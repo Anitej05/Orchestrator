@@ -1,0 +1,74 @@
+{
+  "id": "weather_agent",
+  "owner_id": "orbimesh-vendor",
+  "name": "Orbimesh Weather Agent",
+  "description": "Provides comprehensive global weather data using the Open-Meteo API. It can fetch real-time weather conditions, detailed hourly and daily forecasts, and historical weather data for any location.",
+  "capabilities": [
+    "get current weather",
+    "get daily weather forecast"
+  ],
+  "price_per_call_usd": 0.000,
+  "status": "active",
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA3FcU8hPhmFLgez6qPf801aQahasAlG5S4MPb16nWJPA=\n-----END PUBLIC KEY-----",
+  "endpoints": [
+    {
+      "endpoint": "https://api.open-meteo.com/v1/forecast",
+      "http_method": "GET",
+      "description": "Fetches the current, real-time weather conditions for a specific geographical location.",
+      "parameters": [
+        {
+          "name": "latitude",
+          "param_type": "float",
+          "required": true,
+          "description": "The latitude for the location (e.g., 17.3850 for Hyderabad)."
+        },
+        {
+          "name": "longitude",
+          "param_type": "float",
+          "required": true,
+          "description": "The longitude for the location (e.g., 78.4867 for Hyderabad)."
+        },
+        {
+          "name": "current",
+          "param_type": "string",
+          "required": true,
+          "default_value": "temperature_2m,weather_code,wind_speed_10m",
+          "description": "A comma-separated list of current weather variables to retrieve."
+        }
+      ]
+    },
+    {
+      "endpoint": "https://api.open-meteo.com/v1/forecast",
+      "http_method": "GET",
+      "description": "Provides a detailed daily weather forecast for up to 16 days for a specific location.",
+      "parameters": [
+        {
+          "name": "latitude",
+          "param_type": "float",
+          "required": true,
+          "description": "The latitude for the location."
+        },
+        {
+          "name": "longitude",
+          "param_type": "float",
+          "required": true,
+          "description": "The longitude for the location."
+        },
+        {
+          "name": "daily",
+          "param_type": "string",
+          "required": true,
+          "default_value": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum",
+          "description": "A comma-separated list of daily forecast variables to retrieve."
+        },
+        {
+          "name": "forecast_days",
+          "param_type": "integer",
+          "required": false,
+          "default_value": "7",
+          "description": "The number of days to forecast, from 1 to 16."
+        }
+      ]
+    }
+  ]
+}

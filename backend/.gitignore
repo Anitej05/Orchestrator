@@ -1,0 +1,27 @@
+# Python
+# Bytecode and cache folders that might be created inside the project
+__pycache__/
+*.pyc
+
+# Pytest
+# Cache and reports
+.pytest_cache/
+htmlcov/
+.coverage
+
+# IDE / Editor
+# VS Code specific
+.vscode/
+# PyCharm specific
+.idea/
+
+# Environment Variables
+# Never commit secrets, passwords, or API keys!
+.env
+*.env
+
+test.py
+database.py
+testnew.py
+frontend.md
+test_detailed_continuity.py

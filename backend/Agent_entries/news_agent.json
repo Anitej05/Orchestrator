@@ -1,0 +1,62 @@
+{
+  "id": "news_agent",
+  "owner_id": "orbimesh-vendor",
+  "name": "Orbimesh News Agent",
+  "description": "Fetches news articles from a wide range of sources via the NewsAPI. It can search for articles on any topic or retrieve top business headlines from specific countries.",
+  "capabilities": [
+    "search for news articles on a specific topic",
+    "get top business headlines from a country"
+  ],
+  "price_per_call_usd": 0.002,
+  "status": "active",
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA3FcU8hPhmFLgez6qPf801aQahasAlG5S4MPb16nWJPA=\n-----END PUBLIC KEY-----",
+  "endpoints": [
+    {
+      "endpoint": "http://localhost:8020/everything",
+      "http_method": "GET",
+      "description": "Searches for news articles matching a keyword or query. Ideal for finding news about a specific company, person, or event.",
+      "parameters": [
+        {
+          "name": "query",
+          "param_type": "string",
+          "required": true,
+          "description": "The search keyword or phrase (e.g., 'Tesla', 'stock market trends')."
+        },
+        {
+          "name": "language",
+          "param_type": "string",
+          "required": false,
+          "default_value": "en",
+          "description": "The 2-letter ISO-639-1 code of the language you want to get articles in (e.g., 'en', 'es', 'fr')."
+        },
+        {
+          "name": "page_size",
+          "param_type": "integer",
+          "required": false,
+          "default_value": "10",
+          "description": "The number of results to return per page (maximum 100)."
+        }
+      ]
+    },
+    {
+      "endpoint": "http://localhost:8020/top-headlines",
+      "http_method": "GET",
+      "description": "Provides live top business headlines for a specific country.",
+      "parameters": [
+        {
+          "name": "country",
+          "param_type": "string",
+          "required": true,
+          "description": "The 2-letter ISO 3166-1 code of the country you want to get headlines for (e.g., 'us', 'gb', 'in')."
+        },
+        {
+          "name": "page_size",
+          "param_type": "integer",
+          "required": false,
+          "default_value": "10",
+          "description": "The number of results to return per page (maximum 100)."
+        }
+      ]
+    }
+  ]
+}
