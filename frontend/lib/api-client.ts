@@ -1,51 +1,8 @@
 // lib/api-client.ts
-import type { Agent } from "./types"
+import type { Agent, ProcessResponse, ConversationStatus, ConversationState, Message } from "./types"
 
 // API base URL
 const API_BASE_URL = 'http://localhost:8000';
-
-// Type definitions aligned with backend API
-export interface TaskAgentPair {
-  task_name: string
-  primary: Agent & { score?: number }
-  fallbacks: (Agent & { score?: number })[]
-}
-
-export interface ProcessResponse {
-  message: string;
-  thread_id: string;
-  task_agent_pairs: TaskAgentPair[];
-  final_response: string | null;
-  pending_user_input: boolean;
-  question_for_user: string | null;
-}
-
-export interface ConversationStatus {
-  thread_id: string;
-  status: 'pending_user_input' | 'completed' | 'processing';
-  question_for_user: string | null;
-  final_response: string | null;
-  task_agent_pairs: TaskAgentPair[];
-}
-
-export interface ConversationState {
-  thread_id: string;
-  status: 'pending_user_input' | 'completed' | 'processing' | 'idle';
-  messages: Message[];
-  isWaitingForUser: boolean;
-  currentQuestion?: string;
-}
-
-export interface Message {
-  id: string;
-  type: 'user' | 'assistant' | 'system';
-  content: string;
-  timestamp: Date;
-  metadata?: {
-    task_agent_pairs?: TaskAgentPair[];
-    progress?: number;
-  };
-}
 
 // Agent Management Functions
 export async function fetchAllAgents(): Promise<Agent[]> {
@@ -225,12 +182,12 @@ export async function registerAgent(agentData: Agent): Promise<Agent> {
 }
 
 // Interactive Conversation Functions - Aligned with Backend API
-export async function startConversation(prompt: string, thread_id?: string): Promise<ProcessResponse> {
+export async function startConversation(prompt: string, thread_id?: string, uploadedFiles?: any[]): Promise<ProcessResponse> {
   try {
     const response = await fetch(`${API_BASE_URL}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt, thread_id }) // Pass thread_id if it exists
+      body: JSON.stringify({ prompt, thread_id, files: uploadedFiles }) // Pass thread_id and files if it exists
     });
     
     if (!response.ok) {
@@ -321,11 +278,34 @@ export async function clearConversation(threadId: string): Promise<{ message: st
   }
 }
 
+export async function uploadFiles(files: File[]): Promise<any[]> {
+  const formData = new FormData();
+  files.forEach(file => {
+    formData.append('files', file);
+  });
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/upload`, {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    return await response.json();
+  } catch (error) {
+    console.error('Error uploading files:', error);
+    throw error;
+  }
+}
+
 // Legacy function for backward compatibility
 export async function processPrompt(request: { prompt: string }): Promise<{
   message: string;
   thread_id: string;
-  task_agent_pairs: TaskAgentPair[];
+  task_agent_pairs: any[];
   final_response?: string | null;
 }> {
   try {

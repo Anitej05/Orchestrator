@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { type Message } from '@/lib/api-client';
+import type { Message } from '@/lib/types';
 
 interface WebSocketMessage {
   type: 'progress' | 'completion' | 'error' | 'user_input_required';
@@ -189,6 +189,42 @@ export function useWebSocketConversation({
     };
   }, [connect, disconnect]);
 
+  const loadConversation = useCallback(async (thread_id: string) => {
+    try {
+      // Load conversation history from API
+      const response = await fetch(`http://localhost:8000/api/conversations/${thread_id}`);
+      if (!response.ok) {
+        throw new Error(`Failed to load conversation: ${response.statusText}`);
+      }
+      const historyData = await response.json();
+
+      const loadedMessages: Message[] = historyData.map((msgData: any, index: number) => ({
+        id: (Date.now() + index).toString(),
+        type: msgData.type === 'human' ? 'user' : msgData.type === 'ai' ? 'assistant' : 'system',
+        content: msgData.data?.content || '',
+        timestamp: new Date(msgData.data?.timestamp || Date.now()),
+        metadata: msgData.data?.metadata || {},
+      }));
+
+      setMessages(loadedMessages);
+      setCurrentThreadId(thread_id);
+      setWaitingForUser(false);
+      setCurrentQuestion(undefined);
+      setProgress(0);
+    } catch (error: any) {
+      console.error('Failed to load conversation:', error);
+      onError?.(error.message || 'Failed to load conversation');
+    }
+  }, [onError]);
+
+  const resetConversation = useCallback(() => {
+    setMessages([]);
+    setWaitingForUser(false);
+    setCurrentQuestion(undefined);
+    setProgress(0);
+    setCurrentThreadId(undefined);
+  }, []);
+
   return {
     messages,
     isConnected,
@@ -199,6 +235,8 @@ export function useWebSocketConversation({
     sendMessage,
     connect,
     disconnect,
-    clearMessages
+    clearMessages,
+    loadConversation,
+    resetConversation,
   };
 }

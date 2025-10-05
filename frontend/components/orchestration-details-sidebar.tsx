@@ -4,13 +4,13 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { DollarSign, Clock } from "lucide-react"
+import { DollarSign, Clock, FileIcon } from "lucide-react"
 import CollapsibleSection from "@/components/CollapsibleSection"
 import PlanGraph from "@/components/PlanGraph"
 import { useEffect, useState } from "react"
 import { fetchPlanFile } from "@/lib/api-client"
 import { InteractiveStarRating, StarRating } from "@/components/ui/star-rating"
-import type { Agent } from "@/lib/types"
+import type { Agent, Message } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
 
@@ -28,6 +28,7 @@ interface OrchestrationDetailsSidebarProps {
     executionResults: ExecutionResult[],
     threadId: string | null;
     taskAgentPairs: { primary: Agent }[];
+    messages: Message[];
     className?: string;
 }
 
@@ -36,7 +37,7 @@ interface Plan {
     completedTasks: { task: string; result: string; }[];
 }
 
-export default function OrchestrationDetailsSidebar({ executionResults, threadId, taskAgentPairs, className }: OrchestrationDetailsSidebarProps) {
+export default function OrchestrationDetailsSidebar({ executionResults, threadId, taskAgentPairs, messages, className }: OrchestrationDetailsSidebarProps) {
     const [plan, setPlan] = useState<Plan>({ pendingTasks: [], completedTasks: [] });
     const [isLoadingPlan, setIsLoadingPlan] = useState(false);
     const [agents, setAgents] = useState<Agent[]>([]);
@@ -121,6 +122,7 @@ export default function OrchestrationDetailsSidebar({ executionResults, threadId
     const totalCost = executionResults.reduce((sum, result) => sum + result.cost, 0)
     const totalTime = executionResults.reduce((sum, result) => sum + result.executionTime, 0)
     const allTasks = [...plan.pendingTasks, ...plan.completedTasks];
+    const allAttachments = messages.flatMap(m => m.attachments || []);
 
     const hasResults = executionResults.length > 0 || allTasks.length > 0
 
@@ -224,11 +226,22 @@ export default function OrchestrationDetailsSidebar({ executionResults, threadId
                 <TabsContent value="plan" className="flex-1 flex items-center justify-center">
                     <PlanGraph planData={plan} />
                 </TabsContent>
-                <TabsContent value="attachments" className="flex-1 flex items-center justify-center">
-                    <div className="text-center text-gray-500">
-                        <p className="font-semibold">Attachments</p>
-                        <p className="text-sm mt-2">Any files or attachments used will be listed here.</p>
-                    </div>
+                <TabsContent value="attachments" className="flex-1 overflow-y-auto mt-4">
+                    {allAttachments.length > 0 ? (
+                        <ul className="space-y-2">
+                        {allAttachments.map((att, index) => (
+                            <li key={index} className="flex items-center gap-2 text-sm p-2 rounded-md bg-white border">
+                            <FileIcon className="w-4 h-4 text-gray-500" />
+                            <span className="truncate" title={att.name}>{att.name}</span>
+                            </li>
+                        ))}
+                        </ul>
+                    ) : (
+                        <div className="text-center text-gray-500 py-8">
+                            <p className="font-semibold">No Attachments</p>
+                            <p className="text-sm mt-2">Files you upload will appear here.</p>
+                        </div>
+                    )}
                 </TabsContent>
             </Tabs>
         </aside>

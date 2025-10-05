@@ -25,3 +25,5 @@ pdfminer.six
 openpyxl
 langchain-experimental
 langchain-cerebras
+pypdf
+docx2txt

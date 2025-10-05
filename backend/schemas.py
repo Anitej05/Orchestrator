@@ -101,12 +101,6 @@ class ExecutionPlan(BaseModel):
 
 # --- API Request/Response Models ---
 
-class ProcessRequest(BaseModel):
-    """The schema for the main `/api/chat` endpoint request."""
-    prompt: str
-    thread_id: Optional[str] = None  # To continue an existing conversation
-    user_response: Optional[str] = None # To provide an answer to a question
-
 class ProcessResponse(BaseModel):
     """The schema for the main `/api/chat` endpoint response."""
     message: str
@@ -136,3 +130,49 @@ class PriorityMapper(BaseModel):
 class PriorityMappingResponse(BaseModel):
     """The expected response when asking the LLM to prioritize tasks."""
     mappings: List[PriorityMapper]
+
+class FileObject(BaseModel):
+    """Represents a file uploaded by the user (legacy - for backward compatibility)."""
+    file_name: str
+    file_path: str
+    file_type: Literal['image', 'document']
+    base64_content: Optional[str] = None
+    vector_store_path: Optional[str] = None
+
+class EnrichedFileObject(BaseModel):
+    """File with semantic content understanding for orchestrator context."""
+    # Basic metadata
+    file_name: str
+    file_path: str
+    file_type: Literal['image', 'document']
+    
+    # Semantic content (KEY FEATURE - orchestrator understands file contents)
+    content_summary: str = Field(..., description="AI-generated description/summary of file content")
+    
+    # Vector data for retrieval
+    vector_store_path: Optional[str] = Field(None, description="Path to FAISS vector store for documents")
+    clip_embedding: Optional[List[float]] = Field(None, description="CLIP embedding vector for images")
+    
+    # Additional metadata
+    chunk_count: Optional[int] = Field(None, description="Number of text chunks for documents")
+    dimensions: Optional[Dict[str, int]] = Field(None, description="Image dimensions (width, height)")
+    upload_timestamp: str = Field(..., description="ISO timestamp when file was uploaded")
+
+class ConversationTurn(BaseModel):
+    """Single turn in conversation history for persistent memory."""
+    role: Literal["user", "assistant"]
+    content: str
+    timestamp: str
+    attached_files: List[str] = Field(default_factory=list, description="File names referenced in this turn")
+
+class ProcessRequest(BaseModel):
+    prompt: str
+    thread_id: Optional[str] = None
+    user_response: Optional[str] = None
+    files: Optional[List[FileObject]] = None # Accepts basic FileObject, will be enriched internally
+
+class AnalysisResult(BaseModel):
+    """Schema for the analysis node's output."""
+    needs_complex_processing: bool = Field(..., description="Whether the request requires complex orchestration or can be handled with a simple response")
+    reasoning: str = Field(..., description="The reasoning behind the analysis decision")
+    response: Optional[str] = Field(None, description="Direct response if needs_complex_processing is False")

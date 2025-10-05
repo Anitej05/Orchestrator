@@ -1,23 +1,33 @@
+# agents/groq_search_agent.py
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Optional
-import requests
 import os
+import json
 from dotenv import load_dotenv
 import uvicorn
-import json
+from langchain_groq import ChatGroq
+from langchain_core.messages import HumanMessage
 
-# Load environment variables from .env file
+# Load environment variables from a .env file
 load_dotenv()
 
 # --- Configuration & API Key Check ---
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_API_BASE_URL = "https://api.groq.com/openai/v1"
-
 if not GROQ_API_KEY:
     raise RuntimeError("GROQ_API_KEY is not set in the environment. The agent cannot start.")
 
-# --- Agent Definition (aligned with the server logic) ---
+# --- LLM Initialization ---
+# Use ChatGroq from langchain_groq for a consistent interface
+# The 'compound-beta' model is specifically designed for search-augmented responses.
+# Note: The parameter is 'model_name' for ChatGroq, but we pass it as 'model' in model_kwargs
+# for models like compound-beta that are not standard chat models.
+# For tool-use models, additional_kwargs is the correct way to get tool call info.
+llm = ChatGroq(model="groq/compound")
+
+
+# --- Agent Definition ---
 AGENT_DEFINITION = {
   "id": "groq_search_agent",
   "owner_id": "orbimesh-vendor",
@@ -73,70 +83,51 @@ class SearchResponse(BaseModel):
     answer: str
     sources: Optional[List[dict]] = None
 
-# --- Shared API Fetching Logic ---
-def call_groq_api(payload: dict):
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    try:
-        response = requests.post(f"{GROQ_API_BASE_URL}/chat/completions", json=payload, headers=headers)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.HTTPError as e:
-        error_detail = e.response.json().get("error", {}).get("message", str(e))
-        raise HTTPException(status_code=e.response.status_code, detail=error_detail)
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch data from Groq API: {e}")
-
-
+# --- API Endpoints ---
 @app.get("/")
 def read_root():
     return AGENT_DEFINITION
 
-# --- API Endpoints ---
 @app.post("/search-and-summarize", response_model=SearchResponse)
-def get_search_summary(req: SearchRequest):
+async def get_search_summary(req: SearchRequest):
     """
-    Takes a user query, instructs the Groq `compound-beta` model to search the web,
-    and returns a summarized answer with sources.
+    Takes a user query, instructs the Groq model to search the web,
+    and returns a summarized answer with sources using ChatGroq.
     """
-    payload = {
-        "messages": [
-            {"role": "user", "content": req.query}
-        ],
-        "model": "compound-beta" # Use the correct model for web search
-    }
+    try:
+        # Construct model-specific arguments for tool use
+        model_kwargs = {"model": "compound-beta"}
+        if req.search_settings:
+            model_kwargs["search_settings"] = req.search_settings.model_dump(exclude_none=True)
 
-    # Add search_settings to the payload if they are provided
-    if req.search_settings:
-        payload["search_settings"] = req.search_settings.model_dump(exclude_none=True)
-    
-    data = call_groq_api(payload)
-    
-    choice = data.get("choices", [{}])[0]
-    message = choice.get("message", {})
-    
-    if not message or "content" not in message:
-        raise HTTPException(status_code=500, detail="Could not generate an answer from Groq API.")
+        # Bind the kwargs to the LLM instance
+        bound_llm = llm.bind(**model_kwargs)
         
-    answer = message["content"]
-    
-    # Extract search results for citation
-    sources = []
-    if message.get("tool_calls"):
-        for tool_call in message.get("tool_calls", []):
-            if tool_call.get("function", {}).get("name") == "search":
-                try:
-                    # The output from the tool is a string that needs to be parsed as JSON
-                    output = json.loads(tool_call.get("function", {}).get("output", "[]"))
-                    sources.extend(output)
-                except json.JSONDecodeError:
-                    # Handle cases where the output is not valid JSON
-                    pass
+        # Invoke the model with the user's query
+        response = await bound_llm.ainvoke([HumanMessage(content=req.query)])
+        
+        answer = response.content
+        if not isinstance(answer, str):
+            answer = str(answer) # Ensure content is a string
 
-    return SearchResponse(answer=answer, sources=sources)
+        # Extract search results from tool calls in the response metadata
+        sources = []
+        if response.additional_kwargs and "tool_calls" in response.additional_kwargs:
+            for tool_call in response.additional_kwargs["tool_calls"]:
+                if tool_call.get("function", {}).get("name") == "search":
+                    try:
+                        # The output from the tool is a string that needs to be parsed as JSON
+                        output_str = tool_call.get("function", {}).get("output", "[]")
+                        output = json.loads(output_str)
+                        sources.extend(output)
+                    except json.JSONDecodeError:
+                        # Handle cases where the output is not valid JSON, gracefully skip
+                        pass
 
+        return SearchResponse(answer=answer, sources=sources)
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An error occurred while processing the search: {e}")
 
 if __name__ == "__main__":
     uvicorn.run("groq_search_agent:app", host="127.0.0.1", port=8050, reload=True)

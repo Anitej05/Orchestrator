@@ -8,7 +8,9 @@ from schemas import (
     ExecutionPlan,
     SelectedEndpoint,
     AgentCard,
-    PlannedTask
+    PlannedTask,
+    FileObject,
+    AnalysisResult
 )
 from sentence_transformers import SentenceTransformer
 from models import AgentCapability
@@ -18,7 +20,7 @@ import json
 import time
 import os
 import re
-import io
+import base64
 import numpy as np
 import textwrap
 from contextlib import redirect_stdout, redirect_stderr
@@ -36,6 +38,29 @@ from sqlalchemy import select
 import logging
 from langchain_core.outputs import ChatResult, ChatGeneration
 from langchain_core.runnables import RunnableConfig
+from langchain_core.messages import messages_from_dict, messages_to_dict
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+import json
+
+class ForceJsonSerializer(JsonPlusSerializer):
+    def dumps_typed(self, obj: Any) -> tuple[str, bytes]:
+        return "json", self.dumps(obj)
+
+    def loads_typed(self, data: tuple[str, bytes]) -> Any:
+        return self.loads(data[1])
+
+CONVERSATION_HISTORY_DIR = "conversation_history"
+os.makedirs(CONVERSATION_HISTORY_DIR, exist_ok=True)
+
+# --- Imports for Document Processing ---
+from langchain_community.vectorstores import FAISS
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import (
+    PyPDFLoader,
+    TextLoader,
+    Docx2txtLoader,
+)
 
 class CustomJSONEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -45,7 +70,7 @@ class CustomJSONEncoder(json.JSONEncoder):
 
 # --- Utility Function ---
 def extract_json_from_response(text: str) -> str | None:
-    """
+    '''
     A robust function to extract a JSON object from a string that may contain
     <think> blocks, markdown, and other conversational text.
 
@@ -54,13 +79,13 @@ def extract_json_from_response(text: str) -> str | None:
 
     Returns:
         A clean string of the JSON object if found, otherwise None.
-    """
+    '''
     if not isinstance(text, str):
         return None
 
     # 1. First, try to find a JSON object embedded in a markdown code block.
     # This is the most reliable method. The regex is non-greedy.
-    match = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
+    match = re.search(r"```json\s*(\{.*\})\s*```", text, re.DOTALL)
     if match:
         return match.group(1)
 
@@ -86,7 +111,7 @@ def extract_json_from_response(text: str) -> str | None:
     return None
 
 def serialize_complex_object(obj):
-    """Helper function to serialize complex objects consistently"""
+    '''Helper function to serialize complex objects consistently'''
     try:
         # First try direct JSON serialization
         json.dumps(obj)
@@ -116,7 +141,7 @@ def serialize_complex_object(obj):
         elif hasattr(obj, 'model_dump'):
             # Newer Pydantic v2 models
             try:
-                return obj.model_dump()
+                return obj.model_dump(mode='json') # Use mode='json' here too for safety
             except:
                 pass
         
@@ -125,17 +150,17 @@ def serialize_complex_object(obj):
 
 # --- New Pydantic Schemas for New Nodes ---
 class PlanValidation(BaseModel):
-    """Schema for the pre-flight plan validation node."""
+    '''Schema for the pre-flight plan validation node.'''
     status: str = Field(..., description="Either 'ready' or 'user_input_required'.")
     question: Optional[str] = Field(None, description="The question to ask the user if parameters are missing.")
 
 class AgentResponseEvaluation(BaseModel):
-    """Schema for evaluating an agent's response post-flight."""
+    '''Schema for evaluating an agent's response post-flight.'''
     status: str = Field(..., description="Either 'complete' or 'user_input_required'.")
     question: Optional[str] = Field(None, description="The clarifying question to ask the user if the result is vague.")
 
 class PlanValidationResult(BaseModel):
-    """Schema for the advanced validation node's output."""
+    '''Schema for the advanced validation node's output.'''
     status: Literal["ready", "replan_needed", "user_input_required"] = Field(..., description="The status of the plan validation.")
     reasoning: Optional[str] = Field(None, description="Required explanation if status is 'replan_needed' or 'user_input_required'.")
     question: Optional[str] = Field(None, description="The direct question for the user if input is absolutely required.")
@@ -157,16 +182,16 @@ def patched_generate(self, messages: List[BaseMessage], **kwargs) -> ChatResult:
     return chat_result
 
 def invoke_json(self, prompt: str, pydantic_schema: Any, max_retries: int = 3):
-    """
+    '''
     A more robust version of invoke_json that uses the enhanced parser.
-    """
-    original_prompt = prompt 
+    '''
+    original_prompt = prompt  
     
     for attempt in range(max_retries):
         failed_object_str = ""
         try:
             # The initial prompt to the LLM remains the same
-            json_prompt = f"""
+            json_prompt = f'''
             {prompt}
 
             Please provide your response in a valid JSON format that adheres to the following Pydantic schema:
@@ -176,9 +201,9 @@ def invoke_json(self, prompt: str, pydantic_schema: Any, max_retries: int = 3):
             ```
 
             IMPORTANT: Only output the JSON object itself, without any extra text, explanations, or markdown formatting.
-            """
+            '''
             response_content = self.invoke(json_prompt).content
-            logger.info(f"LLM RAW RESPONSE (Attempt {attempt + 1}):\\n---START---\\n{response_content}\\n---END---")
+            logger.info(f"LLM RAW RESPONSE (Attempt {attempt + 1}):\n---START---\n{response_content}\n---END---")
 
             # --- USE THE NEW PARSER HERE ---
             json_str = extract_json_from_response(response_content)
@@ -199,14 +224,14 @@ def invoke_json(self, prompt: str, pydantic_schema: Any, max_retries: int = 3):
             logger.warning(f"Attempt {attempt + 1} failed: {e}")
             if attempt < max_retries - 1:
                 # The retry logic remains the same
-                retry_context = f"<your_previous_invalid_output>\\n{failed_object_str}\\n</your_previous_invalid_output>" if failed_object_str else ""
-                prompt = f"""
+                retry_context = f"<your_previous_invalid_output>\n{failed_object_str}\n</your_previous_invalid_output>" if failed_object_str else ""
+                prompt = f'''
                 Your previous attempt failed because the output was not valid JSON or could not be extracted. Please re-evaluate the original request and provide a valid, clean JSON response.
                 <error>{e}</error>
                 {retry_context}
-                Original prompt was:\\n{original_prompt}
+                Original prompt was:\n{original_prompt}
                 Please correct your response and try again.
-                """
+                '''
             else:
                 logging.error(f"Failed to get a valid JSON response after {max_retries} attempts.")
                 raise
@@ -221,8 +246,11 @@ load_dotenv()
 logger = logging.getLogger("AgentOrchestrator")
 PLAN_DIR = "agent_plans"
 os.makedirs(PLAN_DIR, exist_ok=True)
+os.makedirs("storage/vector_store", exist_ok=True)
 
 embedding_model = SentenceTransformer('all-mpnet-base-v2')
+hf_embeddings = HuggingFaceEmbeddings(model_name='all-mpnet-base-v2')
+
 
 cached_capabilities = {
     "texts": [],
@@ -233,7 +261,7 @@ CACHE_DURATION_SECONDS = 300
 
 # --- New File-Based Memory Functions ---
 def save_plan_to_file(state: State):
-    """Saves the current plan and completed tasks to a Markdown file."""
+    '''Saves the current plan and completed tasks to a Markdown file.'''
     thread_id = state.get("thread_id")
     if not thread_id:
         return {}
@@ -244,7 +272,20 @@ def save_plan_to_file(state: State):
         f.write(f"# Execution Plan for Thread: {thread_id}\n\n")
         f.write(f"**Original Prompt:** {state.get('original_prompt', 'N/A')}\n\n")
 
-        f.write("## Pending Tasks\n")
+        f.write("## Attachments\n")
+        if uploaded_files := state.get("uploaded_files"):
+            for file_obj in uploaded_files:
+                if isinstance(file_obj, dict):
+                    file_name = file_obj.get('file_name', 'N/A')
+                    file_type = file_obj.get('file_type', 'N/A')
+                else:
+                    file_name = file_obj.file_name
+                    file_type = file_obj.file_type
+                f.write(f"- `{file_name}` ({file_type})\n")
+        else:
+            f.write("- No attachments.\n")
+        
+        f.write("\n## Pending Tasks\n")
         if state.get("task_plan"):
             for i, batch in enumerate(state["task_plan"]):
                 f.write(f"### Batch {i+1}\n")
@@ -281,6 +322,73 @@ def save_plan_to_file(state: State):
     logger.info(f"Plan for thread {thread_id} saved to {plan_path}")
     return {}
 
+# --- NEW NODE: Preprocess Files ---
+def preprocess_files(state: State):
+    '''
+    Processes uploaded files. For images, it now only confirms the path.
+    For documents, it creates the vector store. This is the full, robust version.
+    '''
+    logger.info("Starting file preprocessing...")
+    uploaded_files = state.get("uploaded_files", [])
+    if not uploaded_files:
+        logger.info("No files to preprocess.")
+        return state
+
+    processed_files = []
+    # Convert dictionaries from state back to Pydantic objects for safe access
+    for file_obj_dict in uploaded_files:
+        try:
+            file_obj = FileObject.model_validate(file_obj_dict)
+            
+            # For images, we just ensure the path is valid and pass it along.
+            # The image agent is responsible for reading and encoding.
+            if file_obj.file_type == 'image':
+                if not os.path.exists(file_obj.file_path):
+                    logger.warning(f"Image file not found at path: {file_obj.file_path}. Skipping.")
+                    continue
+                # No other action is needed for images here.
+            
+            # For documents, we perform the full RAG preprocessing.
+            elif file_obj.file_type == 'document':
+                file_path = file_obj.file_path
+                if not os.path.exists(file_path):
+                    logger.warning(f"Document file not found at path: {file_path}. Skipping.")
+                    continue
+
+                logger.info(f"Processing document: {file_path}")
+                ext = os.path.splitext(file_path)[1].lower()
+                
+                # Select the appropriate document loader based on file extension
+                if ext == ".pdf":
+                    loader = PyPDFLoader(file_path)
+                elif ext == ".docx":
+                    loader = Docx2txtLoader(file_path)
+                else:
+                    loader = TextLoader(file_path)
+                
+                documents = loader.load()
+                text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+                texts = text_splitter.split_documents(documents)
+                
+                # Create vector embeddings and save to a FAISS index
+                vector_store = FAISS.from_documents(texts, hf_embeddings)
+                index_path = f"storage/vector_store/{os.path.basename(file_path)}.faiss"
+                vector_store.save_local(index_path)
+                
+                # Add the path to the vector store to our file object
+                file_obj.vector_store_path = index_path
+                logger.info(f"Document processed. Vector store saved to: {index_path}")
+
+            processed_files.append(file_obj)
+
+        except Exception as e:
+            logger.error(f"Failed to process file {file_obj_dict.get('file_name', 'N/A')}: {e}")
+            continue
+            
+    # Convert Pydantic objects back to dictionaries for state serialization
+    return {"uploaded_files": [pf.model_dump(mode='json', exclude_none=True) for pf in processed_files]}
+
+
 # --- Existing and Modified Graph Nodes ---
 
 def get_all_capabilities():
@@ -312,41 +420,40 @@ async def fetch_agents_for_task(client: httpx.AsyncClient, task_name: str, url: 
     try:
         response = await client.get(url, timeout=10.0)
         response.raise_for_status()
-        validated_agents = [AgentCard.model_validate(agent) for agent in response.json()]
-        return {"task_name": task_name, "agents": validated_agents}
+        # FIX: Use mode='json' to convert HttpUrl and other special types to strings.
+        validated_agents_as_dicts = [AgentCard.model_validate(agent).model_dump(mode='json') for agent in response.json()]
+        return {"task_name": task_name, "agents": validated_agents_as_dicts}
     except (httpx.RequestError, httpx.HTTPStatusError, ValidationError) as e:
         logger.error(f"API call or validation failed for task '{task_name}': {e}")
         return {"task_name": task_name, "agents": []}
 
 def parse_prompt(state: State):
-    logger.info(f"Parsing prompt: '{state['original_prompt']}'")
-    llm = ChatCerebras(model="gpt-oss-120b")
-
     # --- Create a formatted history of the conversation ---
     history = ""
     if messages := state.get('messages'):
         # Limit to the last few messages to keep the prompt concise
-        for msg in messages[-5:]: # Using the last 5 messages as context
+        for msg in messages[-20:]:  # Using the last 20 messages as context
             if hasattr(msg, 'type') and msg.type == "human":
                 history += f"Human: {msg.content}\n"
             elif hasattr(msg, 'type') and msg.type == "ai":
                 history += f"AI: {msg.content}\n"
-    # ---
 
     capability_texts, _ = get_all_capabilities()
     capabilities_list_str = ", ".join(f"'{c}'" for c in capability_texts)
 
+    llm = ChatCerebras(model="gpt-oss-120b")
+
     error_feedback = state.get("parsing_error_feedback")
     retry_prompt_injection = ""
     if error_feedback:
-        retry_prompt_injection = f"""
+        retry_prompt_injection = f'''
         **IMPORTANT - PREVIOUS ATTEMPT FAILED:**
         You are being asked to try again because your previous attempt failed to produce a useful result.
         **Failure Feedback:** {error_feedback}
         Please analyze this feedback and the original user prompt carefully and generate a new set of tasks with much more detailed and specific `task_description` fields.
-        """
+        '''
 
-    prompt = f"""
+    prompt = f'''
         You are an expert at breaking down any user request—no matter how short, vague, or poorly written—into a clear list of distinct tasks that can each be handled by a single agent.
         {retry_prompt_injection}
 
@@ -367,6 +474,8 @@ def parse_prompt(state: State):
         4.  **Simple Language:** Keep language simple and avoid technical jargon unless the user explicitly uses it.
         5.  **Infer Intent:** If the prompt is unclear, infer the most reasonable interpretation based on common intent.
         6.  **Strict Schema:** Always output tasks in the required schema.
+        7.  **Decompose Analytical Requests:** If the user's request requires multiple distinct capabilities or asks for analysis (e.g., 'find X and then analyze its effect on Y', 'compare X and Y'), you **MUST** break it down into a sequence of discrete tasks. For example, a request to 'see which news affected stocks' should be decomposed into two separate tasks: one for `get company stock history` and another for `get company news headlines`. The final analysis will be handled by a later step.
+        8.  **Prioritize Specificity:** When creating a `task_description`, be as specific and detailed as possible. The description should be a clear, self-contained instruction for another agent. For example, instead of "find company news," write "Find the three most recent news articles about the company 'TechCorp' and extract their headlines, publication dates, and a brief summary of each." This level of detail is crucial for the next agent to perform its job accurately.
 
         For each task you identify, provide:
         1. `task_name`: A short, descriptive name (e.g., "get_company_news", "summarize_document").
@@ -401,17 +510,20 @@ def parse_prompt(state: State):
         - Only include fields that the user explicitly mentioned (e.g., price, budget, tone, urgency, quality rating).
         - Do NOT include any field with a null value.
         - If, after removing nulls, no fields remain, set `user_expectations` to an empty object `{{}}`.
-    """
+    '''
 
     try:
         response = llm.invoke_json(prompt, ParsedRequest)
         logger.info(f"LLM parsed prompt into: {response}")
 
         if not response or not response.tasks:
-            raise ValueError("LLM returned a valid JSON but with an empty list of tasks.")
+            logger.warning("LLM returned a valid JSON but with an empty list of tasks. This may be a misclassified simple request.")
+            parsed_tasks = []
+            user_expectations = {}
+        else:
+            parsed_tasks = getattr(response, 'tasks', [])
+            user_expectations = getattr(response, 'user_expectations', {})
 
-        parsed_tasks = getattr(response, 'tasks', [])
-        user_expectations = getattr(response, 'user_expectations', {})
     except Exception as e:
         logger.error(f"Failed to parse prompt after all retries: {e}")
         parsed_tasks = []
@@ -439,7 +551,7 @@ async def agent_directory_search(state: State):
     user_expectations = state.get('user_expectations') or {}
 
     for task in parsed_tasks:
-        params: Dict[str, Any] = {'capabilities': task.task_name}
+        params: Dict[str, Any] = {'capabilities': task.task_description}
         if 'price' in user_expectations:
             params['max_price'] = user_expectations['price']
         if 'rating' in user_expectations:
@@ -472,7 +584,6 @@ class RankedAgents(BaseModel):
     ranked_agent_ids: List[str]
 
 def rank_agents(state: State):
-    # The rest of the function remains the same
     parsed_tasks = state.get('parsed_tasks', [])
     logger.info(f"Ranking agents for tasks: {[t.task_name for t in parsed_tasks]}")
     
@@ -485,7 +596,10 @@ def rank_agents(state: State):
     final_selections = []
     for task in parsed_tasks:
         task_name = task.task_name
-        candidate_agents = state.get('candidate_agents', {}).get(task_name, [])
+        
+        # Rehydrate here. Convert dicts from state back into AgentCard objects.
+        candidate_agent_dicts = state.get('candidate_agents', {}).get(task_name, [])
+        candidate_agents = [AgentCard.model_validate(d) for d in candidate_agent_dicts]
         
         if not candidate_agents:
             continue
@@ -494,21 +608,21 @@ def rank_agents(state: State):
             primary_agent = candidate_agents[0]
             fallback_agents = []
         else:
-            serializable_agents = [agent.model_dump() for agent in candidate_agents]
+            serializable_agents = [agent.model_dump(mode='json') for agent in candidate_agents]
             
-            prompt = f"""
+            prompt = f'''
             You are an expert at selecting the best agent for a given task.
             The user's task is: "{task.task_description}"
 
             Here are the available agents that claim to have the capability '{task.task_name}':
             ---
-            {json.dumps(serializable_agents, indent=2, cls=CustomJSONEncoder)}
+            {json.dumps(serializable_agents, indent=2)}
             ---
 
             Please rank these agents in order of suitability for the task, from best to worst. The best agent should be the one whose description and capabilities most closely match the user's task.
 
             Your output should be a JSON object with a single key, "ranked_agent_ids", which is a list of agent IDs in the correct order.
-            """
+            '''
             try:
                 response = llm.invoke_json(prompt, RankedAgents)
                 ranked_agent_ids = response.ranked_agent_ids
@@ -543,15 +657,18 @@ def rank_agents(state: State):
         )
         final_selections.append(pair)
     
+    # FIX: Use mode='json' to convert HttpUrl and other special types to strings.
+    serializable_pairs = [p.model_dump(mode='json') for p in final_selections]
+
     logger.info("Agent ranking complete.")
-    logger.debug(f"Final agent selections: {[p.model_dump_json(indent=2) for p in final_selections]}")
-    return {"task_agent_pairs": final_selections}
+    logger.debug(f"Final agent selections: {[p for p in serializable_pairs]}")
+    return {"task_agent_pairs": serializable_pairs}
 
 def plan_execution(state: State, config: RunnableConfig):
-    """
+    '''
     Creates an initial execution plan or modifies an existing one if a replan is needed,
     and saves the result to a file.
-    """
+    '''
     replan_reason = state.get("replan_reason")
     llm = ChatCerebras(model="gpt-oss-120b")
     output_state = {}
@@ -563,11 +680,11 @@ def plan_execution(state: State, config: RunnableConfig):
         all_capabilities, _ = get_all_capabilities()
         capabilities_str = ", ".join(all_capabilities)
 
-        prompt = f"""
+        prompt = f'''
         You are an expert autonomous planner. The current execution plan is stalled. Your task is to surgically insert a new task into the plan to resolve the issue.
 
         **Reason for Replan:** "{replan_reason}"
-        **Current Stalled Plan:** {json.dumps([task.model_dump() for batch in state.get('task_plan', []) for task in batch], indent=2)}
+        **Current Stalled Plan:** {json.dumps([task for batch in state.get('task_plan', []) for task in batch], indent=2)}
         **Original User Prompt:** "{state['original_prompt']}"
         **Full List of Available System Capabilities:** [{capabilities_str}]
         
@@ -577,10 +694,12 @@ def plan_execution(state: State, config: RunnableConfig):
         3.  Create a new `PlannedTask`. The `task_description` should be a clear, self-contained instruction for another agent (e.g., "Find the latitude and longitude for Hyderabad, India using a web search"). You must select an agent and endpoint that provides the chosen capability.
         4.  **Insert this new task into the `Current Stalled Plan` *immediately before* the task that needs the information.**
         5.  Return the entire modified plan. The output MUST be a valid JSON object conforming to the `ExecutionPlan` schema.
-        """
+        '''
         try:
             response = llm.invoke_json(prompt, ExecutionPlan)
-            output_state = {"task_plan": response.plan, "replan_reason": None} # Clear the reason after replanning
+            # FIX: Use mode='json' to convert HttpUrl and other special types to strings.
+            serializable_plan = [[task.model_dump(mode='json') for task in batch] for batch in (response.plan or [])]
+            output_state = {"task_plan": serializable_plan, "replan_reason": None} # Clear the reason after replanning
         except Exception as e:
             logger.error(f"Replanning failed: {e}. Falling back to asking user.")
             output_state = {
@@ -591,11 +710,14 @@ def plan_execution(state: State, config: RunnableConfig):
     else:
         # --- INITIAL PLANNING MODE ---
         logger.info("Creating initial execution plan.")
-        task_agent_pairs = state.get('task_agent_pairs', [])
-        if not task_agent_pairs:
+        
+        # Rehydrate here
+        task_agent_pair_dicts = state.get('task_agent_pairs', [])
+        if not task_agent_pair_dicts:
             return {"task_plan": []}
+        task_agent_pairs = [TaskAgentPair.model_validate(d) for d in task_agent_pair_dicts]
 
-        prompt = f"""
+        prompt = f'''
         You are an expert project planner. Convert a list of tasks and their assigned agents into a final, executable plan.
         
         **Instructions:**
@@ -606,31 +728,40 @@ def plan_execution(state: State, config: RunnableConfig):
 
         **Tasks to Plan:** {[p.model_dump_json() for p in task_agent_pairs]}
         You MUST only output a valid JSON object that conforms to the ExecutionPlan schema.
-        """
+        '''
         try:
             response = llm.invoke_json(prompt, ExecutionPlan)
-            output_state = {"task_plan": response.plan or [], "user_response": None}
+            # FIX: Use mode='json' to convert HttpUrl and other special types to strings.
+            serializable_plan = [[task.model_dump(mode='json') for task in batch] for batch in (response.plan or [])]
+            output_state = {"task_plan": serializable_plan, "user_response": None}
         except Exception as e:
             logger.error(f"Initial planning failed: {e}")
             output_state = {"task_plan": []}
 
-    # *** THIS IS THE CRITICAL ADDITION ***
     # Save the new or modified plan to the file system immediately.
-    save_plan_to_file({**state, **output_state, "thread_id": config.get("configurable", {}).get("thread_id")})
+    # We create a temporary state to pass the object version of the plan for readable file output.
+    temp_state_for_saving = {**state, **output_state}
+    if 'task_plan' in output_state and output_state['task_plan']:
+        rehydrated_plan = [[PlannedTask.model_validate(task) for task in batch] for batch in output_state['task_plan']]
+        temp_state_for_saving['task_plan'] = rehydrated_plan
+    save_plan_to_file({**temp_state_for_saving, "thread_id": config.get("configurable", {}).get("thread_id")})
     
     return output_state
 
 
 def validate_plan_for_execution(state: State):
-    """
-    Performs an advanced pre-flight check. It sets state flags to determine routing:
-    - Sets 'replan_reason' if a solvable dependency is missing.
-    - Sets 'pending_user_input' if user intervention is required.
-    """
+    '''
+    Performs an advanced pre-flight check on the next task, now with full file
+    context awareness to prevent premature pauses.
+    '''
     logger.info("Performing dynamic validation of the execution plan...")
-    task_plan = state.get("task_plan", [])
-    if not task_plan or not task_plan[0]:
+    
+    # Rehydrate the plan
+    task_plan_dicts = state.get("task_plan", [])
+    if not task_plan_dicts or not task_plan_dicts[0]:
+        logger.info("Plan is empty or complete. No validation needed.")
         return {"replan_reason": None, "pending_user_input": False}
+    task_plan = [[PlannedTask.model_validate(d) for d in batch] for batch in task_plan_dicts]
 
     all_capabilities, _ = get_all_capabilities()
     capabilities_str = ", ".join(all_capabilities)
@@ -638,54 +769,95 @@ def validate_plan_for_execution(state: State):
     llm = ChatCerebras(model="gpt-oss-120b")
     task_to_validate = task_plan[0][0]
 
-    task_agent_pair = next((p for p in state.get('task_agent_pairs', []) if p.task_name == task_to_validate.task_name), None)
-    if not task_agent_pair: return {"replan_reason": None, "pending_user_input": False}
+    # Rehydrate the pairs
+    task_agent_pair_dicts = state.get('task_agent_pairs', [])
+    task_agent_pairs = [TaskAgentPair.model_validate(d) for d in task_agent_pair_dicts]
+
+    task_agent_pair = next((p for p in task_agent_pairs if p.task_name == task_to_validate.task_name), None)
+    if not task_agent_pair:
+        logger.warning(f"Could not find matching task_agent_pair for task '{task_to_validate.task_name}'. Skipping validation.")
+        return {"replan_reason": None, "pending_user_input": False}
 
     agent_card = task_agent_pair.primary
     selected_endpoint = next((ep for ep in agent_card.endpoints if str(ep.endpoint) == str(task_to_validate.primary.endpoint)), None)
     required_params = [p.name for p in selected_endpoint.parameters if p.required] if selected_endpoint else []
 
     if not required_params:
+        logger.info(f"Task '{task_to_validate.task_name}' has no required parameters. Validation successful.")
         return {"replan_reason": None, "pending_user_input": False}
 
-    prompt = f"""
-    You are an intelligent execution validator. Your job is to determine if a task can run, and if not, figure out how to unblock it.
+    # Rehydrate uploaded files
+    uploaded_file_dicts = state.get("uploaded_files", [])
+    uploaded_files_typed = [FileObject.model_validate(f) for f in uploaded_file_dicts]
+    file_context = ""
+    if uploaded_files_typed:
+        file_details = []
+        for file_obj in uploaded_files_typed:
+            detail = f"- File Name: '{file_obj.file_name}', Type: {file_obj.file_type}, Path: '{file_obj.file_path}'"
+            if file_obj.file_type == 'document' and hasattr(file_obj, 'vector_store_path') and file_obj.vector_store_path:
+                detail += f", Vector Store Path: '{file_obj.vector_store_path}'"
+            file_details.append(detail)
+        
+        file_context = f'''
+        **Available File Context:**
+        The user has uploaded files. Use their paths to fill the required parameters.
+        {os.linesep.join(file_details)}
+        ---
+        '''
+
+    # --- Create a formatted history of the conversation ---
+    history = ""
+    if messages := state.get('messages'):
+        # Limit to the last few messages to keep the prompt concise
+        for msg in messages[-20:]: # Using the last 20 messages as context
+            if hasattr(msg, 'type') and msg.type == "human":
+                history += f"Human: {msg.content}\n"
+            elif hasattr(msg, 'type') and msg.type == "ai":
+                history += f"AI: {msg.content}\n"
+
+    prompt = f'''
+    You are an intelligent execution validator. Your job is to determine if a task can run based on the available information.
 
     **Context:**
     - Original User Prompt: "{state['original_prompt']}"
-    - Previously Completed Tasks: {state.get('completed_tasks', [])}
+    - Conversation History:
+    {history}
+    - Previously Completed Tasks: {json.dumps(state.get('completed_tasks', []), indent=2, default=str)}
     - Task to Validate: "{task_to_validate.task_description}"
     - Required Parameters for this Task: {required_params}
+    {file_context}
     - All Available System Capabilities: [{capabilities_str}]
 
     **Your Decision Process:**
-    1.  **Check Context:** Can all `Required Parameters` (e.g., 'latitude', 'longitude') be filled using the `Original User Prompt` or `Previously Completed Tasks`?
-    2.  **If YES:** The task is ready. Respond with `status: "ready"`.
+    1.  **Check Context:** Can all `Required Parameters` (e.g., 'image_path', 'vector_store_path') be filled using the `Original User Prompt`, `Conversation History`, `Previously Completed Tasks`, or the `Available File Context`? The file paths provided are the values you should use.
+    2.  **If YES:** The task is ready to run. Respond with `status: "ready"`.
     3.  **If NO:** Determine the root cause.
-        a. **Is the information implicitly available?** For example, if 'latitude' and 'longitude' are required but a city name (e.g., "Hyderabad") is available in the context, can the missing information be found?
-        b. **Can another agent solve it?** Look at the `All Available System Capabilities`. Is there a capability like **"perform web search and summarize"** that could find the missing information?
-           - If yes, the plan needs a new step. Respond with `status: "replan_needed"` and a clear `reasoning` that states exactly what is missing and how to find it (e.g., "Missing latitude and longitude for Hyderabad, which can be found using the 'perform web search and summarize' capability.").
-        c. **Is the information truly missing?** Is it something only the user would know (like a private document or a personal preference)?
-           - If yes, respond with `status: "user_input_required"` and formulate a clear, direct `question` for the user.
+        a. **Can another agent find the missing info?** If a value is missing (e.g., a city name) but a capability like "perform web search and summarize" could find it, respond with `status: "replan_needed"` and a clear `reasoning` (e.g., "Missing coordinates for the city mentioned, which can be found via web search.").
+        b. **Is user input the only way?** If the information is something only the user would know, respond with `status: "user_input_required"` and a clear, direct `question` for the user.
 
     Respond in a valid JSON format conforming to the PlanValidationResult schema.
-    """
+    '''
     
-    validation = llm.invoke_json(prompt, PlanValidationResult)
-    logger.info(f"Validation result: {validation.status}")
+    try:
+        validation = llm.invoke_json(prompt, PlanValidationResult)
+        logger.info(f"Validation result for task '{task_to_validate.task_name}': {validation.status}")
 
-    if validation.status == "replan_needed":
-        return {"replan_reason": validation.reasoning, "pending_user_input": False, "question_for_user": None}
-    elif validation.status == "user_input_required":
-        return {"pending_user_input": True, "question_for_user": validation.question, "replan_reason": None}
-    
-    return {"replan_reason": None, "pending_user_input": False, "question_for_user": None}
+        if validation.status == "replan_needed":
+            return {"replan_reason": validation.reasoning, "pending_user_input": False, "question_for_user": None}
+        elif validation.status == "user_input_required":
+            return {"pending_user_input": True, "question_for_user": validation.question, "replan_reason": None}
+        
+        # Default to "ready" status
+        return {"replan_reason": None, "pending_user_input": False, "question_for_user": None}
+    except Exception as e:
+        logger.error(f"Plan validation LLM call failed: {e}. Assuming plan is ready to avoid stalling.")
+        return {"replan_reason": None, "pending_user_input": False, "question_for_user": None}
 
-
-async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, completed_tasks: List[CompletedTask], last_error: Optional[str] = None):
-    """
-    Runs a single agent for a task with intelligent retries for empty or unsatisfactory results.
-    """
+async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: State, last_error: Optional[str] = None):
+    '''
+    Builds the payload and runs a single agent, now using file paths instead of content.
+    This is the full, robust version with semantic retries.
+    '''
     logger.info(f"Running agent '{agent_details.name}' for task: '{planned_task.task_name}'")
     
     endpoint_url = str(planned_task.primary.endpoint)
@@ -694,49 +866,72 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, complet
     selected_endpoint = next((ep for ep in agent_details.endpoints if str(ep.endpoint) == endpoint_url), None)
 
     if not selected_endpoint:
-        error_msg = f"Error: Could not find endpoint details for '{endpoint_url}' on agent '{agent_details.name}'."
+        error_msg = f"Critical Error: Could not find endpoint details for '{endpoint_url}' on agent '{agent_details.name}'."
         logger.error(error_msg)
         return {"task_name": planned_task.task_name, "result": error_msg}
 
     payload_builder_llm = ChatCerebras(model="gpt-oss-120b")
     failed_attempts = []
     
-    # This loop handles semantic retries (e.g., valid but empty responses)
+    # --- Prepare detailed file context for the payload builder ---
+    file_context = ""
+    uploaded_files = state.get("uploaded_files", [])
+    if uploaded_files:
+        file_context = f'''
+        **Available File Context:**
+        The user has uploaded files. You MUST use the file information below to populate the required payload parameters (like 'image_path' or 'vector_store_path').
+        ```json
+        {json.dumps(uploaded_files, indent=2)}
+        ```
+        ---
+        '''
+
+    # --- Create a formatted history of the conversation ---
+    history = ""
+    if messages := state.get('messages'):
+        # Limit to the last few messages to keep the prompt concise
+        for msg in messages[-20:]: # Using the last 20 messages as context
+            if hasattr(msg, 'type') and msg.type == "human":
+                history += f"Human: {msg.content}\n"
+            elif hasattr(msg, 'type') and msg.type == "ai":
+                history += f"AI: {msg.content}\n"
+
+    # This loop handles semantic retries (e.g., valid but empty/useless responses)
     for attempt in range(3):
         failed_attempts_context = ""
         if failed_attempts:
-            # This provides context about previous failed payloads and their empty results.
-            failed_attempts_str = "\\n".join([f"- Payload: {att['payload']}\\n  - Result: {att['result']}" for att in failed_attempts])
-            failed_attempts_context = f"""
-            IMPORTANT: Your previous attempt(s) failed because the agent returned empty or unsatisfactory results. Do NOT repeat the same mistakes. Analyze the following failed attempts and generate a NEW, MODIFIED payload. Consider using broader search terms, different parameters, or a more general approach to maximize the chance of getting a non-empty result.
+            failed_attempts_str = "\n".join([f"- Payload: {att['payload']}\n  - Result: {att['result']}" for att in failed_attempts])
+            failed_attempts_context = f'''
+            IMPORTANT: Your previous attempt(s) failed because the agent returned empty or unsatisfactory results. Do NOT repeat the same mistakes. Analyze the following failed attempts and generate a NEW, MODIFIED payload.
 
             <failed_attempts>
             {failed_attempts_str}
             </failed_attempts>
-            """
+            '''
 
-        # This context is for HTTP 4xx errors from the outer loop in try_task_with_fallbacks
-        http_error_context = f"\\nIMPORTANT: The last API call failed with a client error. Please correct the payload based on this feedback:\\n<error>\\n{last_error}\\n</error>\\n" if last_error else ""
+        http_error_context = f"\nIMPORTANT: The last API call failed with a client error. Please correct the payload based on this feedback:\n<error>\n{last_error}\n</error>\n" if last_error else ""
 
-        payload_prompt = f"""
-        You are an expert at creating API requests. Your task is to generate a JSON payload for the following endpoint, based on the provided context.
+        payload_prompt = f'''
+        You are an expert at creating API requests. Your task is to generate a valid JSON payload for the following endpoint, based on all the provided context.
 
         Endpoint Description: "{selected_endpoint.description}"
         Endpoint Parameters: {[p.model_dump_json() for p in selected_endpoint.parameters]}
         High-Level Task: "{planned_task.task_description}"
-        Historical Context (previous task results): {completed_tasks}
+        Conversation History:
+        {history}
+        Historical Context (previous task results): {json.dumps(state.get('completed_tasks', []), indent=2, default=str)}
+        {file_context}
         {http_error_context}
         {failed_attempts_context}
-        Generate only the JSON payload required by the endpoint.
-        """
-        logger.debug(f"Payload builder prompt for task '{planned_task.task_name}' (Attempt {attempt + 1}):\\n{payload_prompt}")
+        Your response MUST be only the JSON payload object, with no extra text or markdown.
+        '''
         
         try:
-            # Logic to generate and clean the payload
             payload_str = payload_builder_llm.invoke(payload_prompt).content
             cleaned_payload_str = strip_think_tags(payload_str)
-            json_match = re.search(r"```json\\s*(\\{.*?\\})\\s*```", cleaned_payload_str, re.DOTALL)
-            json_str = json_match.group(1) if json_match else cleaned_payload_str
+            json_str = extract_json_from_response(cleaned_payload_str)
+            if not json_str:
+                raise json.JSONDecodeError("No JSON found in LLM response", cleaned_payload_str, 0)
             payload = json.loads(json_str)
             logger.info(f"LLM generated payload for task '{planned_task.task_name}': {payload}")
         except (json.JSONDecodeError, AttributeError) as e:
@@ -745,69 +940,59 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, complet
             return {"task_name": planned_task.task_name, "result": error_msg}
 
         headers = {}
-        agent_id = agent_details.id
-        if agent_id:
-            env_var_name = f"{agent_id.upper().replace('-', '_')}_API_KEY"
-            api_key = os.getenv(env_var_name)
-            if api_key:
-                logger.info(f"Found API key for agent '{agent_id}'. Adding to headers.")
-                headers["Authorization"] = f"Bearer {api_key}"
-                headers["x-scholarai-api-key"] = api_key
+        if api_key := os.getenv(f"{agent_details.id.upper().replace('-', '_')}_API_KEY"):
+            headers["Authorization"] = f"Bearer {api_key}"
 
         async with httpx.AsyncClient() as client:
             try:
-                logger.info(f"Calling agent '{agent_details.name}' at '{endpoint_url}' with method '{http_method}'.")
+                logger.info(f"Calling agent '{agent_details.name}' at '{endpoint_url}' (Attempt {attempt + 1})")
                 if http_method == 'GET':
                     response = await client.get(endpoint_url, params=payload, headers=headers, timeout=30.0)
-                elif http_method == 'POST':
+                else: # POST
                     response = await client.post(endpoint_url, json=payload, headers=headers, timeout=30.0)
-                else:
-                    raise ValueError(f"Unsupported HTTP method '{http_method}'.")
 
                 response.raise_for_status()
-                
                 result = response.json()
 
-                # **INTELLIGENT VALIDATION**
-                is_result_empty = not result or (isinstance(result, list) and not result) or (isinstance(result, dict) and "articles" in result and not result["articles"]) or (isinstance(result, dict) and not any(result.values()))
-
+                # **INTELLIGENT VALIDATION** for semantic failure
+                is_result_empty = not result or (isinstance(result, list) and not result) or (isinstance(result, dict) and not any(result.values()))
                 if is_result_empty:
-                    logger.warning(f"Agent returned a successful but empty response. Payload: {payload}. Result: {result}. Retrying...")
+                    logger.warning(f"Agent returned a successful but empty response. Retrying...")
                     failed_attempts.append({"payload": payload, "result": str(result)})
-                    continue  # This continues to the next attempt in the loop
+                    continue  # Continue to the next attempt in the loop
                 
-                logger.info(f"Agent call successful for task '{planned_task.task_name}'. Status: {response.status_code}")
+                logger.info(f"Agent call successful for task '{planned_task.task_name}'.")
                 return {"task_name": planned_task.task_name, "result": result}
             
-            except (httpx.HTTPStatusError, httpx.RequestError, ValueError) as e:
-                error_msg = f"Error calling agent for task '{planned_task.task_name}': {e}"
-                logger.error(error_msg)
-                raw_response = e.response.text if hasattr(e, 'response') and e.response else "No response body."
-                status_code = e.response.status_code if hasattr(e, 'response') else 500
-                return {"task_name": planned_task.task_name, "result": error_msg, "raw_response": raw_response, "status_code": status_code}
+            except httpx.HTTPStatusError as e:
+                error_msg = f"Agent call failed with status {e.response.status_code}: {e.response.text}"
+                return {"task_name": planned_task.task_name, "result": error_msg, "raw_response": e.response.text, "status_code": e.response.status_code}
+            except httpx.RequestError as e:
+                error_msg = f"Agent call failed with a network error: {e}"
+                return {"task_name": planned_task.task_name, "result": error_msg, "raw_response": str(e), "status_code": 500}
     
     # This block is reached only if all semantic retries in the loop fail
-    last_attempt_info = failed_attempts[-1] if failed_attempts else {}
-    final_error_msg = f"Agent returned empty results for task '{planned_task.task_name}' after {len(failed_attempts)} attempts."
+    final_error_msg = f"Agent returned empty or unsatisfactory results for task '{planned_task.task_name}' after {len(failed_attempts)} attempts."
     logger.error(final_error_msg)
-    return {
-        "task_name": planned_task.task_name,
-        "result": final_error_msg,
-        "raw_response": str(last_attempt_info.get('result', 'No result from last attempt.')),
-        "status_code": 500
-    }
+    return {"task_name": planned_task.task_name, "result": final_error_msg, "status_code": 500}
 
-async def execute_batch(state: State):
-    """Executes a single batch of tasks from the plan."""
-    if not state.get('task_plan'):
+async def execute_batch(state: State, config: RunnableConfig):
+    '''Executes a single batch of tasks from the plan.'''
+    # Rehydrate the plan
+    task_plan_dicts = state.get('task_plan', [])
+    if not task_plan_dicts:
         logger.info("No task plan to execute.")
         return {}
+    task_plan = [[PlannedTask.model_validate(d) for d in batch] for batch in task_plan_dicts]
 
-    current_batch_plan = state['task_plan'][0]
-    remaining_plan = state['task_plan'][1:]
+    current_batch_plan = task_plan[0]
+    remaining_plan_objects = task_plan[1:]
     logger.info(f"Executing batch of {len(current_batch_plan)} tasks.")
     
-    task_agent_pairs_map = {pair.task_name: pair for pair in state['task_agent_pairs']}
+    # Rehydrate the pairs
+    task_agent_pair_dicts = state.get('task_agent_pairs', [])
+    task_agent_pairs = [TaskAgentPair.model_validate(d) for d in task_agent_pair_dicts]
+    task_agent_pairs_map = {pair.task_name: pair for pair in task_agent_pairs}
     
     async def try_task_with_fallbacks(planned_task: PlannedTask):
         original_task_pair = task_agent_pairs_map.get(planned_task.task_name)
@@ -825,7 +1010,8 @@ async def execute_batch(state: State):
             for i in range(max_retries):
                 logger.info(f"Attempting task '{planned_task.task_name}' with agent '{agent_to_try.name}' (Attempt {i+1})...")
                 
-                task_result = await run_agent(planned_task, agent_to_try, state.get('completed_tasks', []), last_error=last_error)
+                # The state object is passed directly to run_agent
+                task_result = await run_agent(planned_task, agent_to_try, state, last_error=last_error)
                 
                 result_data = task_result.get('result', {})
                 is_error = isinstance(result_data, str) and "Error:" in result_data
@@ -837,43 +1023,50 @@ async def execute_batch(state: State):
                 final_error_result = task_result
                 raw_response = task_result.get('raw_response', 'No raw response available.')
                 logger.warning(f"Agent '{agent_to_try.name}' failed for task '{planned_task.task_name}'. Error: {result_data}")
-                logger.warning(f"Raw response from failed agent: {raw_response}")
                 
                 status_code = task_result.get("status_code")
-                if status_code and 400 <= status_code < 500:
+                if isinstance(status_code, int) and 400 <= status_code < 500:
                     last_error = raw_response
                 else:
                     break
-            
+        
         logger.error(f"All agents failed for task '{planned_task.task_name}'. Returning final error.")
         return final_error_result
 
     batch_results = await asyncio.gather(*(try_task_with_fallbacks(planned_task) for planned_task in current_batch_plan))
     
-    task_desc_map = {task.task_name: task.task_description for task in current_batch_plan}
     completed_tasks_with_desc = []
     for res in batch_results:
         task_name = res['task_name']
         completed_tasks_with_desc.append(CompletedTask(
             task_name=task_name,
-            task_description=task_desc_map.get(task_name, "N/A"),
             result=res.get('result', {})
         ))
 
     completed_tasks = state.get('completed_tasks', []) + completed_tasks_with_desc
     logger.info("Batch execution complete.")
     
-    return {
-        "task_plan": remaining_plan,
+    # FIX: Use mode='json' to convert HttpUrl and other special types to strings.
+    remaining_plan_dicts = [[task.model_dump(mode='json') for task in batch] for batch in remaining_plan_objects]
+
+    output_state = {
+        "task_plan": remaining_plan_dicts,
         "completed_tasks": completed_tasks,
         "latest_completed_tasks": completed_tasks_with_desc
     }
 
+    # Save the updated plan (using the object version for readability)
+    temp_save_state = {**state, **output_state}
+    temp_save_state['task_plan'] = remaining_plan_objects
+    save_plan_to_file({**temp_save_state, "thread_id": config.get("configurable", {}).get("thread_id")})
+    
+    return output_state
+
 def evaluate_agent_response(state: State):
-    """
+    '''
     Critically evaluates the result of the last executed task to ensure it is
     logically correct and satisfies the user's intent before proceeding.
-    """
+    '''
     latest_tasks = state.get("latest_completed_tasks", [])
     if not latest_tasks:
         # No new tasks to evaluate
@@ -886,11 +1079,11 @@ def evaluate_agent_response(state: State):
     if isinstance(task_to_evaluate.get('result'), str) and "Error:" in task_to_evaluate.get('result', ''):
         return {"pending_user_input": False, "question_for_user": None}
 
-    prompt = f"""
+    prompt = f'''
     You are a meticulous Quality Assurance AI. Your job is to determine if an agent's output is a successful and logical fulfillment of its assigned task.
 
     **Original User Prompt:** "{state['original_prompt']}"
-    **Task Description:** "{task_to_evaluate['task_description']}"
+    **Task Description:** "{task_to_evaluate.get('task_description', 'N/A')}"
     **Agent's Result:**
     ```json
     {json.dumps(task_to_evaluate['result'], indent=2)}
@@ -904,7 +1097,7 @@ def evaluate_agent_response(state: State):
     **Decision:**
     - If the result is logically sound and complete, respond with `{{"status": "complete"}}`.
     - If the result is logically flawed, incomplete, or based on a wrong assumption, respond with `{{"status": "user_input_required", "question": "Formulate a clear, direct question to the user to correct the course of the plan."}}`. For example, "The news search returned an article about the lumber industry, not a tech company. Could you specify a tech company you're interested in?"
-    """
+    '''
     try:
         evaluation = llm.invoke_json(prompt, AgentResponseEvaluation)
         if evaluation.status == "user_input_required":
@@ -940,38 +1133,133 @@ def ask_user(state: State):
             question = f"I need more information to help you with: '{original_prompt}'. Could you please provide more specific details about what you'd like me to do?"
     
     logger.info(f"Asking user for clarification: {question}")
-    
+
+    ai_message = AIMessage(content=question)
     return {
         "pending_user_input": True,
         "question_for_user": question,
-        "final_response": None  # Clear any previous final response
+        "final_response": None,  # Clear any previous final response
+        "messages": [ai_message]
     }
 
 
 def aggregate_responses(state: State):
     logger.info("Aggregating final response.")
-    llm = ChatCerebras(model="gpt-oss-120b")
     
-    prompt = f"""
-    You are an expert project manager's assistant. Your job is to synthesize the results from a team of AI agents into a single, clean, and coherent final report for the user.
-    The user's original request was:
-    "{state['original_prompt']}"
+    # Check if this is a simple response from the analysis step
+    if final_response := state.get("final_response"):
+        logger.info("Returning simple response from analysis step.")
+        ai_message = AIMessage(content=final_response)
+        return {"final_response": final_response, "messages": [ai_message]}
+    else:
+        llm = ChatCerebras(model="gpt-oss-120b")
+        
+        prompt = f'''
+        You are an expert project manager's assistant. Your job is to synthesize the results from a team of AI agents into a single, clean, and coherent final report for the user.
+        The user's original request was:
+        "{state['original_prompt']}"
 
-    The following tasks were completed, with these results:
-    ---
-    {state['completed_tasks']}
-    ---
-    Please generate a final, human-readable response that directly answers the user's original request based on the collected results.
-    """
-    logger.debug(f"Aggregation prompt:\\n{prompt}")
+        The following tasks were completed, with these results:
+        ---
+        {state['completed_tasks']}
+        ---
+        Please generate a final, human-readable response that directly answers the user's original request based on the collected results.
+        '''
+        logger.debug(f"Aggregation prompt:\n{prompt}")
+        
+        final_response = llm.invoke(prompt).content
+        logger.info("Final response generated.")
+        ai_message = AIMessage(content=final_response)
+        return {"final_response": final_response, "messages": [ai_message]}
+
+
+
+def load_conversation_history(state: State, config: RunnableConfig):
+    thread_id = config.get("configurable", {}).get("thread_id")
+    if not thread_id:
+        return {}
+
+    history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
+
+    if os.path.exists(history_path):
+        try:
+            with open(history_path, "r") as f:
+                raw_data = json.load(f)
+
+            # Validate and sanitize the message data
+            if not isinstance(raw_data, list):
+                logger.warning(f"Conversation {thread_id}: Invalid message data format (not a list). Skipping messages.")
+                return {"messages": []}
+
+            # Filter out any non-dict messages and convert them to proper Message objects
+            valid_messages = []
+            for i, msg_data in enumerate(raw_data):
+                try:
+                    if isinstance(msg_data, dict):
+                        # Convert single dict to Message object using the proper LangChain function
+                        from langchain_core.messages import messages_from_dict
+                        # messages_from_dict expects a list, so wrap in list and take first element
+                        try:
+                            msg_list = messages_from_dict([msg_data])
+                            if msg_list:
+                                valid_messages.extend(msg_list)
+                        except Exception as msg_err:
+                            logger.warning(f"Conversation {thread_id}, message {i}: Failed to convert dict to Message: {msg_err}")
+                            # Try manual conversion as fallback
+                            try:
+                                msg_type = msg_data.get("type", "")
+                                content = ""
+                                if "data" in msg_data and isinstance(msg_data["data"], dict):
+                                    content = msg_data["data"].get("content", "")
+                                elif isinstance(msg_data.get("content"), str):
+                                    content = msg_data["content"]
+
+                                if msg_type == "human":
+                                    from langchain_core.messages import HumanMessage
+                                    valid_messages.append(HumanMessage(content=content))
+                                elif msg_type == "ai":
+                                    from langchain_core.messages import AIMessage
+                                    valid_messages.append(AIMessage(content=content))
+                                else:
+                                    logger.warning(f"Conversation {thread_id}, message {i}: Unknown message type '{msg_type}'")
+                            except Exception as fallback_err:
+                                logger.warning(f"Conversation {thread_id}, message {i}: Fallback conversion failed: {fallback_err}")
+                    elif isinstance(msg_data, str):
+                        logger.warning(f"Conversation {thread_id}, message {i}: Found string message, converting to HumanMessage")
+                        from langchain_core.messages import HumanMessage
+                        valid_messages.append(HumanMessage(content=str(msg_data)))
+                    else:
+                        logger.warning(f"Conversation {thread_id}, message {i}: Invalid message type {type(msg_data)}. Skipping.")
+
+                except Exception as msg_processing_error:
+                    logger.warning(f"Conversation {thread_id}, message {i}: Message processing failed: {msg_processing_error}. Skipping.")
+
+            logger.info(f"Conversation {thread_id}: Successfully loaded {len(valid_messages)} valid messages out of {len(raw_data)} total items")
+            return {"messages": valid_messages}
+
+        except (json.JSONDecodeError, Exception) as e:
+            logger.error(f"Conversation {thread_id}: Failed to load conversation history: {e}")
+            return {"messages": []}
+    return {}
+
+def save_conversation_history(state: State, config: RunnableConfig):
+    thread_id = config.get("configurable", {}).get("thread_id")
+    if not thread_id:
+        return {}
+        
+    history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
     
-    final_response = llm.invoke(prompt).content
-    logger.info("Final response generated.")
-    return {"final_response": final_response}
+    messages = state.get("messages", [])
+    dicts = messages_to_dict(messages)
+    
+    with open(history_path, "w") as f:
+        json.dump(dicts, f)
+        
+    return {}
 
 # --- Routing Functions ---
 def route_after_search(state: State):
-    """Route after agent directory search based on whether agents were found"""
+    '''Route after agent directory search based on whether agents were found'''
     if state.get("parsing_error_feedback"):
         if state.get("parse_retry_count", 0) >= 3:
             logger.warning("Max parse retries reached. Asking user for clarification.")
@@ -982,7 +1270,7 @@ def route_after_search(state: State):
     return "rank_agents"
 
 def route_after_validation(state: State):
-    """This router acts as the gate after the plan is validated."""
+    '''This router acts as the gate after the plan is validated.'''
     if state.get("replan_reason"):
         logger.info("Routing back to plan_execution for a replan.")
         return "plan_execution"
@@ -993,8 +1281,117 @@ def route_after_validation(state: State):
         logger.info("Plan is valid. Routing to execute_batch.")
         return "execute_batch"
 
+
+
+
+def analyze_request(state: State):
+    """Sophisticated analysis of user request to determine processing approach."""
+    logger.info("Performing sophisticated analysis of user request...")
+    
+    llm = ChatCerebras(model="gpt-oss-120b")
+    
+    # Build comprehensive context from conversation history
+    history_context = ""
+    if state.get('messages'):
+        # Include recent conversation turns to provide context
+        recent_messages = state['messages'][-20:]  # Last 20 messages
+        for msg in recent_messages:
+            if hasattr(msg, 'type') and msg.type == "human":
+                history_context += f"User: {msg.content}\n"
+            elif hasattr(msg, 'type') and msg.type == "ai":
+                history_context += f"Assistant: {msg.content}\n"
+    
+    # Include uploaded files context
+    files_context = ""
+    uploaded_files = state.get('uploaded_files', [])
+    if uploaded_files:
+        files_info = []
+        for file_obj in uploaded_files:
+            # Convert dict to FileObject if needed for attribute access
+            if isinstance(file_obj, dict):
+                file_obj = FileObject.model_validate(file_obj)
+            file_info = f"- {file_obj.file_name} ({file_obj.file_type}) at {file_obj.file_path}"
+            if file_obj.file_type == 'document' and file_obj.vector_store_path:
+                file_info += f", vector store: {file_obj.vector_store_path}"
+            files_info.append(file_info)
+        files_context = "Uploaded files:\n" + "\n".join(files_info) + "\n\n"
+    
+    # Include completed tasks context
+    tasks_context = ""
+    completed_tasks = state.get('completed_tasks', [])
+    if completed_tasks:
+        tasks_info = [f"- {task.get('task_name', '')}: {str(task.get('result', ''))[:200]}..." for task in completed_tasks[-3:]]  # Last 3 tasks
+        tasks_context = "Previous results:\n" + "\n".join(tasks_info) + "\n\n"
+    
+    prompt = f'''
+    Analyze the user's request and determine if it requires complex orchestration or can be handled with a simple response.
+    
+    Consider the following context:
+    {files_context}
+    {tasks_context}
+    Conversation history:
+    {history_context}
+    
+    User's current request: "{state['original_prompt']}"
+    
+    Evaluate based on these criteria:
+    1. Is this a simple greeting, thanks, or general knowledge question?
+    2. Does this require accessing uploaded files or documents?
+    3. Does this require multiple agents or complex operations?
+    4. Is this a follow-up that builds on previous results?
+    5. Does this require external data or complex processing?
+    
+    Respond with a JSON object containing:
+    {{
+        "needs_complex_processing": true/false,
+        "reasoning": "Brief explanation for the decision",
+        "response": "If needs_complex_processing is false, provide a direct response to the user's request"
+    }}
+    '''
+    
+    try:
+        response = llm.invoke_json(prompt, AnalysisResult)
+        logger.info(f"Analysis result: needs_complex_processing={response.needs_complex_processing}")
+        
+        result = {
+            "needs_complex_processing": response.needs_complex_processing,
+            "analysis_reasoning": response.reasoning
+        }
+        
+        if not response.needs_complex_processing:
+            result["final_response"] = response.response
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Analysis failed: {e}. Defaulting to complex processing.")
+        return {"needs_complex_processing": True, "analysis_reasoning": f"Analysis failed: {e}"}
+
+
+def route_after_analysis(state: State):
+    """Routes the workflow based on the analysis result."""
+    if state.get("needs_complex_processing"):
+        logger.info("Request needs complex processing. Routing to preprocess_files or parse_prompt.")
+        if state.get("uploaded_files"):
+            logger.info("Request has files. Routing to preprocess_files.")
+            return "preprocess_files"
+        else:
+            logger.info("Request has no files. Routing to parse_prompt.")
+            return "parse_prompt"
+    else:
+        logger.info("Request is simple. Routing to final response generation.")
+        return "final_response"  # For simple responses, we'll use the aggregate_responses node which will just return the final_response from state
+
+
+def route_after_parse(state: State):
+    '''If parsing results in no tasks, ask user for clarification. Otherwise, proceed.'''
+    if not state.get('parsed_tasks'):
+        logger.warning("No tasks were parsed from prompt. Routing to ask_user for clarification.")
+        return "ask_user"
+    return "agent_directory_search"
+
 def should_continue_or_finish(state: State):
-    """This router runs after execution and evaluation to decide the next step."""
+    '''This router runs after execution and evaluation to decide the next step.'''
     if state.get("pending_user_input"):
         # If the evaluation failed and we need user input, go to ask_user
         return "ask_user"
@@ -1010,23 +1407,43 @@ def should_continue_or_finish(state: State):
 # --- Build the State Graph ---
 builder = StateGraph(State)
 
+builder.add_node("load_history", load_conversation_history)
+builder.add_node("save_history", save_conversation_history)
+builder.add_node("analyze_request", analyze_request)
 builder.add_node("parse_prompt", parse_prompt)
+builder.add_node("preprocess_files", preprocess_files)
 builder.add_node("agent_directory_search", agent_directory_search)
 builder.add_node("rank_agents", rank_agents)
 builder.add_node("plan_execution", plan_execution)
 builder.add_node("validate_plan_for_execution", validate_plan_for_execution)
 builder.add_node("execute_batch", execute_batch)
-builder.add_node("evaluate_agent_response", evaluate_agent_response) # New Node
+builder.add_node("evaluate_agent_response", evaluate_agent_response)
 builder.add_node("ask_user", ask_user)
 builder.add_node("aggregate_responses", aggregate_responses)
 
-builder.add_edge(START, "parse_prompt")
-builder.add_edge("parse_prompt", "agent_directory_search")
+builder.add_edge(START, "load_history")
+builder.add_edge("load_history", "analyze_request")
+
+builder.add_conditional_edges("analyze_request", route_after_analysis, {
+    "preprocess_files": "preprocess_files",
+    "parse_prompt": "parse_prompt",
+    "final_response": "aggregate_responses"
+})
+
+builder.add_edge("preprocess_files", "parse_prompt")
+
+builder.add_conditional_edges("parse_prompt", route_after_parse, {
+    "ask_user": "ask_user",
+    "agent_directory_search": "agent_directory_search"
+})
+
+builder.add_edge("agent_directory_search", "rank_agents")
 builder.add_edge("rank_agents", "plan_execution")
 builder.add_edge("plan_execution", "validate_plan_for_execution")
-builder.add_edge("execute_batch", "evaluate_agent_response") # <-- New Edge
-builder.add_edge("ask_user", END)
-builder.add_edge("aggregate_responses", END)
+builder.add_edge("execute_batch", "evaluate_agent_response") 
+builder.add_edge("ask_user", "save_history")
+builder.add_edge("aggregate_responses", "save_history")
+builder.add_edge("save_history", END)
 
 builder.add_conditional_edges("agent_directory_search", route_after_search, {
     "parse_prompt": "parse_prompt", 
@@ -1040,7 +1457,6 @@ builder.add_conditional_edges("validate_plan_for_execution", route_after_validat
     "ask_user": "ask_user"
 })
 
-# The 'should_continue_or_finish' router now runs AFTER evaluation
 builder.add_conditional_edges("evaluate_agent_response", should_continue_or_finish, {
     "validate_plan_for_execution": "validate_plan_for_execution",
     "aggregate_responses": "aggregate_responses",
@@ -1051,5 +1467,5 @@ builder.add_conditional_edges("evaluate_agent_response", should_continue_or_fini
 graph = builder.compile()
 
 def create_graph_with_checkpointer(checkpointer):
-    """Create a graph with a specific checkpointer for memory/persistence"""
+    """Attaches a checkpointer to the graph for persistent memory."""
     return builder.compile(checkpointer=checkpointer)

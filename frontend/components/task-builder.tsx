@@ -2,10 +2,10 @@
 "use client"
 
 import { useToast } from "@/hooks/use-toast"
-import { type TaskAgentPair, type ProcessResponse } from "@/lib/api-client"
-import WorkflowOrchestration from "./workflow-orchestration"
 import { useConversation } from "@/hooks/use-conversation"
+import WorkflowOrchestration from "./workflow-orchestration"
 import dynamic from "next/dynamic"
+import type { ProcessResponse, TaskAgentPair, ConversationState } from "@/lib/types"
 
 const InteractiveChatInterface = dynamic(
   () => import("@/components/interactive-chat-interface").then((mod) => mod.InteractiveChatInterface),
@@ -40,42 +40,30 @@ interface TaskBuilderProps {
     apiResponseData: ApiResponse | null;
 }
 
-export default function TaskBuilder({ 
-    onWorkflowComplete, 
-    onOrchestrationComplete, 
-    taskAgentPairs, 
-    selectedAgents, 
-    isExecuting, 
-    apiResponseData 
+export default function TaskBuilder({
+    onWorkflowComplete,
+    onOrchestrationComplete,
+    taskAgentPairs,
+    selectedAgents,
+    isExecuting,
+    apiResponseData
 }: TaskBuilderProps) {
   const { toast } = useToast()
-  const { state, isLoading, startConversation, continueConversation, resetConversation } = useConversation({
-    onComplete: (result) => {
-      console.log('Conversation completed:', result);
-      onWorkflowComplete?.(result);
-    },
+
+  const { state: conversationState, isLoading: isConversationLoading, startConversation, continueConversation, resetConversation } = useConversation({
+    onComplete: onWorkflowComplete,
     onError: (error) => {
-      console.error('Conversation error:', error);
-      
-      if (error.includes('HTTP 500') || error.includes('HTTP 404')) {
-        toast({
-            title: "Orchestration Error",
-            description: 'Interactive features are currently unavailable. Please try the Classic mode instead.',
-            variant: "destructive",
-          });
-      } else {
-        toast({
-            title: "Orchestration Error",
-            description: error,
-            variant: "destructive",
-          });
-      }
+      toast({
+        title: "Orchestration Error",
+        description: error,
+        variant: "destructive",
+      });
     }
   });
 
   return (
     <div className="h-full flex flex-col bg-white rounded-lg border shadow-sm">
-      <InteractiveChatInterface 
+      <InteractiveChatInterface
         onWorkflowComplete={onWorkflowComplete}
         onError={(error) => {
           toast({
@@ -84,13 +72,13 @@ export default function TaskBuilder({
             variant: "destructive",
           });
         }}
-        state={state}
-        isLoading={isLoading}
+        state={conversationState}
+        isLoading={isConversationLoading}
         startConversation={startConversation}
         continueConversation={continueConversation}
         resetConversation={resetConversation}
       />
-      
+
       {/* Hidden component to handle execution logic */}
       <div className="hidden">
         {isExecuting && apiResponseData && (

@@ -1,0 +1,35 @@
+{
+  "id": "document_analysis_agent",
+  "owner_id": "orbimesh-vendor",
+  "name": "Orbimesh Document Analysis Agent",
+  "description": "Processes and analyzes various document formats (PDF, DOCX, TXT) to answer questions and summarize content using a Retrieval-Augmented Generation (RAG) pipeline with Groq's LLaMA 4.",
+  "capabilities": [
+    "summarize_document",
+    "answer_question_about_document",
+    "extract_key_information_from_document"
+  ],
+  "price_per_call_usd": 0.005,
+  "status": "active",
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA3FcU8hPhmFLgez6qPf801aQahasAlG5S4MPb16nWJPA=\n-----END PUBLIC KEY-----",
+  "endpoints": [
+    {
+      "endpoint": "http://localhost:8070/analyze",
+      "http_method": "POST",
+      "description": "Takes a path to a document's vector store and a query, and returns an answer based on the document's content using RAG.",
+      "parameters": [
+        {
+          "name": "vector_store_path",
+          "param_type": "string",
+          "required": true,
+          "description": "The file path to the FAISS vector store index for the document."
+        },
+        {
+          "name": "query",
+          "param_type": "string",
+          "required": true,
+          "description": "The user's question about the document (e.g., 'What are the main conclusions of this report?')."
+        }
+      ]
+    }
+  ]
+}

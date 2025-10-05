@@ -14,6 +14,7 @@ export interface Agent {
   capabilities: string[];
   status: "active" | "inactive";
   rating?: number;
+  rating_count?: number;
   owner_id?: string;
   price_per_call_usd?: number;
   public_key_pem?: string;
@@ -52,19 +53,27 @@ export interface ConversationState {
   currentQuestion?: string;
 }
 
-// Updated Message interface with the new `attachment` field
+export interface Attachment {
+  name: string;
+  type: string; // e.g., 'image/png', 'application/pdf'
+  content: string; // For images, this will be a data URL (base64)
+}
+
+// Updated Message interface with the new `attachments` field
 export interface Message {
   id: string;
   type: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: Date;
-  attachment?: {
-    name: string;
-    type: string; // e.g., 'image/png', 'application/pdf'
-    content: string; // For images, this will be a data URL (base64)
-  };
+  attachments?: Attachment[];
   metadata?: {
     task_agent_pairs?: TaskAgentPair[];
     progress?: number;
   };
 }
+
+export type FileObject = {
+  file_name: string;
+  file_path: string;
+  file_type: string;
+};

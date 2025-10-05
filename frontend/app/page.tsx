@@ -9,8 +9,9 @@ import Link from "next/link"
 import { Button } from "@/components/ui/button"
 import { Users } from "lucide-react"
 import OrchestrationDetailsSidebar from "@/components/orchestration-details-sidebar"
-import { type TaskAgentPair, type ProcessResponse } from "@/lib/api-client"
+import { type TaskAgentPair, type ProcessResponse } from "@/lib/types"
 import { useToast } from "@/hooks/use-toast"
+import { useConversation } from "@/hooks/use-conversation"
 import {
   ResizablePanelGroup,
   ResizablePanel,
@@ -42,13 +43,26 @@ export default function Home() {
   const [isExecuting, setIsExecuting] = useState(false)
   const [executionResults, setExecutionResults] = useState<ExecutionResult[]>([])
   const [apiResponseData, setApiResponseData] = useState<ApiResponse | null>(null)
-  const [threadId, setThreadId] = useState<string | null>(null)
   const { toast } = useToast()
+
+  const { state: conversationState, isLoading: isConversationLoading, startConversation, continueConversation, resetConversation, loadConversation } = useConversation({
+    onComplete: (result) => {
+      console.log('Conversation completed:', result);
+      handleInteractiveWorkflowComplete(result);
+    },
+    onError: (error) => {
+      console.error('Conversation error:', error);
+      toast({
+        title: "Orchestration Error",
+        description: error,
+        variant: "destructive",
+      });
+    }
+  });
 
   const handleInteractiveWorkflowComplete = (result: ProcessResponse) => {
     setApiResponseData(result as ApiResponse);
     setTaskAgentPairs(result.task_agent_pairs);
-    setThreadId(result.thread_id);
 
     const initialSelections: Record<string, string> = {};
     result.task_agent_pairs.forEach((pair) => {
@@ -65,6 +79,23 @@ export default function Home() {
     }
   };
 
+
+  const handleConversationSelect = async (threadId: string) => {
+    try {
+      await loadConversation(threadId);
+      toast({
+        title: "Conversation loaded",
+        description: `Loaded conversation ${threadId}`,
+      });
+    } catch (error) {
+      toast({
+        title: "Error loading conversation",
+        description: "Failed to load the selected conversation",
+        variant: "destructive",
+      });
+    }
+  };
+
   const handleOrchestrationComplete = (results: ExecutionResult[]) => {
     setExecutionResults(results)
     setIsExecuting(false)
@@ -73,13 +104,16 @@ export default function Home() {
 
     toast({
       title: "Workflow executed successfully",
-      description: `All ${results.length} tasks completed. Total cost: $${totalCost.toFixed(4)}`,
+      description: `All ${results.length} tasks completed. Total cost: ${totalCost.toFixed(4)}`,
     })
   }
   
   return (
     <SidebarProvider>
-      <AppSidebar />
+      <AppSidebar
+        onConversationSelect={handleConversationSelect}
+        currentThreadId={conversationState.thread_id}
+      />
       <SidebarInset>
         <div className="h-screen bg-gray-50 relative flex flex-col">
           {/* Header */}
@@ -102,7 +136,7 @@ export default function Home() {
           <ResizablePanelGroup direction="horizontal" className="flex-1 overflow-hidden">
             <ResizablePanel defaultSize={70} minSize={50}>
               <main className="h-full p-6">
-                 <TaskBuilder 
+                 <TaskBuilder
                     onWorkflowComplete={handleInteractiveWorkflowComplete}
                     onOrchestrationComplete={handleOrchestrationComplete}
                     taskAgentPairs={taskAgentPairs}
@@ -118,8 +152,9 @@ export default function Home() {
             <ResizablePanel defaultSize={30} maxSize={40} minSize={25}>
               <OrchestrationDetailsSidebar 
                 executionResults={executionResults} 
-                threadId={threadId} 
+                threadId={conversationState.thread_id} 
                 taskAgentPairs={taskAgentPairs}
+                messages={conversationState.messages}
               />
             </ResizablePanel>
           </ResizablePanelGroup>

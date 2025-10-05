@@ -1,12 +1,20 @@
-// In hooks/use-conversation.ts
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import {
   startConversation as apiStartConversation,
   continueConversation as apiContinueConversation,
-  type ProcessResponse,
-  type ConversationState,
-  type Message,
+  uploadFiles as apiUploadFiles,
 } from '@/lib/api-client';
+import type { ProcessResponse, ConversationState, Message, Attachment, FileObject } from '@/lib/types';
+
+// Helper function to read file as data URL
+const readFileAsDataURL = (file: File): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+};
 
 interface UseConversationProps {
   onComplete?: (result: ProcessResponse) => void;
@@ -14,14 +22,25 @@ interface UseConversationProps {
 }
 
 export function useConversation({ onComplete, onError }: UseConversationProps = {}) {
-  const [state, setState] = useState<ConversationState>({
-    thread_id: '',
-    status: 'idle',
-    messages: [],
-    isWaitingForUser: false,
-    currentQuestion: '',
+  const [state, setState] = useState<ConversationState>(() => {
+    const savedThreadId = typeof window !== 'undefined' ? localStorage.getItem('thread_id') : null;
+    return {
+      thread_id: savedThreadId || '',
+      status: 'idle',
+      messages: [],
+      isWaitingForUser: false,
+      currentQuestion: '',
+    };
   });
   const [isLoading, setIsLoading] = useState(false);
+
+  useEffect(() => {
+    if (state.thread_id) {
+      localStorage.setItem('thread_id', state.thread_id);
+    } else {
+      localStorage.removeItem('thread_id');
+    }
+  }, [state.thread_id]);
 
   const handleApiResponse = useCallback((response: ProcessResponse) => {
     const {
@@ -67,22 +86,39 @@ export function useConversation({ onComplete, onError }: UseConversationProps = 
     }
   }, [onComplete]);
 
-  const startConversation = useCallback(async (input: string) => {
+  const startConversation = useCallback(async (input: string, files: File[] = []) => {
     setIsLoading(true);
     try {
+      let uploadedFiles: FileObject[] = [];
+      if (files.length > 0) {
+        uploadedFiles = await apiUploadFiles(files);
+      }
+
+      const attachments: Attachment[] = await Promise.all(
+        files.map(async (file) => {
+          let content = '';
+          if (file.type.startsWith('image/')) {
+            content = await readFileAsDataURL(file);
+          }
+          return { name: file.name, type: file.type, content };
+        })
+      );
+
       const userMessage: Message = {
         id: Date.now().toString(),
         type: 'user',
         content: input,
         timestamp: new Date(),
+        attachments: attachments.length > 0 ? attachments : undefined,
       };
+      
       setState(prevState => ({
         ...prevState,
         messages: [...prevState.messages, userMessage],
         status: 'processing',
       }));
 
-      const response = await apiStartConversation(input);
+      const response = await apiStartConversation(input, state.thread_id, uploadedFiles);
       handleApiResponse(response);
     } catch (error: any) {
       const errorMessage = error.message || 'An unknown error occurred';
@@ -92,7 +128,7 @@ export function useConversation({ onComplete, onError }: UseConversationProps = 
       setIsLoading(false);
     }
   }, [handleApiResponse, onError]);
-
+  
   const continueConversation = useCallback(async (input: string) => {
     if (!state.thread_id) {
       onError?.('Cannot continue conversation without a thread ID.');
@@ -126,6 +162,7 @@ export function useConversation({ onComplete, onError }: UseConversationProps = 
   }, [state.thread_id, handleApiResponse, onError]);
 
   const resetConversation = useCallback(() => {
+    // Create a new thread_id by generating a fresh UUID
     setState({
       thread_id: '',
       status: 'idle',
@@ -135,11 +172,45 @@ export function useConversation({ onComplete, onError }: UseConversationProps = 
     });
   }, []);
 
+  const loadConversation = useCallback(async (thread_id: string) => {
+    setIsLoading(true);
+    try {
+      // Load conversation history from API
+      const response = await fetch(`http://localhost:8000/api/conversations/${thread_id}`);
+      if (!response.ok) {
+        throw new Error(`Failed to load conversation: ${response.statusText}`);
+      }
+      const historyData = await response.json();
+
+      const messages: Message[] = historyData.map((msgData: any, index: number) => ({
+        id: (Date.now() + index).toString(),
+        type: msgData.type === 'human' ? 'user' : msgData.type === 'ai' ? 'assistant' : 'system',
+        content: msgData.data?.content || '',
+        timestamp: new Date(msgData.data?.timestamp || Date.now()),
+        metadata: msgData.data?.metadata || {},
+      }));
+
+      setState({
+        thread_id,
+        status: 'completed',
+        messages,
+        isWaitingForUser: false,
+        currentQuestion: '',
+      });
+    } catch (error: any) {
+      const errorMessage = error.message || 'Failed to load conversation';
+      onError?.(errorMessage);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [onError]);
+
   return {
     state,
     isLoading,
     startConversation,
     continueConversation,
     resetConversation,
+    loadConversation,
   };
 }

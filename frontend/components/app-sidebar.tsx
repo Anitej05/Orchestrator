@@ -16,8 +16,14 @@ import {
   SidebarFooter,
 } from "@/components/ui/sidebar"
 import { Plus, Home, Users, Workflow, BarChart3, Settings, Bot } from "lucide-react"
+import ConversationsDropdown from "./conversations-dropdown"
 
-export default function AppSidebar() {
+interface AppSidebarProps {
+  onConversationSelect?: (threadId: string) => void;
+  currentThreadId?: string;
+}
+
+export default function AppSidebar({ onConversationSelect, currentThreadId }: AppSidebarProps) {
   const navItems = [
     { href: "/", label: "Orchestrator", icon: Workflow },
     { href: "/agents", label: "Agent Directory", icon: Users },
@@ -50,6 +56,18 @@ export default function AppSidebar() {
                 </SidebarMenuItem>
               ))}
             </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
+
+        <SidebarGroup>
+          <SidebarGroupLabel>Conversations</SidebarGroupLabel>
+          <SidebarGroupContent className="px-2">
+            {onConversationSelect && (
+              <ConversationsDropdown
+                onConversationSelect={onConversationSelect}
+                currentThreadId={currentThreadId}
+              />
+            )}
           </SidebarGroupContent>
         </SidebarGroup>
       </SidebarContent>

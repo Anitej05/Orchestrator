@@ -132,7 +132,7 @@ def sync_agent_entries():
                     # Agent exists, check if it needs an update
                     if is_agent_changed(db_agent, file_agent):
                         print(f"🔄 Updating agent: {file_agent.name}...")
-                        response = requests.post(f"{API_BASE_URL}/agents/register", json=agent_data)
+                        response = requests.post(f"{API_BASE_URL}/api/agents/register", json=agent_data)
                         if response.status_code == 200:
                             updated_count += 1
                         else:
@@ -143,7 +143,7 @@ def sync_agent_entries():
                 else:
                     # Agent does not exist, create it
                     print(f"➕ Adding new agent: {file_agent.name}...")
-                    response = requests.post(f"{API_BASE_URL}/agents/register", json=agent_data)
+                    response = requests.post(f"{API_BASE_URL}/api/agents/register", json=agent_data)
                     if response.status_code == 201:
                         added_count += 1
                     else:
@@ -160,22 +160,17 @@ def main():
     """
     parser = argparse.ArgumentParser(description="Manage database and agents")
     parser.add_argument('action', choices=['sync', 'migrate', 'create-tables'], 
-                       help='Action to perform')
+                       nargs='?', default='sync',  # Make action optional and default to 'sync'
+                       help='Action to perform (sync, migrate, create-tables). Defaults to sync.')
     
-    # If no arguments provided, default to sync
-    if len(sys.argv) == 1:
-        args = parser.parse_args(['sync'])
-    else:
-        args = parser.parse_args()
-    
-        args = parser.parse_args()
+    args = parser.parse_args()
 
-        if args.create_tables:
-            print("Creating tables...")
-            Base.metadata.create_all(bind=engine)
-            print("Tables created.")
-        else:
-            parser.print_help()
+    if args.action == 'sync':
+        sync_agent_entries()
+    elif args.action == 'migrate':
+        run_migrations()
+    elif args.action == 'create-tables':
+        create_tables()
 
 if __name__ == "__main__":
     main()

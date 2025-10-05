@@ -7,6 +7,12 @@ from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
 from pydantic.networks import HttpUrl
 from langchain_core.messages import HumanMessage
+import shutil
+from fastapi import UploadFile, File
+from aiofiles import open as aio_open
+from typing import List
+from pydantic import BaseModel
+from typing import Literal
 
 # # --- Add parent directory to path ---
 # sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -14,6 +20,8 @@ import os
 import subprocess
 import sys
 import platform
+import socket
+import re
 
 # --- Third-party Imports ---
 from fastapi import FastAPI, HTTPException, Depends, status, Query, Response, WebSocket, WebSocketDisconnect, Body
@@ -23,12 +31,12 @@ from sqlalchemy import or_, cast, String, select
 from sentence_transformers import SentenceTransformer
 
 # --- Local Application Imports ---
+CONVERSATION_HISTORY_DIR = "conversation_history"
 from database import SessionLocal
 from models import Agent, StatusEnum, AgentCapability, AgentEndpoint, EndpointParameter
-from schemas import AgentCard, ProcessRequest, ProcessResponse, PlanResponse
-from orchestrator.graph import graph, create_graph_with_checkpointer
+from schemas import AgentCard, ProcessRequest, ProcessResponse, PlanResponse, FileObject
+from orchestrator.graph import ForceJsonSerializer, graph, create_graph_with_checkpointer, messages_from_dict, messages_to_dict, serialize_complex_object
 from orchestrator.state import State
-from orchestrator.graph import serialize_complex_object
 from langgraph.checkpoint.memory import MemorySaver
 
 # --- App Initialization and Configuration ---
@@ -42,7 +50,10 @@ app = FastAPI(
 logger = logging.getLogger("uvicorn.error")
 
 # Initialize memory for persistent conversations
-memory = MemorySaver()
+checkpointer = MemorySaver()
+
+# Create the graph with the checkpointer
+graph = create_graph_with_checkpointer(checkpointer)
 
 # Simple in-memory conversation store as backup
 conversation_store: Dict[str, Dict[str, Any]] = {}
@@ -93,145 +104,204 @@ def get_db():
         db.close()
 
 # --- Agent Server Startup ---
+def is_port_in_use(port: int) -> bool:
+    """Checks if a local port is already in use."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(('127.0.0.1', port)) == 0
+
+def wait_for_port(port: int, agent_file: str, timeout: int = 15):
+    """Waits for a network port to become active."""
+    start_time = time.time()
+    logger.info(f"Waiting for agent '{agent_file}' to start on port {port}...")
+    while time.time() - start_time < timeout:
+        if is_port_in_use(port):
+            logger.info(f"Agent '{agent_file}' is now running on port {port}.")
+            return True
+        time.sleep(0.5)
+    logger.error(f"Agent '{agent_file}' did not start on port {port} within {timeout} seconds.")
+    return False
+
 def start_agent_servers():
     """
-    Finds and starts all agent servers located in the 'agents' directory.
+    Finds and starts agent servers using the Windows 'start /B' command to run them
+    as background processes without new windows. Output is redirected to log files.
     """
     agents_dir = "agents"
     if not os.path.isdir(agents_dir):
         logger.warning(f"'{agents_dir}' directory not found. Skipping agent server startup.")
         return
 
-    agent_files = [f for f in os.listdir(agents_dir) if f.endswith("_agent.py")]
+    logs_dir = "logs"
+    os.makedirs(logs_dir, exist_ok=True)
+    logger.info(f"Agent logs will be stored in the '{logs_dir}' directory.")
 
-    logger.info(f"Found {len(agent_files)} agent(s) to start: {agent_files}")
+    agent_files = [f for f in os.listdir(agents_dir) if f.endswith("_agent.py")]
+    logger.info(f"Found {len(agent_files)} agent(s) to check: {agent_files}")
 
     for agent_file in agent_files:
         agent_path = os.path.join(agents_dir, agent_file)
-
-        current_platform = platform.system()
-
+        port = None
         try:
-            if current_platform == "Windows":
-                # Windows: Use start command with proper syntax
-                # Create a batch command that activates venv and runs the agent
-                cmd = f'start "Agent: {agent_file}" cmd /k "cd /d {os.getcwd()} && {sys.executable} {agent_path}"'
-                logger.info(f"Starting {agent_file} with command: {cmd}")
-                subprocess.Popen(cmd, shell=True)
+            with open(agent_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+                match = re.search(r"port=(\d+)", content)
+                if match:
+                    port = int(match.group(1))
 
-            elif current_platform == "Darwin":  # macOS
-                script = f'cd "{os.getcwd()}" && {sys.executable} {agent_path}'
-                process_command = [
-                    'osascript', '-e',
-                    f'tell app "Terminal" to do script "{script}"'
-                ]
-                logger.info(f"Starting {agent_file} in new Terminal...")
-                subprocess.Popen(process_command)
+            if port is None:
+                logger.warning(f"Could not find port in {agent_file}. Skipping.")
+                continue
 
-            else:  # Linux
-                process_command = [
-                    "gnome-terminal", "--", "bash", "-c",
-                    f'cd "{os.getcwd()}" && {sys.executable} {agent_path}; exec bash'
-                ]
-                logger.info(f"Starting {agent_file} in new terminal...")
-                subprocess.Popen(process_command)
+            if is_port_in_use(port):
+                logger.info(f"Agent '{agent_file}' is already running on port {port}.")
+                continue
+
+            logger.info(f"Starting '{agent_file}' on port {port} in the background...")
+            
+            log_path = os.path.join(logs_dir, f"{agent_file}.log")
+
+            if platform.system() == "Windows":
+                # Use 'start /B' to run the agent in the background without a new window.
+                # Redirect stdout and stderr to a log file using standard shell redirection.
+                command = f'start /B "Agent: {agent_file}" {sys.executable} {agent_path} > "{log_path}" 2>&1'
+                subprocess.run(command, shell=True, check=True)
+            else:
+                # For other OSes, use the previous Popen method with file handle redirection.
+                log_file_handle = open(log_path, 'w')
+                try:
+                    subprocess.Popen(
+                        [sys.executable, agent_path],
+                        stdout=log_file_handle,
+                        stderr=log_file_handle
+                    )
+                finally:
+                    log_file_handle.close()
+
+            wait_for_port(port, agent_file)
 
         except Exception as e:
             logger.error(f"Failed to start agent {agent_file}: {e}")
             logger.warning(f"You may need to start {agent_file} manually: python {agent_path}")
 
-    # Give agents a moment to start up
-    import time
-    time.sleep(2)
-    logger.info("Agent startup commands completed.")
+    logger.info("Agent startup check completed.")
+
+os.makedirs("storage/images", exist_ok=True)
+os.makedirs("storage/documents", exist_ok=True)
+
+@app.post("/api/upload", response_model=List[FileObject])
+async def upload_files(files: List[UploadFile] = File(...)):
+    """
+    Handles file uploads, saves them to the appropriate storage directory,
+    and returns their metadata.
+    """
+    file_objects = []
+    for file in files:
+        # **FIX 1: Handle potential None for filename**
+        if not file.filename:
+            continue  # Or raise an HTTPException for files without names
+
+        # **FIX 2: Handle potential None for content_type**
+        file_type = 'image' if file.content_type and file.content_type.startswith('image/') else 'document'
+        save_dir = f"storage/{file_type}s"
+        file_path = os.path.join(save_dir, file.filename)
+
+        # Save the file asynchronously
+        try:
+            async with aio_open(file_path, 'wb') as out_file:
+                while content := await file.read(1024):  # Read in chunks
+                    await out_file.write(content)
+        except Exception as e:
+            # Handle potential file-saving errors
+            raise HTTPException(status_code=500, detail=f"Could not save file: {e}")
+
+        file_objects.append(FileObject(
+            file_name=file.filename,
+            file_path=file_path,
+            file_type=file_type
+        ))
+    return file_objects
 
 # --- Unified Orchestration Service ---
 async def execute_orchestration(
     prompt: str,
     thread_id: str,
     user_response: Optional[str] = None,
+    files: Optional[List[FileObject]] = None,
     stream_callback=None
 ):
     """
-    Unified orchestration logic for both HTTP and WebSocket endpoints.
-    Now supports interactive workflows with user input and conversation continuity.
-
-    Args:
-        prompt: User's input prompt (only for new conversations)
-        thread_id: Unique identifier for this execution
-        user_response: User's response to a question (for continuing conversations)
-        stream_callback: Optional callback for streaming updates (WebSocket mode)
-
-    Returns:
-        Final state from graph execution
+    Unified orchestration logic that correctly persists and merges file context
+    across all turns in a conversation. This is the final, corrected version.
     """
     logger.info(f"Starting orchestration for thread_id: {thread_id}")
 
     config = {"configurable": {"thread_id": thread_id}}
 
-    # Get current state from our conversation store
-    with store_lock:
-        current_conversation = conversation_store.get(thread_id)
+    # Get the current state of the conversation from the checkpointer
+    current_conversation = checkpointer.get(config)
 
+    # --- State Initialization ---
     if current_conversation and user_response:
-        # Continuing an existing conversation with user response
-        logger.info(f"Resuming conversation for thread_id: {thread_id}")
-
-        # Update the state with user response
+        #
+        # CASE 1: Continuing an interactive workflow where the user answered a question.
+        #
+        logger.info(f"Resuming conversation for thread_id: {thread_id} with user response.")
         initial_state = current_conversation.copy()
         initial_state["user_response"] = user_response
         initial_state["pending_user_input"] = False
         initial_state["question_for_user"] = None
-
-        # Reset parse retry count for new user input
         initial_state["parse_retry_count"] = 0
-
-        # Append user response to original prompt for context
         if "original_prompt" in initial_state:
-            initial_state["original_prompt"] = f"{initial_state['original_prompt']}\\n\\nAdditional information: {user_response}"
+            initial_state["original_prompt"] = f"{initial_state['original_prompt']}\\n\\nAdditional context from user: {user_response}"
         else:
             initial_state["original_prompt"] = user_response
 
-        logger.info(f"Updated prompt with user response: {initial_state['original_prompt'][:200]}...")
-
     elif current_conversation and prompt:
-        # This is a new prompt in an existing conversation.
-        # We should preserve the conversation history (messages) but reset the rest of the state
-        # to process the new prompt.
-        initial_state = current_conversation.copy()
-        initial_state["original_prompt"] = prompt
-        initial_state["messages"].append(HumanMessage(content=prompt)) # Add new prompt to history
+        #
+        # CASE 2: A new prompt is sent in an existing conversation thread.
+        #
+        logger.info(f"Continuing conversation for thread_id: {thread_id} with new prompt.")
+        initial_state = {
+            # Carry over essential long-term memory from the previous turn
+            "messages": current_conversation.get("messages", []) + [HumanMessage(content=prompt)],
+            "completed_tasks": current_conversation.get("completed_tasks", []),
+            "uploaded_files": current_conversation.get("uploaded_files", []), # Persist files
 
-        # Reset fields for the new prompt processing
-        initial_state["parsed_tasks"] = []
-        initial_state["user_expectations"] = {}
-        initial_state["candidate_agents"] = {}
-        initial_state["task_agent_pairs"] = []
-        initial_state["task_plan"] = []
-        # Keep completed_tasks for context, but clear the rest
-        initial_state["final_response"] = None
-        initial_state["pending_user_input"] = False
-        initial_state["question_for_user"] = None
-        initial_state["user_response"] = None
-        initial_state["parsing_error_feedback"] = None
-        initial_state["parse_retry_count"] = 0
-        logger.info(f"Continuing conversation for thread_id: {thread_id} with new prompt: {prompt}")
-
+            # Reset short-term memory for the new task
+            "original_prompt": prompt,
+            "parsed_tasks": [],
+            "user_expectations": {},
+            "candidate_agents": {},
+            "task_agent_pairs": [],
+            "task_plan": [],
+            "final_response": None,
+            "pending_user_input": False,
+            "question_for_user": None,
+            "user_response": None,
+            "parsing_error_feedback": None,
+            "parse_retry_count": 0,
+        }
+    
     elif current_conversation:
-        # Resuming without user response (checking status)
+        #
+        # CASE 3: Resuming without a new prompt or user response (e.g., status check).
+        #
         initial_state = current_conversation.copy()
         logger.info(f"Checking status for thread_id: {thread_id}")
 
     else:
-        # New conversation
+        #
+        # CASE 4: A brand new conversation.
+        #
         if not prompt:
             raise ValueError("Prompt is required for new conversations")
-
+        logger.info(f"Starting new conversation for thread_id: {thread_id}")
         initial_state: State = {
             "original_prompt": prompt,
+            "messages": [HumanMessage(content=prompt)],
+            "uploaded_files": [], # Start with an empty file list
             "parsed_tasks": [],
             "user_expectations": {},
-            "messages": [HumanMessage(content=prompt)],
             "candidate_agents": {},
             "task_agent_pairs": [],
             "task_plan": [],
@@ -243,78 +313,68 @@ async def execute_orchestration(
             "parsing_error_feedback": None,
             "parse_retry_count": 0
         }
-        logger.info(f"Starting new conversation for thread_id: {thread_id}")
 
-    # Store the initial state
+    # --- **FIX**: Unified File Merging Logic ---
+    # This block now runs for EVERY turn, ensuring new files are always added to the state.
+    if files:
+        # Use a dictionary keyed by file_path to merge lists and avoid duplicates
+        file_map = {f['file_path']: f for f in initial_state.get("uploaded_files", [])}
+        for new_file in files:
+            file_map[new_file.file_path] = new_file.model_dump()
+        
+        initial_state["uploaded_files"] = list(file_map.values())
+        logger.info(f"File context updated. Total unique files in state: {len(initial_state['uploaded_files'])}")
+    
+    # Store the prepared initial state before running the graph
     with store_lock:
         conversation_store[thread_id] = initial_state.copy()
 
     final_state = None
-
     try:
-        # For now, use the graph without memory to avoid serialization issues
-        # The AgentCard and other Pydantic objects are not msgpack serializable
-        # TODO: Implement proper serialization for conversation memory
-
         if stream_callback:
             # Streaming mode for WebSocket
             node_count = 0
             expected_nodes = ["parse_prompt", "agent_directory_search", "rank_agents", "plan_execution", "execute_batch"]
 
             async for event in graph.astream(initial_state, config=config, stream_mode="updates"):
-                # Process each node update
                 for node_name, node_output in event.items():
                     node_count += 1
                     progress = min((node_count / len(expected_nodes)) * 100, 100) if expected_nodes else 50
-
-                    # Store the final state from the last event
                     if isinstance(node_output, dict):
                         final_state = node_output
-
-                    # Send to stream callback with enhanced data
                     await stream_callback(node_name, node_output, progress, node_count, thread_id)
-
-                    # Check if we need to pause for user input
                     if isinstance(node_output, dict) and node_output.get("pending_user_input"):
                         logger.info(f"Workflow paused for user input in thread_id: {thread_id}")
                         break
-
-            # Get final state if not captured from streaming
             if not final_state:
                 final_state = await graph.ainvoke(initial_state, config=config)
         else:
             # Single response mode for HTTP
             final_state = await graph.ainvoke(initial_state, config=config)
 
-        # Store the final state in our conversation store
+        # Store the final state after the graph run and save to file
         with store_lock:
             conversation_store[thread_id] = final_state.copy()
+            # Save the final state to a file
+            history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
+            with open(history_path, "w") as f:
+                json.dump(serialize_complex_object(final_state), f, indent=4)
 
         logger.info(f"Orchestration completed for thread_id: {thread_id}")
         return final_state
 
     except Exception as e:
         error_msg = str(e)
-
-        # Check if the error is due to no valid tasks being parsed
         if "No valid tasks to process" in error_msg or "No tasks to rank" in error_msg or "Halting: No agents found for task ''" in error_msg:
             logger.warning(f"No valid tasks could be parsed from prompt for thread_id {thread_id}. Original prompt: '{prompt}'")
-            # Return a meaningful response for this case
             error_state = {
-                "parsed_tasks": [],
-                "user_expectations": {},
-                "task_agent_pairs": [],
-                "final_response": f"I couldn't identify any specific tasks from your message: '{prompt}'. Could you please be more specific about what you'd like me to help you with?",
-                "completed_tasks": [],
+                "final_response": f"I couldn't identify any specific tasks from your message: '{prompt}'. Could you please be more specific?",
                 "pending_user_input": False,
-                "question_for_user": None
+                "question_for_user": None,
             }
-
-            # Store the error state
             with store_lock:
-                conversation_store[thread_id] = error_state.copy()
-
-            return error_state
+                conversation_store[thread_id] = {**initial_state, **error_state}
+            return conversation_store[thread_id]
 
         logger.error(f"Error during orchestration for thread_id {thread_id}: {e}", exc_info=True)
         raise
@@ -412,6 +472,7 @@ async def find_agents(request: ProcessRequest):
         final_state = await execute_orchestration(
             prompt=request.prompt,
             thread_id=thread_id,
+            files=request.files,  # Pass the files to the orchestrator
             stream_callback=None
         )
 
@@ -430,12 +491,12 @@ async def find_agents(request: ProcessRequest):
         task_agent_pairs = final_state.get("task_agent_pairs", [])
         final_response_str = final_state.get("final_response")
 
-        # Check if any tasks were parsed at all
-        if not final_state.get("parsed_tasks") and not task_agent_pairs:
-            logger.warning(f"Could not parse any tasks for thread_id: {thread_id}. Prompt: '{request.prompt}'")
+        # Check for a valid outcome
+        if not task_agent_pairs and not final_response_str and not final_state.get("pending_user_input"):
+            logger.warning(f"Could not parse any tasks or generate a response for thread_id: {thread_id}. Prompt: '{request.prompt}'")
             raise HTTPException(
                 status_code=404,
-                detail=f"I couldn't identify any specific tasks from your message: '{request.prompt}'. Could you please be more specific?"
+                detail=f"I couldn't identify any specific tasks or generate a response from your message: '{request.prompt}'. Could you please be more specific?"
             )
 
         logger.info(f"Successfully processed request for thread_id: {thread_id}")
@@ -586,6 +647,34 @@ async def debug_conversations():
     except Exception as e:
         logger.error(f"Error getting debug conversations: {e}")
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {e}")
+
+@app.get("/api/conversations", response_model=List[str])
+async def get_all_conversations():
+    """
+    Retrieves a list of all conversation thread_ids that have history.
+    """
+    if not os.path.isdir(CONVERSATION_HISTORY_DIR):
+        return []
+    
+    files = os.listdir(CONVERSATION_HISTORY_DIR)
+    # Return filenames without the .json extension, sorted by modification time (newest first)
+    files_with_path = [os.path.join(CONVERSATION_HISTORY_DIR, f) for f in files if f.endswith(".json")]
+    files_with_path.sort(key=os.path.getmtime, reverse=True)
+    return [os.path.splitext(os.path.basename(f))[0] for f in files_with_path]
+
+@app.get("/api/conversations/{thread_id}", response_model=List[Dict])
+async def get_conversation_history(thread_id: str):
+    """
+    Retrieves the message history for a given conversation thread.
+    """
+    history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
+    
+    if not os.path.exists(history_path):
+        raise HTTPException(status_code=404, detail="Conversation history not found.")
+        
+    with open(history_path, "r") as f:
+        history = json.load(f)
+        return history
 
 @app.get("/api/plan/{thread_id}", response_model=PlanResponse)
 async def get_agent_plan(thread_id: str):
@@ -770,6 +859,12 @@ async def websocket_chat(websocket: WebSocket):
         # Convert to serializable format using helper
         serializable_pairs = [serialize_complex_object(pair) for pair in task_agent_pairs] if task_agent_pairs else []
         serializable_completed = [serialize_complex_object(task) for task in completed_tasks] if completed_tasks else []
+
+        # --- DEBUGGING AGENT METADATA ---
+        logger.info(f"DEBUG: final_state keys: {final_state.keys()}")
+        logger.info(f"DEBUG: task_agent_pairs from state: {final_state.get('task_agent_pairs')}")
+        logger.info(f"DEBUG: serializable_pairs: {serializable_pairs}")
+        # --- END DEBUGGING ---
 
         # Calculate summary statistics
         total_tasks = len(serializable_pairs)
