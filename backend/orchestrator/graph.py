@@ -239,7 +239,7 @@ def invoke_json(self, prompt: str, pydantic_schema: Any, max_retries: int = 3):
 ChatCerebras._generate = patched_generate
 ChatCerebras.invoke_json = invoke_json
 
-logging.info("ChatCerebras has been monkey-patched to strip <think> tags and handle JSON manually.")
+logging.info("ChatCerebras has been monkey-patched to strip  and handle JSON manually.")
 
 load_dotenv()
 
@@ -260,10 +260,11 @@ cached_capabilities = {
 CACHE_DURATION_SECONDS = 300
 
 # --- New File-Based Memory Functions ---
-def save_plan_to_file(state: State):
+def save_plan_to_file(state: dict):
     '''Saves the current plan and completed tasks to a Markdown file.'''
     thread_id = state.get("thread_id")
     if not thread_id:
+        logger.warning("No thread_id found in state, skipping plan save")
         return {}
 
     plan_path = os.path.join(PLAN_DIR, f"{thread_id}-plan.md")
@@ -279,8 +280,8 @@ def save_plan_to_file(state: State):
                     file_name = file_obj.get('file_name', 'N/A')
                     file_type = file_obj.get('file_type', 'N/A')
                 else:
-                    file_name = file_obj.file_name
-                    file_type = file_obj.file_type
+                    file_name = getattr(file_obj, 'file_name', 'N/A')
+                    file_type = getattr(file_obj, 'file_type', 'N/A')
                 f.write(f"- `{file_name}` ({file_type})\n")
         else:
             f.write("- No attachments.\n")
@@ -290,9 +291,14 @@ def save_plan_to_file(state: State):
             for i, batch in enumerate(state["task_plan"]):
                 f.write(f"### Batch {i+1}\n")
                 for task in batch:
-                    task_name = getattr(task, 'task_name', 'N/A')
-                    task_description = getattr(task, 'task_description', 'N/A')
-                    primary_id = getattr(getattr(task, 'primary', None), 'id', 'N/A')
+                    if isinstance(task, dict):
+                        task_name = task.get('task_name', 'N/A')
+                        task_description = task.get('task_description', 'N/A')
+                        primary_id = task.get('primary', {}).get('id', 'N/A') if task.get('primary') else 'N/A'
+                    else:
+                        task_name = getattr(task, 'task_name', 'N/A')
+                        task_description = getattr(task, 'task_description', 'N/A')
+                        primary_id = getattr(getattr(task, 'primary', None), 'id', 'N/A')
 
                     # Write each line separately to ensure correct newlines
                     f.write(f"- **Task**: `{task_name}`\n")
@@ -304,8 +310,14 @@ def save_plan_to_file(state: State):
         f.write("\n## Completed Tasks\n")
         if state.get("completed_tasks"):
             for task in state["completed_tasks"]:
-                task_name = task.get('task_name', 'N/A')
-                result_str = json.dumps(task.get('result', {}), indent=2, cls=CustomJSONEncoder)
+                if isinstance(task, dict):
+                    task_name = task.get('task_name', 'N/A')
+                    result_obj = task.get('result', {})
+                else:
+                    task_name = getattr(task, 'task_name', 'N/A')
+                    result_obj = getattr(task, 'result', {})
+                    
+                result_str = json.dumps(result_obj, indent=2, cls=CustomJSONEncoder)
                 
                 # Indent every line of the JSON string for proper markdown rendering
                 indented_result_str = "\n".join("      " + line for line in result_str.splitlines())
@@ -551,7 +563,7 @@ async def agent_directory_search(state: State):
     user_expectations = state.get('user_expectations') or {}
 
     for task in parsed_tasks:
-        params: Dict[str, Any] = {'capabilities': task.task_description}
+        params: Dict[str, Any] = {'capabilities': task.task_name}
         if 'price' in user_expectations:
             params['max_price'] = user_expectations['price']
         if 'rating' in user_expectations:
@@ -744,7 +756,11 @@ def plan_execution(state: State, config: RunnableConfig):
     if 'task_plan' in output_state and output_state['task_plan']:
         rehydrated_plan = [[PlannedTask.model_validate(task) for task in batch] for batch in output_state['task_plan']]
         temp_state_for_saving['task_plan'] = rehydrated_plan
-    save_plan_to_file({**temp_state_for_saving, "thread_id": config.get("configurable", {}).get("thread_id")})
+    thread_id = config.get("configurable", {}).get("thread_id")
+    if thread_id:
+        save_plan_to_file({**temp_state_for_saving, "thread_id": thread_id})
+    else:
+        logger.warning("No thread_id found in config, skipping plan save")
     
     return output_state
 
@@ -1027,7 +1043,9 @@ async def execute_batch(state: State, config: RunnableConfig):
                 status_code = task_result.get("status_code")
                 if isinstance(status_code, int) and 400 <= status_code < 500:
                     last_error = raw_response
+                    logger.warning(f"Client error for agent '{agent_to_try.name}', task '{planned_task.task_name}': {raw_response}")
                 else:
+                    logger.error(f"Server error or other issue for agent '{agent_to_try.name}', task '{planned_task.task_name}': {raw_response}")
                     break
         
         logger.error(f"All agents failed for task '{planned_task.task_name}'. Returning final error.")
@@ -1058,7 +1076,11 @@ async def execute_batch(state: State, config: RunnableConfig):
     # Save the updated plan (using the object version for readability)
     temp_save_state = {**state, **output_state}
     temp_save_state['task_plan'] = remaining_plan_objects
-    save_plan_to_file({**temp_save_state, "thread_id": config.get("configurable", {}).get("thread_id")})
+    thread_id = config.get("configurable", {}).get("thread_id")
+    if thread_id:
+        save_plan_to_file({**temp_save_state, "thread_id": thread_id})
+    else:
+        logger.warning("No thread_id found in config, skipping plan save")
     
     return output_state
 
@@ -1187,6 +1209,9 @@ def load_conversation_history(state: State, config: RunnableConfig):
                 raw_data = json.load(f)
 
             # Validate and sanitize the message data
+            if isinstance(raw_data, dict):
+                raw_data = [raw_data]
+            
             if not isinstance(raw_data, list):
                 logger.warning(f"Conversation {thread_id}: Invalid message data format (not a list). Skipping messages.")
                 return {"messages": []}

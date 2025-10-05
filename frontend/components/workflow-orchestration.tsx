@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react"
 import { Database, Users, BarChart3, Lightbulb, Loader2 } from "lucide-react"
-import type { TaskAgentPair } from "@/lib/api-client"
+import type { TaskAgentPair } from "@/lib/types"
 
 interface ExecutionResult {
   taskId: string
@@ -21,6 +21,8 @@ interface WorkflowOrchestrationProps {
   selectedAgents: Record<string, string>
   taskInput?: string
   onComplete: (results: ExecutionResult[]) => void
+  onThreadIdUpdate?: (threadId: string) => void
+  onExecutionResultsUpdate?: (results: ExecutionResult[]) => void
 }
 
 interface DataSource {
@@ -48,6 +50,8 @@ export default function WorkflowOrchestration({
   selectedAgents,
   taskInput = "",
   onComplete,
+  onThreadIdUpdate,
+  onExecutionResultsUpdate,
 }: WorkflowOrchestrationProps) {
   // WebSocket ref for connection management (must be inside component)
   const wsRef = useRef<WebSocket | null>(null)
@@ -349,9 +353,16 @@ export default function WorkflowOrchestration({
     // event structure: { node, data, thread_id, status, timestamp, ... }
     const node = event.node
     const nodeData = event.data || {}
+    const threadId = event.thread_id || nodeData.thread_id
     const progress = nodeData.progress_percentage || null
     const nodeSeq = nodeData.node_sequence || null
     console.log("Received WebSocket event:", event)
+
+    // Update thread ID in parent component if available
+    if (threadId && onThreadIdUpdate) {
+      onThreadIdUpdate(threadId)
+    }
+
     switch (node) {
       case "__start__":
         setCurrentPhase("intro")
@@ -385,29 +396,38 @@ export default function WorkflowOrchestration({
         const finalResponse = event.final_response || nodeData.final_response || ""
         const summary = event.summary || nodeData.summary || {}
         setFinalMarkdown(finalResponse);
+
+        // Generate execution results from the task agent pairs
         if (pairs.length > 0) {
           const results: ExecutionResult[] = pairs.map((pair: any, index: number) => ({
             taskId: pair.task_name || `task_${index}`,
             taskDescription: pair.task_name?.replace(/_/g, " ").replace(/\b\w/g, (l: string) => l.toUpperCase()) || "Unknown Task",
             agentName: pair.primary?.name || pair.agent?.name || "Unknown Agent",
             status: isDryRun ? "dry-run-success" : "success",
-            output: isDryRun 
+            output: isDryRun
               ? `[DRY RUN] Would execute: ${pair.task_name?.replace(/_/g, " ")} using ${pair.primary?.name || "Unknown Agent"}`
               : finalResponse || `Successfully completed: ${pair.task_name?.replace(/_/g, " ")}`,
             cost: pair.primary?.price_per_call_usd || 0,
             executionTime: Math.floor((Math.random() * 5 + 3) * 10) / 10,
           }))
+
+          // Update execution results in parent component
+          if (onExecutionResultsUpdate) {
+            onExecutionResultsUpdate(results)
+          }
+
           // Optionally, you can display summary stats here
           if (summary && summary.execution_completed) {
             setTaskAnalysis(`Workflow completed. Total tasks: ${summary.total_tasks}, Estimated cost: $${summary.total_estimated_cost}, Agents: ${summary.agent_names?.join(", ")}`)
           }
           onComplete(results)
         } else {
+          // Fallback to generating results from taskAgentPairs if no pairs in response
           const results: ExecutionResult[] = taskAgentPairs.map((pair) => {
             const selectedAgent = getSelectedAgent(pair.task_name)
             return {
               taskId: pair.task_name,
-              taskDescription: pair.task_name.replace(/_/g, " ").replace(/\b\w/g, (l) => l.toUpperCase()),
+              taskDescription: pair.task_name.replace(/_/g, " ").replace(/\b\w/g, (l: string) => l.toUpperCase()),
               agentName: selectedAgent?.name || "Unknown Agent",
               status: isDryRun ? "dry-run-success" : "success",
               output: isDryRun
@@ -417,6 +437,11 @@ export default function WorkflowOrchestration({
               executionTime: Math.floor((Math.random() * 5 + 3) * 10) / 10,
             }
           })
+
+          // Update execution results in parent component
+          if (onExecutionResultsUpdate) {
+            onExecutionResultsUpdate(results)
+          }
           onComplete(results)
         }
         break
@@ -431,7 +456,7 @@ export default function WorkflowOrchestration({
         // For other nodes, show progress and description
         await typeText(nodeData.description || `Processing ${node.replace(/_/g, " ")}...`)
     }
-  }, [isDryRun, taskAgentPairs, onComplete])
+  }, [isDryRun, taskAgentPairs, onComplete, onThreadIdUpdate, onExecutionResultsUpdate])
 
   // Refactored orchestration logic using WebSocket
   const handleSubmit = useCallback(() => {
@@ -444,8 +469,9 @@ export default function WorkflowOrchestration({
     wsRef.current = ws
 
     ws.onopen = () => {
-      // Send initial prompt (customize as needed)
-      const prompt = taskInput || "your prompt here"
+      console.log("WebSocket connected, sending initial prompt...")
+      // Send initial prompt when connection opens
+      const prompt = taskInput || "Please analyze and execute the requested workflow"
       ws.send(JSON.stringify({ prompt }))
     }
 

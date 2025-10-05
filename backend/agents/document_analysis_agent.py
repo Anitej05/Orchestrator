@@ -9,9 +9,14 @@ from langchain.chains import RetrievalQA
 from langchain_cerebras import ChatCerebras
 import os
 from dotenv import load_dotenv
+import logging
 
 # Load environment variables from a .env file at the project root
 load_dotenv()
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # --- Configuration & API Key Check ---
 CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY")
@@ -60,6 +65,7 @@ def analyze_document(request: AnalyzeDocumentRequest):
     """
     # 1. Validate that the vector store path exists.
     if not os.path.exists(request.vector_store_path):
+        logger.error(f"Document vector store not found at path: {request.vector_store_path}")
         raise HTTPException(
             status_code=404,
             detail=f"Document vector store not found at path: {request.vector_store_path}"
@@ -69,6 +75,7 @@ def analyze_document(request: AnalyzeDocumentRequest):
         # 2. Load the vector store from the path provided by the orchestrator.
         # This is the core of the RAG pipeline's retrieval step.
         # The `allow_dangerous_deserialization` flag is required for FAISS with pickle.
+        logger.info(f"Loading vector store from: {request.vector_store_path}")
         vector_store = FAISS.load_local(
             request.vector_store_path,
             hf_embeddings,
@@ -84,13 +91,16 @@ def analyze_document(request: AnalyzeDocumentRequest):
         )
 
         # 4. Invoke the chain to get the answer. This performs the retrieval and generation steps.
+        logger.info(f"Processing query: {request.query}")
         result = qa_chain.invoke({"query": request.query})
 
         # 5. Return the generated answer in the specified response format.
+        logger.info("Document analysis completed successfully")
         return AnalyzeDocumentResponse(answer=result['result'])
 
     except Exception as e:
         # Catch-all for any other errors during the process
+        logger.error(f"Error occurred while analyzing the document: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"An unexpected error occurred while analyzing the document: {str(e)}"
@@ -99,4 +109,6 @@ def analyze_document(request: AnalyzeDocumentRequest):
 if __name__ == "__main__":
     # This block allows you to run the server directly for testing
     # Use: python backend/agents/document_analysis_agent.py
-    uvicorn.run("document_analysis_agent:app", host="127.0.0.1", port=8070, reload=True)
+    port = int(os.getenv("DOCUMENT_AGENT_PORT", 8070))
+    logger.info(f"Starting Document Analysis Agent on port {port}")
+    uvicorn.run("document_analysis_agent:app", host="127.0.0.1", port=port, reload=True)

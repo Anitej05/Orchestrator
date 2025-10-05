@@ -126,7 +126,7 @@ def start_agent_servers():
     Finds and starts agent servers using the Windows 'start /B' command to run them
     as background processes without new windows. Output is redirected to log files.
     """
-    agents_dir = "agents"
+    agents_dir = "backend/agents"
     if not os.path.isdir(agents_dir):
         logger.warning(f"'{agents_dir}' directory not found. Skipping agent server startup.")
         return
@@ -144,7 +144,10 @@ def start_agent_servers():
         try:
             with open(agent_path, 'r', encoding='utf-8') as f:
                 content = f.read()
-                match = re.search(r"port=(\d+)", content)
+                match = re.search(r'port\s*=\s*int\(os\.getenv\([^,]+,\s*(\d+)\)', content)
+                if not match:
+                    # Fallback to the older pattern in case of direct assignment
+                    match = re.search(r"port\s*=\s*(\d+)", content)
                 if match:
                     port = int(match.group(1))
 
@@ -202,7 +205,7 @@ async def upload_files(files: List[UploadFile] = File(...)):
 
         # **FIX 2: Handle potential None for content_type**
         file_type = 'image' if file.content_type and file.content_type.startswith('image/') else 'document'
-        save_dir = f"storage/{file_type}s"
+        save_dir = f"storage/{file_type}s"  # Path relative to project root
         file_path = os.path.join(save_dir, file.filename)
 
         # Save the file asynchronously
@@ -359,6 +362,23 @@ async def execute_orchestration(
             history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
             with open(history_path, "w") as f:
                 json.dump(serialize_complex_object(final_state), f, indent=4)
+
+        # Ensure a plan file is saved for every conversation
+        try:
+            from orchestrator.graph import save_plan_to_file
+            # Make sure the state has the required structure for plan saving
+            plan_state = {**final_state}
+            if "task_plan" not in plan_state:
+                plan_state["task_plan"] = []
+            if "original_prompt" not in plan_state:
+                plan_state["original_prompt"] = prompt if prompt else ""
+            if "uploaded_files" not in plan_state:
+                plan_state["uploaded_files"] = []
+            if "completed_tasks" not in plan_state:
+                plan_state["completed_tasks"] = []
+            save_plan_to_file({**plan_state, "thread_id": thread_id})
+        except Exception as e:
+            logger.error(f"Failed to save plan file for thread {thread_id}: {e}")
 
         logger.info(f"Orchestration completed for thread_id: {thread_id}")
         return final_state

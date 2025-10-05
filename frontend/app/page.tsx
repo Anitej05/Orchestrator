@@ -43,6 +43,7 @@ export default function Home() {
   const [isExecuting, setIsExecuting] = useState(false)
   const [executionResults, setExecutionResults] = useState<ExecutionResult[]>([])
   const [apiResponseData, setApiResponseData] = useState<ApiResponse | null>(null)
+  const [currentThreadId, setCurrentThreadId] = useState<string | null>(null)
   const { toast } = useToast()
 
   const { state: conversationState, isLoading: isConversationLoading, startConversation, continueConversation, resetConversation, loadConversation } = useConversation({
@@ -107,6 +108,14 @@ export default function Home() {
       description: `All ${results.length} tasks completed. Total cost: ${totalCost.toFixed(4)}`,
     })
   }
+
+  const handleThreadIdUpdate = (threadId: string) => {
+    setCurrentThreadId(threadId)
+  }
+
+  const handleExecutionResultsUpdate = (results: ExecutionResult[]) => {
+    setExecutionResults(results)
+  }
   
   return (
     <SidebarProvider>
@@ -143,6 +152,8 @@ export default function Home() {
                     selectedAgents={selectedAgents}
                     isExecuting={isExecuting}
                     apiResponseData={apiResponseData}
+                    onThreadIdUpdate={handleThreadIdUpdate}
+                    onExecutionResultsUpdate={handleExecutionResultsUpdate}
                  />
               </main>
             </ResizablePanel>
@@ -150,11 +161,12 @@ export default function Home() {
             <ResizableHandle withHandle />
 
             <ResizablePanel defaultSize={30} maxSize={40} minSize={25}>
-              <OrchestrationDetailsSidebar 
-                executionResults={executionResults} 
-                threadId={conversationState.thread_id} 
+              <OrchestrationDetailsSidebar
+                executionResults={executionResults}
+                threadId={currentThreadId || conversationState.thread_id}
                 taskAgentPairs={taskAgentPairs}
                 messages={conversationState.messages}
+                onThreadIdUpdate={handleThreadIdUpdate}
               />
             </ResizablePanel>
           </ResizablePanelGroup>

@@ -38,6 +38,8 @@ interface TaskBuilderProps {
     selectedAgents: Record<string, string>;
     isExecuting: boolean;
     apiResponseData: ApiResponse | null;
+    onThreadIdUpdate?: (threadId: string) => void;
+    onExecutionResultsUpdate?: (results: ExecutionResult[]) => void;
 }
 
 export default function TaskBuilder({
@@ -46,7 +48,9 @@ export default function TaskBuilder({
     taskAgentPairs,
     selectedAgents,
     isExecuting,
-    apiResponseData
+    apiResponseData,
+    onThreadIdUpdate,
+    onExecutionResultsUpdate
 }: TaskBuilderProps) {
   const { toast } = useToast()
 
@@ -88,6 +92,8 @@ export default function TaskBuilder({
               taskAgentPairs={taskAgentPairs}
               selectedAgents={selectedAgents}
               onComplete={onOrchestrationComplete}
+              onThreadIdUpdate={onThreadIdUpdate}
+              onExecutionResultsUpdate={onExecutionResultsUpdate}
             />
         )}
       </div>

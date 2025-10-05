@@ -30,6 +30,7 @@ interface OrchestrationDetailsSidebarProps {
     taskAgentPairs: { primary: Agent }[];
     messages: Message[];
     className?: string;
+    onThreadIdUpdate?: (threadId: string) => void;
 }
 
 interface Plan {
