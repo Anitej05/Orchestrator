@@ -165,7 +165,7 @@ export default function OrchestrationDetailsSidebar({ executionResults, threadId
                                                     <div className="flex items-center justify-end space-x-2">
                                                         <StarRating currentRating={agent.rating} readonly size="sm" showValue={false}/>
                                                         <span className="text-xs text-gray-500 w-16 text-right">
-                                                            ({agent.rating.toFixed(1)} / {agent.rating_count ?? 0})
+                                                            ({(agent.rating ?? 0).toFixed(1)} / {agent.rating_count ?? 0})
                                                         </span>
                                                     </div>
                                                 </div>

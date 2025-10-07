@@ -1,6 +1,6 @@
 INFO:     Will watch for changes in these directories: ['D:\\Internship\\Orbimesh']
 INFO:     Uvicorn running on http://127.0.0.1:8050 (Press CTRL+C to quit)
-INFO:     Started reloader process [14388] using WatchFiles
-INFO:     Started server process [23356]
+INFO:     Started reloader process [8528] using WatchFiles
+INFO:     Started server process [9492]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.

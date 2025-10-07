@@ -83,7 +83,7 @@ export function StarRating({
       {showValue && (
         <div className="flex items-center space-x-1 ml-2">
           <span className="text-sm text-gray-600 font-medium tabular-nums">
-            ({currentRating.toFixed(1)})
+            ({(currentRating ?? 0).toFixed(1)})
           </span>
           <Star className="w-3.5 h-3.5 text-yellow-400 fill-yellow-400" />
         </div>
@@ -95,7 +95,7 @@ export function StarRating({
 interface InteractiveStarRatingProps {
   agentId: string
   agentName: string
-  currentRating: number
+  currentRating?: number
   onRatingUpdate?: (newRating: number) => void
   className?: string
 }
@@ -163,7 +163,7 @@ export function InteractiveStarRating({
     <div className={cn("flex items-center justify-end gap-x-2", className)}>
         {/* Interactive stars for user input */}
         <StarRating
-          currentRating={userRating ?? 0} // Show user's selection, fallback to 0
+          currentRating={userRating ?? currentRating ?? 0} // Show user's selection, fallback to currentRating, then to 0
           onRate={handleRate}
           readonly={isSubmitting}
           showValue={false} // Hides the (4.2) ★ part

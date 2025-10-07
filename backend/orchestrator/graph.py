@@ -3,10 +3,8 @@
 from orchestrator.state import State, CompletedTask
 from schemas import (
     ParsedRequest,
-    PriorityMappingResponse,
     TaskAgentPair,
     ExecutionPlan,
-    SelectedEndpoint,
     AgentCard,
     PlannedTask,
     FileObject,
@@ -29,6 +27,16 @@ from pydantic.networks import HttpUrl
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, AIMessage, ToolMessage, ChatMessage
 from langchain_cerebras import ChatCerebras
+from typing import Protocol, Any
+
+# Define a protocol for the invoke_json method to help with type checking
+class JsonInvoker(Protocol):
+    def invoke_json(self, prompt: str, pydantic_schema: Any, max_retries: int = 3) -> Any:
+        ...
+
+# Extend ChatCerebras with the protocol to help type checkers
+class ExtendedChatCerebras(ChatCerebras):
+    pass
 from langgraph.graph import StateGraph, START, END
 from dotenv import load_dotenv
 from typing import List, Optional, Dict, Any, Literal
@@ -63,16 +71,16 @@ from langchain_community.document_loaders import (
 )
 
 class CustomJSONEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, HttpUrl):
-            return str(obj)
-        return json.JSONEncoder.default(self, obj)
+    def default(self, o):
+        if isinstance(o, HttpUrl):
+            return str(o)
+        return json.JSONEncoder.default(self, o)
 
 # --- Utility Function ---
 def extract_json_from_response(text: str) -> str | None:
     '''
-    A robust function to extract a JSON object from a string that may contain
-    <think> blocks, markdown, and other conversational text.
+    A robust function to extract a JSON object from a string that may contain 
+    , markdown, and other conversational text.
 
     Args:
         text: The raw string output from the language model.
@@ -135,7 +143,19 @@ def serialize_complex_object(obj):
         elif isinstance(obj, (list, tuple)):
             # Handle lists/tuples of complex objects
             try:
-                return [serialize_complex_object(item) for item in obj]
+                # Check if this is a list of LangChain message objects
+                if all(hasattr(item, '_type') for item in obj if item is not None):
+                    # Use LangChain's messages_to_dict for message objects
+                    return messages_to_dict(obj)
+                else:
+                    return [serialize_complex_object(item) for item in obj]
+            except:
+                pass
+        elif hasattr(obj, '_type'):  # Check for LangChain message objects
+            # Handle LangChain message objects specifically
+            try:
+                # Use LangChain's messages_to_dict for individual message objects
+                return messages_to_dict([obj])[0] if messages_to_dict([obj]) else str(obj)
             except:
                 pass
         elif hasattr(obj, 'model_dump'):
@@ -166,22 +186,23 @@ class PlanValidationResult(BaseModel):
     question: Optional[str] = Field(None, description="The direct question for the user if input is absolutely required.")
 
 
-def strip_think_tags(text: str) -> str:
+def strip_think_tags(text: Any) -> Any:
     if not isinstance(text, str):
         return text
     return re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
 
+# Monkey-patch the ChatCerebras class to add the invoke_json method and strip_think_tags
 original_generate = ChatCerebras._generate
 
-def patched_generate(self, messages: List[BaseMessage], **kwargs) -> ChatResult:
-    chat_result = original_generate(self, messages, **kwargs)
+def patched_generate(self, messages: List[BaseMessage], stop: Optional[List[str]] = None, run_manager: Optional[Any] = None, **kwargs) -> ChatResult:
+    chat_result = original_generate(self, messages, stop, run_manager, **kwargs)
     for generation in chat_result.generations:
         if isinstance(generation, ChatGeneration) and hasattr(generation.message, 'content'):
             original_content = generation.message.content
             generation.message.content = strip_think_tags(original_content)
     return chat_result
 
-def invoke_json(self, prompt: str, pydantic_schema: Any, max_retries: int = 3):
+def invoke_json_method(self, prompt: str, pydantic_schema: Any, max_retries: int = 3):
     '''
     A more robust version of invoke_json that uses the enhanced parser.
     '''
@@ -237,7 +258,13 @@ def invoke_json(self, prompt: str, pydantic_schema: Any, max_retries: int = 3):
                 raise
 
 ChatCerebras._generate = patched_generate
-ChatCerebras.invoke_json = invoke_json
+
+# Add the invoke_json method as a bound method to the class
+def bind_invoke_json_method(self, prompt: str, pydantic_schema: Any, max_retries: int = 3):
+    return invoke_json_method(self, prompt, pydantic_schema, max_retries)
+
+# Add the method to the class using setattr
+setattr(ChatCerebras, 'invoke_json', bind_invoke_json_method)
 
 logging.info("ChatCerebras has been monkey-patched to strip  and handle JSON manually.")
 
@@ -248,8 +275,17 @@ PLAN_DIR = "agent_plans"
 os.makedirs(PLAN_DIR, exist_ok=True)
 os.makedirs("storage/vector_store", exist_ok=True)
 
-embedding_model = SentenceTransformer('all-mpnet-base-v2')
-hf_embeddings = HuggingFaceEmbeddings(model_name='all-mpnet-base-v2')
+# Create a function to load embeddings lazily
+def get_hf_embeddings():
+    """Lazily load HuggingFace embeddings to avoid import-time issues."""
+    global hf_embeddings
+    if 'hf_embeddings' not in globals():
+        from langchain_huggingface import HuggingFaceEmbeddings
+        from sentence_transformers import SentenceTransformer
+        global embedding_model
+        embedding_model = SentenceTransformer('all-mpnet-base-v2')
+        hf_embeddings = HuggingFaceEmbeddings(model_name='all-mpnet-base-v2')
+    return hf_embeddings
 
 
 cached_capabilities = {
@@ -324,7 +360,7 @@ def save_plan_to_file(state: dict):
 
                 # Write each part of the completed task entry separately
                 f.write(f"- **Task**: `{task_name}`\n")
-                f.write("  - **Result**:\n")
+                f.write(" - **Result**:\n")
                 f.write("    ```json\n")
                 f.write(f"{indented_result_str}\n")
                 f.write("    ```\n")
@@ -383,7 +419,7 @@ def preprocess_files(state: State):
                 texts = text_splitter.split_documents(documents)
                 
                 # Create vector embeddings and save to a FAISS index
-                vector_store = FAISS.from_documents(texts, hf_embeddings)
+                vector_store = FAISS.from_documents(texts, get_hf_embeddings())
                 index_path = f"storage/vector_store/{os.path.basename(file_path)}.faiss"
                 vector_store.save_local(index_path)
                 
@@ -525,7 +561,8 @@ def parse_prompt(state: State):
     '''
 
     try:
-        response = llm.invoke_json(prompt, ParsedRequest)
+        # Use the monkey-patched invoke_json method
+        response = invoke_json_method(llm, prompt, ParsedRequest)
         logger.info(f"LLM parsed prompt into: {response}")
 
         if not response or not response.tasks:
@@ -537,9 +574,24 @@ def parse_prompt(state: State):
             user_expectations = getattr(response, 'user_expectations', {})
 
     except Exception as e:
+        error_msg = str(e)
         logger.error(f"Failed to parse prompt after all retries: {e}")
-        parsed_tasks = []
-        user_expectations = {}
+        
+        # Check if this is an external API issue (like rate limiting)
+        if "429" in error_msg or "rate" in error_msg.lower() or "too_many_requests" in error_msg.lower() or "high traffic" in error_msg.lower():
+            # This is an external issue, not a user input issue
+            logger.warning("External API issue detected - routing to final response instead of asking user")
+            return {
+                "parsed_tasks": [],
+                "user_expectations": {},
+                "parsing_error_feedback": None,
+                "parse_retry_count": state.get('parse_retry_count', 0) + 1,
+                "final_response": f"Sorry, I'm currently experiencing high traffic or technical issues with the underlying services. Please try again later. Error: {str(e)}"
+            }
+        else:
+            # This is likely a user input issue
+            parsed_tasks = []
+            user_expectations = {}
 
     current_retry_count = state.get('parse_retry_count', 0)
 
@@ -703,9 +755,9 @@ def plan_execution(state: State, config: RunnableConfig):
         **Instructions:**
         1.  Analyze the `Reason for Replan` to understand what's missing (e.g., "missing coordinates for Hyderabad").
         2.  Identify the best capability from the `Available System Capabilities` to find this missing information. The **"perform web search and summarize"** capability is perfect for this.
-        3.  Create a new `PlannedTask`. The `task_description` should be a clear, self-contained instruction for another agent (e.g., "Find the latitude and longitude for Hyderabad, India using a web search"). You must select an agent and endpoint that provides the chosen capability.
+        3. Create a new `PlannedTask`. The `task_description` should be a clear, self-contained instruction for another agent (e.g., "Find the latitude and longitude for Hyderabad, India using a web search"). You must select an agent and endpoint that provides the chosen capability.
         4.  **Insert this new task into the `Current Stalled Plan` *immediately before* the task that needs the information.**
-        5.  Return the entire modified plan. The output MUST be a valid JSON object conforming to the `ExecutionPlan` schema.
+        5. Return the entire modified plan. The output MUST be a valid JSON object conforming to the `ExecutionPlan` schema.
         '''
         try:
             response = llm.invoke_json(prompt, ExecutionPlan)
@@ -736,7 +788,7 @@ def plan_execution(state: State, config: RunnableConfig):
         1.  For each task, select the most appropriate endpoint from the `primary` agent's list.
         2.  Create an `ExecutionStep` with the agent `id`, `http_method`, and `endpoint`.
         3.  **Do not generate a payload.**
-        4.  Your final `plan` must be a list of batches (list of lists). Group tasks that can run in parallel into the same batch. A task that depends on another must be in a subsequent batch.
+        4. Your final `plan` must be a list of batches (list of lists). Group tasks that can run in parallel into the same batch. A task that depends on another must be in a subsequent batch.
 
         **Tasks to Plan:** {[p.model_dump_json() for p in task_agent_pairs]}
         You MUST only output a valid JSON object that conforms to the ExecutionPlan schema.
@@ -846,7 +898,7 @@ def validate_plan_for_execution(state: State):
 
     **Your Decision Process:**
     1.  **Check Context:** Can all `Required Parameters` (e.g., 'image_path', 'vector_store_path') be filled using the `Original User Prompt`, `Conversation History`, `Previously Completed Tasks`, or the `Available File Context`? The file paths provided are the values you should use.
-    2.  **If YES:** The task is ready to run. Respond with `status: "ready"`.
+    2. **If YES:** The task is ready to run. Respond with `status: "ready"` and `reasoning: null`.
     3.  **If NO:** Determine the root cause.
         a. **Can another agent find the missing info?** If a value is missing (e.g., a city name) but a capability like "perform web search and summarize" could find it, respond with `status: "replan_needed"` and a clear `reasoning` (e.g., "Missing coordinates for the city mentioned, which can be found via web search.").
         b. **Is user input the only way?** If the information is something only the user would know, respond with `status: "user_input_required"` and a clear, direct `question` for the user.
@@ -1160,7 +1212,7 @@ def ask_user(state: State):
     return {
         "pending_user_input": True,
         "question_for_user": question,
-        "final_response": None,  # Clear any previous final response
+        "final_response": None, # Clear any previous final response
         "messages": [ai_message]
     }
 
@@ -1180,10 +1232,10 @@ def aggregate_responses(state: State):
         You are an expert project manager's assistant. Your job is to synthesize the results from a team of AI agents into a single, clean, and coherent final report for the user.
         The user's original request was:
         "{state['original_prompt']}"
-
+        
         The following tasks were completed, with these results:
         ---
-        {state['completed_tasks']}
+        {json.dumps([serialize_complex_object(task) for task in state.get('completed_tasks', [])], indent=2)}
         ---
         Please generate a final, human-readable response that directly answers the user's original request based on the collected results.
         '''
@@ -1205,12 +1257,55 @@ def load_conversation_history(state: State, config: RunnableConfig):
 
     if os.path.exists(history_path):
         try:
-            with open(history_path, "r") as f:
-                raw_data = json.load(f)
+            with open(history_path, "r", encoding="utf-8") as f:
+                raw_data = f.read()  # Read as raw string first
+
+            # Check if the raw data is a string representation of a dict
+            if raw_data.strip().startswith("\"{") and raw_data.strip().endswith("}\""):
+                # This is a string representation of a dict, likely from str() of a dict
+                # Remove the outer quotes and unescape the inner string
+                raw_data_cleaned = raw_data.strip().strip('"')
+                raw_data_cleaned = raw_data_cleaned.replace('\\"', '"').replace('\\\\', '\\')
+                # Now parse it as JSON
+                try:
+                    raw_data = json.loads(raw_data_cleaned)
+                except json.JSONDecodeError:
+                    # If JSON parsing fails, try to eval it as a Python literal (safe approach)
+                    import ast
+                    try:
+                        raw_data = ast.literal_eval(raw_data_cleaned)
+                    except (ValueError, SyntaxError):
+                        logger.warning(f"Conversation {thread_id}: Could not parse string representation of dict. Skipping messages.")
+                        return {"messages": []}
+            elif raw_data.strip().startswith("\"[") and raw_data.strip().endswith("]\""):
+                # This is a string representation of a list
+                raw_data_cleaned = raw_data.strip().strip('"')
+                raw_data_cleaned = raw_data_cleaned.replace('\\"', '"').replace('\\\\', '\\')
+                try:
+                    raw_data = json.loads(raw_data_cleaned)
+                except json.JSONDecodeError:
+                    import ast
+                    try:
+                        raw_data = ast.literal_eval(raw_data_cleaned)
+                    except (ValueError, SyntaxError):
+                        logger.warning(f"Conversation {thread_id}: Could not parse string representation of list. Skipping messages.")
+                        return {"messages": []}
+            else:
+                # Try to parse as regular JSON
+                try:
+                    raw_data = json.loads(raw_data)
+                except json.JSONDecodeError:
+                    logger.warning(f"Conversation {thread_id}: Invalid JSON format. Skipping messages.")
+                    return {"messages": []}
 
             # Validate and sanitize the message data
             if isinstance(raw_data, dict):
-                raw_data = [raw_data]
+                # Extract messages from the state dict if it exists
+                if 'messages' in raw_data:
+                    raw_data = raw_data['messages']
+                else:
+                    # If there's no messages key, convert the entire dict to a single message
+                    raw_data = [raw_data]
             
             if not isinstance(raw_data, list):
                 logger.warning(f"Conversation {thread_id}: Invalid message data format (not a list). Skipping messages.")
@@ -1262,7 +1357,113 @@ def load_conversation_history(state: State, config: RunnableConfig):
             logger.info(f"Conversation {thread_id}: Successfully loaded {len(valid_messages)} valid messages out of {len(raw_data)} total items")
             return {"messages": valid_messages}
 
-        except (json.JSONDecodeError, Exception) as e:
+        except UnicodeDecodeError as e:
+            logger.error(f"Conversation {thread_id}: Failed to decode conversation history file: {e}")
+            # Try to read with different encoding
+            try:
+                with open(history_path, "r", encoding="latin-1") as f:
+                    raw_data = f.read()
+                # Process the raw_data again with the same logic
+                # Check if the raw data is a string representation of a dict
+                if raw_data.strip().startswith("\"{") and raw_data.strip().endswith("}\""):
+                    # This is a string representation of a dict, likely from str() of a dict
+                    # Remove the outer quotes and unescape the inner string
+                    raw_data_cleaned = raw_data.strip().strip('"')
+                    raw_data_cleaned = raw_data_cleaned.replace('\\"', '"').replace('\\\\', '\\')
+                    # Now parse it as JSON
+                    try:
+                        raw_data = json.loads(raw_data_cleaned)
+                    except json.JSONDecodeError:
+                        # If JSON parsing fails, try to eval it as a Python literal (safe approach)
+                        import ast
+                        try:
+                            raw_data = ast.literal_eval(raw_data_cleaned)
+                        except (ValueError, SyntaxError):
+                            logger.warning(f"Conversation {thread_id}: Could not parse string representation of dict. Skipping messages.")
+                            return {"messages": []}
+                elif raw_data.strip().startswith("\"[") and raw_data.strip().endswith("]\""):
+                    # This is a string representation of a list
+                    raw_data_cleaned = raw_data.strip().strip('"')
+                    raw_data_cleaned = raw_data_cleaned.replace('\\"', '"').replace('\\\\', '\\')
+                    try:
+                        raw_data = json.loads(raw_data_cleaned)
+                    except json.JSONDecodeError:
+                        import ast
+                        try:
+                            raw_data = ast.literal_eval(raw_data_cleaned)
+                        except (ValueError, SyntaxError):
+                            logger.warning(f"Conversation {thread_id}: Could not parse string representation of list. Skipping messages.")
+                            return {"messages": []}
+                else:
+                    # Try to parse as regular JSON
+                    try:
+                        raw_data = json.loads(raw_data)
+                    except json.JSONDecodeError:
+                        logger.warning(f"Conversation {thread_id}: Invalid JSON format. Skipping messages.")
+                        return {"messages": []}
+
+                # Validate and sanitize the message data
+                if isinstance(raw_data, dict):
+                    # Extract messages from the state dict if it exists
+                    if 'messages' in raw_data:
+                        raw_data = raw_data['messages']
+                    else:
+                        # If there's no messages key, convert the entire dict to a single message
+                        raw_data = [raw_data]
+                
+                if not isinstance(raw_data, list):
+                    logger.warning(f"Conversation {thread_id}: Invalid message data format (not a list). Skipping messages.")
+                    return {"messages": []}
+
+                # Filter out any non-dict messages and convert them to proper Message objects
+                valid_messages = []
+                for i, msg_data in enumerate(raw_data):
+                    try:
+                        if isinstance(msg_data, dict):
+                            # Convert single dict to Message object using the proper LangChain function
+                            from langchain_core.messages import messages_from_dict
+                            # messages_from_dict expects a list, so wrap in list and take first element
+                            try:
+                                msg_list = messages_from_dict([msg_data])
+                                if msg_list:
+                                    valid_messages.extend(msg_list)
+                            except Exception as msg_err:
+                                logger.warning(f"Conversation {thread_id}, message {i}: Failed to convert dict to Message: {msg_err}")
+                                # Try manual conversion as fallback
+                                try:
+                                    msg_type = msg_data.get("type", "")
+                                    content = ""
+                                    if "data" in msg_data and isinstance(msg_data["data"], dict):
+                                        content = msg_data["data"].get("content", "")
+                                    elif isinstance(msg_data.get("content"), str):
+                                        content = msg_data["content"]
+
+                                    if msg_type == "human":
+                                        from langchain_core.messages import HumanMessage
+                                        valid_messages.append(HumanMessage(content=content))
+                                    elif msg_type == "ai":
+                                        from langchain_core.messages import AIMessage
+                                        valid_messages.append(AIMessage(content=content))
+                                    else:
+                                        logger.warning(f"Conversation {thread_id}, message {i}: Unknown message type '{msg_type}'")
+                                except Exception as fallback_err:
+                                    logger.warning(f"Conversation {thread_id}, message {i}: Fallback conversion failed: {fallback_err}")
+                        elif isinstance(msg_data, str):
+                            logger.warning(f"Conversation {thread_id}, message {i}: Found string message, converting to HumanMessage")
+                            from langchain_core.messages import HumanMessage
+                            valid_messages.append(HumanMessage(content=str(msg_data)))
+                        else:
+                            logger.warning(f"Conversation {thread_id}, message {i}: Invalid message type {type(msg_data)}. Skipping.")
+
+                    except Exception as msg_processing_error:
+                        logger.warning(f"Conversation {thread_id}, message {i}: Message processing failed: {msg_processing_error}. Skipping.")
+
+                logger.info(f"Conversation {thread_id}: Successfully loaded {len(valid_messages)} valid messages out of {len(raw_data)} total items")
+                return {"messages": valid_messages}
+            except Exception as e2:
+                logger.error(f"Conversation {thread_id}: Failed to load conversation history with alternative encoding: {e2}")
+                return {"messages": []}
+        except Exception as e:
             logger.error(f"Conversation {thread_id}: Failed to load conversation history: {e}")
             return {"messages": []}
     return {}
@@ -1274,11 +1475,23 @@ def save_conversation_history(state: State, config: RunnableConfig):
         
     history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
     
-    messages = state.get("messages", [])
-    dicts = messages_to_dict(messages)
+    # Convert the entire state to a serializable format
+    # We need to serialize the state properly to avoid string representation issues
+    serializable_state = {}
+    for key, value in state.items():
+        if key == "messages":
+            # Convert messages to dict format for serialization
+            # Ensure value is a list of BaseMessage objects before calling messages_to_dict
+            if value and isinstance(value, list) and all(isinstance(msg, BaseMessage) for msg in value):
+                serializable_state[key] = messages_to_dict(value)
+            else:
+                serializable_state[key] = []  # Default to empty list if not proper format
+        else:
+            # Use the serialize_complex_object function to handle complex objects
+            serializable_state[key] = serialize_complex_object(value)
     
-    with open(history_path, "w") as f:
-        json.dump(dicts, f)
+    with open(history_path, "w", encoding="utf-8") as f:
+        json.dump(serializable_state, f, ensure_ascii=False, indent=2)
         
     return {}
 
@@ -1305,9 +1518,6 @@ def route_after_validation(state: State):
     else:
         logger.info("Plan is valid. Routing to execute_batch.")
         return "execute_batch"
-
-
-
 
 def analyze_request(state: State):
     """Sophisticated analysis of user request to determine processing approach."""
@@ -1378,19 +1588,26 @@ def analyze_request(state: State):
         response = llm.invoke_json(prompt, AnalysisResult)
         logger.info(f"Analysis result: needs_complex_processing={response.needs_complex_processing}")
         
+        # Ensure we return a complete state update with all required fields
         result = {
             "needs_complex_processing": response.needs_complex_processing,
             "analysis_reasoning": response.reasoning
         }
         
-        if not response.needs_complex_processing:
+        if not response.needs_complex_processing and response.response:
             result["final_response"] = response.response
+        else:
+            result["final_response"] = None
         
         return result
         
     except Exception as e:
         logger.error(f"Analysis failed: {e}. Defaulting to complex processing.")
-        return {"needs_complex_processing": True, "analysis_reasoning": f"Analysis failed: {e}"}
+        return {
+            "needs_complex_processing": True, 
+            "analysis_reasoning": f"Analysis failed: {e}",
+            "final_response": None
+        }
 
 
 def route_after_analysis(state: State):
@@ -1405,7 +1622,7 @@ def route_after_analysis(state: State):
             return "parse_prompt"
     else:
         logger.info("Request is simple. Routing to final response generation.")
-        return "final_response"  # For simple responses, we'll use the aggregate_responses node which will just return the final_response from state
+        return "aggregate_responses"  # For simple responses, we'll use the aggregate_responses node which will just return the final_response from state
 
 
 def route_after_parse(state: State):
@@ -1452,7 +1669,7 @@ builder.add_edge("load_history", "analyze_request")
 builder.add_conditional_edges("analyze_request", route_after_analysis, {
     "preprocess_files": "preprocess_files",
     "parse_prompt": "parse_prompt",
-    "final_response": "aggregate_responses"
+    "aggregate_responses": "aggregate_responses"
 })
 
 builder.add_edge("preprocess_files", "parse_prompt")

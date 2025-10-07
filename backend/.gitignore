@@ -21,7 +21,6 @@ htmlcov/
 *.env
 
 test.py
-database.py
 testnew.py
 frontend.md
 test_detailed_continuity.py

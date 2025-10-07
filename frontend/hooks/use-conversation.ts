@@ -42,6 +42,14 @@ export function useConversation({ onComplete, onError }: UseConversationProps = 
     }
   }, [state.thread_id]);
 
+  // Automatically load conversation when component mounts if there's a saved thread_id
+  useEffect(() => {
+    const savedThreadId = typeof window !== 'undefined' ? localStorage.getItem('thread_id') : null;
+    if (savedThreadId) {
+      loadConversation(savedThreadId);
+    }
+  }, []);
+
   const handleApiResponse = useCallback((response: ProcessResponse) => {
     const {
       thread_id,
@@ -182,13 +190,32 @@ export function useConversation({ onComplete, onError }: UseConversationProps = 
       }
       const historyData = await response.json();
 
-      const messages: Message[] = historyData.map((msgData: any, index: number) => ({
-        id: (Date.now() + index).toString(),
-        type: msgData.type === 'human' ? 'user' : msgData.type === 'ai' ? 'assistant' : 'system',
-        content: msgData.data?.content || '',
-        timestamp: new Date(msgData.data?.timestamp || Date.now()),
-        metadata: msgData.data?.metadata || {},
-      }));
+      // Process the messages from the API response
+      const messages: Message[] = historyData.map((msgData: any, index: number) => {
+        // Determine the message type based on the LangChain message type
+        let messageType: 'user' | 'assistant' | 'system' = 'system';
+        if (typeof msgData.type === 'string') {
+          if (msgData.type.toLowerCase().includes('human') || msgData.type.toLowerCase() === 'user') {
+            messageType = 'user';
+          } else if (msgData.type.toLowerCase().includes('ai') || msgData.type.toLowerCase() === 'assistant') {
+            messageType = 'assistant';
+          } else {
+            messageType = 'system';
+          }
+        } else if (msgData.type === 'human') {
+          messageType = 'user';
+        } else if (msgData.type === 'ai') {
+          messageType = 'assistant';
+        }
+
+        return {
+          id: msgData.id || (Date.now() + index).toString(),
+          type: messageType,
+          content: msgData.content || msgData.data?.content || '',
+          timestamp: msgData.timestamp ? new Date(msgData.timestamp) : new Date(),
+          metadata: msgData.metadata || msgData.data?.metadata || {},
+        };
+      });
 
       setState({
         thread_id,

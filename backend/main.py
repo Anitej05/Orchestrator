@@ -42,7 +42,7 @@ from langgraph.checkpoint.memory import MemorySaver
 # --- App Initialization and Configuration ---
 app = FastAPI(
     title="Unified Agent Service API",
-    version="1.0.0",
+    version="1.0",
     description="An API for both finding/managing agents and orchestrating tasks."
 )
 
@@ -73,7 +73,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Allow all origins
     allow_credentials=True,
-    allow_methods=["*"],  # Allow all methods
+    allow_methods=["*"], # Allow all methods
     allow_headers=["*"],  # Allow all headers
 )
 
@@ -123,10 +123,13 @@ def wait_for_port(port: int, agent_file: str, timeout: int = 15):
 
 def start_agent_servers():
     """
-    Finds and starts agent servers using the Windows 'start /B' command to run them
-    as background processes without new windows. Output is redirected to log files.
+    Finds and starts agent servers, with enhanced logging and better error handling
+    to track which agents start successfully and which fail.
     """
-    agents_dir = "backend/agents"
+    # Use absolute path based on the project root directory
+    project_root = os.path.dirname(os.path.abspath(__file__))  # This gets the backend directory
+    agents_dir = os.path.join(project_root, "agents")
+    
     if not os.path.isdir(agents_dir):
         logger.warning(f"'{agents_dir}' directory not found. Skipping agent server startup.")
         return
@@ -138,54 +141,128 @@ def start_agent_servers():
     agent_files = [f for f in os.listdir(agents_dir) if f.endswith("_agent.py")]
     logger.info(f"Found {len(agent_files)} agent(s) to check: {agent_files}")
 
+    started_agents = []
+    failed_agents = []
+
     for agent_file in agent_files:
         agent_path = os.path.join(agents_dir, agent_file)
         port = None
+        process = None
+        
         try:
             with open(agent_path, 'r', encoding='utf-8') as f:
                 content = f.read()
+                # Look for port definition in the agent file
                 match = re.search(r'port\s*=\s*int\(os\.getenv\([^,]+,\s*(\d+)\)', content)
                 if not match:
-                    # Fallback to the older pattern in case of direct assignment
+                    # Fallback to direct assignment like: port = 8010
                     match = re.search(r"port\s*=\s*(\d+)", content)
                 if match:
                     port = int(match.group(1))
 
             if port is None:
-                logger.warning(f"Could not find port in {agent_file}. Skipping.")
+                logger.error(f"Could not find port in {agent_file}. Skipping.")
+                failed_agents.append({
+                    'agent': agent_file,
+                    'reason': 'Port not found in agent file'
+                })
                 continue
 
             if is_port_in_use(port):
                 logger.info(f"Agent '{agent_file}' is already running on port {port}.")
+                started_agents.append({
+                    'agent': agent_file,
+                    'port': port,
+                    'status': 'already_running'
+                })
                 continue
 
-            logger.info(f"Starting '{agent_file}' on port {port} in the background...")
+            logger.info(f"Attempting to start '{agent_file}' on port {port}...")
             
             log_path = os.path.join(logs_dir, f"{agent_file}.log")
 
+            # Create the subprocess differently based on the OS
             if platform.system() == "Windows":
-                # Use 'start /B' to run the agent in the background without a new window.
-                # Redirect stdout and stderr to a log file using standard shell redirection.
-                command = f'start /B "Agent: {agent_file}" {sys.executable} {agent_path} > "{log_path}" 2>&1'
-                subprocess.run(command, shell=True, check=True)
-            else:
-                # For other OSes, use the previous Popen method with file handle redirection.
-                log_file_handle = open(log_path, 'w')
+                # For Windows, use subprocess.Popen with proper parameters to run in background
                 try:
-                    subprocess.Popen(
+                    with open(log_path, 'w') as log_file:
+                        process = subprocess.Popen(
+                            [sys.executable, agent_path],
+                            stdout=log_file,
+                            stderr=log_file,
+                            creationflags=subprocess.CREATE_NEW_CONSOLE if os.environ.get('DEBUG_AGENT_STARTUP') else subprocess.CREATE_NEW_PROCESS_GROUP
+                        )
+                except Exception as e:
+                    logger.error(f"Failed to start {agent_file} using Popen: {e}")
+                    # Fallback to the start command
+                    command = f'start /B "Agent: {agent_file}" /D "{os.getcwd()}" {sys.executable} {agent_path} > "{log_path}" 2>&1'
+                    subprocess.run(command, shell=True, check=True)
+            else:
+                # For Unix-like systems
+                with open(log_path, 'w') as log_file:
+                    process = subprocess.Popen(
                         [sys.executable, agent_path],
-                        stdout=log_file_handle,
-                        stderr=log_file_handle
+                        stdout=log_file,
+                        stderr=log_file
                     )
-                finally:
-                    log_file_handle.close()
 
-            wait_for_port(port, agent_file)
+            # Wait for the port to be in use with a timeout
+            if wait_for_port(port, agent_file, timeout=30):  # Increased timeout
+                logger.info(f"Successfully started agent '{agent_file}' on port {port}")
+                started_agents.append({
+                    'agent': agent_file,
+                    'port': port,
+                    'status': 'started',
+                    'process': process
+                })
+            else:
+                logger.error(f"Timed out waiting for agent '{agent_file}' to start on port {port}")
+                failed_agents.append({
+                    'agent': agent_file,
+                    'reason': f'Timed out waiting for port {port} to become available',
+                    'port': port
+                })
+                if process:
+                    try:
+                        process.terminate()
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
 
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to start agent {agent_file} using shell command: {e}")
+            failed_agents.append({
+                'agent': agent_file,
+                'reason': f'Shell command failed: {str(e)}'
+            })
         except Exception as e:
-            logger.error(f"Failed to start agent {agent_file}: {e}")
-            logger.warning(f"You may need to start {agent_file} manually: python {agent_path}")
+            logger.error(f"Unexpected error while starting agent {agent_file}: {e}")
+            logger.exception("Full traceback:")  # Log the full traceback
+            failed_agents.append({
+                'agent': agent_file,
+                'reason': f'Unexpected error: {str(e)}'
+            })
 
+    # Log summary of agent startup results
+    logger.info(f"Agent startup completed. Started: {len(started_agents)}, Failed: {len(failed_agents)}")
+    
+    if started_agents:
+        logger.info("Successfully started agents:")
+        for agent_info in started_agents:
+            logger.info(f"  - {agent_info['agent']} on port {agent_info['port']} ({agent_info['status']})")
+    
+    if failed_agents:
+        logger.error("Failed to start agents:")
+        for agent_info in failed_agents:
+            logger.error(f"  - {agent_info['agent']}: {agent_info['reason']}")
+        
+        # Provide detailed instructions for manual startup
+        logger.info("To start agents manually, run these commands in separate terminals:")
+        for agent_info in failed_agents:
+            agent_file = agent_info['agent']
+            agent_path = os.path.join(agents_dir, agent_file)
+            logger.info(f"  - python {agent_path}")
+    
     logger.info("Agent startup check completed.")
 
 os.makedirs("storage/images", exist_ok=True)
@@ -241,7 +318,10 @@ async def execute_orchestration(
     config = {"configurable": {"thread_id": thread_id}}
 
     # Get the current state of the conversation from the checkpointer
-    current_conversation = checkpointer.get(config)
+    current_checkpoint = checkpointer.get(config)
+    # Extract the state from the checkpoint if it exists
+    # The checkpoint structure is { "values": State, "next": List[str], "config": RunnableConfig }
+    current_conversation = current_checkpoint.get("values", {}) if current_checkpoint else {}
 
     # --- State Initialization ---
     if current_conversation and user_response:
@@ -249,7 +329,7 @@ async def execute_orchestration(
         # CASE 1: Continuing an interactive workflow where the user answered a question.
         #
         logger.info(f"Resuming conversation for thread_id: {thread_id} with user response.")
-        initial_state = current_conversation.copy()
+        initial_state = dict(current_conversation)  # Convert to dict if it's a State object
         initial_state["user_response"] = user_response
         initial_state["pending_user_input"] = False
         initial_state["question_for_user"] = None
@@ -283,13 +363,15 @@ async def execute_orchestration(
             "user_response": None,
             "parsing_error_feedback": None,
             "parse_retry_count": 0,
+            "needs_complex_processing": False,
+            "analysis_reasoning": None,
         }
     
     elif current_conversation:
         #
         # CASE 3: Resuming without a new prompt or user response (e.g., status check).
         #
-        initial_state = current_conversation.copy()
+        initial_state = dict(current_conversation) # Convert to dict if it's a State object
         logger.info(f"Checking status for thread_id: {thread_id}")
 
     else:
@@ -299,7 +381,7 @@ async def execute_orchestration(
         if not prompt:
             raise ValueError("Prompt is required for new conversations")
         logger.info(f"Starting new conversation for thread_id: {thread_id}")
-        initial_state: State = {
+        initial_state = {
             "original_prompt": prompt,
             "messages": [HumanMessage(content=prompt)],
             "uploaded_files": [], # Start with an empty file list
@@ -314,7 +396,9 @@ async def execute_orchestration(
             "question_for_user": None,
             "user_response": None,
             "parsing_error_feedback": None,
-            "parse_retry_count": 0
+            "parse_retry_count": 0,
+            "needs_complex_processing": False,
+            "analysis_reasoning": None,
         }
 
     # --- **FIX**: Unified File Merging Logic ---
@@ -342,7 +426,7 @@ async def execute_orchestration(
             async for event in graph.astream(initial_state, config=config, stream_mode="updates"):
                 for node_name, node_output in event.items():
                     node_count += 1
-                    progress = min((node_count / len(expected_nodes)) * 100, 100) if expected_nodes else 50
+                    progress = min((node_count / len(expected_nodes)) * 100, 10) if expected_nodes else 50
                     if isinstance(node_output, dict):
                         final_state = node_output
                     await stream_callback(node_name, node_output, progress, node_count, thread_id)
@@ -556,7 +640,7 @@ async def continue_conversation(user_response: UserResponse):
 
     try:
         final_state = await execute_orchestration(
-            prompt=None,  # No new prompt needed
+            prompt=None, # No new prompt needed
             thread_id=user_response.thread_id,
             user_response=user_response.response,
             stream_callback=None
@@ -694,20 +778,54 @@ async def get_conversation_history(thread_id: str):
         
     with open(history_path, "r") as f:
         history = json.load(f)
-        return history
+        # If the history is a single object (like the state object), extract the messages
+        if isinstance(history, dict) and 'messages' in history:
+            # Return just the messages array as expected by the response model
+            messages = history['messages']
+            # Convert LangChain message objects to simple dictionaries if needed
+            formatted_messages = []
+            for msg in messages:
+                if isinstance(msg, dict):
+                    # If it's already a dict, use it as is
+                    formatted_messages.append(msg)
+                else:
+                    # If it's a LangChain message object, convert to dict format
+                    if hasattr(msg, 'type') and hasattr(msg, 'content'):
+                        formatted_messages.append({
+                            'type': msg.type,
+                            'content': msg.content,
+                            'additional_kwargs': getattr(msg, 'additional_kwargs', {}),
+                            'response_metadata': getattr(msg, 'response_metadata', {}),
+                            'id': getattr(msg, 'id', None),
+                            'timestamp': getattr(msg, 'timestamp', None)
+                        })
+            return formatted_messages
+        # If history is already a list, return it as is
+        elif isinstance(history, list):
+            return history
+        # If we can't process the history, return an empty list
+        else:
+            return []
 
 @app.get("/api/plan/{thread_id}", response_model=PlanResponse)
 async def get_agent_plan(thread_id: str):
     """
     Retrieves the markdown execution plan for a given conversation thread.
     """
-    PLAN_DIR = "agent_plans"
-    file_path = os.path.join(PLAN_DIR, f"{thread_id}-plan.md")
+    # Check both possible locations for plan files
+    plan_dirs = ["agent_plans", "backend/agent_plans"]  # Check root first, then backend/
+    file_path = None
+    
+    for plan_dir in plan_dirs:
+        temp_path = os.path.join(plan_dir, f"{thread_id}-plan.md")
+        if os.path.exists(temp_path):
+            file_path = temp_path
+            break
 
-    if not os.path.exists(file_path):
+    if not file_path:
         raise HTTPException(
             status_code=404,
-            detail=f"Plan file not found for thread_id: {thread_id}"
+            detail=f"Plan file not found for thread_id: {thread_id} in any location: {plan_dirs}"
         )
 
     try:
