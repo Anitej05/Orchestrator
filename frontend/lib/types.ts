@@ -51,6 +51,10 @@ export interface ConversationState {
   messages: Message[];
   isWaitingForUser: boolean;
   currentQuestion?: string;
+  task_agent_pairs?: TaskAgentPair[];
+  final_response?: string;
+  metadata?: any;
+  uploaded_files?: FileObject[];
 }
 
 export interface Attachment {

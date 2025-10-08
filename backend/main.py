@@ -790,72 +790,136 @@ async def get_all_conversations():
     files_with_path.sort(key=os.path.getmtime, reverse=True)
     return [os.path.splitext(os.path.basename(f))[0] for f in files_with_path]
 
-@app.get("/api/conversations/{thread_id}", response_model=List[Dict])
+@app.get("/api/conversations/{thread_id}")
 async def get_conversation_history(thread_id: str):
     """
-    Retrieves the message history for a given conversation thread.
+    Retrieves the complete conversation state including messages, metadata, and plan for a given thread.
+    Returns a consistent format with messages, thread_id, task_agent_pairs, final_response, and attachments.
     """
     history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
     
     if not os.path.exists(history_path):
         raise HTTPException(status_code=404, detail="Conversation history not found.")
         
-    with open(history_path, "r") as f:
-        history = json.load(f)
-        # If the history is a single object (like the state object), extract the messages
-        if isinstance(history, dict) and 'messages' in history:
-            # Return just the messages array as expected by the response model
-            messages = history['messages']
-            # Convert LangChain message objects to simple dictionaries if needed
+    try:
+        with open(history_path, "r", encoding="utf-8") as f:
+            history = json.load(f)
+        
+        # Initialize response structure
+        response = {
+            "thread_id": thread_id,
+            "messages": [],
+            "task_agent_pairs": [],
+            "final_response": None,
+            "metadata": {},
+            "uploaded_files": []
+        }
+        
+        # Extract data based on history format
+        if isinstance(history, dict):
+            # Get messages
+            messages = history.get('messages', [])
             formatted_messages = []
+            
             for msg in messages:
+                formatted_msg = {}
+                
                 if isinstance(msg, dict):
-                    # If it's already a dict, use it as is
-                    formatted_messages.append(msg)
-                else:
-                    # If it's a LangChain message object, convert to dict format
-                    if hasattr(msg, 'type') and hasattr(msg, 'content'):
-                        formatted_messages.append({
-                            'type': msg.type,
-                            'content': msg.content,
-                            'additional_kwargs': getattr(msg, 'additional_kwargs', {}),
-                            'response_metadata': getattr(msg, 'response_metadata', {}),
-                            'id': getattr(msg, 'id', None),
-                            'timestamp': getattr(msg, 'timestamp', None)
-                        })
-            return formatted_messages
-        # If history is already a list, return it as is
+                    # Already a dict - normalize it
+                    # Check multiple possible locations for type
+                    msg_type = msg.get('type') or msg.get('data', {}).get('type', 'system')
+                    
+                    # Also check if it's a serialized LangChain message with __class__ info
+                    if 'id' in msg and isinstance(msg.get('id'), list):
+                        # This is a serialized LangChain message format
+                        msg_class = msg['id'][0] if msg['id'] else ''
+                        if 'HumanMessage' in msg_class:
+                            msg_type = 'human'
+                        elif 'AIMessage' in msg_class:
+                            msg_type = 'ai'
+                    
+                    # Map LangChain types to our frontend types
+                    if msg_type in ['human', 'HumanMessage', 'user']:
+                        formatted_msg['type'] = 'user'
+                    elif msg_type in ['ai', 'AIMessage', 'assistant']:
+                        formatted_msg['type'] = 'assistant'
+                    else:
+                        formatted_msg['type'] = 'system'
+                    
+                    # Extract content
+                    if 'content' in msg:
+                        formatted_msg['content'] = msg['content']
+                    elif 'data' in msg and 'content' in msg['data']:
+                        formatted_msg['content'] = msg['data']['content']
+                    elif 'kwargs' in msg and 'content' in msg['kwargs']:
+                        formatted_msg['content'] = msg['kwargs']['content']
+                    else:
+                        formatted_msg['content'] = ''
+                    
+                    # Extract or generate ID
+                    msg_id = msg.get('id')
+                    if isinstance(msg_id, list):
+                        # LangChain format - extract the actual ID
+                        msg_id = msg_id[-1] if msg_id else None
+                    if not msg_id:
+                        msg_id = msg.get('data', {}).get('id', f'msg-{len(formatted_messages)}')
+                    formatted_msg['id'] = msg_id
+                    
+                    # Extract timestamp
+                    timestamp = msg.get('timestamp') or msg.get('data', {}).get('timestamp')
+                    formatted_msg['timestamp'] = timestamp if timestamp else None
+                    
+                    # Extract metadata
+                    metadata = msg.get('metadata', msg.get('data', {}).get('metadata', {}))
+                    if metadata:
+                        formatted_msg['metadata'] = metadata
+                    
+                    # Extract attachments
+                    attachments = msg.get('attachments', msg.get('data', {}).get('attachments'))
+                    if attachments:
+                        formatted_msg['attachments'] = attachments
+                    
+                    formatted_messages.append(formatted_msg)
+            
+            response['messages'] = formatted_messages
+            
+            # Extract other state information
+            response['task_agent_pairs'] = history.get('task_agent_pairs', [])
+            response['final_response'] = history.get('final_response')
+            response['uploaded_files'] = history.get('uploaded_files', [])
+            
+            # Include any additional metadata
+            if 'completed_tasks' in history:
+                response['metadata']['completed_tasks'] = history['completed_tasks']
+            if 'parsed_tasks' in history:
+                response['metadata']['parsed_tasks'] = history['parsed_tasks']
+                
         elif isinstance(history, list):
-            return history
-        # If the file contains a JSON string (legacy Python repr inside a JSON string),
-        # attempt to heuristically extract messages from that string and return them.
-        elif isinstance(history, str):
-            raw = history
-            # Try to extract a messages=[ ... ] block
-            m = re.search(r"messages\s*[:=]\s*\[([\s\S]*?)\]\s*[,}]", raw)
-            msgs = []
-            if m:
-                inner = m.group(1)
-                for mm in re.finditer(r"(AIMessage|HumanMessage|ChatMessage|SystemMessage)\s*\(([^)]*)\)", inner):
-                    kind = mm.group(1)
-                    body = mm.group(2)
-                    content_match = re.search(r"content\s*=\s*(?:r?\"([^\"]*)\"|r?\'([^\']*)\')", body)
-                    id_match = re.search(r"id\s*=\s*(?:r?\"([^\"]*)\"|r?\'([^\']*)\')", body)
-                    content = (content_match.group(1) or content_match.group(2)) if content_match else ''
-                    idv = (id_match.group(1) or id_match.group(2)) if id_match else None
-                    msgs.append({
-                        'id': idv or f'legacy-{len(msgs)}',
-                        'type': 'user' if 'HumanMessage' in kind else 'assistant',
-                        'content': content,
-                        'timestamp': None,
-                        'additional_kwargs': {},
-                        'response_metadata': {},
-                    })
-            if msgs:
-                return msgs
-
-        # If we can't process the history, return an empty list
-        return []
+            # Legacy format - list of messages
+            formatted_messages = []
+            for msg in history:
+                if isinstance(msg, dict):
+                    formatted_msg = {
+                        'id': msg.get('id', f'msg-{len(formatted_messages)}'),
+                        'type': msg.get('type', 'system'),
+                        'content': msg.get('content', ''),
+                        'timestamp': msg.get('timestamp')
+                    }
+                    if 'metadata' in msg:
+                        formatted_msg['metadata'] = msg['metadata']
+                    if 'attachments' in msg:
+                        formatted_msg['attachments'] = msg['attachments']
+                    formatted_messages.append(formatted_msg)
+            response['messages'] = formatted_messages
+        
+        return response
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse conversation history for {thread_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to parse conversation history")
+    except Exception as e:
+        logger.error(f"Error loading conversation history for {thread_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error loading conversation: {str(e)}")
 
 @app.get("/api/plan/{thread_id}", response_model=PlanResponse)
 async def get_agent_plan(thread_id: str):

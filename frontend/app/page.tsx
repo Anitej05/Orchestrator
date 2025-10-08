@@ -84,6 +84,19 @@ export default function Home() {
   const handleConversationSelect = async (threadId: string) => {
     try {
       await loadConversation(threadId);
+      
+      // Update local state with loaded conversation data
+      if (conversationState.task_agent_pairs && conversationState.task_agent_pairs.length > 0) {
+        setTaskAgentPairs(conversationState.task_agent_pairs);
+        
+        // Update selected agents
+        const initialSelections: Record<string, string> = {};
+        conversationState.task_agent_pairs.forEach((pair) => {
+          initialSelections[pair.task_name] = pair.primary.id;
+        });
+        setSelectedAgents(initialSelections);
+      }
+      
       toast({
         title: "Conversation loaded",
         description: `Loaded conversation ${threadId}`,

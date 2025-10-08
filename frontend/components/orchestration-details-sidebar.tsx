@@ -118,7 +118,7 @@ export default function OrchestrationDetailsSidebar({ executionResults, threadId
 
         loadPlan();
 
-    }, [threadId]);
+    }, [threadId, messages.length, taskAgentPairs.length]);
 
     const totalCost = executionResults.reduce((sum, result) => sum + result.cost, 0)
     const totalTime = executionResults.reduce((sum, result) => sum + result.executionTime, 0)

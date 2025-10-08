@@ -89,6 +89,8 @@ export function useConversation({ onComplete, onError }: UseConversationProps = 
         messages: newMessages,
         isWaitingForUser: pending_user_input,
         currentQuestion: question_for_user || undefined,
+        task_agent_pairs: task_agent_pairs || prevState.task_agent_pairs,
+        final_response: final_response || prevState.final_response,
       };
     });
 
@@ -201,17 +203,9 @@ export function useConversation({ onComplete, onError }: UseConversationProps = 
         throw new Error(`Failed to load conversation: ${response.statusText}`);
       }
 
-      // Read and parse conversation data
-      const text = await response.text();
-      console.debug('[useConversation] raw response snippet', text.slice(0, 2000));
-
-      let conversationData: any;
-      try {
-        conversationData = JSON.parse(text);
-      } catch (e) {
-        console.error('[useConversation] failed to parse JSON from conversation response', e);
-        throw new Error('Invalid conversation data format');
-      }
+      // Parse the new response format from backend
+      const conversationData = await response.json();
+      console.debug('[useConversation] received conversation data', conversationData);
 
       if (!conversationData || typeof conversationData !== 'object') {
         console.error('[useConversation] invalid conversation data structure');
@@ -223,12 +217,29 @@ export function useConversation({ onComplete, onError }: UseConversationProps = 
 
       // Process the messages from the API response
       const messages: Message[] = rawMessages.map((msgData: any, index: number) => {
-        // The backend now sends messages in a consistent format
         const messageType = msgData.type || 'system';
         const id = msgData.id || `${Date.now()}-${index}`;
         const content = msgData.content || '';
-        const timestamp = msgData.timestamp ? new Date(msgData.timestamp) : new Date();
+        
+        // Handle timestamp conversion - it might be a number (Unix timestamp) or a string
+        let timestamp = new Date();
+        if (msgData.timestamp) {
+          if (typeof msgData.timestamp === 'number') {
+            // Unix timestamp - convert to milliseconds if needed
+            timestamp = new Date(msgData.timestamp * 1000);
+          } else if (typeof msgData.timestamp === 'string') {
+            // String timestamp
+            timestamp = new Date(msgData.timestamp);
+          } else {
+            // Already a Date object or something else
+            timestamp = new Date(msgData.timestamp);
+          }
+        } else {
+          timestamp = new Date();
+        }
+        
         const metadata = msgData.metadata || {};
+        const attachments = msgData.attachments || undefined;
 
         return {
           id,
@@ -236,21 +247,29 @@ export function useConversation({ onComplete, onError }: UseConversationProps = 
           content,
           timestamp,
           metadata,
+          ...(attachments ? { attachments } : {})
         };
       });
 
-      console.debug('[useConversation] mapped messages length', messages.length, 'sample', messages[0]);
+      console.debug('[useConversation] mapped messages length', messages.length);
+      
+      // Update state with all the loaded data
       setState({
         thread_id: conversationData.thread_id || thread_id,
         status: 'completed',
         messages,
         isWaitingForUser: false,
         currentQuestion: '',
-        ...(conversationData.final_response ? { final_response: conversationData.final_response } : {})
+        task_agent_pairs: conversationData.task_agent_pairs || [],
+        final_response: conversationData.final_response || undefined,
+        metadata: conversationData.metadata || {},
+        uploaded_files: conversationData.uploaded_files || []
       });
+      
       console.debug('[useConversation] state updated on loadConversation', {
         thread_id: conversationData.thread_id || thread_id,
         messagesCount: messages.length,
+        taskAgentPairsCount: conversationData.task_agent_pairs?.length || 0,
         hasFinalResponse: Boolean(conversationData.final_response)
       });
     } catch (error: any) {
