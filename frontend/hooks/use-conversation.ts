@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import {
   startConversation as apiStartConversation,
   continueConversation as apiContinueConversation,
@@ -34,6 +34,15 @@ export function useConversation({ onComplete, onError }: UseConversationProps = 
   });
   const [isLoading, setIsLoading] = useState(false);
 
+  // Keep refs to the latest onError/onComplete to avoid recreating callbacks
+  // when parent components pass inline functions (which changes their identity each render).
+  const _onErrorRef = useRef(onError);
+  const _onCompleteRef = useRef(onComplete);
+
+  // Keep refs up to date
+  useEffect(() => { _onErrorRef.current = onError }, [onError]);
+  useEffect(() => { _onCompleteRef.current = onComplete }, [onComplete]);
+
   useEffect(() => {
     if (state.thread_id) {
       localStorage.setItem('thread_id', state.thread_id);
@@ -42,13 +51,7 @@ export function useConversation({ onComplete, onError }: UseConversationProps = 
     }
   }, [state.thread_id]);
 
-  // Automatically load conversation when component mounts if there's a saved thread_id
-  useEffect(() => {
-    const savedThreadId = typeof window !== 'undefined' ? localStorage.getItem('thread_id') : null;
-    if (savedThreadId) {
-      loadConversation(savedThreadId);
-    }
-  }, []);
+  // Initial conversation auto-load moved below (after loadConversation declaration)
 
   const handleApiResponse = useCallback((response: ProcessResponse) => {
     const {
@@ -90,9 +93,14 @@ export function useConversation({ onComplete, onError }: UseConversationProps = 
     });
 
     if (!pending_user_input) {
-      onComplete?.(response);
+      try {
+        _onCompleteRef.current?.(response);
+      } catch (e) {
+        // swallow
+      }
     }
-  }, [onComplete]);
+  }, []);
+  // Intentionally no external deps; onComplete is accessed via ref above.
 
   const startConversation = useCallback(async (input: string, files: File[] = []) => {
     setIsLoading(true);
@@ -131,15 +139,15 @@ export function useConversation({ onComplete, onError }: UseConversationProps = 
     } catch (error: any) {
       const errorMessage = error.message || 'An unknown error occurred';
       setState(prevState => ({ ...prevState, status: 'error' }));
-      onError?.(errorMessage);
+      try { _onErrorRef.current?.(errorMessage); } catch (e) {}
     } finally {
       setIsLoading(false);
     }
-  }, [handleApiResponse, onError]);
+  }, [handleApiResponse, state.thread_id]);
   
   const continueConversation = useCallback(async (input: string) => {
     if (!state.thread_id) {
-      onError?.('Cannot continue conversation without a thread ID.');
+      try { _onErrorRef.current?.('Cannot continue conversation without a thread ID.'); } catch (e) {}
       return;
     }
     setIsLoading(true);
@@ -163,11 +171,11 @@ export function useConversation({ onComplete, onError }: UseConversationProps = 
     } catch (error: any) {
       const errorMessage = error.message || 'An unknown error occurred';
       setState(prevState => ({ ...prevState, status: 'error' }));
-      onError?.(errorMessage);
+      try { _onErrorRef.current?.(errorMessage); } catch (e) {}
     } finally {
       setIsLoading(false);
     }
-  }, [state.thread_id, handleApiResponse, onError]);
+  }, [state.thread_id, handleApiResponse]);
 
   const resetConversation = useCallback(() => {
     // Create a new thread_id by generating a fresh UUID
@@ -182,55 +190,108 @@ export function useConversation({ onComplete, onError }: UseConversationProps = 
 
   const loadConversation = useCallback(async (thread_id: string) => {
     setIsLoading(true);
+    console.debug('[useConversation] loadConversation called for', thread_id);
     try {
       // Load conversation history from API
       const response = await fetch(`http://localhost:8000/api/conversations/${thread_id}`);
+      console.debug('[useConversation] fetch complete', response.status, response.statusText);
       if (!response.ok) {
+        const errText = await response.text().catch(() => '<no-body>');
+        console.error('[useConversation] fetch failed', response.status, response.statusText, errText);
         throw new Error(`Failed to load conversation: ${response.statusText}`);
       }
-      const historyData = await response.json();
+
+      // Read and parse conversation data
+      const text = await response.text();
+      console.debug('[useConversation] raw response snippet', text.slice(0, 2000));
+
+      let conversationData: any;
+      try {
+        conversationData = JSON.parse(text);
+      } catch (e) {
+        console.error('[useConversation] failed to parse JSON from conversation response', e);
+        throw new Error('Invalid conversation data format');
+      }
+
+      if (!conversationData || typeof conversationData !== 'object') {
+        console.error('[useConversation] invalid conversation data structure');
+        throw new Error('Invalid conversation data structure');
+      }
+
+      const rawMessages = Array.isArray(conversationData.messages) ? conversationData.messages : [];
+      console.debug('[useConversation] found messages array with length:', rawMessages.length);
 
       // Process the messages from the API response
-      const messages: Message[] = historyData.map((msgData: any, index: number) => {
-        // Determine the message type based on the LangChain message type
-        let messageType: 'user' | 'assistant' | 'system' = 'system';
-        if (typeof msgData.type === 'string') {
-          if (msgData.type.toLowerCase().includes('human') || msgData.type.toLowerCase() === 'user') {
-            messageType = 'user';
-          } else if (msgData.type.toLowerCase().includes('ai') || msgData.type.toLowerCase() === 'assistant') {
-            messageType = 'assistant';
-          } else {
-            messageType = 'system';
-          }
-        } else if (msgData.type === 'human') {
-          messageType = 'user';
-        } else if (msgData.type === 'ai') {
-          messageType = 'assistant';
-        }
+      const messages: Message[] = rawMessages.map((msgData: any, index: number) => {
+        // The backend now sends messages in a consistent format
+        const messageType = msgData.type || 'system';
+        const id = msgData.id || `${Date.now()}-${index}`;
+        const content = msgData.content || '';
+        const timestamp = msgData.timestamp ? new Date(msgData.timestamp) : new Date();
+        const metadata = msgData.metadata || {};
 
         return {
-          id: msgData.id || (Date.now() + index).toString(),
+          id,
           type: messageType,
-          content: msgData.content || msgData.data?.content || '',
-          timestamp: msgData.timestamp ? new Date(msgData.timestamp) : new Date(),
-          metadata: msgData.metadata || msgData.data?.metadata || {},
+          content,
+          timestamp,
+          metadata,
         };
       });
 
+      console.debug('[useConversation] mapped messages length', messages.length, 'sample', messages[0]);
       setState({
-        thread_id,
+        thread_id: conversationData.thread_id || thread_id,
         status: 'completed',
         messages,
         isWaitingForUser: false,
         currentQuestion: '',
+        ...(conversationData.final_response ? { final_response: conversationData.final_response } : {})
+      });
+      console.debug('[useConversation] state updated on loadConversation', {
+        thread_id: conversationData.thread_id || thread_id,
+        messagesCount: messages.length,
+        hasFinalResponse: Boolean(conversationData.final_response)
       });
     } catch (error: any) {
       const errorMessage = error.message || 'Failed to load conversation';
-      onError?.(errorMessage);
+      console.error('[useConversation] loadConversation error', error);
+      try { _onErrorRef.current?.(errorMessage); } catch (e) {}
     } finally {
       setIsLoading(false);
     }
-  }, [onError]);
+  }, []);
+
+  // Prevent double-loading in React StrictMode during development by ensuring the
+  // mount-load runs only once per full mount lifecycle.
+  const _didMountRef = useRef(false);
+  // Keep a ref to the loadConversation function so we can call it from an effect
+  // with an empty dependency array. This avoids re-running the effect when the
+  // callback identity changes (HMR/dev) and is safe because loadConversation is stable.
+  const loadConversationRef = useRef(loadConversation);
+  useEffect(() => { loadConversationRef.current = loadConversation }, [loadConversation]);
+
+  // Automatically load conversation when component mounts if there's a saved thread_id
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (_didMountRef.current) return; // already ran
+    _didMountRef.current = true;
+
+    const tryLoad = async () => {
+      const savedThreadId = localStorage.getItem('thread_id');
+      if (!savedThreadId) return;
+      try {
+        // Attempt to load the saved conversation on initial page load
+        await loadConversationRef.current(savedThreadId);
+      } catch (err) {
+        // Swallow errors here - we don't want a failed load to crash the UI.
+        // Keep the thread_id in localStorage so user can retry or continue later.
+        console.warn('Failed to load saved conversation on mount', err);
+      }
+    };
+
+    tryLoad();
+  }, []);
 
   return {
     state,

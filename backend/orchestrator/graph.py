@@ -1255,218 +1255,70 @@ def load_conversation_history(state: State, config: RunnableConfig):
 
     history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
 
-    if os.path.exists(history_path):
-        try:
-            with open(history_path, "r", encoding="utf-8") as f:
-                raw_data = f.read()  # Read as raw string first
+    if not os.path.exists(history_path):
+        return {}
 
-            # Check if the raw data is a string representation of a dict
-            if raw_data.strip().startswith("\"{") and raw_data.strip().endswith("}\""):
-                # This is a string representation of a dict, likely from str() of a dict
-                # Remove the outer quotes and unescape the inner string
-                raw_data_cleaned = raw_data.strip().strip('"')
-                raw_data_cleaned = raw_data_cleaned.replace('\\"', '"').replace('\\\\', '\\')
-                # Now parse it as JSON
-                try:
-                    raw_data = json.loads(raw_data_cleaned)
-                except json.JSONDecodeError:
-                    # If JSON parsing fails, try to eval it as a Python literal (safe approach)
-                    import ast
-                    try:
-                        raw_data = ast.literal_eval(raw_data_cleaned)
-                    except (ValueError, SyntaxError):
-                        logger.warning(f"Conversation {thread_id}: Could not parse string representation of dict. Skipping messages.")
-                        return {"messages": []}
-            elif raw_data.strip().startswith("\"[") and raw_data.strip().endswith("]\""):
-                # This is a string representation of a list
-                raw_data_cleaned = raw_data.strip().strip('"')
-                raw_data_cleaned = raw_data_cleaned.replace('\\"', '"').replace('\\\\', '\\')
-                try:
-                    raw_data = json.loads(raw_data_cleaned)
-                except json.JSONDecodeError:
-                    import ast
-                    try:
-                        raw_data = ast.literal_eval(raw_data_cleaned)
-                    except (ValueError, SyntaxError):
-                        logger.warning(f"Conversation {thread_id}: Could not parse string representation of list. Skipping messages.")
-                        return {"messages": []}
-            else:
-                # Try to parse as regular JSON
-                try:
-                    raw_data = json.loads(raw_data)
-                except json.JSONDecodeError:
-                    logger.warning(f"Conversation {thread_id}: Invalid JSON format. Skipping messages.")
-                    return {"messages": []}
-
-            # Validate and sanitize the message data
-            if isinstance(raw_data, dict):
-                # Extract messages from the state dict if it exists
-                if 'messages' in raw_data:
-                    raw_data = raw_data['messages']
-                else:
-                    # If there's no messages key, convert the entire dict to a single message
-                    raw_data = [raw_data]
-            
-            if not isinstance(raw_data, list):
-                logger.warning(f"Conversation {thread_id}: Invalid message data format (not a list). Skipping messages.")
-                return {"messages": []}
-
-            # Filter out any non-dict messages and convert them to proper Message objects
-            valid_messages = []
-            for i, msg_data in enumerate(raw_data):
-                try:
-                    if isinstance(msg_data, dict):
-                        # Convert single dict to Message object using the proper LangChain function
-                        from langchain_core.messages import messages_from_dict
-                        # messages_from_dict expects a list, so wrap in list and take first element
-                        try:
-                            msg_list = messages_from_dict([msg_data])
-                            if msg_list:
-                                valid_messages.extend(msg_list)
-                        except Exception as msg_err:
-                            logger.warning(f"Conversation {thread_id}, message {i}: Failed to convert dict to Message: {msg_err}")
-                            # Try manual conversion as fallback
-                            try:
-                                msg_type = msg_data.get("type", "")
-                                content = ""
-                                if "data" in msg_data and isinstance(msg_data["data"], dict):
-                                    content = msg_data["data"].get("content", "")
-                                elif isinstance(msg_data.get("content"), str):
-                                    content = msg_data["content"]
-
-                                if msg_type == "human":
-                                    from langchain_core.messages import HumanMessage
-                                    valid_messages.append(HumanMessage(content=content))
-                                elif msg_type == "ai":
-                                    from langchain_core.messages import AIMessage
-                                    valid_messages.append(AIMessage(content=content))
-                                else:
-                                    logger.warning(f"Conversation {thread_id}, message {i}: Unknown message type '{msg_type}'")
-                            except Exception as fallback_err:
-                                logger.warning(f"Conversation {thread_id}, message {i}: Fallback conversion failed: {fallback_err}")
-                    elif isinstance(msg_data, str):
-                        logger.warning(f"Conversation {thread_id}, message {i}: Found string message, converting to HumanMessage")
-                        from langchain_core.messages import HumanMessage
-                        valid_messages.append(HumanMessage(content=str(msg_data)))
-                    else:
-                        logger.warning(f"Conversation {thread_id}, message {i}: Invalid message type {type(msg_data)}. Skipping.")
-
-                except Exception as msg_processing_error:
-                    logger.warning(f"Conversation {thread_id}, message {i}: Message processing failed: {msg_processing_error}. Skipping.")
-
-            logger.info(f"Conversation {thread_id}: Successfully loaded {len(valid_messages)} valid messages out of {len(raw_data)} total items")
-            return {"messages": valid_messages}
-
-        except UnicodeDecodeError as e:
-            logger.error(f"Conversation {thread_id}: Failed to decode conversation history file: {e}")
-            # Try to read with different encoding
+    try:
+        with open(history_path, "r", encoding="utf-8") as f:
             try:
-                with open(history_path, "r", encoding="latin-1") as f:
-                    raw_data = f.read()
-                # Process the raw_data again with the same logic
-                # Check if the raw data is a string representation of a dict
-                if raw_data.strip().startswith("\"{") and raw_data.strip().endswith("}\""):
-                    # This is a string representation of a dict, likely from str() of a dict
-                    # Remove the outer quotes and unescape the inner string
-                    raw_data_cleaned = raw_data.strip().strip('"')
-                    raw_data_cleaned = raw_data_cleaned.replace('\\"', '"').replace('\\\\', '\\')
-                    # Now parse it as JSON
-                    try:
-                        raw_data = json.loads(raw_data_cleaned)
-                    except json.JSONDecodeError:
-                        # If JSON parsing fails, try to eval it as a Python literal (safe approach)
-                        import ast
-                        try:
-                            raw_data = ast.literal_eval(raw_data_cleaned)
-                        except (ValueError, SyntaxError):
-                            logger.warning(f"Conversation {thread_id}: Could not parse string representation of dict. Skipping messages.")
-                            return {"messages": []}
-                elif raw_data.strip().startswith("\"[") and raw_data.strip().endswith("]\""):
-                    # This is a string representation of a list
-                    raw_data_cleaned = raw_data.strip().strip('"')
-                    raw_data_cleaned = raw_data_cleaned.replace('\\"', '"').replace('\\\\', '\\')
-                    try:
-                        raw_data = json.loads(raw_data_cleaned)
-                    except json.JSONDecodeError:
-                        import ast
-                        try:
-                            raw_data = ast.literal_eval(raw_data_cleaned)
-                        except (ValueError, SyntaxError):
-                            logger.warning(f"Conversation {thread_id}: Could not parse string representation of list. Skipping messages.")
-                            return {"messages": []}
-                else:
-                    # Try to parse as regular JSON
-                    try:
-                        raw_data = json.loads(raw_data)
-                    except json.JSONDecodeError:
-                        logger.warning(f"Conversation {thread_id}: Invalid JSON format. Skipping messages.")
-                        return {"messages": []}
-
-                # Validate and sanitize the message data
-                if isinstance(raw_data, dict):
-                    # Extract messages from the state dict if it exists
-                    if 'messages' in raw_data:
-                        raw_data = raw_data['messages']
-                    else:
-                        # If there's no messages key, convert the entire dict to a single message
-                        raw_data = [raw_data]
-                
-                if not isinstance(raw_data, list):
-                    logger.warning(f"Conversation {thread_id}: Invalid message data format (not a list). Skipping messages.")
-                    return {"messages": []}
-
-                # Filter out any non-dict messages and convert them to proper Message objects
-                valid_messages = []
-                for i, msg_data in enumerate(raw_data):
-                    try:
-                        if isinstance(msg_data, dict):
-                            # Convert single dict to Message object using the proper LangChain function
-                            from langchain_core.messages import messages_from_dict
-                            # messages_from_dict expects a list, so wrap in list and take first element
-                            try:
-                                msg_list = messages_from_dict([msg_data])
-                                if msg_list:
-                                    valid_messages.extend(msg_list)
-                            except Exception as msg_err:
-                                logger.warning(f"Conversation {thread_id}, message {i}: Failed to convert dict to Message: {msg_err}")
-                                # Try manual conversion as fallback
-                                try:
-                                    msg_type = msg_data.get("type", "")
-                                    content = ""
-                                    if "data" in msg_data and isinstance(msg_data["data"], dict):
-                                        content = msg_data["data"].get("content", "")
-                                    elif isinstance(msg_data.get("content"), str):
-                                        content = msg_data["content"]
-
-                                    if msg_type == "human":
-                                        from langchain_core.messages import HumanMessage
-                                        valid_messages.append(HumanMessage(content=content))
-                                    elif msg_type == "ai":
-                                        from langchain_core.messages import AIMessage
-                                        valid_messages.append(AIMessage(content=content))
-                                    else:
-                                        logger.warning(f"Conversation {thread_id}, message {i}: Unknown message type '{msg_type}'")
-                                except Exception as fallback_err:
-                                    logger.warning(f"Conversation {thread_id}, message {i}: Fallback conversion failed: {fallback_err}")
-                        elif isinstance(msg_data, str):
-                            logger.warning(f"Conversation {thread_id}, message {i}: Found string message, converting to HumanMessage")
-                            from langchain_core.messages import HumanMessage
-                            valid_messages.append(HumanMessage(content=str(msg_data)))
-                        else:
-                            logger.warning(f"Conversation {thread_id}, message {i}: Invalid message type {type(msg_data)}. Skipping.")
-
-                    except Exception as msg_processing_error:
-                        logger.warning(f"Conversation {thread_id}, message {i}: Message processing failed: {msg_processing_error}. Skipping.")
-
-                logger.info(f"Conversation {thread_id}: Successfully loaded {len(valid_messages)} valid messages out of {len(raw_data)} total items")
-                return {"messages": valid_messages}
-            except Exception as e2:
-                logger.error(f"Conversation {thread_id}: Failed to load conversation history with alternative encoding: {e2}")
+                data = json.load(f)
+            except json.JSONDecodeError:
+                logger.error(f"Failed to parse JSON from {history_path}")
                 return {"messages": []}
-        except Exception as e:
-            logger.error(f"Conversation {thread_id}: Failed to load conversation history: {e}")
+
+        if not isinstance(data, dict):
+            logger.error(f"Conversation data is not a dictionary: {type(data)}")
             return {"messages": []}
-    return {}
+
+        messages = data.get("messages", [])
+        if not isinstance(messages, list):
+            logger.error(f"Messages data is not a list: {type(messages)}")
+            return {"messages": []}
+
+        valid_messages = []
+        for msg_data in messages:
+            if not isinstance(msg_data, dict):
+                continue
+
+            msg_type = msg_data.get("type", "").lower()
+            content = msg_data.get("content", "")
+            metadata = msg_data.get("metadata", {})
+            msg_id = msg_data.get("id")
+            timestamp = msg_data.get("timestamp")
+
+            try:
+                if msg_type == "user":
+                    msg = HumanMessage(content=content)
+                elif msg_type == "assistant":
+                    msg = AIMessage(content=content)
+                else:
+                    msg = SystemMessage(content=content)
+
+                # Add additional attributes
+                if msg_id:
+                    msg.id = msg_id
+                if metadata:
+                    msg.additional_kwargs = metadata
+                if timestamp:
+                    msg.timestamp = timestamp
+
+                valid_messages.append(msg)
+
+            except Exception as e:
+                logger.warning(f"Failed to create message object: {e}")
+                continue
+
+        logger.info(f"Successfully loaded {len(valid_messages)} messages for conversation {thread_id}")
+        
+        return {
+            "messages": valid_messages,
+            "thread_id": data.get("thread_id"),
+            "final_response": data.get("final_response")
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to load conversation history for {thread_id}: {e}")
+        return {"messages": []}
 
 def save_conversation_history(state: State, config: RunnableConfig):
     thread_id = config.get("configurable", {}).get("thread_id")
@@ -1475,24 +1327,50 @@ def save_conversation_history(state: State, config: RunnableConfig):
         
     history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
     
-    # Convert the entire state to a serializable format
-    # We need to serialize the state properly to avoid string representation issues
-    serializable_state = {}
-    for key, value in state.items():
-        if key == "messages":
-            # Convert messages to dict format for serialization
-            # Ensure value is a list of BaseMessage objects before calling messages_to_dict
-            if value and isinstance(value, list) and all(isinstance(msg, BaseMessage) for msg in value):
-                serializable_state[key] = messages_to_dict(value)
-            else:
-                serializable_state[key] = []  # Default to empty list if not proper format
-        else:
-            # Use the serialize_complex_object function to handle complex objects
-            serializable_state[key] = serialize_complex_object(value)
-    
-    with open(history_path, "w", encoding="utf-8") as f:
-        json.dump(serializable_state, f, ensure_ascii=False, indent=2)
+    try:
+        messages = state.get("messages", [])
+        final_response = state.get("final_response")
         
+        # Convert messages to a standard format
+        formatted_messages = []
+        for msg in messages:
+            if isinstance(msg, BaseMessage):
+                msg_dict = {
+                    "id": getattr(msg, "id", str(time.time())),
+                    "type": "user" if isinstance(msg, HumanMessage) else "assistant" if isinstance(msg, AIMessage) else "system",
+                    "content": msg.content,
+                    "timestamp": getattr(msg, "timestamp", time.time()),
+                    "metadata": getattr(msg, "metadata", {})
+                }
+                formatted_messages.append(msg_dict)
+            elif isinstance(msg, dict):
+                msg_dict = {
+                    "id": msg.get("id", str(time.time())),
+                    "type": msg.get("type", "system"),
+                    "content": msg.get("content", ""),
+                    "timestamp": msg.get("timestamp", time.time()),
+                    "metadata": msg.get("metadata", {})
+                }
+                formatted_messages.append(msg_dict)
+
+        # Create the conversation state
+        conversation_state = {
+            "messages": formatted_messages,
+            "final_response": final_response,
+            "thread_id": thread_id,
+            "timestamp": time.time()
+        }
+
+        # Write to file in consistent JSON format
+        with open(history_path, "w", encoding="utf-8") as f:
+            json.dump(conversation_state, f, ensure_ascii=False, indent=2, cls=CustomJSONEncoder)
+            
+        logger.info(f"Successfully saved conversation history for thread {thread_id} with {len(formatted_messages)} messages")
+
+    except Exception as e:
+        logger.error(f"Conversation {thread_id}: Failed to write conversation history to {history_path}: {e}")
+        logger.exception("Full error details:")
+
     return {}
 
 # --- Routing Functions ---

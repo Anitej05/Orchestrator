@@ -1,0 +1,8 @@
+INFO:     Will watch for changes in these directories: ['D:\\Internship\\Orbimesh\\backend']
+INFO:     Uvicorn running on http://127.0.0.1:8020 (Press CTRL+C to quit)
+INFO:     Started reloader process [17936] using WatchFiles
+INFO:     Started server process [19384]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+WARNING:  WatchFiles detected changes in 'orchestrator\graph.py'. Reloading...
+ INFO:     127.0.0.1:61172 - "GET /everything?query=Tesla+stock&language=en&page_size=10 HTTP/1.1" 200 OK

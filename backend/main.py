@@ -442,10 +442,34 @@ async def execute_orchestration(
         # Store the final state after the graph run and save to file
         with store_lock:
             conversation_store[thread_id] = final_state.copy()
-            # Save the final state to a file
+            # Save the final state to a file using the orchestrator's save routine
             history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
-            with open(history_path, "w") as f:
-                json.dump(serialize_complex_object(final_state), f, indent=4)
+            try:
+                # Import locally to avoid circular import issues during module import time
+                import orchestrator.graph as orchestrator_graph
+                try:
+                    orchestrator_graph.save_conversation_history(final_state, {"configurable": {"thread_id": thread_id}})
+                except Exception as e:
+                    # If the orchestrator writer fails, fall back to a robust writer below
+                    logger.warning(f"save_conversation_history failed for {thread_id}: {e}")
+                    raise
+            except Exception:
+                # Fallback writer: make a best-effort serializable dict and write it
+                serializable = serialize_complex_object(final_state)
+                # If serialize_complex_object returned a string (legacy fallback), try to interpret it
+                if isinstance(serializable, str):
+                    try:
+                        parsed = json.loads(serializable)
+                        serializable = parsed
+                    except Exception:
+                        # As a last resort, wrap the raw string so JSON is valid and searchable
+                        serializable = {"raw_state": serializable}
+
+                try:
+                    with open(history_path, "w", encoding="utf-8") as f:
+                        json.dump(serializable, f, ensure_ascii=False, indent=2)
+                except Exception as e:
+                    logger.error(f"Failed to write conversation history fallback for {thread_id}: {e}")
 
         # Ensure a plan file is saved for every conversation
         try:
@@ -803,9 +827,35 @@ async def get_conversation_history(thread_id: str):
         # If history is already a list, return it as is
         elif isinstance(history, list):
             return history
+        # If the file contains a JSON string (legacy Python repr inside a JSON string),
+        # attempt to heuristically extract messages from that string and return them.
+        elif isinstance(history, str):
+            raw = history
+            # Try to extract a messages=[ ... ] block
+            m = re.search(r"messages\s*[:=]\s*\[([\s\S]*?)\]\s*[,}]", raw)
+            msgs = []
+            if m:
+                inner = m.group(1)
+                for mm in re.finditer(r"(AIMessage|HumanMessage|ChatMessage|SystemMessage)\s*\(([^)]*)\)", inner):
+                    kind = mm.group(1)
+                    body = mm.group(2)
+                    content_match = re.search(r"content\s*=\s*(?:r?\"([^\"]*)\"|r?\'([^\']*)\')", body)
+                    id_match = re.search(r"id\s*=\s*(?:r?\"([^\"]*)\"|r?\'([^\']*)\')", body)
+                    content = (content_match.group(1) or content_match.group(2)) if content_match else ''
+                    idv = (id_match.group(1) or id_match.group(2)) if id_match else None
+                    msgs.append({
+                        'id': idv or f'legacy-{len(msgs)}',
+                        'type': 'user' if 'HumanMessage' in kind else 'assistant',
+                        'content': content,
+                        'timestamp': None,
+                        'additional_kwargs': {},
+                        'response_metadata': {},
+                    })
+            if msgs:
+                return msgs
+
         # If we can't process the history, return an empty list
-        else:
-            return []
+        return []
 
 @app.get("/api/plan/{thread_id}", response_model=PlanResponse)
 async def get_agent_plan(thread_id: str):

@@ -35,6 +35,18 @@ export function InteractiveChatInterface({
   continueConversation,
   resetConversation
 }: InteractiveChatInterfaceProps) {
+  useEffect(() => {
+    if (!state) {
+      console.debug('InteractiveChatInterface: no state prop received');
+      return;
+    }
+    if (!Array.isArray(state.messages)) {
+      console.warn('InteractiveChatInterface: state.messages is not an array', state.messages);
+      return;
+    }
+    console.debug('InteractiveChatInterface: rendering messages count=', state.messages.length);
+    if (state.messages.length > 0) console.debug('InteractiveChatInterface: sample', state.messages.slice(0, 3));
+  }, [state]);
   const [inputValue, setInputValue] = useState('');
   const [userResponse, setUserResponse] = useState('');
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);

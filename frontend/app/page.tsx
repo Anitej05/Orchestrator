@@ -154,6 +154,14 @@ export default function Home() {
                     apiResponseData={apiResponseData}
                     onThreadIdUpdate={handleThreadIdUpdate}
                     onExecutionResultsUpdate={handleExecutionResultsUpdate}
+              // Conversation props passed down so TaskBuilder/InteractiveChatInterface
+              // can render the loaded conversation state.
+              conversationState={conversationState}
+              isConversationLoading={isConversationLoading}
+              startConversation={startConversation}
+              continueConversation={continueConversation}
+              resetConversation={resetConversation}
+              loadConversation={loadConversation}
                  />
               </main>
             </ResizablePanel>

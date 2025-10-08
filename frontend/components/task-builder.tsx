@@ -2,10 +2,11 @@
 "use client"
 
 import { useToast } from "@/hooks/use-toast"
-import { useConversation } from "@/hooks/use-conversation"
+import { useEffect } from "react"
+import type { ProcessResponse, TaskAgentPair, ConversationState } from "@/lib/types"
 import WorkflowOrchestration from "./workflow-orchestration"
 import dynamic from "next/dynamic"
-import type { ProcessResponse, TaskAgentPair, ConversationState } from "@/lib/types"
+ 
 
 const InteractiveChatInterface = dynamic(
   () => import("@/components/interactive-chat-interface").then((mod) => mod.InteractiveChatInterface),
@@ -40,6 +41,13 @@ interface TaskBuilderProps {
     apiResponseData: ApiResponse | null;
     onThreadIdUpdate?: (threadId: string) => void;
     onExecutionResultsUpdate?: (results: ExecutionResult[]) => void;
+  // Conversation props (lifted from parent)
+  conversationState: ConversationState;
+  isConversationLoading: boolean;
+  startConversation: (input: string, files?: File[]) => Promise<void>;
+  continueConversation: (input: string) => Promise<void>;
+  resetConversation: () => void;
+  loadConversation: (threadId: string) => Promise<void>;
 }
 
 export default function TaskBuilder({
@@ -51,19 +59,36 @@ export default function TaskBuilder({
     apiResponseData,
     onThreadIdUpdate,
     onExecutionResultsUpdate
+    ,
+    conversationState,
+    isConversationLoading,
+    startConversation,
+    continueConversation,
+    resetConversation,
+    loadConversation
 }: TaskBuilderProps) {
   const { toast } = useToast()
 
-  const { state: conversationState, isLoading: isConversationLoading, startConversation, continueConversation, resetConversation } = useConversation({
-    onComplete: onWorkflowComplete,
-    onError: (error) => {
-      toast({
-        title: "Orchestration Error",
-        description: error,
-        variant: "destructive",
-      });
+  useEffect(() => {
+    // Debug helper: log conversation messages when they arrive so we can confirm
+    // the parent `useConversation` state is being passed correctly.
+    // Leave as console.debug to avoid spamming production logs; remove later.
+    if (!conversationState) {
+      console.debug('TaskBuilder: no conversationState prop received');
+      return;
     }
-  });
+
+    if (!Array.isArray(conversationState.messages)) {
+      console.warn('TaskBuilder: conversationState.messages is not an array', conversationState.messages);
+      return;
+    }
+
+    console.debug('TaskBuilder: received conversation messages length=', conversationState.messages.length);
+    if (conversationState.messages.length > 0) {
+      // Log only the first few messages to avoid huge logs
+      console.debug('TaskBuilder: sample messages', conversationState.messages.slice(0, 5));
+    }
+  }, [conversationState]);
 
   return (
     <div className="h-full flex flex-col bg-white rounded-lg border shadow-sm">
