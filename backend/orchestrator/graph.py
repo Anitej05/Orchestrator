@@ -856,7 +856,18 @@ def validate_plan_for_execution(state: State):
 
     # Rehydrate uploaded files
     uploaded_file_dicts = state.get("uploaded_files", [])
-    uploaded_files_typed = [FileObject.model_validate(f) for f in uploaded_file_dicts]
+    uploaded_files_typed = []
+    for f in uploaded_file_dicts:
+        try:
+            if isinstance(f, dict):
+                uploaded_files_typed.append(FileObject.model_validate(f))
+            else:
+                # Handle case where files are already FileObject instances
+                uploaded_files_typed.append(f)
+        except Exception as e:
+            logger.warning(f"Failed to validate file object: {e}")
+            continue
+    
     file_context = ""
     if uploaded_files_typed:
         file_details = []
@@ -924,7 +935,7 @@ def validate_plan_for_execution(state: State):
 async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: State, last_error: Optional[str] = None):
     '''
     Builds the payload and runs a single agent, now using file paths instead of content.
-    This is the full, robust version with semantic retries.
+    This is the full, robust version with semantic retries and rate limit handling.
     '''
     logger.info(f"Running agent '{agent_details.name}' for task: '{planned_task.task_name}'")
     
@@ -994,16 +1005,37 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
         Your response MUST be only the JSON payload object, with no extra text or markdown.
         '''
         
-        try:
-            payload_str = payload_builder_llm.invoke(payload_prompt).content
-            cleaned_payload_str = strip_think_tags(payload_str)
-            json_str = extract_json_from_response(cleaned_payload_str)
-            if not json_str:
-                raise json.JSONDecodeError("No JSON found in LLM response", cleaned_payload_str, 0)
-            payload = json.loads(json_str)
-            logger.info(f"LLM generated payload for task '{planned_task.task_name}': {payload}")
-        except (json.JSONDecodeError, AttributeError) as e:
-            error_msg = f"Error building payload for task '{planned_task.task_name}': {e}"
+        # Add exponential backoff for rate limit handling when generating payloads
+        payload_generated = False
+        payload_generation_error = None
+        payload = {}  # Initialize payload to avoid unbound variable error
+        for payload_attempt in range(5):  # Up to 5 attempts for payload generation
+            try:
+                payload_str = payload_builder_llm.invoke(payload_prompt).content
+                cleaned_payload_str = strip_think_tags(payload_str)
+                json_str = extract_json_from_response(cleaned_payload_str)
+                if not json_str:
+                    raise json.JSONDecodeError("No JSON found in LLM response", cleaned_payload_str, 0)
+                payload = json.loads(json_str)
+                logger.info(f"LLM generated payload for task '{planned_task.task_name}': {payload}")
+                payload_generated = True
+                break  # Success, exit retry loop
+            except Exception as e:
+                # Check if this is a rate limit error
+                error_str = str(e).lower()
+                if "429" in error_str or "rate" in error_str or "queue_exceeded" in error_str or "high traffic" in error_str:
+                    # Apply exponential backoff
+                    wait_time = (2 ** payload_attempt) + (0.1 * payload_attempt)  # Exponential backoff with jitter
+                    logger.warning(f"Rate limit hit during payload generation. Waiting {wait_time:.2f} seconds before retry {payload_attempt + 1}/5")
+                    await asyncio.sleep(wait_time)
+                    continue  # Retry
+                else:
+                    # Non-rate limit error, don't retry
+                    payload_generation_error = e
+                    break
+        
+        if not payload_generated:
+            error_msg = f"Error building payload for task '{planned_task.task_name}': {payload_generation_error}"
             logger.error(error_msg)
             return {"task_name": planned_task.task_name, "result": error_msg}
 
@@ -1033,8 +1065,16 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                 return {"task_name": planned_task.task_name, "result": result}
             
             except httpx.HTTPStatusError as e:
-                error_msg = f"Agent call failed with status {e.response.status_code}: {e.response.text}"
-                return {"task_name": planned_task.task_name, "result": error_msg, "raw_response": e.response.text, "status_code": e.response.status_code}
+                # Handle rate limit errors from agents with exponential backoff
+                if e.response.status_code == 429:
+                    # Apply exponential backoff
+                    wait_time = (2 ** attempt) + (0.1 * attempt)  # Exponential backoff with jitter
+                    logger.warning(f"Rate limit hit for agent '{agent_details.name}'. Waiting {wait_time:.2f} seconds before retry {attempt + 1}/3")
+                    await asyncio.sleep(wait_time)
+                    continue  # Retry the agent call
+                else:
+                    error_msg = f"Agent call failed with status {e.response.status_code}: {e.response.text}"
+                    return {"task_name": planned_task.task_name, "result": error_msg, "raw_response": e.response.text, "status_code": e.response.status_code}
             except httpx.RequestError as e:
                 error_msg = f"Agent call failed with a network error: {e}"
                 return {"task_name": planned_task.task_name, "result": error_msg, "raw_response": str(e), "status_code": 500}
@@ -1220,29 +1260,90 @@ def ask_user(state: State):
 def aggregate_responses(state: State):
     logger.info("Aggregating final response.")
     
-    # Check if this is a simple response from the analysis step
-    if final_response := state.get("final_response"):
-        logger.info("Returning simple response from analysis step.")
+    # Check if this is a simple request that was handled directly by analyze_request
+    # For simple requests, needs_complex_processing will be False
+    if state.get("needs_complex_processing") is False:
+        # This is a simple request that was handled by analyze_request
+        # The final_response should already be in the state
+        final_response = state.get("final_response", "")
+        if not final_response:
+            # Fallback: generate a new simple response
+            llm = ChatCerebras(model="gpt-oss-120b")
+            
+            # Build comprehensive context from conversation history
+            history_context = ""
+            if state.get('messages'):
+                # Include recent conversation turns to provide context
+                recent_messages = state['messages'][-20:]  # Last 20 messages
+                for msg in recent_messages:
+                    if hasattr(msg, 'type') and msg.type == "human":
+                        history_context += f"User: {msg.content}\n"
+                    elif hasattr(msg, 'type') and msg.type == "ai":
+                        history_context += f"Assistant: {msg.content}\n"
+            
+            # Include uploaded files context
+            files_context = ""
+            uploaded_files = state.get('uploaded_files', [])
+            if uploaded_files:
+                files_info = []
+                for file_obj in uploaded_files:
+                    # Convert dict to FileObject if needed for attribute access
+                    if isinstance(file_obj, dict):
+                        file_obj = FileObject.model_validate(file_obj)
+                    file_info = f"- {file_obj.file_name} ({file_obj.file_type}) at {file_obj.file_path}"
+                    if file_obj.file_type == 'document' and file_obj.vector_store_path:
+                        file_info += f", vector store: {file_obj.vector_store_path}"
+                    files_info.append(file_info)
+                files_context = "Uploaded files:\n" + "\n".join(files_info) + "\n\n"
+            
+            prompt = f'''
+            You are a helpful AI assistant. Answer the user's request directly and concisely.
+            
+            Consider the following context:
+            {files_context}
+            Conversation history:
+            {history_context}
+            
+            User's current request: "{state['original_prompt']}"
+            
+            Please provide a helpful response to the user's request.
+            '''
+            logger.debug(f"Simple response prompt:\n{prompt}")
+            
+            final_response = llm.invoke(prompt).content
+            logger.info("Simple response generated.")
+        else:
+            logger.info("Using final_response from analyze_request for simple request.")
+        
         ai_message = AIMessage(content=final_response)
         return {"final_response": final_response, "messages": [ai_message]}
     else:
-        llm = ChatCerebras(model="gpt-oss-120b")
+        # This is a complex request, synthesize results from completed tasks
+        completed_tasks = state.get('completed_tasks', [])
+        if not completed_tasks:
+            # Edge case: needs_complex_processing is True but no tasks completed
+            # This shouldn't happen, but let's handle it gracefully
+            logger.warning("Complex request indicated but no completed tasks found. Generating a default response.")
+            final_response = "I've processed your request, but I don't have specific results to share."
+        else:
+            llm = ChatCerebras(model="gpt-oss-120b")
+            
+            prompt = f'''
+            You are an expert project manager's assistant. Your job is to synthesize the results from a team of AI agents into a single, clean, and coherent final report for the user.
+            The user's original request was:
+            "{state['original_prompt']}"
+            
+            The following tasks were completed, with these results:
+            ---
+            {json.dumps([serialize_complex_object(task) for task in completed_tasks], indent=2)}
+            ---
+            Please generate a final, human-readable response that directly answers the user's original request based on the collected results.
+            '''
+            logger.debug(f"Aggregation prompt:\n{prompt}")
+            
+            final_response = llm.invoke(prompt).content
+            logger.info("Final response generated.")
         
-        prompt = f'''
-        You are an expert project manager's assistant. Your job is to synthesize the results from a team of AI agents into a single, clean, and coherent final report for the user.
-        The user's original request was:
-        "{state['original_prompt']}"
-        
-        The following tasks were completed, with these results:
-        ---
-        {json.dumps([serialize_complex_object(task) for task in state.get('completed_tasks', [])], indent=2)}
-        ---
-        Please generate a final, human-readable response that directly answers the user's original request based on the collected results.
-        '''
-        logger.debug(f"Aggregation prompt:\n{prompt}")
-        
-        final_response = llm.invoke(prompt).content
-        logger.info("Final response generated.")
         ai_message = AIMessage(content=final_response)
         return {"final_response": final_response, "messages": [ai_message]}
 
@@ -1320,55 +1421,112 @@ def load_conversation_history(state: State, config: RunnableConfig):
         logger.error(f"Failed to load conversation history for {thread_id}: {e}")
         return {"messages": []}
 
+def get_serializable_state(state: dict | State, thread_id: str) -> dict:
+    """
+    Takes the current graph state and a thread_id, and returns a dictionary
+    that is fully JSON-serializable, containing all necessary information
+    for the frontend to render the conversation and its metadata.
+    """
+    # Convert State object to dict if needed
+    if not isinstance(state, dict):
+        # Handle the case where state might be a State object (TypedDict)
+        state_dict = {}
+        # Get all attributes that exist in the state
+        for key in ['messages', 'task_agent_pairs', 'final_response', 'pending_user_input', 
+                   'question_for_user', 'original_prompt', 'completed_tasks', 'parsed_tasks',
+                   'uploaded_files', 'task_plan']:
+            if hasattr(state, key):
+                state_dict[key] = getattr(state, key)
+            # Also try to get from __getitem__ if it's a dict-like object
+            try:
+                state_dict[key] = state[key]
+            except (KeyError, TypeError):
+                pass
+        state = state_dict
+    
+    # Safely serialize messages
+    messages = state.get("messages", [])
+    try:
+        # This handles LangChain message objects
+        serializable_messages = messages_to_dict(messages)
+    except Exception:
+        # Fallback for plain dicts or other formats
+        serializable_messages = []
+        for msg in messages:
+            if isinstance(msg, dict):
+                serializable_messages.append(msg)
+            elif hasattr(msg, 'dict'):
+                serializable_messages.append(msg.dict())
+            else:
+                serializable_messages.append(str(msg)) # Failsafe
+
+    # Use the serialize_complex_object helper for other potentially complex fields
+    # This ensures nested Pydantic models, HttpUrl, etc., are converted correctly.
+    return {
+        "thread_id": thread_id,
+        "status": "pending_user_input" if state.get("pending_user_input") else "completed",
+        "messages": serializable_messages,
+        "task_agent_pairs": serialize_complex_object(state.get("task_agent_pairs", [])),
+        "final_response": state.get("final_response"),
+        "pending_user_input": state.get("pending_user_input", False),
+        "question_for_user": state.get("question_for_user"),
+        # Metadata for the sidebar
+        "metadata": {
+            "original_prompt": state.get("original_prompt"),
+            "completed_tasks": serialize_complex_object(state.get("completed_tasks", [])),
+            "parsed_tasks": serialize_complex_object(state.get("parsed_tasks", [])),
+            "currentStage": "completed",
+            "stageMessage": "Orchestration completed successfully!",
+            "progress": 100
+        },
+        # Attachments for the sidebar
+        "uploaded_files": serialize_complex_object(state.get("uploaded_files", [])),
+        # Plan for the sidebar
+        "plan": serialize_complex_object(state.get("task_plan", [])),
+        "timestamp": time.time(),
+    }
+
 def save_conversation_history(state: State, config: RunnableConfig):
+    """
+    Saves the full, serializable state of the conversation to a JSON file.
+    This is the single source of truth for conversation history.
+    """
     thread_id = config.get("configurable", {}).get("thread_id")
     if not thread_id:
+        logger.warning("No thread_id in config, cannot save history.")
         return {}
         
     history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
     
     try:
-        messages = state.get("messages", [])
-        final_response = state.get("final_response")
+        # Convert State object to dict if needed
+        state_dict = {}
+        if not isinstance(state, dict):
+            # Handle the case where state might be a State object (TypedDict)
+            for key in ['messages', 'task_agent_pairs', 'final_response', 'pending_user_input', 
+                       'question_for_user', 'original_prompt', 'completed_tasks', 'parsed_tasks',
+                       'uploaded_files', 'task_plan']:
+                if hasattr(state, key):
+                    state_dict[key] = getattr(state, key)
+                # Also try to get from __getitem__ if it's a dict-like object
+                try:
+                    state_dict[key] = state[key]
+                except (KeyError, TypeError):
+                    pass
+        else:
+            state_dict = state
         
-        # Convert messages to a standard format
-        formatted_messages = []
-        for msg in messages:
-            if isinstance(msg, BaseMessage):
-                msg_dict = {
-                    "id": getattr(msg, "id", str(time.time())),
-                    "type": "user" if isinstance(msg, HumanMessage) else "assistant" if isinstance(msg, AIMessage) else "system",
-                    "content": msg.content,
-                    "timestamp": getattr(msg, "timestamp", time.time()),
-                    "metadata": getattr(msg, "metadata", {})
-                }
-                formatted_messages.append(msg_dict)
-            elif isinstance(msg, dict):
-                msg_dict = {
-                    "id": msg.get("id", str(time.time())),
-                    "type": msg.get("type", "system"),
-                    "content": msg.get("content", ""),
-                    "timestamp": msg.get("timestamp", time.time()),
-                    "metadata": msg.get("metadata", {})
-                }
-                formatted_messages.append(msg_dict)
+        # Create the fully serializable state object
+        serializable_state = get_serializable_state(state_dict, thread_id)
 
-        # Create the conversation state
-        conversation_state = {
-            "messages": formatted_messages,
-            "final_response": final_response,
-            "thread_id": thread_id,
-            "timestamp": time.time()
-        }
-
-        # Write to file in consistent JSON format
+        # Write to file in a consistent JSON format
         with open(history_path, "w", encoding="utf-8") as f:
-            json.dump(conversation_state, f, ensure_ascii=False, indent=2, cls=CustomJSONEncoder)
+            json.dump(serializable_state, f, ensure_ascii=False, indent=2)
             
-        logger.info(f"Successfully saved conversation history for thread {thread_id} with {len(formatted_messages)} messages")
+        logger.info(f"Successfully saved conversation history for thread {thread_id}.")
 
     except Exception as e:
-        logger.error(f"Conversation {thread_id}: Failed to write conversation history to {history_path}: {e}")
+        logger.error(f"Failed to write conversation history for {thread_id} to {history_path}: {e}")
         logger.exception("Full error details:")
 
     return {}
@@ -1472,10 +1630,14 @@ def analyze_request(state: State):
             "analysis_reasoning": response.reasoning
         }
         
+        # Explicitly handle final_response to ensure it's cleared for complex requests
+        # LangGraph might ignore None values, so we use an empty string to clear it
         if not response.needs_complex_processing and response.response:
             result["final_response"] = response.response
         else:
-            result["final_response"] = None
+            # For complex requests, explicitly clear the final_response
+            # Using an empty string instead of None to ensure it's cleared
+            result["final_response"] = ""
         
         return result
         
@@ -1484,7 +1646,7 @@ def analyze_request(state: State):
         return {
             "needs_complex_processing": True, 
             "analysis_reasoning": f"Analysis failed: {e}",
-            "final_response": None
+            "final_response": ""  # Explicitly clear for error case
         }
 
 

@@ -1,0 +1,33 @@
+{
+  "thread_id": "231c9b7c-00fa-48c3-9fc6-72c63f8d0d76",
+  "status": "completed",
+  "messages": [
+    {
+      "type": "ai",
+      "data": {
+        "content": "Hello! How can I assist you today?",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "ai",
+        "name": null,
+        "id": "2032bdd6-8cf4-4a9c-8d96-58e81f3a0250",
+        "example": false,
+        "tool_calls": [],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      }
+    }
+  ],
+  "task_agent_pairs": [],
+  "final_response": "Hello! How can I assist you today?",
+  "pending_user_input": false,
+  "question_for_user": null,
+  "metadata": {
+    "original_prompt": null,
+    "completed_tasks": [],
+    "parsed_tasks": []
+  },
+  "uploaded_files": [],
+  "plan": [],
+  "timestamp": 1760059278.3146133
+}

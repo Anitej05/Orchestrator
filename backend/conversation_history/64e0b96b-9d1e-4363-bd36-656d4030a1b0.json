@@ -1,0 +1,14 @@
+{
+  "messages": [
+    {
+      "id": "ba1dd375-9ef9-480e-bf2e-3d2b72acae71",
+      "type": "assistant",
+      "content": "I need more information to help you with: 'Please analyze and execute the requested workflow'. Could you please provide more specific details about what you'd like me to do?",
+      "timestamp": 1759943991.4279335,
+      "metadata": {}
+    }
+  ],
+  "final_response": null,
+  "thread_id": "64e0b96b-9d1e-4363-bd36-656d4030a1b0",
+  "timestamp": 1759943991.4279335
+}

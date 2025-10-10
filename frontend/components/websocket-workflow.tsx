@@ -181,7 +181,7 @@ export function WebSocketWorkflow({
                         <h5 className="font-medium text-blue-800 mb-2">Workflow Tasks:</h5>
                         <div className="space-y-2">
                           {message.metadata.task_agent_pairs.map((pair, index) => (
-                            <div key={index} className="flex items-center justify-between p-2 bg-white rounded border">
+                            <div key={`${message.id}-task-${index}`} className="flex items-center justify-between p-2 bg-white rounded border">
                               <span className="text-sm text-gray-900">
                                 {pair.task_name.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
                               </span>

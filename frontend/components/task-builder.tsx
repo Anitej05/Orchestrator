@@ -3,7 +3,8 @@
 
 import { useToast } from "@/hooks/use-toast"
 import { useEffect } from "react"
-import type { ProcessResponse, TaskAgentPair, ConversationState } from "@/lib/types"
+import type { ProcessResponse, TaskAgentPair } from "@/lib/types"
+import { useConversationStore } from "@/lib/conversation-store"
 import WorkflowOrchestration from "./workflow-orchestration"
 import dynamic from "next/dynamic"
  
@@ -41,13 +42,6 @@ interface TaskBuilderProps {
     apiResponseData: ApiResponse | null;
     onThreadIdUpdate?: (threadId: string) => void;
     onExecutionResultsUpdate?: (results: ExecutionResult[]) => void;
-  // Conversation props (lifted from parent)
-  conversationState: ConversationState;
-  isConversationLoading: boolean;
-  startConversation: (input: string, files?: File[]) => Promise<void>;
-  continueConversation: (input: string) => Promise<void>;
-  resetConversation: () => void;
-  loadConversation: (threadId: string) => Promise<void>;
 }
 
 export default function TaskBuilder({
@@ -59,22 +53,18 @@ export default function TaskBuilder({
     apiResponseData,
     onThreadIdUpdate,
     onExecutionResultsUpdate
-    ,
-    conversationState,
-    isConversationLoading,
-    startConversation,
-    continueConversation,
-    resetConversation,
-    loadConversation
 }: TaskBuilderProps) {
   const { toast } = useToast()
+  
+  // Get conversation state from Zustand store
+  const conversationState = useConversationStore();
+  const isConversationLoading = useConversationStore((state: any) => state.isLoading);
+  const { startConversation, continueConversation, resetConversation } = useConversationStore((state: any) => state.actions);
 
   useEffect(() => {
-    // Debug helper: log conversation messages when they arrive so we can confirm
-    // the parent `useConversation` state is being passed correctly.
-    // Leave as console.debug to avoid spamming production logs; remove later.
+    // Debug helper: log conversation messages
     if (!conversationState) {
-      console.debug('TaskBuilder: no conversationState prop received');
+      console.debug('TaskBuilder: no conversationState from store');
       return;
     }
 
@@ -85,7 +75,6 @@ export default function TaskBuilder({
 
     console.debug('TaskBuilder: received conversation messages length=', conversationState.messages.length);
     if (conversationState.messages.length > 0) {
-      // Log only the first few messages to avoid huge logs
       console.debug('TaskBuilder: sample messages', conversationState.messages.slice(0, 5));
     }
   }, [conversationState]);

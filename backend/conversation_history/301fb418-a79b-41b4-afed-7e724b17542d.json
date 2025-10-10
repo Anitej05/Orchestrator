@@ -1,0 +1,33 @@
+{
+  "thread_id": "301fb418-a79b-41b4-afed-7e724b17542d",
+  "status": "completed",
+  "messages": [
+    {
+      "type": "ai",
+      "data": {
+        "content": "I can assist with a wide range of tasks, such as answering questions, providing explanations, summarizing text, drafting emails or documents, generating ideas, tutoring in various subjects, helping with programming and debugging code, translating languages, offering creative writing prompts, and much more.",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "ai",
+        "name": null,
+        "id": "9ed8af1d-b39c-4fbc-bc57-9975a7242974",
+        "example": false,
+        "tool_calls": [],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      }
+    }
+  ],
+  "task_agent_pairs": [],
+  "final_response": "I can assist with a wide range of tasks, such as answering questions, providing explanations, summarizing text, drafting emails or documents, generating ideas, tutoring in various subjects, helping with programming and debugging code, translating languages, offering creative writing prompts, and much more.",
+  "pending_user_input": false,
+  "question_for_user": null,
+  "metadata": {
+    "original_prompt": null,
+    "completed_tasks": [],
+    "parsed_tasks": []
+  },
+  "uploaded_files": [],
+  "plan": [],
+  "timestamp": 1760059456.856374
+}

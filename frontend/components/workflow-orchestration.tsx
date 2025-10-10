@@ -526,7 +526,7 @@ export default function WorkflowOrchestration({
           </div>
           <div className="space-y-3">
             {dataSources.map((source, index) => (
-              <div key={index} className="flex items-center space-x-3">
+              <div key={`${source.name}-${index}`} className="flex items-center space-x-3">
                 <div
                   className={`w-2 h-2 rounded-full ${source.status === "connected" ? "bg-green-500" : "bg-yellow-500"}`}
                 />
@@ -559,7 +559,7 @@ export default function WorkflowOrchestration({
           </div>
           <div className="space-y-3">
             {dataSources.map((source, index) => (
-              <div key={index} className="flex items-center space-x-3">
+              <div key={`${source.name}-${index}`} className="flex items-center space-x-3">
                 <div className="w-2 h-2 rounded-full bg-green-500" />
                 <span className="text-2xl">{source.icon}</span>
                 <div className="flex-1">
@@ -602,7 +602,7 @@ export default function WorkflowOrchestration({
           </div>
           <div className="space-y-2">
             {taskSegments.map((segment, index) => (
-              <div key={index} className="flex items-center space-x-2">
+              <div key={`${segment.name}-${index}`} className="flex items-center space-x-2">
                 <div className="w-2 h-2 rounded-full bg-blue-500 mt-2 flex-shrink-0" />
                 <span className="text-gray-700">
                   {segment.name}{" "}
@@ -625,7 +625,7 @@ export default function WorkflowOrchestration({
           </div>
           <div className="space-y-4">
             {(taskInsights.length > 0 ? taskInsights : generateTaskInsights()).map((insight, index) => (
-              <div key={index} className="flex items-start space-x-3">
+              <div key={`insight-${index}`} className="flex items-start space-x-3">
                 <div className="w-2 h-2 rounded-full bg-purple-500 mt-2 flex-shrink-0" />
                 <p className="text-gray-700 leading-relaxed">{insight.text}</p>
               </div>

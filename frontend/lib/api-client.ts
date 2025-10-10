@@ -210,12 +210,12 @@ export async function startConversation(prompt: string, thread_id?: string, uplo
   }
 }
 
-export async function continueConversation(response: string, threadId: string): Promise<ProcessResponse> {
+export async function continueConversation(response: string, threadId: string, uploadedFiles?: any[]): Promise<ProcessResponse> {
   try {
     const apiResponse = await fetch(`${API_BASE_URL}/api/chat/continue`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ response, thread_id: threadId })
+      body: JSON.stringify({ response, thread_id: threadId, files: uploadedFiles })
     });
     
     if (!apiResponse.ok) {

@@ -46,7 +46,7 @@ export interface ConversationStatus {
 }
 
 export interface ConversationState {
-  thread_id: string;
+  thread_id?: string;
   status: 'pending_user_input' | 'completed' | 'processing' | 'idle' | 'error';
   messages: Message[];
   isWaitingForUser: boolean;
@@ -55,6 +55,7 @@ export interface ConversationState {
   final_response?: string;
   metadata?: any;
   uploaded_files?: FileObject[];
+  plan?: any[];
 }
 
 export interface Attachment {

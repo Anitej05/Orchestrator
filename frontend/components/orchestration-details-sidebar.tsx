@@ -8,9 +8,9 @@ import { DollarSign, Clock, FileIcon } from "lucide-react"
 import CollapsibleSection from "@/components/CollapsibleSection"
 import PlanGraph from "@/components/PlanGraph"
 import { useEffect, useState } from "react"
-import { fetchPlanFile } from "@/lib/api-client"
 import { InteractiveStarRating, StarRating } from "@/components/ui/star-rating"
-import type { Agent, Message } from "@/lib/types"
+import { useConversationStore } from "@/lib/conversation-store"
+import type { Agent, Message, TaskAgentPair } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
 
@@ -27,8 +27,6 @@ interface ExecutionResult {
 interface OrchestrationDetailsSidebarProps {
     executionResults: ExecutionResult[],
     threadId: string | null;
-    taskAgentPairs: { primary: Agent }[];
-    messages: Message[];
     className?: string;
     onThreadIdUpdate?: (threadId: string) => void;
 }
@@ -38,14 +36,71 @@ interface Plan {
     completedTasks: { task: string; result: string; }[];
 }
 
-export default function OrchestrationDetailsSidebar({ executionResults, threadId, taskAgentPairs, messages, className }: OrchestrationDetailsSidebarProps) {
+import { forwardRef, useImperativeHandle } from 'react';
+
+export interface OrchestrationDetailsSidebarRef {
+  refreshPlan: () => void;
+}
+
+const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, OrchestrationDetailsSidebarProps>(
+ ({ executionResults, threadId, className, onThreadIdUpdate }, ref) => {
     const [plan, setPlan] = useState<Plan>({ pendingTasks: [], completedTasks: [] });
     const [isLoadingPlan, setIsLoadingPlan] = useState(false);
     const [agents, setAgents] = useState<Agent[]>([]);
+    
+    // Get conversation state from Zustand store
+    const conversationState = useConversationStore();
+    const taskAgentPairs = conversationState.task_agent_pairs || [];
+    const messages = conversationState.messages || [];
+    const uploadedFiles = conversationState.uploaded_files || [];
+    const planData = conversationState.plan || [];
+
+    // Process plan data from conversation store
+    useEffect(() => {
+        // Always update the plan when planData or metadata changes
+        const pendingTasks: Plan['pendingTasks'] = [];
+        const completedTasks: Plan['completedTasks'] = [];
+        
+        // Process pending tasks from planData
+        if (planData && planData.length > 0) {
+            planData.forEach((batch: any) => {
+                if (Array.isArray(batch)) {
+                    batch.forEach((task: any) => {
+                        if (task && typeof task === 'object') {
+                            pendingTasks.push({
+                                task: task.task_name || 'Unknown Task',
+                                description: task.task_description || 'No description',
+                                agent: task.primary?.id || task.primary?.name || 'Unknown Agent'
+                            });
+                        }
+                    });
+                }
+            });
+        }
+        
+        // Process completed tasks from conversationState.metadata
+        const completedTasksData = conversationState.metadata?.completed_tasks || [];
+        if (completedTasksData && completedTasksData.length > 0) {
+            completedTasksData.forEach((task: any) => {
+                if (task && typeof task === 'object') {
+                    completedTasks.push({
+                        task: task.task_name || 'Unknown Task',
+                        result: typeof task.result === 'string' ? task.result : JSON.stringify(task.result, null, 2)
+                    });
+                }
+            });
+        }
+        
+        setPlan({ 
+            pendingTasks: pendingTasks, 
+            completedTasks: completedTasks 
+        });
+        setIsLoadingPlan(false);
+    }, [planData, conversationState.metadata]);
 
     useEffect(() => {
-        const uniqueAgentsFromPairs = Array.from(new Set(taskAgentPairs.map(pair => pair.primary.id)))
-            .map(id => taskAgentPairs.find(pair => pair.primary.id === id)!.primary);
+        const uniqueAgentsFromPairs = Array.from(new Set(taskAgentPairs.map((pair: TaskAgentPair) => pair.primary.id)))
+            .map(id => taskAgentPairs.find((pair: TaskAgentPair) => pair.primary.id === id)!.primary);
         setAgents(uniqueAgentsFromPairs);
     }, [taskAgentPairs]);
 
@@ -57,73 +112,36 @@ export default function OrchestrationDetailsSidebar({ executionResults, threadId
         );
     };
 
+    // Simplified refreshPlan function that just sets loading state
+    const refreshPlan = async () => {
+        setIsLoadingPlan(true);
+        // In a real implementation, you might want to trigger a refresh of the conversation store here
+        // For now, we'll just reset the loading state
+        setTimeout(() => setIsLoadingPlan(false), 500);
+    };
 
-    useEffect(() => {
-        const loadPlan = async () => {
-            if (threadId) {
-                setIsLoadingPlan(true);
-                try {
-                    const content = await fetchPlanFile(threadId);
-                    if (content) {
-                        const pendingTasks: Plan['pendingTasks'] = [];
-                        const completedTasks: Plan['completedTasks'] = [];
-
-                        const pendingSectionMatch = content.match(/## Pending Tasks([\s\S]*?)## Completed Tasks/);
-                        const pendingSection = pendingSectionMatch ? pendingSectionMatch[1] : '';
-
-                        const completedSectionMatch = content.match(/## Completed Tasks([\s\S]*)/);
-                        const completedSection = completedSectionMatch ? completedSectionMatch[1] : '';
-
-                        if (pendingSection) {
-                            const taskRegex = /- \*\*Task\*\*: \`(.+?)\`\s*-\s+\*\*Description\*\*:\s(.*?)\s*-\s+\*\*Agent\*\*:\s(.*?)(?=\n- \*\*Task\*\*|\n##|$)/gs;
-                            let match;
-                            while ((match = taskRegex.exec(pendingSection)) !== null) {
-                                pendingTasks.push({
-                                    task: match[1].trim(),
-                                    description: match[2].trim(),
-                                    agent: match[3].trim()
-                                });
-                            }
-                        }
-
-                        if (completedSection) {
-                            const taskRegex = /- \*\*Task\*\*: \`(.+?)\`\s*-\s+\*\*Result\*\*:\s*```json\s*([\s\S]*?)\s*```/g;
-                            let match;
-                            while ((match = taskRegex.exec(completedSection)) !== null) {
-                                let formattedResult = match[2].trim();
-                                try {
-                                    const parsedJson = JSON.parse(formattedResult);
-                                    formattedResult = JSON.stringify(parsedJson, null, 2);
-                                } catch (e) {
-                                    // Keep as is if not valid JSON
-                                }
-                                completedTasks.push({ task: match[1].trim(), result: formattedResult });
-                            }
-                        }
-
-                        setPlan({ pendingTasks, completedTasks });
-                    } else {
-                        setPlan({ pendingTasks: [], completedTasks: [] });
-                    }
-                } catch (error) {
-                    console.error("Failed to load plan:", error);
-                    setPlan({ pendingTasks: [], completedTasks: [] });
-                } finally {
-                    setIsLoadingPlan(false);
-                }
-            } else {
-                setPlan({ pendingTasks: [], completedTasks: [] });
-            }
-        };
-
-        loadPlan();
-
-    }, [threadId, messages.length, taskAgentPairs.length]);
 
     const totalCost = executionResults.reduce((sum, result) => sum + result.cost, 0)
     const totalTime = executionResults.reduce((sum, result) => sum + result.executionTime, 0)
     const allTasks = [...plan.pendingTasks, ...plan.completedTasks];
-    const allAttachments = messages.flatMap(m => m.attachments || []);
+    // Collect attachments from messages and uploaded files
+    const messageAttachments = messages.flatMap((m: Message) => m.attachments || []);
+    const fileAttachments = (uploadedFiles || []).map((file: any) => ({
+      name: file.file_name || file.name || 'Unknown File',
+      type: file.file_type || file.type || 'unknown',
+      content: file.content || ''
+    }));
+    
+    // Combine attachments and deduplicate based on name, type, and content
+    // This prevents duplicates while preserving unique files with the same name
+    const allAttachments = [...messageAttachments, ...fileAttachments].filter(
+      (att, index, self) => 
+        index === self.findIndex(a => 
+          a.name === att.name && 
+          a.type === att.type && 
+          a.content === att.content
+        )
+    );
 
     const hasResults = executionResults.length > 0 || allTasks.length > 0
 
@@ -182,7 +200,7 @@ export default function OrchestrationDetailsSidebar({ executionResults, threadId
                                             </TableHeader>
                                             <TableBody>
                                                 {allTasks.map((task, index) => (
-                                                    <TableRow key={index}>
+                                                    <TableRow key={`${task.task}-${index}`}>
                                                         <TableCell className="font-semibold">{task.task}</TableCell>
                                                         <TableCell className="text-gray-600">{"description" in task && task.description}</TableCell>
                                                     </TableRow>
@@ -225,15 +243,29 @@ export default function OrchestrationDetailsSidebar({ executionResults, threadId
                     )}
                 </TabsContent>
                 <TabsContent value="plan" className="flex-1 flex items-center justify-center">
-                    <PlanGraph planData={plan} />
+                    <PlanGraph key={JSON.stringify(plan)} planData={plan} />
                 </TabsContent>
                 <TabsContent value="attachments" className="flex-1 overflow-y-auto mt-4">
                     {allAttachments.length > 0 ? (
                         <ul className="space-y-2">
-                        {allAttachments.map((att, index) => (
-                            <li key={index} className="flex items-center gap-2 text-sm p-2 rounded-md bg-white border">
-                            <FileIcon className="w-4 h-4 text-gray-500" />
-                            <span className="truncate" title={att.name}>{att.name}</span>
+                        {allAttachments.map((att: any, index: number) => (
+                            <li key={`${att.name}-${index}`} className="flex items-center gap-2 text-sm p-2 rounded-md bg-white border">
+                            {att.type.startsWith('image/') ? (
+                                <>
+                                    <FileIcon className="w-4 h-4 text-gray-500" />
+                                    <div className="flex flex-col">
+                                        <span className="truncate" title={att.name}>{att.name}</span>
+                                        {att.content && (
+                                            <img src={att.content} alt={att.name} className="max-w-xs max-h-32 rounded mt-1" />
+                                        )}
+                                    </div>
+                                </>
+                            ) : (
+                                <>
+                                    <FileIcon className="w-4 h-4 text-gray-500" />
+                                    <span className="truncate" title={att.name}>{att.name}</span>
+                                </>
+                            )}
                             </li>
                         ))}
                         </ul>
@@ -247,4 +279,6 @@ export default function OrchestrationDetailsSidebar({ executionResults, threadId
             </Tabs>
         </aside>
     )
-}
+});
+
+export default OrchestrationDetailsSidebar;

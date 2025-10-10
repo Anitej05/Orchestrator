@@ -85,6 +85,7 @@ class UserResponse(BaseModel):
     """Model for user responses to orchestrator questions"""
     response: str
     thread_id: str
+    files: Optional[List[FileObject]] = None
 
 class ConversationStatus(BaseModel):
     """Model for conversation status responses"""
@@ -303,7 +304,7 @@ async def upload_files(files: List[UploadFile] = File(...)):
 
 # --- Unified Orchestration Service ---
 async def execute_orchestration(
-    prompt: str,
+    prompt: Optional[str],
     thread_id: str,
     user_response: Optional[str] = None,
     files: Optional[List[FileObject]] = None,
@@ -311,7 +312,7 @@ async def execute_orchestration(
 ):
     """
     Unified orchestration logic that correctly persists and merges file context
-    across all turns in a conversation. This is the final, corrected version.
+    across all turns in a conversation. Simplified and more robust version.
     """
     logger.info(f"Starting orchestration for thread_id: {thread_id}")
 
@@ -324,10 +325,8 @@ async def execute_orchestration(
     current_conversation = current_checkpoint.get("values", {}) if current_checkpoint else {}
 
     # --- State Initialization ---
-    if current_conversation and user_response:
-        #
-        # CASE 1: Continuing an interactive workflow where the user answered a question.
-        #
+    if user_response:
+        # Continuing an interactive workflow where the user answered a question
         logger.info(f"Resuming conversation for thread_id: {thread_id} with user response.")
         initial_state = dict(current_conversation)  # Convert to dict if it's a State object
         initial_state["user_response"] = user_response
@@ -335,19 +334,20 @@ async def execute_orchestration(
         initial_state["question_for_user"] = None
         initial_state["parse_retry_count"] = 0
         if "original_prompt" in initial_state:
-            initial_state["original_prompt"] = f"{initial_state['original_prompt']}\\n\\nAdditional context from user: {user_response}"
+            initial_state["original_prompt"] = f"{initial_state['original_prompt']}\n\nAdditional context from user: {user_response}"
         else:
             initial_state["original_prompt"] = user_response
+            
+        # Clear any previous final response to avoid confusion
+        initial_state["final_response"] = None
 
-    elif current_conversation and prompt:
-        #
-        # CASE 2: A new prompt is sent in an existing conversation thread.
-        #
+    elif prompt and current_conversation:
+        # A new prompt is sent in an existing conversation thread
         logger.info(f"Continuing conversation for thread_id: {thread_id} with new prompt.")
         initial_state = {
             # Carry over essential long-term memory from the previous turn
             "messages": current_conversation.get("messages", []) + [HumanMessage(content=prompt)],
-            "completed_tasks": current_conversation.get("completed_tasks", []),
+            "completed_tasks": [],  # Start fresh for new prompt, but keep conversation history
             "uploaded_files": current_conversation.get("uploaded_files", []), # Persist files
 
             # Reset short-term memory for the new task
@@ -363,21 +363,17 @@ async def execute_orchestration(
             "user_response": None,
             "parsing_error_feedback": None,
             "parse_retry_count": 0,
-            "needs_complex_processing": False,
+            "needs_complex_processing": None,  # Let analyze_request determine this
             "analysis_reasoning": None,
         }
     
     elif current_conversation:
-        #
-        # CASE 3: Resuming without a new prompt or user response (e.g., status check).
-        #
+        # Resuming without a new prompt or user response (e.g., status check)
         initial_state = dict(current_conversation) # Convert to dict if it's a State object
         logger.info(f"Checking status for thread_id: {thread_id}")
 
     else:
-        #
-        # CASE 4: A brand new conversation.
-        #
+        # A brand new conversation
         if not prompt:
             raise ValueError("Prompt is required for new conversations")
         logger.info(f"Starting new conversation for thread_id: {thread_id}")
@@ -397,12 +393,12 @@ async def execute_orchestration(
             "user_response": None,
             "parsing_error_feedback": None,
             "parse_retry_count": 0,
-            "needs_complex_processing": False,
+            "needs_complex_processing": None,  # Let analyze_request determine this
             "analysis_reasoning": None,
         }
 
-    # --- **FIX**: Unified File Merging Logic ---
-    # This block now runs for EVERY turn, ensuring new files are always added to the state.
+    # --- File Merging Logic ---
+    # This block runs for EVERY turn, ensuring new files are always added to the state
     if files:
         # Use a dictionary keyed by file_path to merge lists and avoid duplicates
         file_map = {f['file_path']: f for f in initial_state.get("uploaded_files", [])}
@@ -421,14 +417,15 @@ async def execute_orchestration(
         if stream_callback:
             # Streaming mode for WebSocket
             node_count = 0
-            expected_nodes = ["parse_prompt", "agent_directory_search", "rank_agents", "plan_execution", "execute_batch"]
+            expected_nodes = ["analyze_request", "parse_prompt", "agent_directory_search", "rank_agents", "plan_execution", "execute_batch", "aggregate_responses"]
 
             async for event in graph.astream(initial_state, config=config, stream_mode="updates"):
                 for node_name, node_output in event.items():
                     node_count += 1
-                    progress = min((node_count / len(expected_nodes)) * 100, 10) if expected_nodes else 50
+                    # More accurate progress calculation
+                    progress = min((node_count / len(expected_nodes)) * 100, 100) if expected_nodes else 50
                     if isinstance(node_output, dict):
-                        final_state = node_output
+                        final_state = {**final_state, **node_output} if final_state else node_output
                     await stream_callback(node_name, node_output, progress, node_count, thread_id)
                     if isinstance(node_output, dict) and node_output.get("pending_user_input"):
                         logger.info(f"Workflow paused for user input in thread_id: {thread_id}")
@@ -439,52 +436,21 @@ async def execute_orchestration(
             # Single response mode for HTTP
             final_state = await graph.ainvoke(initial_state, config=config)
 
-        # Store the final state after the graph run and save to file
+        # Store the final state after the graph run
         with store_lock:
             conversation_store[thread_id] = final_state.copy()
-            # Save the final state to a file using the orchestrator's save routine
-            history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
-            try:
-                # Import locally to avoid circular import issues during module import time
-                import orchestrator.graph as orchestrator_graph
-                try:
-                    orchestrator_graph.save_conversation_history(final_state, {"configurable": {"thread_id": thread_id}})
-                except Exception as e:
-                    # If the orchestrator writer fails, fall back to a robust writer below
-                    logger.warning(f"save_conversation_history failed for {thread_id}: {e}")
-                    raise
-            except Exception:
-                # Fallback writer: make a best-effort serializable dict and write it
-                serializable = serialize_complex_object(final_state)
-                # If serialize_complex_object returned a string (legacy fallback), try to interpret it
-                if isinstance(serializable, str):
-                    try:
-                        parsed = json.loads(serializable)
-                        serializable = parsed
-                    except Exception:
-                        # As a last resort, wrap the raw string so JSON is valid and searchable
-                        serializable = {"raw_state": serializable}
-
-                try:
-                    with open(history_path, "w", encoding="utf-8") as f:
-                        json.dump(serializable, f, ensure_ascii=False, indent=2)
-                except Exception as e:
-                    logger.error(f"Failed to write conversation history fallback for {thread_id}: {e}")
+            
+        # Save conversation history using orchestrator's save routine
+        try:
+            from orchestrator.graph import save_conversation_history
+            save_conversation_history(final_state, {"configurable": {"thread_id": thread_id}})
+        except Exception as e:
+            logger.error(f"Failed to save conversation history for {thread_id}: {e}")
 
         # Ensure a plan file is saved for every conversation
         try:
             from orchestrator.graph import save_plan_to_file
-            # Make sure the state has the required structure for plan saving
-            plan_state = {**final_state}
-            if "task_plan" not in plan_state:
-                plan_state["task_plan"] = []
-            if "original_prompt" not in plan_state:
-                plan_state["original_prompt"] = prompt if prompt else ""
-            if "uploaded_files" not in plan_state:
-                plan_state["uploaded_files"] = []
-            if "completed_tasks" not in plan_state:
-                plan_state["completed_tasks"] = []
-            save_plan_to_file({**plan_state, "thread_id": thread_id})
+            save_plan_to_file({**final_state, "thread_id": thread_id})
         except Exception as e:
             logger.error(f"Failed to save plan file for thread {thread_id}: {e}")
 
@@ -667,6 +633,7 @@ async def continue_conversation(user_response: UserResponse):
             prompt=None, # No new prompt needed
             thread_id=user_response.thread_id,
             user_response=user_response.response,
+            files=user_response.files,  # Pass files if provided
             stream_callback=None
         )
 
@@ -793,8 +760,8 @@ async def get_all_conversations():
 @app.get("/api/conversations/{thread_id}")
 async def get_conversation_history(thread_id: str):
     """
-    Retrieves the complete conversation state including messages, metadata, and plan for a given thread.
-    Returns a consistent format with messages, thread_id, task_agent_pairs, final_response, and attachments.
+    Retrieves the full, standardized conversation state from its JSON file.
+    This is the single source of truth for a conversation's history.
     """
     history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
     
@@ -803,123 +770,17 @@ async def get_conversation_history(thread_id: str):
         
     try:
         with open(history_path, "r", encoding="utf-8") as f:
-            history = json.load(f)
-        
-        # Initialize response structure
-        response = {
-            "thread_id": thread_id,
-            "messages": [],
-            "task_agent_pairs": [],
-            "final_response": None,
-            "metadata": {},
-            "uploaded_files": []
-        }
-        
-        # Extract data based on history format
-        if isinstance(history, dict):
-            # Get messages
-            messages = history.get('messages', [])
-            formatted_messages = []
-            
-            for msg in messages:
-                formatted_msg = {}
-                
-                if isinstance(msg, dict):
-                    # Already a dict - normalize it
-                    # Check multiple possible locations for type
-                    msg_type = msg.get('type') or msg.get('data', {}).get('type', 'system')
-                    
-                    # Also check if it's a serialized LangChain message with __class__ info
-                    if 'id' in msg and isinstance(msg.get('id'), list):
-                        # This is a serialized LangChain message format
-                        msg_class = msg['id'][0] if msg['id'] else ''
-                        if 'HumanMessage' in msg_class:
-                            msg_type = 'human'
-                        elif 'AIMessage' in msg_class:
-                            msg_type = 'ai'
-                    
-                    # Map LangChain types to our frontend types
-                    if msg_type in ['human', 'HumanMessage', 'user']:
-                        formatted_msg['type'] = 'user'
-                    elif msg_type in ['ai', 'AIMessage', 'assistant']:
-                        formatted_msg['type'] = 'assistant'
-                    else:
-                        formatted_msg['type'] = 'system'
-                    
-                    # Extract content
-                    if 'content' in msg:
-                        formatted_msg['content'] = msg['content']
-                    elif 'data' in msg and 'content' in msg['data']:
-                        formatted_msg['content'] = msg['data']['content']
-                    elif 'kwargs' in msg and 'content' in msg['kwargs']:
-                        formatted_msg['content'] = msg['kwargs']['content']
-                    else:
-                        formatted_msg['content'] = ''
-                    
-                    # Extract or generate ID
-                    msg_id = msg.get('id')
-                    if isinstance(msg_id, list):
-                        # LangChain format - extract the actual ID
-                        msg_id = msg_id[-1] if msg_id else None
-                    if not msg_id:
-                        msg_id = msg.get('data', {}).get('id', f'msg-{len(formatted_messages)}')
-                    formatted_msg['id'] = msg_id
-                    
-                    # Extract timestamp
-                    timestamp = msg.get('timestamp') or msg.get('data', {}).get('timestamp')
-                    formatted_msg['timestamp'] = timestamp if timestamp else None
-                    
-                    # Extract metadata
-                    metadata = msg.get('metadata', msg.get('data', {}).get('metadata', {}))
-                    if metadata:
-                        formatted_msg['metadata'] = metadata
-                    
-                    # Extract attachments
-                    attachments = msg.get('attachments', msg.get('data', {}).get('attachments'))
-                    if attachments:
-                        formatted_msg['attachments'] = attachments
-                    
-                    formatted_messages.append(formatted_msg)
-            
-            response['messages'] = formatted_messages
-            
-            # Extract other state information
-            response['task_agent_pairs'] = history.get('task_agent_pairs', [])
-            response['final_response'] = history.get('final_response')
-            response['uploaded_files'] = history.get('uploaded_files', [])
-            
-            # Include any additional metadata
-            if 'completed_tasks' in history:
-                response['metadata']['completed_tasks'] = history['completed_tasks']
-            if 'parsed_tasks' in history:
-                response['metadata']['parsed_tasks'] = history['parsed_tasks']
-                
-        elif isinstance(history, list):
-            # Legacy format - list of messages
-            formatted_messages = []
-            for msg in history:
-                if isinstance(msg, dict):
-                    formatted_msg = {
-                        'id': msg.get('id', f'msg-{len(formatted_messages)}'),
-                        'type': msg.get('type', 'system'),
-                        'content': msg.get('content', ''),
-                        'timestamp': msg.get('timestamp')
-                    }
-                    if 'metadata' in msg:
-                        formatted_msg['metadata'] = msg['metadata']
-                    if 'attachments' in msg:
-                        formatted_msg['attachments'] = msg['attachments']
-                    formatted_messages.append(formatted_msg)
-            response['messages'] = formatted_messages
-        
-        return response
+            # The file already contains the standardized, serializable state.
+            # No further processing is needed.
+            history_data = json.load(f)
+        return history_data
         
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse conversation history for {thread_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to parse conversation history")
+        raise HTTPException(status_code=500, detail="Failed to parse conversation history file.")
     except Exception as e:
         logger.error(f"Error loading conversation history for {thread_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Error loading conversation: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred while loading the conversation: {str(e)}")
 
 @app.get("/api/plan/{thread_id}", response_model=PlanResponse)
 async def get_agent_plan(thread_id: str):
@@ -961,194 +822,148 @@ async def websocket_chat(websocket: WebSocket):
     Now supports interactive workflows with user input.
     """
     await websocket.accept()
-    thread_id = str(uuid.uuid4())
-    logger.info(f"WebSocket connection established with thread_id: {thread_id}")
-
+    thread_id = None  # Initialize thread_id to None
+    
     try:
-        # Wait for initial message from client with timeout
-        try:
-            data = await websocket.receive_json()
-        except Exception as e:
-            await websocket.send_json({
-                "node": "__error__",
-                "error": "Failed to receive initial message",
-                "thread_id": thread_id,
-                "timestamp": time.time()
-            })
-            return
-
-        prompt = data.get("prompt")
-        user_response = data.get("user_response")  # For continuing conversations
-
-        if not prompt and not user_response:
-            await websocket.send_json({
-                "node": "__error__",
-                "error": "Missing 'prompt' field for new conversation or 'user_response' for continuing",
-                "thread_id": thread_id,
-                "timestamp": time.time()
-            })
-            return
-
-        logger.info(f"Received {'prompt' if prompt else 'user response'} for thread_id {thread_id}")
-
-        # Send acknowledgment
-        await websocket.send_json({
-            "node": "__start__",
-            "thread_id": thread_id,
-            "message": "Starting agent orchestration..." if prompt else "Continuing conversation...",
-            "data": {
-                "original_prompt": prompt,
-                "user_response": user_response,
-                "status": "initializing",
-                "timestamp": time.time()
-            }
-        })
-
-        # Define stream callback for WebSocket updates
-        async def stream_callback(node_name: str, node_output, progress: float, node_count: int, thread_id: str):
+        while True:  # Keep the connection open for multiple messages
+            # Wait for message from client
             try:
-                # Process node data using unified helper
-                final_data = process_node_data(node_name, node_output, progress, node_count, thread_id)
-
-                # Send enhanced node update
-                await websocket.send_json({
-                    "node": node_name,
-                    "data": final_data,
-                    "thread_id": thread_id,
-                    "status": "completed",
-                    "timestamp": time.time()
-                })
-                logger.info(f"Streamed update from node '{node_name}' (#{node_count}) for thread_id {thread_id} - Progress: {progress:.1f}%")
-
-            except Exception as process_error:
-                logger.warning(f"Failed to process data from node '{node_name}': {process_error}")
-                # Send a simplified message instead
-                try:
-                    await websocket.send_json({
-                        "node": node_name,
-                        "data": {
-                            "status": "completed",
-                            "message": f"Node {node_name} completed successfully",
-                            "warning": f"Data processing failed: {str(process_error)}",
-                            "progress_percentage": round(progress, 1),
-                            "node_sequence": node_count,
-                            "description": f"Node {node_name} processed with warning"
-                        },
-                        "thread_id": thread_id,
-                        "timestamp": time.time()
-                    })
-                except Exception as send_error:
-                    logger.error(f"Failed to send fallback message for node '{node_name}': {send_error}")
-
-        # Use unified orchestration service with streaming
-        final_state = await execute_orchestration(
-            prompt=prompt,
-            thread_id=thread_id,
-            user_response=user_response,
-            stream_callback=stream_callback
-        )
-
-        # Check if workflow is paused for user input
-        if final_state.get("pending_user_input"):
-            await websocket.send_json({
-                "node": "__user_input_required__",
-                "thread_id": thread_id,
-                "question_for_user": final_state.get("question_for_user"),
-                "message": "Additional information required to complete your request.",
-                "status": "pending_user_input",
-                "timestamp": time.time()
-            })
-            logger.info(f"WebSocket workflow paused for user input in thread_id {thread_id}")
-
-            # Keep connection open and wait for user response
-            try:
-                user_data = await websocket.receive_json()
-                user_response_text = user_data.get("user_response")
-
-                if user_response_text:
-                    # Continue the workflow with user response
-                    await websocket.send_json({
-                        "node": "__continue__",
-                        "thread_id": thread_id,
-                        "message": "Continuing with your response...",
-                        "status": "continuing",
-                        "timestamp": time.time()
-                    })
-
-                    # Recursively call the workflow continuation
-                    final_state = await execute_orchestration(
-                        prompt=None,
-                        thread_id=thread_id,
-                        user_response=user_response_text,
-                        stream_callback=stream_callback
-                    )
-                else:
-                    await websocket.send_json({
-                        "node": "__error__",
-                        "thread_id": thread_id,
-                        "error": "No user response provided",
-                        "status": "error",
-                        "timestamp": time.time()
-                    })
-                    return
-
+                data = await websocket.receive_json()
             except Exception as e:
-                logger.error(f"Error waiting for user response in WebSocket: {e}")
                 await websocket.send_json({
                     "node": "__error__",
-                    "thread_id": thread_id,
-                    "error": f"Error waiting for user response: {str(e)}",
-                    "status": "error",
+                    "error": "Failed to receive message",
+                    "thread_id": thread_id or "unknown",
                     "timestamp": time.time()
                 })
-                return
+                continue  # Continue waiting for messages
 
-        # Send final summary with comprehensive data
-        task_agent_pairs = final_state.get("task_agent_pairs", [])
-        final_response_str = final_state.get("final_response")
-        completed_tasks = final_state.get("completed_tasks", [])
+            # Get thread_id from client, or generate a new one if not provided
+            thread_id = data.get("thread_id") or str(uuid.uuid4())
+            prompt = data.get("prompt")
+            user_response = data.get("user_response")  # For continuing conversations
+            files_data = data.get("files", [])  # Get files from WebSocket message
 
-        # Convert to serializable format using helper
-        serializable_pairs = [serialize_complex_object(pair) for pair in task_agent_pairs] if task_agent_pairs else []
-        serializable_completed = [serialize_complex_object(task) for task in completed_tasks] if completed_tasks else []
+            logger.info(f"WebSocket received message with thread_id: {thread_id}")
 
-        # --- DEBUGGING AGENT METADATA ---
-        logger.info(f"DEBUG: final_state keys: {final_state.keys()}")
-        logger.info(f"DEBUG: task_agent_pairs from state: {final_state.get('task_agent_pairs')}")
-        logger.info(f"DEBUG: serializable_pairs: {serializable_pairs}")
-        # --- END DEBUGGING ---
+            if not prompt and not user_response:
+                await websocket.send_json({
+                    "node": "__error__",
+                    "error": "Missing 'prompt' field for new conversation or 'user_response' for continuing",
+                    "thread_id": thread_id,
+                    "timestamp": time.time()
+                })
+                continue  # Continue waiting for messages
 
-        # Calculate summary statistics
-        total_tasks = len(serializable_pairs)
-        total_cost = 0
-        agent_names = set()
+            logger.info(f"Received {'prompt' if prompt else 'user response'} for thread_id {thread_id}")
 
-        for pair in serializable_pairs:
-            if isinstance(pair, dict):
-                primary = pair.get("primary", {})
-                if isinstance(primary, dict):
-                    total_cost += primary.get("price_per_call_usd", 0)
-                    agent_names.add(primary.get("name", "Unknown"))
+            # Send acknowledgment
+            await websocket.send_json({
+                "node": "__start__",
+                "thread_id": thread_id,
+                "message": "Starting agent orchestration..." if prompt else "Continuing conversation...",
+                "data": {
+                    "original_prompt": prompt,
+                    "user_response": user_response,
+                    "status": "initializing",
+                    "timestamp": time.time()
+                }
+            })
 
-        await websocket.send_json({
-            "node": "__end__",
-            "thread_id": thread_id,
-            "task_agent_pairs": serializable_pairs,
-            "final_response": final_response_str,
-            "completed_tasks": serializable_completed,
-            "summary": {
-                "total_tasks": total_tasks,
-                "total_estimated_cost": total_cost,
-                "unique_agents": len(agent_names),
-                "agent_names": list(agent_names),
-                "execution_completed": True
-            },
-            "message": "Agent orchestration completed successfully",
-            "status": "completed",
-            "timestamp": time.time()
-        })
+            # Define stream callback for WebSocket updates
+            async def stream_callback(node_name: str, node_output, progress: float, node_count: int, thread_id: str):
+                try:
+                    # Process node data using unified helper
+                    final_data = process_node_data(node_name, node_output, progress, node_count, thread_id)
 
-        logger.info(f"WebSocket stream completed successfully for thread_id {thread_id}")
+                    # Send enhanced node update
+                    await websocket.send_json({
+                        "node": node_name,
+                        "data": final_data,
+                        "thread_id": thread_id,
+                        "status": "completed",
+                        "timestamp": time.time()
+                    })
+                    logger.info(f"Streamed update from node '{node_name}' (#{node_count}) for thread_id {thread_id} - Progress: {progress:.1f}%")
+
+                except Exception as process_error:
+                    logger.warning(f"Failed to process data from node '{node_name}': {process_error}")
+                    # Send a simplified message instead
+                    try:
+                        await websocket.send_json({
+                            "node": node_name,
+                            "data": {
+                                "status": "completed",
+                                "message": f"Node {node_name} completed successfully",
+                                "warning": f"Data processing failed: {str(process_error)}",
+                                "progress_percentage": round(progress, 1),
+                                "node_sequence": node_count,
+                                "description": f"Node {node_name} processed with warning"
+                            },
+                            "thread_id": thread_id,
+                            "timestamp": time.time()
+                        })
+                    except Exception as send_error:
+                        logger.error(f"Failed to send fallback message for node '{node_name}': {send_error}")
+
+            # Convert files data to FileObject instances
+            file_objects = []
+            if files_data:
+                logger.info(f"Processing {len(files_data)} files from WebSocket message")
+                for file_data in files_data:
+                    if isinstance(file_data, dict) and 'file_name' in file_data:
+                        try:
+                            file_objects.append(FileObject(
+                                file_name=file_data['file_name'],
+                                file_path=file_data['file_path'],
+                                file_type=file_data['file_type']
+                            ))
+                            logger.info(f"Added file: {file_data['file_name']} at {file_data['file_path']}")
+                        except Exception as e:
+                            logger.error(f"Failed to create FileObject from {file_data}: {e}")
+            
+            # Use unified orchestration service with streaming
+            final_state = await execute_orchestration(
+                prompt=prompt,
+                thread_id=thread_id,
+                user_response=user_response,
+                files=file_objects if file_objects else None,
+                stream_callback=stream_callback
+            )
+
+            # Check if workflow is paused for user input
+            if final_state.get("pending_user_input"):
+                await websocket.send_json({
+                    "node": "__user_input_required__",
+                    "thread_id": thread_id,
+                    "question_for_user": final_state.get("question_for_user"),
+                    "message": "Additional information required to complete your request.",
+                    "status": "pending_user_input",
+                    "timestamp": time.time()
+                })
+                logger.info(f"WebSocket workflow paused for user input in thread_id {thread_id}")
+                continue  # Continue waiting for user response message
+
+            # --- **NEW**: Send the complete, standardized state object ---
+            # This ensures the frontend has all information needed to update the UI,
+            # including plan, metadata, and attachments, without needing a separate API call.
+            from orchestrator.graph import get_serializable_state
+            serializable_state = get_serializable_state(final_state, thread_id)
+
+            await websocket.send_json({
+                "node": "__end__",
+                "thread_id": thread_id,
+                "data": serializable_state, # Send the entire state object
+                "message": "Agent orchestration completed successfully.",
+                "status": "completed",
+                "timestamp": time.time()
+            })
+
+            logger.info(f"WebSocket stream completed successfully for thread_id {thread_id}")
+            
+            # For single-turn conversations, we might want to close the connection
+            # But for multi-turn conversations, we keep it open
+            # The frontend can send a special message to close the connection if needed
 
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected for thread_id {thread_id}")
@@ -1168,11 +983,12 @@ async def websocket_chat(websocket: WebSocket):
             # If we can't send the error, the connection is likely already closed
             logger.error(f"Could not send error message to WebSocket for thread_id {thread_id}")
     finally:
+        # Close the WebSocket connection
         try:
             await websocket.close()
         except:
-            # Connection might already be closed
-            logger.debug(f"WebSocket connection already closed for thread_id {thread_id}")
+            pass  # Connection might already be closed
+        logger.info(f"WebSocket connection closed for thread_id {thread_id}")
 
 @app.post("/api/agents/register", response_model=AgentCard)
 def register_or_update_agent(agent_data: AgentCard, response: Response, db: Session = Depends(get_db)):
@@ -1310,8 +1126,8 @@ def rate_agent(agent_id: str, rating: float = Body(..., embed=True), db: Session
     current_rating = db_agent.rating if db_agent.rating is not None else 0.0
     count = db_agent.rating_count if db_agent.rating_count is not None else 0
     new_rating = ((current_rating * count) + rating) / (count + 1) if count > 0 else rating
-    db_agent.rating = new_rating
-    db_agent.rating_count = count + 1
+    db_agent.rating = float(new_rating)
+    db_agent.rating_count = int(count + 1)
     db.commit()
     db.refresh(db_agent)
     return AgentCard.model_validate(db_agent)
@@ -1330,8 +1146,8 @@ def rate_agent_by_name(agent_name: str, rating: float = Body(..., embed=True), d
     current_rating = db_agent.rating if db_agent.rating is not None else 0.0
     count = db_agent.rating_count if db_agent.rating_count is not None else 0
     new_rating = ((current_rating * count) + rating) / (count + 1) if count > 0 else rating
-    db_agent.rating = new_rating
-    db_agent.rating_count = count + 1
+    db_agent.rating = float(new_rating)
+    db_agent.rating_count = int(count + 1)
     db.commit()
     db.refresh(db_agent)
     return AgentCard.model_validate(db_agent)

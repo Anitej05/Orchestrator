@@ -1,0 +1,63 @@
+{
+  "messages": [
+    {
+      "id": "6b605960-2e52-4023-8a4f-58cc35a17f84",
+      "type": "user",
+      "content": "Describe this image/",
+      "timestamp": 1759941345.9631495,
+      "metadata": {}
+    },
+    {
+      "id": "3584c6b9-37b7-4515-ba5b-d9111285a653",
+      "type": "user",
+      "content": "Hello!",
+      "timestamp": 1759940469.1694303,
+      "metadata": {}
+    },
+    {
+      "id": "a782ec7a-efca-474f-b021-5fa8ab3f679b",
+      "type": "assistant",
+      "content": "Hello! How can I assist you today?",
+      "timestamp": 1759940469.1694303,
+      "metadata": {}
+    },
+    {
+      "id": "03df77c0-c4a9-4177-9454-94d0d522271d",
+      "type": "user",
+      "content": "Search on web for Gemini 2.5 Computer Use model.",
+      "timestamp": 1759940525.2820213,
+      "metadata": {}
+    },
+    {
+      "id": "18d530fc-d91f-457c-b9cc-a30c9000d4cd",
+      "type": "assistant",
+      "content": "**Gemini 2.5 Computer Use – Quick Summary**\n\n*Released by Google DeepMind in early October 2025, Gemini 2.5 Computer Use (often abbreviated **Gemini 2.5 CU**) is a specialized version of the Gemini 2.5 Pro model that adds a “computer‑use” tool. This enables the model to **look at a UI screenshot, reason about what needs to be done, and issue concrete UI actions** such as clicks, typing, scrolling, opening apps, etc.*\n\n---\n\n## 1. What the model does\n\n| Feature | Description |\n|---------|-------------|\n| **Vision‑language core** | Uses Gemini 2.5 Pro’s vision‑language backbone to understand UI elements (buttons, text, icons, layout). |\n| **Iterative reasoning loop** | Takes a user goal + current screenshot + action history → returns a `function_call` (e.g., `click_at`). The loop repeats until the task is finished or a safety gate stops it. |\n| **Supported UI actions** | `click_at`, `type_text_at`, `scroll_document`, `open_web_browser`, `navigate`, `hover_at`, `drag_and_drop`, plus custom functions like `open_app` or `long_press_at`. |\n| **Safety** | Inherits Gemini 2.5 Pro safety mitigations and adds extra red‑team testing for UI actions (preventing malicious clicks, etc.). |\n| **Performance** | Beats competing models on web‑control (Mind2Web, WebArena) and mobile‑control benchmarks, with lower latency. |\n\n---\n\n## 2. Where it works\n\n| Platform | Status |\n|----------|--------|\n| **Desktop web browsers** | Primary target – best‑in‑class results. |\n| **Mobile UI (Android)** | Strong performance; custom actions (e.g., `open_app`) available. |\n| **OS‑level control (Windows / macOS file system, system settings)** | Not yet optimized – focus is on UI‑level interaction. |\n\n---\n\n## 3. Typical use‑cases\n\n1. **Task automation** – Fill forms, navigate multi‑step workflows, scrape data behind UI interactions.  \n2. **Automated UI testing** – Generate and run test scripts that mimic real user behavior.  \n3. **Data collection & web‑scraping** – Interact with sites that have no clean APIs (captchas, pagination, etc.).  \n4. **Assistive digital agents** – Build “personal assistants” that can act on a user’s computer or phone on demand.\n\n---\n\n## 4. How to start using it\n\n### API (Gemini API)\n\n```python\nfrom google.generativeai import GenerativeModel, GenerationConfig\n\nmodel = GenerativeModel('gemini-2.5-computer-use-preview-10-2025')\n\nresponse = model.generate_content(\n    contents=[{\n        \"role\": \"user\",\n        \"parts\": [\n            \"Please book a flight from San Francisco to New York on Dec 15.\",\n            {\"image\": {\"uri\": \"gs://my-bucket/screenshot.png\"}}\n        ]\n    }],\n    generation_config=GenerationConfig(\n        temperature=0.0,\n        max_output_tokens=1024,\n    ),\n    tools=[\"computer_use\"]          # Enable the computer‑use tool\n)\n\nprint(response)   # Returns a FunctionCall like {\"name\":\"click_at\",\"args\":{...}}\n```\n\n* **Model name**: `gemini-2.5-computer-use-preview-10-2025` (currently in preview).  \n* **Screen‑size suggestion**: 1440 × 900 (any resolution works, but higher quality screenshots give better results).  \n* **Supported actions** are detailed in the official docs: <https://ai.google.dev/gemini-api/docs/computer-use>.\n\n### Environments that already expose the model\n\n| Environment | How to enable |\n|-------------|---------------|\n| **Google AI Studio** | Choose “Gemini 2.5 Computer Use (preview)” when creating a new Gemini model. |\n| **Vertex AI (Generative AI)** | Use the same model name and add the `computer_use` tool in the request payload. |\n| **Open‑source wrappers** | Projects such as **Apidog**, **LangChain**, and **AutoGPT‑Gemini** provide ready‑made agent loops that handle the request/response/action execution cycle for you. |\n\n---\n\n## 5. Pricing\n\n* Charged at the same per‑token rate as **Gemini 2.5 Pro**.  \n* Costs can be tracked with custom metadata labels in Vertex AI (see the Vertex AI pricing docs).\n\n---\n\n## 6. Safety, limitations & ethical notes\n\n| Area | Details |\n|------|---------|\n| **Safety** | Inherits Gemini 2.5 Pro safety mitigations; extra red‑team testing for UI actions (e.g., preventing malicious clicks, data exfiltration). |\n| **Known limitations** | • Not optimized for OS‑level operations (file‑system, system settings). <br> • Action space limited to predefined functions unless you add custom ones. <br> • Low‑resolution or heavily animated screenshots may reduce accuracy. |\n| **Ethics** | The model card includes a discussion on responsible use, data‑privacy, and the recommendation that high‑risk tasks keep a human‑in‑the‑loop. |\n\n---\n\n## 7. Key reference documents (all publicly available)\n\n| Document | Link |\n|----------|------|\n| **Model Card (PDF)** – full technical description, evaluation methodology | <https://storage.googleapis.com/deepmind-media/Model-Cards/Gemini-2-5-Computer-Use-Model-Card.pdf> |\n| **Evaluation Details (PDF)** – benchmarks, environment specs | <https://storage.googleapis.com/deepmind-media/gemini/computer_use_eval_additional_info.pdf> |\n| **Google Blog Announcement** – high‑level overview & launch details | <https://blog.google/technology/google-deepmind/gemini-computer-use-model/> |\n| **API Docs – Computer Use** | <https://ai.google.dev/gemini-api/docs/computer-use> |\n| **Vertex AI Docs – Generative AI Computer Use** | <https://cloud.google.com/vertex-ai/generative-ai/docs/computer-use> |\n\n---\n\n## 8. Quick “starter” checklist\n\n1. **Create a Google Cloud project** and enable the Gemini API (or work from AI Studio).  \n2. **Add the `computer_use` tool** in your request payload.  \n3. **Supply a clear user goal** plus an initial screenshot of the target UI.  \n4. **Implement the client‑side executor** that receives the `FunctionCall` objects and actually performs the UI actions (click, type, etc.).  \n5. **Iterate** until the model returns a “completion” signal or a safety stop.  \n6. **Monitor usage & cost** with metadata labels; keep a human reviewer for any high‑risk actions.\n\n---\n\n### TL;DR\n\n- **Gemini 2.5 Computer Use** = Gemini 2.5 Pro + a built‑in UI‑action tool.  \n- Lets you build agents that **see a screen and act on it** (click, type, scroll, open apps…).  \n- Optimized for **web and mobile UI**, available now in preview via the Gemini API, AI Studio, and Vertex AI.  \n- **Strong benchmark performance**, priced the same as Gemini 2.5 Pro, with robust safety evaluations.  \n\nYou can start experimenting right away with the sample Python snippet above, or explore the linked PDFs for deep technical and ethical details. Happy building!",
+      "timestamp": 1759940525.2820213,
+      "metadata": {}
+    },
+    {
+      "id": "c79f929e-2740-44f4-bf27-06d091bccdc4",
+      "type": "assistant",
+      "content": "I’m unable to view the uploaded image directly, but if you can describe its contents or provide more details, I’ll be happy to help you interpret or discuss it.",
+      "timestamp": 1759941345.9631495,
+      "metadata": {}
+    },
+    {
+      "id": "ffad0a16-d44c-4b2d-a100-4f6742a2f234",
+      "type": "user",
+      "content": "What have we discussed so far?",
+      "timestamp": 1759941363.490389,
+      "metadata": {}
+    },
+    {
+      "id": "607ad0a7-0550-4450-ac58-f03229246cf5",
+      "type": "assistant",
+      "content": "Here's a brief recap of our conversation so far:\n1. You greeted me with \"Hello!\" and I responded in kind.\n2. You asked me to search the web for information about the \"Gemini 2.5 Computer Use\" model.\n3. I provided a detailed summary of Gemini 2.5 Computer Use, covering its features, use‑cases, how to access it via the API, pricing, safety considerations, and links to reference documents.\n4. I also included a quick starter checklist and a TL;DR overview.\nNow you're asking what we've discussed, which is essentially this summary.",
+      "timestamp": 1759941363.490389,
+      "metadata": {}
+    }
+  ],
+  "final_response": "Here's a brief recap of our conversation so far:\n1. You greeted me with \"Hello!\" and I responded in kind.\n2. You asked me to search the web for information about the \"Gemini 2.5 Computer Use\" model.\n3. I provided a detailed summary of Gemini 2.5 Computer Use, covering its features, use‑cases, how to access it via the API, pricing, safety considerations, and links to reference documents.\n4. I also included a quick starter checklist and a TL;DR overview.\nNow you're asking what we've discussed, which is essentially this summary.",
+  "thread_id": "941d2d2f-7766-4407-932c-1de274251134",
+  "timestamp": 1759941363.490389
+}

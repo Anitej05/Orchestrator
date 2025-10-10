@@ -1,0 +1,33 @@
+{
+  "thread_id": "6c55e796-06dd-4663-b65f-eef703b72df7",
+  "status": "pending_user_input",
+  "messages": [
+    {
+      "type": "ai",
+      "data": {
+        "content": "Please provide the image you would like described (upload the image or specify its file path).",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "ai",
+        "name": null,
+        "id": "4008f8d3-0f45-4024-9824-d968b7a58f60",
+        "example": false,
+        "tool_calls": [],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      }
+    }
+  ],
+  "task_agent_pairs": [],
+  "final_response": null,
+  "pending_user_input": true,
+  "question_for_user": "Please provide the image you would like described (upload the image or specify its file path).",
+  "metadata": {
+    "original_prompt": null,
+    "completed_tasks": [],
+    "parsed_tasks": []
+  },
+  "uploaded_files": [],
+  "plan": [],
+  "timestamp": 1760020415.0415423
+}

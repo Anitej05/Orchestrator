@@ -1,13 +1,13 @@
 import { Badge } from "@/components/ui/badge"
 import { Star, DollarSign, Zap, ExternalLink } from "lucide-react"
 import { StarRating } from "@/components/ui/star-rating"
-import type { EndpointDetail } from "@/lib/types"
+import type { AgentEndpoint } from "@/lib/types"
 
 interface FormData {
   name: string
   framework: string
   capabilities: string[]
-  endpoints: EndpointDetail[]
+  endpoints: AgentEndpoint[]
   description: string
   successRate: string
   pricePerCall: string
@@ -88,7 +88,7 @@ export default function AgentPreview({ formData }: AgentPreviewProps) {
             <h4 className="text-xs font-medium text-gray-700 mb-2">Endpoints:</h4>
             <div className="space-y-1">
               {formData.endpoints.slice(0, 2).map((endpoint, index) => (
-                <div key={index} className="flex items-center text-xs text-gray-500">
+                <div key={`${endpoint.endpoint}-${index}`} className="flex items-center text-xs text-gray-500">
                   <Badge variant="outline" className="mr-2 text-xs">
                     {endpoint.http_method}
                   </Badge>

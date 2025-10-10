@@ -1,0 +1,35 @@
+{
+  "messages": [
+    {
+      "id": "6ade1948-fda4-4925-9b43-2764e8983d64",
+      "type": "user",
+      "content": "Hello!",
+      "timestamp": 1759944478.5844662,
+      "metadata": {}
+    },
+    {
+      "id": "73d91ea3-20ef-40d4-9ef4-60decc9dc3bd",
+      "type": "assistant",
+      "content": "Hello! How can I assist you today?",
+      "timestamp": 1759944478.5844662,
+      "metadata": {}
+    },
+    {
+      "id": "5e6f85ff-5e90-476b-8bd4-679d3828b4f4",
+      "type": "user",
+      "content": "Describe this image.",
+      "timestamp": 1759944488.2440274,
+      "metadata": {}
+    },
+    {
+      "id": "72b67465-a611-46b9-9d83-04a6fc28ee45",
+      "type": "assistant",
+      "content": "I’m unable to view the image directly. If you can provide a brief description of its contents, I’ll be happy to help elaborate or answer any questions you have about it.",
+      "timestamp": 1759944488.2440274,
+      "metadata": {}
+    }
+  ],
+  "final_response": "I’m unable to view the image directly. If you can provide a brief description of its contents, I’ll be happy to help elaborate or answer any questions you have about it.",
+  "thread_id": "24437d1d-a670-4023-9b4b-4152678f96cf",
+  "timestamp": 1759944488.2440274
+}

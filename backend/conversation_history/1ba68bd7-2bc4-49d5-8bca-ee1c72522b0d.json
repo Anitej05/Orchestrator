@@ -1,0 +1,33 @@
+{
+  "thread_id": "1ba68bd7-2bc4-49d5-8bca-ee1c72522b0d",
+  "status": "pending_user_input",
+  "messages": [
+    {
+      "type": "ai",
+      "data": {
+        "content": "I need more information to help you with: 'Please analyze and execute the requested workflow'. Could you please provide more specific details about what you'd like me to do?",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "ai",
+        "name": null,
+        "id": "c2b79169-72c0-4340-8559-c927b06b175a",
+        "example": false,
+        "tool_calls": [],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      }
+    }
+  ],
+  "task_agent_pairs": [],
+  "final_response": null,
+  "pending_user_input": true,
+  "question_for_user": "I need more information to help you with: 'Please analyze and execute the requested workflow'. Could you please provide more specific details about what you'd like me to do?",
+  "metadata": {
+    "original_prompt": null,
+    "completed_tasks": [],
+    "parsed_tasks": []
+  },
+  "uploaded_files": [],
+  "plan": [],
+  "timestamp": 1760063092.276352
+}

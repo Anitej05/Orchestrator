@@ -4,7 +4,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
-import { MessageCircle, Clock, CheckCircle, Paperclip, X, File as FileIcon } from 'lucide-react';
+import { MessageCircle, Clock, CheckCircle, Paperclip, X, File as FileIcon, AlertCircle, Loader2, Brain, Search, Users, FileText, Play, BarChart3 } from 'lucide-react';
 import Markdown from '@/components/ui/markdown';
 import { type ProcessResponse, type ConversationState, type Message, type Attachment } from '@/lib/types';
 
@@ -15,7 +15,7 @@ interface InteractiveChatInterfaceProps {
   state: ConversationState;
   isLoading: boolean;
   startConversation: (input: string, files?: File[]) => Promise<void>;
-  continueConversation: (input: string) => Promise<void>;
+  continueConversation: (input: string, files?: File[]) => Promise<void>;
   resetConversation: () => void;
 }
 
@@ -46,7 +46,7 @@ export function InteractiveChatInterface({
     }
     console.debug('InteractiveChatInterface: rendering messages count=', state.messages.length);
     if (state.messages.length > 0) console.debug('InteractiveChatInterface: sample', state.messages.slice(0, 3));
-  }, [state]);
+  }, [state, state.messages.length]);
   const [inputValue, setInputValue] = useState('');
   const [userResponse, setUserResponse] = useState('');
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
@@ -87,8 +87,9 @@ export function InteractiveChatInterface({
     
     if (state.isWaitingForUser) {
       if (userResponse.trim()) {
-        await continueConversation(userResponse);
+        await continueConversation(userResponse, attachedFiles);
         setUserResponse('');
+        setAttachedFiles([]); // Clear files after submission
       }
     } else {
       if (inputValue.trim() || attachedFiles.length > 0) {
@@ -106,6 +107,7 @@ export function InteractiveChatInterface({
     }
   };
 
+
   return (
     <div className="flex flex-col h-full">
       {/* Chat Messages */}
@@ -117,44 +119,145 @@ export function InteractiveChatInterface({
           </div>
         )}
         
-        {state.messages.map((message: Message) => (
-          <div key={message.id} className={`message message-${message.type} w-full flex ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}>
-            <div className={`p-4 rounded-lg ${
-              message.type === 'user' 
-                ? 'bg-blue-600 text-white max-w-[85%]'
-                : message.type === 'system'
-                ? 'bg-yellow-50 border border-yellow-200 text-yellow-800 max-w-[90%]'
-                : 'bg-gray-100 border border-gray-200 max-w-[95%]'
-            }`}>
-              <div className="message-content space-y-2">
-                {message.content && (message.type === 'assistant' ? <Markdown content={message.content} /> : message.content)}
-                {message.attachments && message.attachments.length > 0 && (
-                  <div className="flex flex-wrap gap-2 mt-2">
-                    {message.attachments.map((att: Attachment, index: number) => (
-                      <div key={index}>
-                        {att.type.startsWith('image/') && att.content ? (
-                          <img src={att.content} alt={att.name} className="max-w-xs max-h-48 rounded-lg" />
-                        ) : (
-                          <div className="flex items-center gap-2 p-2 rounded-md bg-gray-200 text-sm">
-                            <FileIcon className="w-4 h-4" />
-                            <span>{att.name}</span>
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-              <div className={`text-xs opacity-70 mt-1 ${message.type === 'user' ? 'text-blue-200' : 'text-gray-500'}`}>
-                {message.timestamp.toLocaleTimeString()}
+        {state.messages.map((message: Message, index: number) => {
+          // Ensure message.id is a valid string
+          const messageId = message.id || `message-${index}-${Date.now()}`;
+          
+          return (
+            <div key={messageId} className={`message message-${message.type} w-full flex ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}>
+              <div className={`p-4 rounded-lg ${
+                message.type === 'user' 
+                  ? 'bg-blue-600 text-white max-w-[85%]'
+                  : message.type === 'system'
+                  ? 'bg-yellow-50 border border-yellow-200 text-yellow-800 max-w-[90%]'
+                  : 'bg-gray-100 border border-gray-200 max-w-[95%]'
+              }`}>
+                <div className="message-content space-y-2">
+                  {message.content && (message.type === 'assistant' ? <Markdown content={message.content} /> : <p>{message.content}</p>)}
+                  {message.attachments && message.attachments.length > 0 && (
+                    <div className="flex flex-wrap gap-2 mt-2">
+                      {message.attachments.map((att: Attachment, attIndex: number) => (
+                        <div key={`${messageId}-attachment-${attIndex}`}>
+                          {att.type.startsWith('image/') && att.content ? (
+                            <img src={att.content} alt={att.name} className="max-w-xs max-h-48 rounded-lg" />
+                          ) : (
+                            <div className="flex items-center gap-2 p-2 rounded-md bg-gray-20 text-sm">
+                              <FileIcon className="w-4 h-4" />
+                              <span>{att.name}</span>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div className={`text-xs opacity-70 mt-1 ${message.type === 'user' ? 'text-blue-200' : 'text-gray-500'}`}>
+                  {message.timestamp.toLocaleTimeString()}
+                </div>
               </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       {/* Input Form */}
       <div className="p-4 border-t bg-white rounded-b-lg">
+        {/* Consolidated Status Indicator - Shows orchestration progress above input */}
+        {(isLoading || state.status === 'processing' || state.isWaitingForUser) && (
+          <div className={`status-indicator p-3 rounded-lg mb-4 ${
+            state.isWaitingForUser
+              ? 'bg-yellow-50 border border-yellow-200' 
+              : state.metadata?.currentStage === 'completed'
+              ? 'bg-green-50 border border-green-200'
+              : state.metadata?.currentStage === 'error'
+              ? 'bg-red-50 border border-red-200'
+              : state.metadata?.currentStage === 'parsing'
+              ? 'bg-purple-50 border border-purple-200'
+              : state.metadata?.currentStage === 'searching'
+              ? 'bg-green-50 border border-green-200'
+              : state.metadata?.currentStage === 'ranking'
+              ? 'bg-orange-50 border border-orange-200'
+              : state.metadata?.currentStage === 'planning'
+              ? 'bg-indigo-50 border border-indigo-200'
+              : state.metadata?.currentStage === 'validating'
+              ? 'bg-teal-50 border border-teal-200'
+              : state.metadata?.currentStage === 'executing'
+              ? 'bg-red-50 border border-red-200'
+              : state.metadata?.currentStage === 'aggregating'
+              ? 'bg-cyan-50 border border-cyan-200'
+              : 'bg-blue-50 border border-blue-200'  // default initializing state
+          }`}>
+            <div className="flex items-center space-x-2">
+              {state.isWaitingForUser ? (
+                <AlertCircle className="w-4 h-4 text-yellow-600" />
+              ) : state.metadata?.currentStage === 'completed' ? (
+                <CheckCircle className="w-4 h-4 text-green-600" />
+              ) : state.metadata?.currentStage === 'error' ? (
+                <AlertCircle className="w-4 h-4 text-red-600" />
+              ) : state.metadata?.currentStage === 'parsing' ? (
+                <Brain className="w-4 h-4 text-purple-600" />
+              ) : state.metadata?.currentStage === 'searching' ? (
+                <Search className="w-4 h-4 text-green-600" />
+              ) : state.metadata?.currentStage === 'ranking' ? (
+                <Users className="w-4 h-4 text-orange-600" />
+              ) : state.metadata?.currentStage === 'planning' ? (
+                <FileText className="w-4 h-4 text-indigo-600" />
+              ) : state.metadata?.currentStage === 'validating' ? (
+                <CheckCircle className="w-4 h-4 text-teal-600" />
+              ) : state.metadata?.currentStage === 'executing' ? (
+                <Play className="w-4 h-4 text-red-600" />
+              ) : state.metadata?.currentStage === 'aggregating' ? (
+                <BarChart3 className="w-4 h-4 text-cyan-600" />
+              ) : (
+                <Loader2 className={`w-4 h-4 animate-spin text-blue-600`} />
+              )}
+              <span className={`font-medium text-sm ${
+                state.isWaitingForUser
+                  ? 'text-yellow-800' 
+                  : state.metadata?.currentStage === 'completed'
+                  ? 'text-green-800'
+                  : state.metadata?.currentStage === 'error'
+                  ? 'text-red-800'
+                  : state.metadata?.currentStage === 'parsing'
+                  ? 'text-purple-800'
+                  : state.metadata?.currentStage === 'searching'
+                  ? 'text-green-800'
+                  : state.metadata?.currentStage === 'ranking'
+                  ? 'text-orange-800'
+                  : state.metadata?.currentStage === 'planning'
+                  ? 'text-indigo-800'
+                  : state.metadata?.currentStage === 'validating'
+                  ? 'text-teal-800'
+                  : state.metadata?.currentStage === 'executing'
+                  ? 'text-red-800'
+                  : state.metadata?.currentStage === 'aggregating'
+                  ? 'text-cyan-800'
+                  : 'text-blue-800'  // default initializing state
+              }`}>
+                {state.metadata?.stageMessage || (state.isWaitingForUser ? 'Waiting for your response...' : 'Processing your request...')}
+              </span>
+              {state.metadata?.progress && !state.isWaitingForUser && state.metadata?.currentStage !== 'completed' && state.metadata?.currentStage !== 'error' && (
+                <div className="flex-1 bg-gray-200 rounded-full h-2 ml-4">
+                  <div 
+                    className={`h-2 rounded-full transition-all duration-300 ${
+                      state.metadata?.currentStage === 'initializing' ? 'bg-blue-500' :
+                      state.metadata?.currentStage === 'parsing' ? 'bg-purple-500' :
+                      state.metadata?.currentStage === 'searching' ? 'bg-green-500' :
+                      state.metadata?.currentStage === 'ranking' ? 'bg-orange-500' :
+                      state.metadata?.currentStage === 'planning' ? 'bg-indigo-500' :
+                      state.metadata?.currentStage === 'validating' ? 'bg-teal-500' :
+                      state.metadata?.currentStage === 'executing' ? 'bg-red-500' :
+                      state.metadata?.currentStage === 'aggregating' ? 'bg-cyan-500' :
+                      'bg-blue-500'
+                    }`} 
+                    style={{ width: `${state.metadata.progress}%` }}
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         <form onSubmit={handleSubmit} className="space-y-4">
           {state.isWaitingForUser ? (
             <div className="space-y-2">
@@ -174,12 +277,12 @@ export function InteractiveChatInterface({
             <>
               {/* Attached Files Preview */}
               <div className="flex flex-wrap gap-2">
-                {previewUrls.map((url, index) => (
-                  <div key={index} className="relative">
-                    <img src={url} alt={`preview ${index}`} className="h-20 w-20 object-cover rounded-md" />
+                {attachedFiles.filter(f => f.type.startsWith('image/')).map((file, index) => (
+                  <div key={file.name} className="relative">
+                    <img src={previewUrls[index]} alt={file.name} className="h-20 w-20 object-cover rounded-md" />
                     <button 
                       type="button"
-                      onClick={() => removeFile(attachedFiles[index].name)} 
+                      onClick={() => removeFile(file.name)} 
                       className="absolute top-0 right-0 bg-red-500 text-white rounded-full p-1 text-xs"
                     >
                       <X className="w-3 h-3" />
@@ -249,8 +352,8 @@ export function InteractiveChatInterface({
           </div>
         </form>
 
-        {/* Status Indicator */}
-        {state.status === 'pending_user_input' && !isLoading && (
+        {/* Status Indicator for user input */}
+        {state.isWaitingForUser && !isLoading && (
           <div className="status-indicator mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
             <div className="flex items-center space-x-2">
               <Clock className="w-4 h-4 text-yellow-600" />

@@ -85,8 +85,8 @@ export default function AgentCard({ agent, isRegistered = false, onToggleRegistr
 
       {/* Capabilities */}
       <div className="flex flex-wrap gap-1 mb-4">
-        {agent.capabilities.slice(0, 3).map((cap) => (
-          <Badge key={cap} variant="secondary" className="text-xs">
+        {agent.capabilities.slice(0, 3).map((cap, index) => (
+          <Badge key={`${agent.id}-${cap}-${index}`} variant="secondary" className="text-xs">
             {cap.replace(/_/g, " ")}
           </Badge>
         ))}
