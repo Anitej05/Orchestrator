@@ -45,6 +45,10 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
   metadata: {},
   uploaded_files: [],
   plan: [],
+  // Canvas feature fields
+  canvas_content: undefined,
+  canvas_type: undefined,
+  has_canvas: false,
   isLoading: false,
 
   actions: {
@@ -330,6 +334,10 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
           task_agent_pairs: updatedTaskAgentPairs,
           plan: updatedPlan,
           metadata: updatedMetadata,
+          // Handle canvas data
+          canvas_content: newState.canvas_content !== undefined ? newState.canvas_content : state.canvas_content,
+          canvas_type: newState.canvas_type !== undefined ? newState.canvas_type : state.canvas_type,
+          has_canvas: newState.has_canvas !== undefined ? newState.has_canvas : state.has_canvas,
           // Ensure messages are properly created with Date objects for timestamps
           messages: (newState.messages || state.messages || []).map((msg: any) => ({
             ...msg,

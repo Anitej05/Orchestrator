@@ -56,6 +56,10 @@ export interface ConversationState {
   metadata?: any;
   uploaded_files?: FileObject[];
   plan?: any[];
+  // Canvas feature fields
+  canvas_content?: string;
+  canvas_type?: 'html' | 'markdown';
+  has_canvas?: boolean;
 }
 
 export interface Attachment {

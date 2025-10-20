@@ -10,6 +10,7 @@ import PlanGraph from "@/components/PlanGraph"
 import { useEffect, useState } from "react"
 import { InteractiveStarRating, StarRating } from "@/components/ui/star-rating"
 import { useConversationStore } from "@/lib/conversation-store"
+import Markdown from '@/components/ui/markdown'
 import type { Agent, Message, TaskAgentPair } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
@@ -148,10 +149,11 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
     return (
         <aside className={cn("border-l bg-gray-50/50 p-4 flex flex-col h-full", className)}>
             <Tabs defaultValue="metadata" className="h-full flex flex-col">
-                <TabsList className="grid w-full grid-cols-3">
+                <TabsList className="grid w-full grid-cols-4">
                     <TabsTrigger value="metadata">Metadata</TabsTrigger>
                     <TabsTrigger value="plan">Plan</TabsTrigger>
                     <TabsTrigger value="attachments">Attachments</TabsTrigger>
+                    <TabsTrigger value="canvas">Canvas</TabsTrigger>
                 </TabsList>
                 <TabsContent value="metadata" className="flex-1 overflow-y-auto mt-4 space-y-4">
                     <Card>
@@ -273,6 +275,31 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                         <div className="text-center text-gray-500 py-8">
                             <p className="font-semibold">No Attachments</p>
                             <p className="text-sm mt-2">Files you upload will appear here.</p>
+                        </div>
+                    )}
+                </TabsContent>
+                <TabsContent value="canvas" className="flex-1 overflow-y-auto mt-4">
+                    {conversationState.has_canvas && conversationState.canvas_content ? (
+                        <div className="h-full flex flex-col">
+                            <div className="flex-1 overflow-auto">
+                                {conversationState.canvas_type === 'html' ? (
+                                    <iframe
+                                        srcDoc={conversationState.canvas_content}
+                                        className="w-full h-full min-h-[300px] border-0"
+                                        title="Canvas HTML Content"
+                                        sandbox="allow-scripts allow-same-origin"
+                                    />
+                                ) : (
+                                    <div className="prose prose-sm max-w-none p-4">
+                                        <Markdown content={conversationState.canvas_content} />
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="text-center text-gray-500 py-8">
+                            <p className="font-semibold">No Canvas Content</p>
+                            <p className="text-sm mt-2">Canvas content will appear here when available.</p>
                         </div>
                     )}
                 </TabsContent>

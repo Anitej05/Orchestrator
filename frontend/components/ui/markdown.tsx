@@ -17,6 +17,23 @@ interface MarkdownProps {
  * @returns {JSX.Element} The rendered markdown content.
  */
 const Markdown: FC<MarkdownProps> = ({ content }) => {
+  // Check if content contains HTML that should not be processed by Markdown
+  const containsHtml = content.includes('<!DOCTYPE html>') || 
+                      content.includes('<html') || 
+                      content.includes('<button') || 
+                      content.includes('<script>') ||
+                      content.includes('onClick=') ||
+                      content.includes('onclick=');
+
+  if (containsHtml) {
+    // For HTML content, render as plain text to avoid React parsing issues
+    return (
+      <div className="whitespace-pre-wrap font-mono text-sm">
+        {content}
+      </div>
+    );
+  }
+
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}

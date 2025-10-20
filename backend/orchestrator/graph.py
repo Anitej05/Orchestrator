@@ -1257,14 +1257,140 @@ def ask_user(state: State):
     }
 
 
-def aggregate_responses(state: State):
-    logger.info("Aggregating final response.")
+def render_canvas_output(state: State):
+    """
+    Renders canvas output when needed for complex visualizations, documents, or webpages.
+    This function is called after generate_final_response and uses the canvas decision made there.
+    """
+    logger.info("=== CANVAS RENDER: Starting canvas output rendering ===")
+    logger.info(f"CANVAS RENDER: Full state keys: {list(state.keys())}")
+    logger.info(f"CANVAS RENDER: needs_canvas: {state.get('needs_canvas')}")
+    logger.info(f"CANVAS RENDER: canvas_type: {state.get('canvas_type')}")
+    logger.info(f"CANVAS RENDER: canvas_prompt: {state.get('canvas_prompt')}")
+    logger.info(f"CANVAS RENDER: has_canvas: {state.get('has_canvas')}")
+    logger.info(f"CANVAS RENDER: canvas_content: {state.get('canvas_content')}")
+    
+    # Check if canvas is needed based on the decision from generate_final_response
+    needs_canvas = state.get("needs_canvas")
+    if not needs_canvas:
+        logger.info("CANVAS RENDER: Canvas not needed, returning empty state")
+        logger.info("CANVAS RENDER: This means generate_final_response decided canvas was not needed")
+        return {}
+    
+    # Check if we already have canvas content
+    if state.get("has_canvas") and state.get("canvas_content"):
+        logger.info("CANVAS RENDER: Canvas content already exists, skipping generation")
+        logger.info("CANVAS RENDER: Canvas content found, will be used by frontend")
+        return {}
+    
+    canvas_type = state.get("canvas_type")
+    canvas_prompt = state.get("canvas_prompt") or state.get("original_prompt", "")
+    
+    if not canvas_type or not canvas_prompt:
+        logger.info("CANVAS RENDER: Missing canvas_type or canvas_prompt, skipping generation")
+        logger.info(f"CANVAS RENDER: canvas_type={canvas_type}, canvas_prompt={canvas_prompt}")
+        return {}
+    
+    logger.info(f"CANVAS RENDER: Generating {canvas_type} canvas content")
+    logger.info(f"CANVAS RENDER: Canvas prompt: {canvas_prompt}")
+    
+    llm = ChatCerebras(model="gpt-oss-120b")
+    
+    # Create a prompt to generate the canvas content
+    prompt = f'''
+    Generate {canvas_type} content for the following request:
+    
+    User Request: "{canvas_prompt}"
+    
+    **Requirements:**
+    - Generate a complete, self-contained {canvas_type} document
+    - For HTML: Include proper HTML5 structure, embedded CSS, and JavaScript
+    - For Markdown: Use proper markdown syntax and formatting
+    - The content should be interactive and engaging
+    - Make it visually appealing with good styling
+    
+    **Canvas Type:** {canvas_type}
+    
+    Generate the complete {canvas_type} content that can be rendered directly in a browser.
+    '''
+    
+    try:
+        if canvas_type == "html":
+            # Generate HTML content
+            canvas_content = llm.invoke(prompt).content
+            
+            # Ensure it's proper HTML and fix JavaScript issues
+            logger.info(f"CANVAS RENDER: Original canvas content length: {len(canvas_content)}")
+            logger.info(f"CANVAS RENDER: Canvas content preview: {canvas_content[:200]}...")
+            
+            if not canvas_content.strip().startswith('<!DOCTYPE html>') and not canvas_content.strip().startswith('<html'):
+                # Wrap in basic HTML structure if needed
+                canvas_content = f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Canvas Content</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 20px; text-align: center; }}
+        button {{ padding: 10px 20px; font-size: 16px; margin: 10px; cursor: pointer; }}
+        #counter {{ font-size: 24px; font-weight: bold; color: #333; }}
+    </style>
+</head>
+<body>
+    {canvas_content}
+</body>
+</html>'''
+                
+                logger.info("CANVAS RENDER: Wrapped content in basic HTML structure")
+            
+            # Fix common JavaScript issues - ensure canvas_content is a string
+            if isinstance(canvas_content, str):
+                canvas_content = canvas_content.replace('onclick=\\"', 'onclick="')
+                canvas_content = canvas_content.replace('\\"', '"')
+                canvas_content = canvas_content.replace("'", '"')
+                
+                # Ensure proper script tags
+                if '<script>' in canvas_content and '</script>' not in canvas_content:
+                    canvas_content += '</script>'
+            else:
+                logger.warning(f"CANVAS RENDER: canvas_content is not a string, got {type(canvas_content)}")
+                canvas_content = str(canvas_content)
+            
+            logger.info("CANVAS RENDER: Generated HTML canvas content")
+            return {
+                "has_canvas": True,
+                "canvas_type": "html",
+                "canvas_content": canvas_content
+            }
+        elif canvas_type == "markdown":
+            # Generate Markdown content
+            canvas_content = llm.invoke(prompt).content
+            logger.info("CANVAS RENDER: Generated Markdown canvas content")
+            return {
+                "has_canvas": True,
+                "canvas_type": "markdown",
+                "canvas_content": canvas_content
+            }
+        else:
+            logger.error(f"CANVAS RENDER: Unknown canvas type: {canvas_type}")
+            return {}
+            
+    except Exception as e:
+        logger.error(f"CANVAS RENDER: Canvas content generation failed: {e}")
+        return {}
+
+
+def generate_text_answer(state: State):
+    """
+    Generates a simple text answer for the user's request.
+    This is the first step in the final response generation pipeline.
+    """
+    logger.info("=== GENERATE_TEXT_ANSWER: Starting text answer generation ===")
     
     # Check if this is a simple request that was handled directly by analyze_request
-    # For simple requests, needs_complex_processing will be False
     if state.get("needs_complex_processing") is False:
         # This is a simple request that was handled by analyze_request
-        # The final_response should already be in the state
         final_response = state.get("final_response", "")
         if not final_response:
             # Fallback: generate a new simple response
@@ -1273,8 +1399,7 @@ def aggregate_responses(state: State):
             # Build comprehensive context from conversation history
             history_context = ""
             if state.get('messages'):
-                # Include recent conversation turns to provide context
-                recent_messages = state['messages'][-20:]  # Last 20 messages
+                recent_messages = state['messages'][-20:]
                 for msg in recent_messages:
                     if hasattr(msg, 'type') and msg.type == "human":
                         history_context += f"User: {msg.content}\n"
@@ -1287,7 +1412,6 @@ def aggregate_responses(state: State):
             if uploaded_files:
                 files_info = []
                 for file_obj in uploaded_files:
-                    # Convert dict to FileObject if needed for attribute access
                     if isinstance(file_obj, dict):
                         file_obj = FileObject.model_validate(file_obj)
                     file_info = f"- {file_obj.file_name} ({file_obj.file_type}) at {file_obj.file_path}"
@@ -1308,12 +1432,11 @@ def aggregate_responses(state: State):
             
             Please provide a helpful response to the user's request.
             '''
-            logger.debug(f"Simple response prompt:\n{prompt}")
             
             final_response = llm.invoke(prompt).content
-            logger.info("Simple response generated.")
+            logger.info("Simple text answer generated.")
         else:
-            logger.info("Using final_response from analyze_request for simple request.")
+            logger.info("Using existing final_response for simple request.")
         
         ai_message = AIMessage(content=final_response)
         return {"final_response": final_response, "messages": [ai_message]}
@@ -1321,9 +1444,7 @@ def aggregate_responses(state: State):
         # This is a complex request, synthesize results from completed tasks
         completed_tasks = state.get('completed_tasks', [])
         if not completed_tasks:
-            # Edge case: needs_complex_processing is True but no tasks completed
-            # This shouldn't happen, but let's handle it gracefully
-            logger.warning("Complex request indicated but no completed tasks found. Generating a default response.")
+            logger.warning("Complex request indicated but no completed tasks found. Generating default response.")
             final_response = "I've processed your request, but I don't have specific results to share."
         else:
             llm = ChatCerebras(model="gpt-oss-120b")
@@ -1339,13 +1460,158 @@ def aggregate_responses(state: State):
             ---
             Please generate a final, human-readable response that directly answers the user's original request based on the collected results.
             '''
-            logger.debug(f"Aggregation prompt:\n{prompt}")
             
             final_response = llm.invoke(prompt).content
-            logger.info("Final response generated.")
+            logger.info("Complex text answer generated.")
         
         ai_message = AIMessage(content=final_response)
         return {"final_response": final_response, "messages": [ai_message]}
+
+def generate_final_response(state: State):
+    """
+    Generates the final response and determines if canvas is needed.
+    This replaces the old aggregate_responses node.
+    """
+    logger.info("=== GENERATE_FINAL_RESPONSE: Starting final response generation ===")
+    logger.info(f"CANVAS DEBUG: Full state keys: {list(state.keys())}")
+    logger.info(f"CANVAS DEBUG: Original prompt: {state.get('original_prompt', 'NOT FOUND')}")
+    logger.info(f"CANVAS DEBUG: Completed tasks count: {len(state.get('completed_tasks', []))}")
+    logger.info(f"CANVAS DEBUG: Messages count: {len(state.get('messages', []))}")
+    
+    # First generate the text answer
+    text_result = generate_text_answer(state)
+    
+    logger.info(f"CANVAS DEBUG: Text result keys: {list(text_result.keys())}")
+    logger.info(f"CANVAS DEBUG: Text result final_response length: {len(text_result.get('final_response', ''))}")
+    
+    # Check if the text result contains HTML content that should be in canvas
+    final_response = text_result.get('final_response', '')
+    
+    logger.info(f"CANVAS DEBUG: Final response preview: {final_response[:200]}...")
+    
+    # Enhanced canvas detection - check for HTML content in the response
+    contains_html = False
+    html_indicators = [
+        '<!DOCTYPE html>', '<html', '<button', '<script>', 'onclick=', 'onClick=',
+        '<div', '<span>', '<p>', '<h1>', '<h2>', '<h3>', '<style>', '<head>'
+    ]
+    
+    logger.info("CANVAS DEBUG: Starting HTML detection...")
+    for indicator in html_indicators:
+        if indicator in final_response:
+            contains_html = True
+            logger.info(f"CANVAS DEBUG: Found HTML indicator '{indicator}' in response")
+            logger.info(f"CANVAS DEBUG: Found at position: {final_response.find(indicator)}")
+            break
+    
+    logger.info(f"CANVAS DEBUG: HTML detection result: contains_html={contains_html}")
+    
+    # Now analyze if canvas is needed using LLM
+    llm = ChatCerebras(model="gpt-oss-120b")
+    
+    prompt = f'''
+    Analyze the user's request and the generated text response to determine if a canvas visualization would enhance the user experience.
+    
+    User's Original Request: "{state['original_prompt']}"
+    Generated Text Response: "{final_response}"
+    
+    **CANVAS DECISION CRITERIA:**
+    
+    **DEFINITELY USE CANVAS for:**
+    - Interactive elements (counters, buttons, games, demos)
+    - Visualizations (charts, graphs, plots, data visualization)
+    - Complex layouts or formatting that text cannot represent well
+    - Web pages, HTML content, or rich media
+    - Documents that need markdown rendering
+    - When user explicitly asks for "canvas", "visual", "interactive", "demo", "show me"
+    
+    **CONSIDER CANVAS for:**
+    - Numerical data that could benefit from visualization
+    - Complex information that would be clearer visually
+    - When the text response mentions creating visual content
+    
+    **USE TEXT ONLY for:**
+    - Simple questions and factual answers
+    - Explanations and descriptions
+    - When no visual enhancement is needed
+    
+    **DECISION PROCESS:**
+    1. Look for explicit canvas requests in the original prompt
+    2. Analyze if the content would benefit from visual representation
+    3. Consider if interactive elements would improve user experience
+    4. Default to text-only if uncertain
+    
+    **IMPORTANT:** If the response contains HTML elements like buttons, scripts, or interactive content, ALWAYS use "html" canvas type, never "markdown".
+    
+    Respond with a JSON object:
+    {{
+        "use_canvas": true/false,
+        "reasoning": "Brief explanation of why canvas is or isn't needed",
+        "canvas_type": "html" or "markdown" (only if use_canvas is true),
+        "canvas_prompt": "Specific instructions for what canvas content to generate (only if use_canvas is true)"
+    }}
+    '''
+    
+    try:
+        # Create a simple model for canvas decision
+        class CanvasDecision(BaseModel):
+            use_canvas: bool
+            reasoning: str
+            canvas_type: Optional[Literal["html", "markdown"]] = None
+            canvas_prompt: Optional[str] = None
+        
+        response = llm.invoke_json(prompt, CanvasDecision)
+        
+        # Force canvas usage if HTML content is detected
+        if contains_html and not response.use_canvas:
+            logger.info("CANVAS DETECTION: Forcing canvas usage due to HTML content detection")
+            response.use_canvas = True
+            response.canvas_type = "html"
+            response.reasoning = "HTML content detected, forcing canvas usage"
+            response.canvas_prompt = state['original_prompt']
+        
+        if response.use_canvas:
+            logger.info(f"Canvas needed: {response.canvas_type} - {response.reasoning}")
+            result = {
+                "final_response": final_response,
+                "messages": text_result.get('messages', []),
+                "needs_canvas": True,
+                "canvas_type": response.canvas_type,
+                "canvas_prompt": response.canvas_prompt or state['original_prompt'],
+                "has_canvas": False,  # Explicitly set to False initially
+                "canvas_content": None  # Explicitly set to None initially
+            }
+            logger.info(f"CANVAS DEBUG: generate_final_response returning: {result}")
+            logger.info(f"CANVAS DEBUG: About to return with needs_canvas=True")
+            return result
+        else:
+            logger.info(f"Text-only response sufficient: {response.reasoning}")
+            result = {
+                "final_response": final_response,
+                "messages": text_result.get('messages', []),
+                "needs_canvas": False,
+                "canvas_type": None,
+                "canvas_prompt": None,
+                "has_canvas": False,
+                "canvas_content": None
+            }
+            logger.info(f"CANVAS DEBUG: generate_final_response returning: {result}")
+            logger.info(f"CANVAS DEBUG: About to return with needs_canvas=False")
+            return result
+            
+    except Exception as e:
+        logger.error(f"Canvas decision failed: {e}. Defaulting to text-only.")
+        result = {
+            "final_response": final_response,
+            "messages": text_result.get('messages', []),
+            "needs_canvas": False,
+            "canvas_type": None,
+            "canvas_prompt": None,
+            "has_canvas": False,
+            "canvas_content": None
+        }
+        logger.info(f"CANVAS DEBUG: generate_final_response returning (error case): {result}")
+        return result
 
 
 
@@ -1434,7 +1700,7 @@ def get_serializable_state(state: dict | State, thread_id: str) -> dict:
         # Get all attributes that exist in the state
         for key in ['messages', 'task_agent_pairs', 'final_response', 'pending_user_input', 
                    'question_for_user', 'original_prompt', 'completed_tasks', 'parsed_tasks',
-                   'uploaded_files', 'task_plan']:
+                   'uploaded_files', 'task_plan', 'canvas_content', 'canvas_type', 'has_canvas']:
             if hasattr(state, key):
                 state_dict[key] = getattr(state, key)
             # Also try to get from __getitem__ if it's a dict-like object
@@ -1483,6 +1749,10 @@ def get_serializable_state(state: dict | State, thread_id: str) -> dict:
         "uploaded_files": serialize_complex_object(state.get("uploaded_files", [])),
         # Plan for the sidebar
         "plan": serialize_complex_object(state.get("task_plan", [])),
+        # Canvas fields for the sidebar
+        "has_canvas": state.get("has_canvas", False),
+        "canvas_content": state.get("canvas_content"),
+        "canvas_type": state.get("canvas_type"),
         "timestamp": time.time(),
     }
 
@@ -1505,7 +1775,7 @@ def save_conversation_history(state: State, config: RunnableConfig):
             # Handle the case where state might be a State object (TypedDict)
             for key in ['messages', 'task_agent_pairs', 'final_response', 'pending_user_input', 
                        'question_for_user', 'original_prompt', 'completed_tasks', 'parsed_tasks',
-                       'uploaded_files', 'task_plan']:
+                       'uploaded_files', 'task_plan', 'canvas_content', 'canvas_type', 'has_canvas']:
                 if hasattr(state, key):
                     state_dict[key] = getattr(state, key)
                 # Also try to get from __getitem__ if it's a dict-like object
@@ -1630,14 +1900,11 @@ def analyze_request(state: State):
             "analysis_reasoning": response.reasoning
         }
         
-        # Explicitly handle final_response to ensure it's cleared for complex requests
-        # LangGraph might ignore None values, so we use an empty string to clear it
+        # Handle final_response properly - only set it for simple requests
         if not response.needs_complex_processing and response.response:
             result["final_response"] = response.response
-        else:
-            # For complex requests, explicitly clear the final_response
-            # Using an empty string instead of None to ensure it's cleared
-            result["final_response"] = ""
+        # For complex requests, don't set final_response at all (let it be None/undefined)
+        # This ensures generate_text_answer will handle complex requests properly
         
         return result
         
@@ -1662,7 +1929,7 @@ def route_after_analysis(state: State):
             return "parse_prompt"
     else:
         logger.info("Request is simple. Routing to final response generation.")
-        return "aggregate_responses"  # For simple responses, we'll use the aggregate_responses node which will just return the final_response from state
+        return "generate_final_response"  # For simple responses, we'll use the generate_final_response node
 
 
 def route_after_parse(state: State):
@@ -1679,8 +1946,8 @@ def should_continue_or_finish(state: State):
         return "ask_user"
     if not state.get('task_plan'):
         # If the plan is empty and evaluation passed, we are done
-        logger.info("Execution plan is complete. Routing to aggregate_responses.")
-        return "aggregate_responses"
+        logger.info("Execution plan is complete. Routing to generate_final_response.")
+        return "generate_final_response"
     else:
         # If there are more tasks and evaluation passed, continue to next batch
         logger.info("Plan has more batches. Routing back to validation for the next batch.")
@@ -1701,7 +1968,8 @@ builder.add_node("validate_plan_for_execution", validate_plan_for_execution)
 builder.add_node("execute_batch", execute_batch)
 builder.add_node("evaluate_agent_response", evaluate_agent_response)
 builder.add_node("ask_user", ask_user)
-builder.add_node("aggregate_responses", aggregate_responses)
+builder.add_node("generate_final_response", generate_final_response)
+builder.add_node("render_canvas_output", render_canvas_output)
 
 builder.add_edge(START, "load_history")
 builder.add_edge("load_history", "analyze_request")
@@ -1709,7 +1977,7 @@ builder.add_edge("load_history", "analyze_request")
 builder.add_conditional_edges("analyze_request", route_after_analysis, {
     "preprocess_files": "preprocess_files",
     "parse_prompt": "parse_prompt",
-    "aggregate_responses": "aggregate_responses"
+    "generate_final_response": "generate_final_response"
 })
 
 builder.add_edge("preprocess_files", "parse_prompt")
@@ -1724,7 +1992,8 @@ builder.add_edge("rank_agents", "plan_execution")
 builder.add_edge("plan_execution", "validate_plan_for_execution")
 builder.add_edge("execute_batch", "evaluate_agent_response") 
 builder.add_edge("ask_user", "save_history")
-builder.add_edge("aggregate_responses", "save_history")
+builder.add_edge("generate_final_response", "render_canvas_output")
+builder.add_edge("render_canvas_output", "save_history")
 builder.add_edge("save_history", END)
 
 builder.add_conditional_edges("agent_directory_search", route_after_search, {
@@ -1741,7 +2010,7 @@ builder.add_conditional_edges("validate_plan_for_execution", route_after_validat
 
 builder.add_conditional_edges("evaluate_agent_response", should_continue_or_finish, {
     "validate_plan_for_execution": "validate_plan_for_execution",
-    "aggregate_responses": "aggregate_responses",
+    "generate_final_response": "generate_final_response",
     "ask_user": "ask_user"
 })
 

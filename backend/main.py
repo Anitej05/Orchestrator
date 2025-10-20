@@ -49,6 +49,24 @@ app = FastAPI(
 # Configure logging
 logger = logging.getLogger("uvicorn.error")
 
+# Set up logging for the orchestrator to show debug logs
+orchestrator_logger = logging.getLogger("AgentOrchestrator")
+orchestrator_logger.setLevel(logging.INFO)
+
+# Add a handler to print orchestrator logs to console
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+console_handler.setFormatter(formatter)
+orchestrator_logger.addHandler(console_handler)
+
+# Also configure the root logger to show all logs
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+
 # Initialize memory for persistent conversations
 checkpointer = MemorySaver()
 

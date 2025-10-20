@@ -1,6 +1,6 @@
 # In Project_Agent_Directory/orchestrator/state.py
 
-from typing import Annotated, Any, List, Optional, Dict
+from typing import Annotated, Any, List, Optional, Dict, Literal
 from typing_extensions import TypedDict
 from langgraph.graph.message import add_messages
 from langchain_core.messages import BaseMessage
@@ -65,3 +65,9 @@ class State(TypedDict):
 
     needs_complex_processing: Annotated[bool, overwrite_reducer]
     analysis_reasoning: Annotated[Optional[str], overwrite_reducer]
+    
+    # Canvas feature fields
+    needs_canvas: Annotated[bool, overwrite_reducer]
+    canvas_content: Annotated[Optional[str], overwrite_reducer]
+    canvas_type: Annotated[Optional[Literal["html", "markdown"]], overwrite_reducer]
+    has_canvas: Annotated[bool, overwrite_reducer]

@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Simple Counter & Canvas Demo</title>
+  <style>
+    body { font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; padding: 2rem; }
+    .card { max-width: 540px; margin: 0 auto; padding: 1.25rem; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); background: #fff }
+    button { padding: 0.5rem 0.75rem; border-radius: 6px; border: 1px solid #ccc; background: #f3f4f6; cursor: pointer }
+    button:active { transform: translateY(1px) }
+    .row { display:flex; gap:1rem; align-items:center }
+    canvas { border:1px solid #e5e7eb; border-radius:6px }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Simple Counter</h1>
+    <p id="time">20:45:27</p>
+    <h2 id="title">Simple Counter</h2>
+    <div class="row" style="margin:1rem 0">
+      <div id="counter" style="font-size:2rem; font-weight:600">0</div>
+      <button id="incrementBtn">Increment</button>
+    </div>
+
+    <hr />
+
+    <h2>When to use canvas</h2>
+    <p>The HTML5 &lt;canvas&gt; element is for pixel-level rendering: games, advanced visualizations, painting apps, or when you need to draw a lot of objects efficiently.</p>
+
+    <h3>Canvas Demo</h3>
+    <canvas id="demoCanvas" width="400" height="150"></canvas>
+  </div>
+
+  <script>
+    // Simple counter
+    const counterEl = document.getElementById('counter');
+    const button = document.getElementById('incrementBtn');
+    let count = 0;
+    button.addEventListener('click', () => {
+      count++;
+      counterEl.textContent = count;
+    });
+
+    // Canvas demo: draws animated circles; good example for canvas usage
+    const canvas = document.getElementById('demoCanvas');
+    if (canvas && canvas.getContext) {
+      const ctx = canvas.getContext('2d');
+      const DPR = window.devicePixelRatio || 1;
+      // resize for crisp rendering on high-dpi
+      function resize() {
+        const w = 400; const h = 150;
+        canvas.width = w * DPR;
+        canvas.height = h * DPR;
+        canvas.style.width = w + 'px';
+        canvas.style.height = h + 'px';
+        ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+      }
+      resize();
+
+      let t = 0;
+      function draw() {
+        t += 0.02;
+        ctx.clearRect(0,0,canvas.width,canvas.height);
+        for (let i=0;i<6;i++) {
+          const x = 60 + i*60 + Math.sin(t + i) * 10;
+          const y = 75 + Math.cos(t*1.2 + i) * 8;
+          ctx.beginPath();
+          ctx.fillStyle = `hsl(${(i*60 + t*40)%360} 70% 50%)`;
+          ctx.arc(x,y,16,0,Math.PI*2);
+          ctx.fill();
+        }
+        requestAnimationFrame(draw);
+      }
+      draw();
+
+      window.addEventListener('resize', resize);
+    }
+  </script>
+</body>
+</html>

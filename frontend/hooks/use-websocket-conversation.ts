@@ -182,9 +182,51 @@ export function useWebSocketManager({
               });
             }
             
-            // Ensure we have the final response as a message in the chat
-            // Only add the final response if it's not already in our messages to prevent duplicates
-            if (finalState.final_response && !mergedMessages.some(msg => msg.type === 'assistant' && msg.content === finalState.final_response)) {
+            // Handle canvas content - don't add it as a regular message if it should be in canvas
+            let finalMessages = mergedMessages;
+            
+            // Check if the final response contains HTML that should be in canvas
+            const isHtmlContent = finalState.final_response && (
+              finalState.final_response.includes('<!DOCTYPE html>') ||
+              finalState.final_response.includes('<html') ||
+              finalState.final_response.includes('<button') ||
+              finalState.final_response.includes('<script>')
+            );
+            
+            console.log('CANVAS DEBUG: Frontend canvas detection:', {
+              hasCanvas: finalState.has_canvas,
+              canvasType: finalState.canvas_type,
+              canvasContentLength: finalState.canvas_content?.length,
+              finalResponseLength: finalState.final_response?.length,
+              isHtmlContent: isHtmlContent
+            });
+            
+            if (finalState.has_canvas && finalState.canvas_content) {
+              // If we have canvas content, don't add the final response as a regular message
+              // The canvas will display the content separately
+              console.log('Canvas content detected, not adding final response as regular message');
+              console.log('Canvas content preview:', finalState.canvas_content?.substring(0, 200));
+              
+              // Remove any HTML content from messages if it exists
+              finalMessages = mergedMessages.filter(msg => {
+                if (msg.type === 'assistant' && msg.content) {
+                  const content = msg.content;
+                  const hasHtml = (
+                    content.includes('<!DOCTYPE html>') ||
+                    content.includes('<html') ||
+                    content.includes('<button') ||
+                    content.includes('<script>')
+                  );
+                  if (hasHtml) {
+                    console.log('Filtering HTML content from message:', content.substring(0, 100));
+                  }
+                  return !hasHtml;
+                }
+                return true;
+              });
+              
+            } else if (finalState.final_response && !mergedMessages.some(msg => msg.type === 'assistant' && msg.content === finalState.final_response)) {
+              // Only add the final response if it's not already in our messages to prevent duplicates
               // Check if the last message is an empty assistant message and replace it instead of adding a new one
               const lastMessage = mergedMessages[mergedMessages.length - 1];
               if (lastMessage && lastMessage.type === 'assistant' && !lastMessage.content) {
@@ -202,7 +244,7 @@ export function useWebSocketManager({
                   content: finalState.final_response,
                   timestamp: new Date()
                 };
-                mergedMessages = [...mergedMessages, assistantMessage];
+                finalMessages = [...mergedMessages, assistantMessage];
               }
             }
             
@@ -211,7 +253,7 @@ export function useWebSocketManager({
             
             _setConversationState({
               ...finalState,
-              messages: mergedMessages,
+              messages: finalMessages,
               status: 'completed',
               metadata: {
                 ...currentState.metadata,
@@ -223,7 +265,11 @@ export function useWebSocketManager({
               // Ensure we're properly updating all fields by preserving existing data when finalState doesn't have it
               task_agent_pairs: finalState.task_agent_pairs || currentState.task_agent_pairs || [],
               plan: finalState.plan || currentState.plan || [],
-              uploaded_files: finalState.uploaded_files || currentState.uploaded_files || []
+              uploaded_files: finalState.uploaded_files || currentState.uploaded_files || [],
+              // Handle canvas data
+              canvas_content: finalState.canvas_content !== undefined ? finalState.canvas_content : currentState.canvas_content,
+              canvas_type: finalState.canvas_type !== undefined ? finalState.canvas_type : currentState.canvas_type,
+              has_canvas: finalState.has_canvas !== undefined ? finalState.has_canvas : currentState.has_canvas
             });
             // Explicitly set isLoading to false in the store
             useConversationStore.setState({ isLoading: false });
