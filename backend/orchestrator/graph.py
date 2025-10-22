@@ -27,6 +27,8 @@ from pydantic.networks import HttpUrl
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, AIMessage, ToolMessage, ChatMessage
 from langchain_cerebras import ChatCerebras
+from langchain_nvidia_ai_endpoints import ChatNVIDIA
+from langchain_groq import ChatGroq
 from typing import Protocol, Any
 
 # Define a protocol for the invoke_json method to help with type checking
@@ -208,28 +210,33 @@ def invoke_json_method(self, prompt: str, pydantic_schema: Any, max_retries: int
     '''
     original_prompt = prompt  
     
+    # Try ChatCerebras first
     for attempt in range(max_retries):
         failed_object_str = ""
         try:
             # The initial prompt to the LLM remains the same
-            json_prompt = f'''
-            {prompt}
+            if pydantic_schema is not None:
+                json_prompt = f'''
+                {prompt}
 
-            Please provide your response in a valid JSON format that adheres to the following Pydantic schema:
-            
-            ```json
-            {json.dumps(pydantic_schema.model_json_schema(), indent=2)}
-            ```
+                Please provide your response in a valid JSON format that adheres to the following Pydantic schema:
+                
+                ```json
+                {json.dumps(pydantic_schema.model_json_schema(), indent=2)}
+                ```
 
-            IMPORTANT: Only output the JSON object itself, without any extra text, explanations, or markdown formatting.
-            '''
+                IMPORTANT: Only output the JSON object itself, without any extra text, explanations, or markdown formatting.
+                '''
+            else:
+                json_prompt = prompt
+                
             response_content = self.invoke(json_prompt).content
             logger.info(f"LLM RAW RESPONSE (Attempt {attempt + 1}):\n---START---\n{response_content}\n---END---")
 
             # --- USE THE NEW PARSER HERE ---
             json_str = extract_json_from_response(response_content)
             
-            if json_str:
+            if json_str and pydantic_schema is not None:
                 parsed_json = json.loads(json_str)
                 validated_obj = pydantic_schema.model_validate(parsed_json)
                 
@@ -237,6 +244,10 @@ def invoke_json_method(self, prompt: str, pydantic_schema: Any, max_retries: int
                 failed_object_str = validated_obj.model_dump_json(indent=2)
                 
                 return validated_obj
+            elif json_str and pydantic_schema is None:
+                # If schema is None, just return the parsed JSON
+                parsed_json = json.loads(json_str)
+                return parsed_json
             else:
                 # If the new parser returns None, no valid JSON was found
                 raise ValueError("No valid JSON object could be extracted from the response.")
@@ -256,6 +267,131 @@ def invoke_json_method(self, prompt: str, pydantic_schema: Any, max_retries: int
             else:
                 logging.error(f"Failed to get a valid JSON response after {max_retries} attempts.")
                 raise
+
+# Create a fallback wrapper for LLM calls
+def invoke_llm_with_fallback(primary_llm, fallback_llm, prompt: str, pydantic_schema: Any, max_retries: int = 2):
+    '''
+    Invoke an LLM with fallback to Groq and NVIDIA when Cerebras fails with external API issues.
+    Cycles through providers in order: Cerebras -> Groq -> NVIDIA -> Cerebras (2 times each).
+    '''
+    # Initialize all LLMs
+    cerebras_llm = primary_llm
+    groq_llm = ChatGroq(model="openai/gpt-oss-120b") if os.getenv("GROQ_API_KEY") else None
+    nvidia_llm = fallback_llm  # ChatNVIDIA
+    
+    # Create list of available LLMs
+    available_llms = []
+    llm_names = []
+    
+    if cerebras_llm:
+        available_llms.append(cerebras_llm)
+        llm_names.append("Cerebras")
+    
+    if groq_llm:
+        available_llms.append(groq_llm)
+        llm_names.append("Groq")
+    
+    if nvidia_llm:
+        available_llms.append(nvidia_llm)
+        llm_names.append("NVIDIA")
+    
+    if not available_llms:
+        raise ValueError("No LLMs available to process the request.")
+    
+    logger.info(f"Available LLMs: {', '.join(llm_names)}")
+    
+    # Track errors for each provider
+    errors = {}
+    
+    # Prepare prompts based on schema
+    if pydantic_schema is not None:
+        json_prompt = f'''
+        {prompt}
+
+        Please provide your response in a valid JSON format that adheres to the following Pydantic schema:
+        
+        ```json
+        {json.dumps(pydantic_schema.model_json_schema(), indent=2)}
+        ```
+
+        IMPORTANT: Only output the JSON object itself, without any extra text, explanations, or markdown formatting.
+        '''
+    else:
+        json_prompt = prompt
+
+    # Cycle through providers: Cerebras -> Groq -> NVIDIA -> Cerebras (2 times each)
+    total_attempts = max_retries * len(available_llms)  # 2 cycles * 3 providers = 6 total attempts
+    for attempt in range(total_attempts):
+        # Determine which LLM to use (cycle through available LLMs)
+        llm_index = attempt % len(available_llms)
+        current_llm = available_llms[llm_index]
+        current_llm_name = llm_names[llm_index]
+        
+        # Calculate attempt number for this specific LLM (1 or 2)
+        llm_attempt = (attempt // len(available_llms)) + 1
+        is_last_attempt = attempt == (total_attempts - 1)
+        
+        try:
+            logger.info(f"Trying {current_llm_name} LLM, attempt {llm_attempt}/{max_retries}")
+            response_content = current_llm.invoke(json_prompt).content
+            logger.info(f"{current_llm_name.upper()} LLM RAW RESPONSE:\n---START---\n{response_content}\n---END---")
+            
+            # For non-Pydantic responses, return the content directly
+            if pydantic_schema is None:
+                return response_content
+            
+            # Parse the response using the same logic for Pydantic schemas
+            json_str = extract_json_from_response(response_content)
+            if json_str:
+                parsed_json = json.loads(json_str)
+                validated_obj = pydantic_schema.model_validate(parsed_json)
+                logger.info(f"Successfully got response from {current_llm_name} LLM.")
+                return validated_obj
+            else:
+                error = ValueError(f"No valid JSON object could be extracted from the {current_llm_name} LLM response.")
+                errors[current_llm_name] = error
+                logger.warning(f"{current_llm_name} LLM attempt {llm_attempt} failed: {error}")
+                if is_last_attempt:
+                    raise error
+        except Exception as e:
+            errors[current_llm_name] = e
+            error_msg = str(e).lower()
+            # Check if this is an external API issue that warrants trying the next provider
+            if any(keyword in error_msg for keyword in ["429", "rate", "too_many_requests", "high traffic", "queue_exceeded"]):
+                logger.warning(f"{current_llm_name} LLM failed with external API issue: {e}. Will try next LLM provider.")
+                if is_last_attempt:
+                    # If this is the last attempt and it failed, we've exhausted all options
+                    pass
+                else:
+                    continue  # Continue to try next LLM provider
+            else:
+                # For non-rate limit errors, re-raise immediately
+                logger.error(f"{current_llm_name} LLM failed with non-API error: {e}")
+                raise
+
+    # If we've exhausted all attempts, create a graceful fallback response
+    logger.error("All LLM attempts exhausted. Creating graceful fallback response.")
+    logger.error(f"Errors encountered: {errors}")
+    
+    if pydantic_schema is not None:
+        # For Pydantic schemas, try to create a minimal valid object
+        try:
+            # Create a minimal valid object with default values
+            minimal_obj = pydantic_schema()
+            logger.warning(f"Creating minimal fallback object for {pydantic_schema.__name__}")
+            return minimal_obj
+        except Exception:
+            # If we can't create a minimal object, raise the last error we had
+            logger.error("Could not create minimal fallback object.")
+            # Return the first error we encountered
+            if errors:
+                raise list(errors.values())[0]
+            else:
+                raise ValueError("Unable to process request with available LLMs.")
+    else:
+        # For non-Pydantic responses, return a simple error message
+        logger.warning("Returning simple error message as fallback")
+        return "I'm sorry, but I'm currently unable to process your request due to technical issues. Please try again later."
 
 ChatCerebras._generate = patched_generate
 
@@ -465,15 +601,31 @@ def get_all_capabilities():
         db.close()
 
 async def fetch_agents_for_task(client: httpx.AsyncClient, task_name: str, url: str):
-    try:
-        response = await client.get(url, timeout=10.0)
-        response.raise_for_status()
-        # FIX: Use mode='json' to convert HttpUrl and other special types to strings.
-        validated_agents_as_dicts = [AgentCard.model_validate(agent).model_dump(mode='json') for agent in response.json()]
-        return {"task_name": task_name, "agents": validated_agents_as_dicts}
-    except (httpx.RequestError, httpx.HTTPStatusError, ValidationError) as e:
-        logger.error(f"API call or validation failed for task '{task_name}': {e}")
-        return {"task_name": task_name, "agents": []}
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = await client.get(url, timeout=10.0)
+            response.raise_for_status()
+            # FIX: Use mode='json' to convert HttpUrl and other special types to strings.
+            validated_agents_as_dicts = [AgentCard.model_validate(agent).model_dump(mode='json') for agent in response.json()]
+            return {"task_name": task_name, "agents": validated_agents_as_dicts}
+        except (httpx.RequestError, httpx.HTTPStatusError, ValidationError) as e:
+            # Check if this is a rate limit error
+            if isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 429:
+                if attempt < max_retries - 1:  # Don't wait after the last attempt
+                    # Exponential backoff with jitter
+                    wait_time = (2 ** attempt) + (0.1 * attempt)
+                    logger.warning(f"Rate limit hit for task '{task_name}'. Waiting {wait_time:.2f} seconds before retry {attempt + 1}/{max_retries}")
+                    await asyncio.sleep(wait_time)
+                    continue
+                else:
+                    logger.error(f"Max retries reached for task '{task_name}' due to rate limiting: {e}")
+            else:
+                logger.error(f"API call or validation failed for task '{task_name}': {e}")
+            
+            # Return empty agents if all retries failed or if it's not a retryable error
+            if attempt == max_retries - 1:
+                return {"task_name": task_name, "agents": []}
 
 def parse_prompt(state: State):
     # --- Create a formatted history of the conversation ---
@@ -489,7 +641,9 @@ def parse_prompt(state: State):
     capability_texts, _ = get_all_capabilities()
     capabilities_list_str = ", ".join(f"'{c}'" for c in capability_texts)
 
-    llm = ChatCerebras(model="gpt-oss-120b")
+    # Initialize both primary and fallback LLMs
+    primary_llm = ChatCerebras(model="gpt-oss-120b")
+    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
 
     error_feedback = state.get("parsing_error_feedback")
     retry_prompt_injection = ""
@@ -561,8 +715,8 @@ def parse_prompt(state: State):
     '''
 
     try:
-        # Use the monkey-patched invoke_json method
-        response = invoke_json_method(llm, prompt, ParsedRequest)
+        # Use the fallback wrapper for LLM calls
+        response = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, ParsedRequest)
         logger.info(f"LLM parsed prompt into: {response}")
 
         if not response or not response.tasks:
@@ -655,7 +809,9 @@ def rank_agents(state: State):
         logger.warning("No tasks to rank in rank_agents")
         return {"task_agent_pairs": []}
     
-    llm = ChatCerebras(model="gpt-oss-120b")
+    # Initialize both primary and fallback LLMs
+    primary_llm = ChatCerebras(model="gpt-oss-120b")
+    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
     
     final_selections = []
     for task in parsed_tasks:
@@ -688,7 +844,7 @@ def rank_agents(state: State):
             Your output should be a JSON object with a single key, "ranked_agent_ids", which is a list of agent IDs in the correct order.
             '''
             try:
-                response = llm.invoke_json(prompt, RankedAgents)
+                response = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, RankedAgents)
                 ranked_agent_ids = response.ranked_agent_ids
                 
                 sorted_agents = sorted(candidate_agents, key=lambda agent: ranked_agent_ids.index(agent.id) if agent.id in ranked_agent_ids else float('inf'))
@@ -734,7 +890,9 @@ def plan_execution(state: State, config: RunnableConfig):
     and saves the result to a file.
     '''
     replan_reason = state.get("replan_reason")
-    llm = ChatCerebras(model="gpt-oss-120b")
+    # Initialize both primary and fallback LLMs
+    primary_llm = ChatCerebras(model="gpt-oss-120b")
+    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
     output_state = {}
 
     if replan_reason:
@@ -760,10 +918,16 @@ def plan_execution(state: State, config: RunnableConfig):
         5. Return the entire modified plan. The output MUST be a valid JSON object conforming to the `ExecutionPlan` schema.
         '''
         try:
-            response = llm.invoke_json(prompt, ExecutionPlan)
+            response = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, ExecutionPlan)
             # FIX: Use mode='json' to convert HttpUrl and other special types to strings.
-            serializable_plan = [[task.model_dump(mode='json') for task in batch] for batch in (response.plan or [])]
-            output_state = {"task_plan": serializable_plan, "replan_reason": None} # Clear the reason after replanning
+            if response and hasattr(response, 'plan'):
+                serializable_plan = [[task.model_dump(mode='json') for task in batch] for batch in (response.plan or [])]
+                output_state = {"task_plan": serializable_plan, "replan_reason": None} # Clear the reason after replanning
+            else:
+                # If response is None or doesn't have plan attribute, create a simple plan
+                logger.warning("Replanning LLM response was invalid. Creating simple plan.")
+                task_plan_dicts = state.get("task_plan", [])
+                output_state = {"task_plan": task_plan_dicts, "replan_reason": None}
         except Exception as e:
             logger.error(f"Replanning failed: {e}. Falling back to asking user.")
             output_state = {
@@ -781,26 +945,87 @@ def plan_execution(state: State, config: RunnableConfig):
             return {"task_plan": []}
         task_agent_pairs = [TaskAgentPair.model_validate(d) for d in task_agent_pair_dicts]
 
+        # Simplify the prompt for better compatibility with fallback LLM
         prompt = f'''
-        You are an expert project planner. Convert a list of tasks and their assigned agents into a final, executable plan.
+        You are an expert project planner. Convert tasks and their assigned agents into an executable plan.
         
-        **Instructions:**
-        1.  For each task, select the most appropriate endpoint from the `primary` agent's list.
-        2.  Create an `ExecutionStep` with the agent `id`, `http_method`, and `endpoint`.
-        3.  **Do not generate a payload.**
-        4. Your final `plan` must be a list of batches (list of lists). Group tasks that can run in parallel into the same batch. A task that depends on another must be in a subsequent batch.
+        Instructions:
+        1. For each task, select the most appropriate endpoint from the primary agent's list.
+        2. Create an ExecutionStep with the agent id, http_method, and endpoint.
+        3. Do not generate a payload.
+        4. Group tasks that can run in parallel into the same batch.
+        5. Return a valid JSON object that conforms to the ExecutionPlan schema.
 
-        **Tasks to Plan:** {[p.model_dump_json() for p in task_agent_pairs]}
-        You MUST only output a valid JSON object that conforms to the ExecutionPlan schema.
+        Tasks to Plan: {json.dumps([p.model_dump(mode='json') for p in task_agent_pairs], indent=2)}
         '''
         try:
-            response = llm.invoke_json(prompt, ExecutionPlan)
+            response = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, ExecutionPlan)
             # FIX: Use mode='json' to convert HttpUrl and other special types to strings.
-            serializable_plan = [[task.model_dump(mode='json') for task in batch] for batch in (response.plan or [])]
-            output_state = {"task_plan": serializable_plan, "user_response": None}
+            if response and hasattr(response, 'plan'):
+                serializable_plan = [[task.model_dump(mode='json') for task in batch] for batch in (response.plan or [])]
+                output_state = {"task_plan": serializable_plan, "user_response": None}
+            else:
+                # If response is None or doesn't have plan attribute, create a simple plan
+                logger.warning("Planning LLM response was invalid. Creating simple plan.")
+                # Create a simple plan with one batch containing all tasks
+                from schemas import ExecutionStep
+                import uuid
+                simple_plan = []
+                for pair in task_agent_pairs:
+                    if pair.primary and pair.primary.endpoints:
+                        # Take the first endpoint as default
+                        endpoint = pair.primary.endpoints[0]
+                        planned_task = PlannedTask(
+                            task_name=pair.task_name,
+                            task_description=pair.task_description,
+                            primary=ExecutionStep(
+                                id=str(uuid.uuid4()),
+                                http_method=endpoint.http_method,
+                                endpoint=endpoint.endpoint,
+                                payload={}  # Empty payload for now, will be filled by run_agent
+                            )
+                        )
+                        simple_plan.append(planned_task)
+                
+                if simple_plan:
+                    serializable_plan = [[task.model_dump(mode='json') for task in simple_plan]]
+                    output_state = {"task_plan": serializable_plan, "user_response": None}
+                    logger.info("Created simplified plan as fallback")
+                else:
+                    output_state = {"task_plan": [], "user_response": None}
         except Exception as e:
             logger.error(f"Initial planning failed: {e}")
-            output_state = {"task_plan": []}
+            # Try a simpler approach as fallback
+            try:
+                # Create a simple plan with one batch containing all tasks
+                from schemas import ExecutionStep
+                import uuid
+                simple_plan = []
+                for pair in task_agent_pairs:
+                    if pair.primary and pair.primary.endpoints:
+                        # Take the first endpoint as default
+                        endpoint = pair.primary.endpoints[0]
+                        planned_task = PlannedTask(
+                            task_name=pair.task_name,
+                            task_description=pair.task_description,
+                            primary=ExecutionStep(
+                                id=str(uuid.uuid4()),
+                                http_method=endpoint.http_method,
+                                endpoint=endpoint.endpoint,
+                                payload={}  # Empty payload for now, will be filled by run_agent
+                            )
+                        )
+                        simple_plan.append(planned_task)
+                
+                if simple_plan:
+                    serializable_plan = [[task.model_dump(mode='json') for task in simple_plan]]
+                    output_state = {"task_plan": serializable_plan, "user_response": None}
+                    logger.info("Created simplified plan as fallback")
+                else:
+                    output_state = {"task_plan": [], "user_response": None}
+            except Exception as fallback_error:
+                logger.error(f"Simplified plan creation also failed: {fallback_error}")
+                output_state = {"task_plan": []}
 
     # Save the new or modified plan to the file system immediately.
     # We create a temporary state to pass the object version of the plan for readable file output.
@@ -829,12 +1054,14 @@ def validate_plan_for_execution(state: State):
     if not task_plan_dicts or not task_plan_dicts[0]:
         logger.info("Plan is empty or complete. No validation needed.")
         return {"replan_reason": None, "pending_user_input": False}
-    task_plan = [[PlannedTask.model_validate(d) for d in batch] for batch in task_plan_dicts]
+    task_plan = [[PlannedTask.model_validate(batch_item) for batch_item in batch] for batch in task_plan_dicts]
 
     all_capabilities, _ = get_all_capabilities()
     capabilities_str = ", ".join(all_capabilities)
     
-    llm = ChatCerebras(model="gpt-oss-120b")
+    # Initialize both primary and fallback LLMs
+    primary_llm = ChatCerebras(model="gpt-oss-120b")
+    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
     task_to_validate = task_plan[0][0]
 
     # Rehydrate the pairs
@@ -918,7 +1145,7 @@ def validate_plan_for_execution(state: State):
     '''
     
     try:
-        validation = llm.invoke_json(prompt, PlanValidationResult)
+        validation = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, PlanValidationResult)
         logger.info(f"Validation result for task '{task_to_validate.task_name}': {validation.status}")
 
         if validation.status == "replan_needed":
@@ -949,7 +1176,9 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
         logger.error(error_msg)
         return {"task_name": planned_task.task_name, "result": error_msg}
 
-    payload_builder_llm = ChatCerebras(model="gpt-oss-120b")
+    # Initialize both primary and fallback LLMs for payload generation
+    primary_llm = ChatCerebras(model="gpt-oss-120b")
+    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
     failed_attempts = []
     
     # --- Prepare detailed file context for the payload builder ---
@@ -1011,7 +1240,8 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
         payload = {}  # Initialize payload to avoid unbound variable error
         for payload_attempt in range(5):  # Up to 5 attempts for payload generation
             try:
-                payload_str = payload_builder_llm.invoke(payload_prompt).content
+                # Use the fallback wrapper for LLM calls
+                payload_str = invoke_llm_with_fallback(primary_llm, fallback_llm, payload_prompt, None).__str__()
                 cleaned_payload_str = strip_think_tags(payload_str)
                 json_str = extract_json_from_response(cleaned_payload_str)
                 if not json_str:
@@ -1186,7 +1416,9 @@ def evaluate_agent_response(state: State):
         # No new tasks to evaluate
         return {"pending_user_input": False, "question_for_user": None}
 
-    llm = ChatCerebras(model="gpt-oss-120b")
+    # Initialize both primary and fallback LLMs
+    primary_llm = ChatCerebras(model="gpt-oss-120b")
+    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
     task_to_evaluate = latest_tasks[-1] # Evaluate the most recent task
 
     # If the agent itself reported an error, we don't need to evaluate it further
@@ -1213,7 +1445,7 @@ def evaluate_agent_response(state: State):
     - If the result is logically flawed, incomplete, or based on a wrong assumption, respond with `{{"status": "user_input_required", "question": "Formulate a clear, direct question to the user to correct the course of the plan."}}`. For example, "The news search returned an article about the lumber industry, not a tech company. Could you specify a tech company you're interested in?"
     '''
     try:
-        evaluation = llm.invoke_json(prompt, AgentResponseEvaluation)
+        evaluation = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, AgentResponseEvaluation)
         if evaluation.status == "user_input_required":
             logger.warning(f"Result for task '{task_to_evaluate['task_name']}' is unsatisfactory. Pausing for user input.")
             # We add the failed task's result to the parsing feedback to prevent loops
@@ -1294,22 +1526,114 @@ def render_canvas_output(state: State):
     logger.info(f"CANVAS RENDER: Generating {canvas_type} canvas content")
     logger.info(f"CANVAS RENDER: Canvas prompt: {canvas_prompt}")
     
-    llm = ChatCerebras(model="gpt-oss-120b")
+    # Initialize all LLMs for fallback mechanism
+    primary_llm = ChatCerebras(model="gpt-oss-120b")
+    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
     
-    # Create a prompt to generate the canvas content
+    # Extract additional context from state
+    original_prompt = state.get("original_prompt", "")
+    messages = state.get("messages", [])
+    completed_tasks = state.get("completed_tasks", [])
+    uploaded_files = state.get("uploaded_files", [])
+    
+    # Format conversation history
+    history_context = ""
+    if messages:
+        recent_messages = messages[-20:]  # Last 20 messages
+        for msg in recent_messages:
+            if hasattr(msg, 'type') and msg.type == "human":
+                history_context += f"User: {msg.content}\n"
+            elif hasattr(msg, 'type') and msg.type == "ai":
+                history_context += f"Assistant: {msg.content}\n"
+    
+    # Format completed tasks
+    tasks_context = ""
+    if completed_tasks:
+        tasks_info = []
+        for task in completed_tasks[-10:]:  # Last 10 tasks
+            task_name = task.get('task_name', 'Unknown Task')
+            task_result = task.get('result', {})
+            # Truncate long results
+            result_str = json.dumps(task_result, default=str)
+            if len(result_str) > 500:
+                result_str = result_str[:500] + "... (truncated)"
+            tasks_info.append(f"- {task_name}: {result_str}")
+        tasks_context = "Completed Tasks:\n" + "\n".join(tasks_info) + "\n\n"
+    
+    # Format uploaded files
+    files_context = ""
+    if uploaded_files:
+        files_info = []
+        for file_obj in uploaded_files:
+            # Convert dict to FileObject if needed for attribute access
+            if isinstance(file_obj, dict):
+                try:
+                    file_obj = FileObject.model_validate(file_obj)
+                except Exception:
+                    # If validation fails, use the dict directly
+                    pass
+            
+            if isinstance(file_obj, dict):
+                file_info = f"- {file_obj.get('file_name', 'Unknown')} ({file_obj.get('file_type', 'Unknown')}) at {file_obj.get('file_path', 'Unknown')}"
+                if file_obj.get('file_type') == 'document' and file_obj.get('vector_store_path'):
+                    file_info += f", vector store: {file_obj.get('vector_store_path')}"
+            else:
+                file_info = f"- {getattr(file_obj, 'file_name', 'Unknown')} ({getattr(file_obj, 'file_type', 'Unknown')}) at {getattr(file_obj, 'file_path', 'Unknown')}"
+                if getattr(file_obj, 'file_type', '') == 'document' and getattr(file_obj, 'vector_store_path', None):
+                    file_info += f", vector store: {getattr(file_obj, 'vector_store_path')}"
+            files_info.append(file_info)
+        files_context = "Uploaded Files:\n" + "\n".join(files_info) + "\n\n"
+    
+    # Create a prompt to generate the canvas content with full context
     prompt = f'''
     Generate {canvas_type} content for the following request:
     
-    User Request: "{canvas_prompt}"
+    Original User Request: "{original_prompt}"
     
-    **Requirements:**
-    - Generate a complete, self-contained {canvas_type} document
-    - For HTML: Include proper HTML5 structure, embedded CSS, and JavaScript
-    - For Markdown: Use proper markdown syntax and formatting
-    - The content should be interactive and engaging
-    - Make it visually appealing with good styling
+    Canvas-Specific Request: "{canvas_prompt}"
     
-    **Canvas Type:** {canvas_type}
+    **Additional Context:**
+    {files_context}
+    {tasks_context}
+    Conversation History:
+    {history_context}
+    
+    **IMPORTANT INSTRUCTIONS FOR CANVAS GENERATION:**
+    
+    **PURPOSE AND ENVIRONMENT:**
+    - You are generating content for a canvas display area in a web application
+    - The canvas is displayed in an iframe with limited capabilities
+    - The canvas should be a standalone, self-contained {canvas_type} document
+    - Do NOT assume any existing libraries or frameworks are available unless explicitly imported
+    
+    **RESPONSE FORMAT REQUIREMENTS:**
+    - Generate ONLY the complete {canvas_type} content, nothing else
+    - Do NOT include any markdown code block formatting
+    - Do NOT include any explanations or comments outside the {canvas_type} content
+    
+    **FOR HTML CANVAS CONTENT SPECIFICALLY:**
+    - Include complete HTML5 structure with <!DOCTYPE html> declaration
+    - For any external libraries (React, ReactDOM, Babel, etc.), use external CDN imports in <script> tags
+    - Example for React:
+      <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+      <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+      <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    - All JavaScript must be contained within <script> tags
+    - Use inline CSS in <style> tags or inline styles
+    - Ensure all functionality works in a standalone HTML file
+    - Avoid complex build tools or bundlers - everything must work directly in the browser
+    
+    **FOR MARKDOWN CANVAS CONTENT:**
+    - Use proper markdown syntax and formatting
+    - Focus on clear, readable content presentation
+    - Use appropriate headers, lists, and emphasis as needed
+    
+    **CONTENT QUALITY REQUIREMENTS:**
+    - Make the content interactive and engaging when appropriate
+    - Ensure visual appeal with good styling and layout
+    - Utilize the provided context to create relevant content
+    - For interactive elements, ensure they work correctly in the canvas environment
+    - Test that all functionality works in a standalone environment
     
     Generate the complete {canvas_type} content that can be rendered directly in a browser.
     '''
@@ -1317,14 +1641,20 @@ def render_canvas_output(state: State):
     try:
         if canvas_type == "html":
             # Generate HTML content
-            canvas_content = llm.invoke(prompt).content
+            canvas_content = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, None).__str__()
+            
+            # Strip any markdown code block formatting
+            if isinstance(canvas_content, str):
+                canvas_content = re.sub(r"```html\s*", "", canvas_content)
+                canvas_content = re.sub(r"\s*```", "", canvas_content)
+                canvas_content = re.sub(r"```\s*", "", canvas_content)
             
             # Ensure it's proper HTML and fix JavaScript issues
             logger.info(f"CANVAS RENDER: Original canvas content length: {len(canvas_content)}")
             logger.info(f"CANVAS RENDER: Canvas content preview: {canvas_content[:200]}...")
             
-            if not canvas_content.strip().startswith('<!DOCTYPE html>') and not canvas_content.strip().startswith('<html'):
-                # Wrap in basic HTML structure if needed
+            # Always wrap in complete HTML structure to ensure proper rendering
+            if not canvas_content.strip().startswith('<!DOCTYPE html>'):
                 canvas_content = f'''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1333,8 +1663,12 @@ def render_canvas_output(state: State):
     <title>Canvas Content</title>
     <style>
         body {{ font-family: Arial, sans-serif; margin: 20px; text-align: center; }}
-        button {{ padding: 10px 20px; font-size: 16px; margin: 10px; cursor: pointer; }}
-        #counter {{ font-size: 24px; font-weight: bold; color: #333; }}
+        button {{ padding: 10px 20px; font-size: 16px; margin: 10px; cursor: pointer; background-color: #4CAF50; color: white; border: none; border-radius: 4px; }}
+        button:hover {{ background-color: #45a049; }}
+        #game-board {{ display: grid; grid-template-columns: repeat(3, 100px); grid-gap: 5px; margin: 20px auto; }}
+        .cell {{ width: 100px; height: 100px; background-color: #f0f0f0; display: flex; align-items: center; justify-content: center; font-size: 2em; cursor: pointer; }}
+        .cell:hover {{ background-color: #e0e0e0; }}
+        #status {{ margin: 20px; font-size: 1.2em; font-weight: bold; }}
     </style>
 </head>
 <body>
@@ -1342,17 +1676,27 @@ def render_canvas_output(state: State):
 </body>
 </html>'''
                 
-                logger.info("CANVAS RENDER: Wrapped content in basic HTML structure")
+                logger.info("CANVAS RENDER: Wrapped content in complete HTML structure")
             
             # Fix common JavaScript issues - ensure canvas_content is a string
             if isinstance(canvas_content, str):
+                # Fix escaped quotes
                 canvas_content = canvas_content.replace('onclick=\\"', 'onclick="')
                 canvas_content = canvas_content.replace('\\"', '"')
-                canvas_content = canvas_content.replace("'", '"')
+                canvas_content = canvas_content.replace("\\'", "'")
                 
-                # Ensure proper script tags
-                if '<script>' in canvas_content and '</script>' not in canvas_content:
-                    canvas_content += '</script>'
+                # Ensure proper script tags are closed
+                # Count opening and closing script tags
+                open_script_count = canvas_content.count('<script')
+                close_script_count = canvas_content.count('</script>')
+                
+                # Add closing script tags if needed
+                if open_script_count > close_script_count:
+                    for _ in range(open_script_count - close_script_count):
+                        canvas_content += '</script>'
+                        
+                # Fix any malformed script tags
+                canvas_content = re.sub(r'<script([^>]*)>(.*?)(?=</script>|$)', r'<script\1>\2</script>', canvas_content, flags=re.DOTALL)
             else:
                 logger.warning(f"CANVAS RENDER: canvas_content is not a string, got {type(canvas_content)}")
                 canvas_content = str(canvas_content)
@@ -1365,7 +1709,13 @@ def render_canvas_output(state: State):
             }
         elif canvas_type == "markdown":
             # Generate Markdown content
-            canvas_content = llm.invoke(prompt).content
+            canvas_content = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, None).__str__()
+            
+            # Strip any markdown code block formatting
+            canvas_content = re.sub(r"```markdown\s*", "", canvas_content)
+            canvas_content = re.sub(r"\s*```", "", canvas_content)
+            canvas_content = re.sub(r"```\s*", "", canvas_content)
+            
             logger.info("CANVAS RENDER: Generated Markdown canvas content")
             return {
                 "has_canvas": True,
@@ -1378,7 +1728,13 @@ def render_canvas_output(state: State):
             
     except Exception as e:
         logger.error(f"CANVAS RENDER: Canvas content generation failed: {e}")
-        return {}
+        # Even if generation fails, we still want to indicate that canvas was needed
+        # This will help with debugging and ensure the frontend knows to expect canvas content
+        return {
+            "has_canvas": True,
+            "canvas_type": canvas_type,
+            "canvas_content": f"<p>Error generating canvas content: {str(e)}</p>"
+        }
 
 
 def generate_text_answer(state: State):
@@ -1388,13 +1744,20 @@ def generate_text_answer(state: State):
     """
     logger.info("=== GENERATE_TEXT_ANSWER: Starting text answer generation ===")
     
+    # Check if canvas is needed - if so, we should generate a more concise text response
+    needs_canvas = state.get("needs_canvas", False)
+    canvas_type = state.get("canvas_type", "")
+    
+    # Initialize both primary and fallback LLMs
+    primary_llm = ChatCerebras(model="gpt-oss-120b")
+    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
+    
     # Check if this is a simple request that was handled directly by analyze_request
     if state.get("needs_complex_processing") is False:
         # This is a simple request that was handled by analyze_request
         final_response = state.get("final_response", "")
         if not final_response:
             # Fallback: generate a new simple response
-            llm = ChatCerebras(model="gpt-oss-120b")
             
             # Build comprehensive context from conversation history
             history_context = ""
@@ -1433,7 +1796,7 @@ def generate_text_answer(state: State):
             Please provide a helpful response to the user's request.
             '''
             
-            final_response = llm.invoke(prompt).content
+            final_response = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, None).__str__()
             logger.info("Simple text answer generated.")
         else:
             logger.info("Using existing final_response for simple request.")
@@ -1447,22 +1810,61 @@ def generate_text_answer(state: State):
             logger.warning("Complex request indicated but no completed tasks found. Generating default response.")
             final_response = "I've processed your request, but I don't have specific results to share."
         else:
-            llm = ChatCerebras(model="gpt-oss-120b")
+            # If canvas is needed, generate a more concise text response that references the canvas
+            if needs_canvas and canvas_type:
+                prompt = f'''
+                You are an expert project manager's assistant. Your job is to synthesize the results from a team of AI agents into a single, clean, and coherent final report for the user.
+                The user's original request was:
+                "{state['original_prompt']}"
+                
+                The following tasks were completed, with these results:
+                ---
+                {json.dumps([serialize_complex_object(task) for task in completed_tasks], indent=2)}
+                ---
+                
+                A {canvas_type} visualization has been prepared to display this information. 
+                Please generate a brief, human-readable summary that references the visualization 
+                and highlights the key findings without reproducing the raw data or code.
+                '''
+            else:
+                prompt = f'''
+                You are an expert project manager's assistant. Your job is to synthesize the results from a team of AI agents into a single, clean, and coherent final report for the user.
+                The user's original request was:
+                "{state['original_prompt']}"
+                
+                The following tasks were completed, with these results:
+                ---
+                {json.dumps([serialize_complex_object(task) for task in completed_tasks], indent=2)}
+                ---
+                Please generate a final, human-readable response that directly answers the user's original request based on the collected results.
+                '''
             
-            prompt = f'''
-            You are an expert project manager's assistant. Your job is to synthesize the results from a team of AI agents into a single, clean, and coherent final report for the user.
-            The user's original request was:
-            "{state['original_prompt']}"
-            
-            The following tasks were completed, with these results:
-            ---
-            {json.dumps([serialize_complex_object(task) for task in completed_tasks], indent=2)}
-            ---
-            Please generate a final, human-readable response that directly answers the user's original request based on the collected results.
-            '''
-            
-            final_response = llm.invoke(prompt).content
+            final_response = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, None).__str__()
             logger.info("Complex text answer generated.")
+        
+        # If canvas is needed, provide a more concise message that references the canvas
+        if needs_canvas and canvas_type:
+            # Check if the final_response contains HTML/Markdown code that should be in the canvas
+            html_indicators = ['<!DOCTYPE html>', '<html', '<button', '<script>', 'onclick=', 'onClick=',
+                              '<div', '<span', '<p>', '<h1>', '<h2>', '<h3>', '<style>', '<head>']
+            markdown_indicators = ['```html', '```markdown', '# ', '## ', '### ', '**', '* ', '- ']
+            
+            # If the response contains code that should be in the canvas, create a more concise response
+            contains_html = any(indicator in final_response for indicator in html_indicators)
+            contains_markdown_code = any(indicator in final_response for indicator in ['```html', '```markdown'])
+            
+            if contains_html or contains_markdown_code:
+                # Generate a more concise response that references the canvas
+                concise_prompt = f'''
+                The user's original request was:
+                "{state['original_prompt']}"
+                
+                A {canvas_type} visualization has been created to display the results.
+                Please generate a brief, human-readable message that tells the user to check 
+                the {canvas_type} visualization for the results, without including any code.
+                '''
+                final_response = invoke_llm_with_fallback(primary_llm, fallback_llm, concise_prompt, None).__str__()
+                logger.info("Generated concise text response for canvas visualization.")
         
         ai_message = AIMessage(content=final_response)
         return {"final_response": final_response, "messages": [ai_message]}
@@ -1507,11 +1909,19 @@ def generate_final_response(state: State):
     logger.info(f"CANVAS DEBUG: HTML detection result: contains_html={contains_html}")
     
     # Now analyze if canvas is needed using LLM
-    llm = ChatCerebras(model="gpt-oss-120b")
+    # Initialize both primary and fallback LLMs
+    primary_llm = ChatCerebras(model="gpt-oss-120b")
+    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
     
     prompt = f'''
     Analyze the user's request and the generated text response to determine if a canvas visualization would enhance the user experience.
     
+    **YOUR PURPOSE AND ENVIRONMENT:**
+    You are a decision-making AI that determines whether to generate a canvas visualization for a web application.
+    The canvas is a separate display area that can show interactive content, visualizations, or rich media.
+    The chat area should only contain text responses, while the canvas area shows interactive content.
+    
+    **CONTEXT:**
     User's Original Request: "{state['original_prompt']}"
     Generated Text Response: "{final_response}"
     
@@ -1541,7 +1951,10 @@ def generate_final_response(state: State):
     3. Consider if interactive elements would improve user experience
     4. Default to text-only if uncertain
     
-    **IMPORTANT:** If the response contains HTML elements like buttons, scripts, or interactive content, ALWAYS use "html" canvas type, never "markdown".
+    **IMPORTANT OUTPUT RULES:**
+    - If the response contains HTML elements like buttons, scripts, or interactive content, ALWAYS use "html" canvas type, never "markdown".
+    - Your response will be used to generate a canvas visualization, so be precise in your decision.
+    - The canvas content will be displayed in an iframe with limited capabilities, so external libraries must be imported via CDN if needed.
     
     Respond with a JSON object:
     {{
@@ -1560,7 +1973,7 @@ def generate_final_response(state: State):
             canvas_type: Optional[Literal["html", "markdown"]] = None
             canvas_prompt: Optional[str] = None
         
-        response = llm.invoke_json(prompt, CanvasDecision)
+        response = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, CanvasDecision)
         
         # Force canvas usage if HTML content is detected
         if contains_html and not response.use_canvas:
@@ -1572,8 +1985,22 @@ def generate_final_response(state: State):
         
         if response.use_canvas:
             logger.info(f"Canvas needed: {response.canvas_type} - {response.reasoning}")
+            
+            # When canvas is needed, we should generate a concise text response for the chat
+            # that references the canvas content without including the actual HTML
+            concise_text_prompt = f'''
+            The user's original request was:
+            "{state['original_prompt']}"
+            
+            A {response.canvas_type} visualization has been created to display the results.
+            Please generate a brief, human-readable message that tells the user to check 
+            the {response.canvas_type} visualization for the results, without including any code.
+            '''
+            
+            concise_text_response = invoke_llm_with_fallback(primary_llm, fallback_llm, concise_text_prompt, None).__str__()
+            
             result = {
-                "final_response": final_response,
+                "final_response": concise_text_response,
                 "messages": text_result.get('messages', []),
                 "needs_canvas": True,
                 "canvas_type": response.canvas_type,
@@ -1700,7 +2127,8 @@ def get_serializable_state(state: dict | State, thread_id: str) -> dict:
         # Get all attributes that exist in the state
         for key in ['messages', 'task_agent_pairs', 'final_response', 'pending_user_input', 
                    'question_for_user', 'original_prompt', 'completed_tasks', 'parsed_tasks',
-                   'uploaded_files', 'task_plan', 'canvas_content', 'canvas_type', 'has_canvas']:
+                   'uploaded_files', 'task_plan', 'canvas_content', 'canvas_type', 'has_canvas',
+                   'needs_canvas']:
             if hasattr(state, key):
                 state_dict[key] = getattr(state, key)
             # Also try to get from __getitem__ if it's a dict-like object
@@ -1714,20 +2142,54 @@ def get_serializable_state(state: dict | State, thread_id: str) -> dict:
     messages = state.get("messages", [])
     try:
         # This handles LangChain message objects
-        serializable_messages = messages_to_dict(messages)
-    except Exception:
+        langchain_messages = messages_to_dict(messages)
+        
+        # Convert LangChain format to frontend format and filter empty messages
+        serializable_messages = []
+        for msg in langchain_messages:
+            msg_type = msg.get('type', '')
+            msg_data = msg.get('data', {})
+            content = msg_data.get('content', '')
+            
+            # Skip empty assistant/ai messages
+            if msg_type == 'ai' and (not content or content.strip() == ''):
+                logger.debug(f"Skipping empty AI message: {msg}")
+                continue
+            
+            # Convert to frontend format
+            frontend_msg = {
+                'id': msg.get('id', str(time.time())),
+                'type': 'assistant' if msg_type == 'ai' else 'user' if msg_type == 'human' else 'system',
+                'content': content,
+                'timestamp': msg_data.get('timestamp', time.time())
+            }
+            serializable_messages.append(frontend_msg)
+            logger.debug(f"Converted message: type={msg_type}, content_length={len(content)}")
+            
+    except Exception as e:
+        logger.warning(f"Failed to serialize messages with messages_to_dict: {e}")
         # Fallback for plain dicts or other formats
         serializable_messages = []
         for msg in messages:
             if isinstance(msg, dict):
+                # Filter out empty assistant messages
+                if msg.get('type') == 'assistant' and (not msg.get('content') or msg.get('content', '').strip() == ''):
+                    continue
                 serializable_messages.append(msg)
             elif hasattr(msg, 'dict'):
-                serializable_messages.append(msg.dict())
+                msg_dict = msg.dict()
+                # Filter out empty assistant messages
+                if msg_dict.get('type') == 'assistant' and (not msg_dict.get('content') or msg_dict.get('content', '').strip() == ''):
+                    continue
+                serializable_messages.append(msg_dict)
             else:
                 serializable_messages.append(str(msg)) # Failsafe
 
     # Use the serialize_complex_object helper for other potentially complex fields
     # This ensures nested Pydantic models, HttpUrl, etc., are converted correctly.
+    logger.info(f"Serialized {len(serializable_messages)} messages for thread {thread_id}")
+    logger.info(f"Final response length: {len(state.get('final_response', '')) if state.get('final_response') else 0}")
+    
     return {
         "thread_id": thread_id,
         "status": "pending_user_input" if state.get("pending_user_input") else "completed",
@@ -1753,6 +2215,7 @@ def get_serializable_state(state: dict | State, thread_id: str) -> dict:
         "has_canvas": state.get("has_canvas", False),
         "canvas_content": state.get("canvas_content"),
         "canvas_type": state.get("canvas_type"),
+        "needs_canvas": state.get("needs_canvas", False),
         "timestamp": time.time(),
     }
 
@@ -1829,7 +2292,9 @@ def analyze_request(state: State):
     """Sophisticated analysis of user request to determine processing approach."""
     logger.info("Performing sophisticated analysis of user request...")
     
-    llm = ChatCerebras(model="gpt-oss-120b")
+    # Initialize both primary and fallback LLMs
+    primary_llm = ChatCerebras(model="gpt-oss-120b")
+    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
     
     # Build comprehensive context from conversation history
     history_context = ""
@@ -1891,7 +2356,7 @@ def analyze_request(state: State):
     '''
     
     try:
-        response = llm.invoke_json(prompt, AnalysisResult)
+        response = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, AnalysisResult)
         logger.info(f"Analysis result: needs_complex_processing={response.needs_complex_processing}")
         
         # Ensure we return a complete state update with all required fields

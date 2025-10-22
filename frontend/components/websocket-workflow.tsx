@@ -6,8 +6,9 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import { MessageCircle, Wifi, WifiOff, Play, Pause, RotateCcw } from 'lucide-react';
-import { useWebSocketConversation } from '@/hooks/use-websocket-conversation';
-import { type ProcessResponse } from '@/lib/api-client';
+import { useWebSocketManager } from '@/hooks/use-websocket-conversation';
+import { type ProcessResponse } from '@/lib/types';
+import { useConversationStore } from '@/lib/conversation-store';
 
 interface WebSocketWorkflowProps {
   onWorkflowComplete?: (result: ProcessResponse) => void;
@@ -23,39 +24,48 @@ export function WebSocketWorkflow({
   const [inputPrompt, setInputPrompt] = useState('');
   const [isStarted, setIsStarted] = useState(false);
 
+  // Initialize the WebSocket manager. It will automatically connect
+  // and keep the Zustand store in sync with backend updates.
+  useWebSocketManager();
+  
+  // Get conversation state from Zustand store
+  const conversationState = useConversationStore();
   const { 
-    messages, 
-    isConnected, 
-    waitingForUser, 
-    currentQuestion, 
-    progress, 
-    currentThreadId,
-    sendMessage, 
-    connect, 
-    disconnect,
-    clearMessages 
-  } = useWebSocketConversation({
-    onMessageReceived: (data) => {
-      console.log('WebSocket message received:', data);
-      
-      // Handle completion with task agent pairs
-      if (data.type === 'completion' && !data.requires_user_input && data.task_agent_pairs) {
-        const result: ProcessResponse = {
-          task_agent_pairs: data.task_agent_pairs,
-          message: data.message || 'Workflow completed via WebSocket',
-          thread_id: data.thread_id || currentThreadId || '',
-          pending_user_input: false,
-          question_for_user: null,
-          final_response: data.final_response || null
-        };
-        onWorkflowComplete?.(result);
-      }
-    },
-    onError: (error) => {
-      console.error('WebSocket error:', error);
-      onError?.(error);
+    startConversation, 
+    continueConversation, 
+    resetConversation, 
+    loadConversation 
+  } = useConversationStore(state => state.actions);
+  const isConversationLoading = useConversationStore((state: any) => state.isLoading);
+  
+  const messages = conversationState.messages;
+  const isConnected = true; // Assuming always connected when using WebSocketManager
+  const waitingForUser = conversationState.isWaitingForUser;
+  const currentQuestion = conversationState.currentQuestion;
+  const progress = conversationState.metadata?.progress || 0;
+  const currentThreadId = conversationState.thread_id;
+  
+  const sendMessage = async (input: string, threadId?: string) => {
+    if (threadId) {
+      await continueConversation(input);
+    } else {
+      await startConversation(input);
     }
-  });
+  };
+  
+  const connect = () => {
+    // Connection is handled by useWebSocketManager
+    console.log('WebSocket connection managed by useWebSocketManager');
+  };
+  
+  const disconnect = () => {
+    // Disconnection is handled by useWebSocketManager
+    console.log('WebSocket disconnection managed by useWebSocketManager');
+  };
+  
+  const clearMessages = () => {
+    resetConversation();
+  };
 
   const handleStartWorkflow = () => {
     if (!inputPrompt.trim()) return;
@@ -157,42 +167,50 @@ export function WebSocketWorkflow({
             <div className="space-y-4">
               <h4 className="font-medium text-gray-900">Conversation</h4>
               <div className="max-h-96 overflow-y-auto space-y-3 p-4 bg-gray-50 rounded-lg">
-                {messages.map((message) => (
-                  <div key={message.id} className={`message message-${message.type}`}>
-                    <div className={`p-3 rounded-lg max-w-[80%] ${
-                      message.type === 'user' 
-                        ? 'bg-blue-500 text-white ml-auto' 
-                        : message.type === 'system'
-                        ? 'bg-yellow-50 border border-yellow-200 text-yellow-800'
-                        : 'bg-white border border-gray-200'
-                    }`}>
-                      <div className="text-sm font-medium mb-1 opacity-70">
-                        {message.type === 'user' ? 'You' : message.type === 'system' ? 'System' : 'Assistant'}
-                      </div>
-                      <div>{message.content}</div>
-                      <div className="text-xs opacity-70 mt-1">
-                        {message.timestamp.toLocaleTimeString()}
-                      </div>
-                    </div>
-                    
-                    {/* Show task-agent pairs for assistant messages */}
-                    {message.type === 'assistant' && message.metadata?.task_agent_pairs && (
-                      <div className="mt-2 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-                        <h5 className="font-medium text-blue-800 mb-2">Workflow Tasks:</h5>
-                        <div className="space-y-2">
-                          {message.metadata.task_agent_pairs.map((pair, index) => (
-                            <div key={`${message.id}-task-${index}`} className="flex items-center justify-between p-2 bg-white rounded border">
-                              <span className="text-sm text-gray-900">
-                                {pair.task_name.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
-                              </span>
-                              <Badge variant="outline">{pair.primary.name}</Badge>
-                            </div>
-                          ))}
+                {messages
+                  .filter((message) => {
+                    // Filter out empty assistant messages to prevent empty bubbles
+                    if (message.type === 'assistant') {
+                      return message.content && message.content.trim() !== '';
+                    }
+                    return true;
+                  })
+                  .map((message) => (
+                    <div key={message.id} className={`message message-${message.type}`}>
+                      <div className={`p-3 rounded-lg max-w-[80%] ${
+                        message.type === 'user' 
+                          ? 'bg-blue-500 text-white ml-auto' 
+                          : message.type === 'system'
+                          ? 'bg-yellow-50 border border-yellow-200 text-yellow-800'
+                          : 'bg-white border border-gray-200'
+                      }`}>
+                        <div className="text-sm font-medium mb-1 opacity-70">
+                          {message.type === 'user' ? 'You' : message.type === 'system' ? 'System' : 'Assistant'}
+                        </div>
+                        <div>{message.content}</div>
+                        <div className="text-xs opacity-70 mt-1">
+                          {message.timestamp.toLocaleTimeString()}
                         </div>
                       </div>
-                    )}
-                  </div>
-                ))}
+                      
+                      {/* Show task-agent pairs for assistant messages */}
+                      {message.type === 'assistant' && message.metadata?.task_agent_pairs && (
+                        <div className="mt-2 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                          <h5 className="font-medium text-blue-800 mb-2">Workflow Tasks:</h5>
+                          <div className="space-y-2">
+                            {message.metadata.task_agent_pairs.map((pair, index) => (
+                              <div key={`${message.id}-task-${index}`} className="flex items-center justify-between p-2 bg-white rounded border">
+                                <span className="text-sm text-gray-900">
+                                  {pair.task_name.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                                </span>
+                                <Badge variant="outline">{pair.primary.name}</Badge>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ))}
               </div>
             </div>
           )}

@@ -50,6 +50,14 @@ const Markdown: FC<MarkdownProps> = ({ content }) => {
         tr: ({ node, ...props }) => <tr className="hover:bg-gray-50 dark:hover:bg-gray-900" {...props} />,
         th: ({ node, ...props }) => <th className="px-4 py-2 text-left font-semibold" {...props} />,
         td: ({ node, ...props }) => <td className="px-4 py-2" {...props} />,
+        // Fix for empty src attribute error
+        img: ({ node, ...props }) => {
+          // Check if src is empty and replace with null to prevent browser warnings
+          if (props.src === "") {
+            return <img {...props} src={null} alt={props.alt || ""} />;
+          }
+          return <img {...props} />;
+        },
       }}
     >
       {content}

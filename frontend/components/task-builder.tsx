@@ -42,6 +42,7 @@ interface TaskBuilderProps {
     apiResponseData: ApiResponse | null;
     onThreadIdUpdate?: (threadId: string) => void;
     onExecutionResultsUpdate?: (results: ExecutionResult[]) => void;
+    onViewCanvas?: (canvasContent: string, canvasType: 'html' | 'markdown') => void;
 }
 
 export default function TaskBuilder({
@@ -52,7 +53,8 @@ export default function TaskBuilder({
     isExecuting,
     apiResponseData,
     onThreadIdUpdate,
-    onExecutionResultsUpdate
+    onExecutionResultsUpdate,
+    onViewCanvas
 }: TaskBuilderProps) {
   const { toast } = useToast()
   
@@ -95,6 +97,7 @@ export default function TaskBuilder({
         startConversation={startConversation}
         continueConversation={continueConversation}
         resetConversation={resetConversation}
+        onViewCanvas={onViewCanvas}
       />
 
       {/* Hidden component to handle execution logic */}

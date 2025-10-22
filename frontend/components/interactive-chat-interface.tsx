@@ -17,6 +17,7 @@ interface InteractiveChatInterfaceProps {
   startConversation: (input: string, files?: File[]) => Promise<void>;
   continueConversation: (input: string, files?: File[]) => Promise<void>;
   resetConversation: () => void;
+  onViewCanvas?: (canvasContent: string, canvasType: 'html' | 'markdown') => void;
 }
 
 export function InteractiveChatInterface({
@@ -33,7 +34,8 @@ export function InteractiveChatInterface({
   isLoading,
   startConversation,
   continueConversation,
-  resetConversation
+  resetConversation,
+  onViewCanvas
 }: InteractiveChatInterfaceProps) {
   useEffect(() => {
     if (!state) {
@@ -119,45 +121,65 @@ export function InteractiveChatInterface({
           </div>
         )}
         
-        {state.messages.map((message: Message, index: number) => {
-          // Ensure message.id is a valid string
-          const messageId = message.id || `message-${index}-${Date.now()}`;
-          
-          return (
-            <div key={messageId} className={`message message-${message.type} w-full flex ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div className={`p-4 rounded-lg ${
-                message.type === 'user' 
-                  ? 'bg-blue-600 text-white max-w-[85%]'
-                  : message.type === 'system'
-                  ? 'bg-yellow-50 border border-yellow-200 text-yellow-800 max-w-[90%]'
-                  : 'bg-gray-100 border border-gray-200 max-w-[95%]'
-              }`}>
-                <div className="message-content space-y-2">
-                  {message.content && (message.type === 'assistant' ? <Markdown content={message.content} /> : <p>{message.content}</p>)}
-                  {message.attachments && message.attachments.length > 0 && (
-                    <div className="flex flex-wrap gap-2 mt-2">
-                      {message.attachments.map((att: Attachment, attIndex: number) => (
-                        <div key={`${messageId}-attachment-${attIndex}`}>
-                          {att.type.startsWith('image/') && att.content ? (
-                            <img src={att.content} alt={att.name} className="max-w-xs max-h-48 rounded-lg" />
-                          ) : (
-                            <div className="flex items-center gap-2 p-2 rounded-md bg-gray-20 text-sm">
-                              <FileIcon className="w-4 h-4" />
-                              <span>{att.name}</span>
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-                <div className={`text-xs opacity-70 mt-1 ${message.type === 'user' ? 'text-blue-200' : 'text-gray-500'}`}>
-                  {message.timestamp.toLocaleTimeString()}
+        {state.messages
+          .filter((message: Message) => {
+            // Filter out empty assistant messages to prevent empty bubbles
+            if (message.type === 'assistant') {
+              return message.content && message.content.trim() !== '';
+            }
+            return true;
+          })
+          .map((message: Message, index: number) => {
+            // Ensure message.id is a valid string
+            const messageId = message.id || `message-${index}-${Date.now()}`;
+            
+            return (
+              <div key={messageId} className={`message message-${message.type} w-full flex ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}>
+                <div className={`p-4 rounded-lg ${
+                  message.type === 'user' 
+                    ? 'bg-blue-600 text-white max-w-[85%]'
+                    : message.type === 'system'
+                    ? 'bg-yellow-50 border border-yellow-200 text-yellow-800 max-w-[90%]'
+                    : 'bg-gray-100 border border-gray-200 max-w-[95%]'
+                }`}>
+                  <div className="message-content space-y-2">
+                    {message.content && (message.type === 'assistant' ? <Markdown content={message.content} /> : <p>{message.content}</p>)}
+                    {message.attachments && message.attachments.length > 0 && (
+                      <div className="flex flex-wrap gap-2 mt-2">
+                        {message.attachments.map((att: Attachment, attIndex: number) => (
+                          <div key={`${messageId}-attachment-${attIndex}`}>
+                            {att.type.startsWith('image/') && att.content ? (
+                              <img src={att.content} alt={att.name} className="max-w-xs max-h-48 rounded-lg" />
+                            ) : (
+                              <div className="flex items-center gap-2 p-2 rounded-md bg-gray-20 text-sm">
+                                <FileIcon className="w-4 h-4" />
+                                <span>{att.name}</span>
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {/* View in Canvas button for messages with canvas content */}
+                    {message.has_canvas && message.canvas_content && message.canvas_type && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="mt-2 text-xs"
+                        onClick={() => onViewCanvas?.(message.canvas_content!, message.canvas_type!)}
+                      >
+                        <FileText className="w-3 h-3 mr-1" />
+                        View in Canvas
+                      </Button>
+                    )}
+                  </div>
+                  <div className={`text-xs opacity-70 mt-1 ${message.type === 'user' ? 'text-blue-200' : 'text-gray-500'}`}>
+                    {message.timestamp.toLocaleTimeString()}
+                  </div>
                 </div>
               </div>
-            </div>
-          );
-        })}
+            );
+          })}
       </div>
 
       {/* Input Form */}

@@ -1,0 +1,39 @@
+{
+  "thread_id": "cd796929-e150-43d2-9437-d0503ad5bad4",
+  "status": "pending_user_input",
+  "messages": [
+    {
+      "type": "ai",
+      "data": {
+        "content": "I need more information to help you with: 'hi!'. Could you please provide more specific details about what you'd like me to do?",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "ai",
+        "name": null,
+        "id": "44ed69f9-9b26-4dd3-8aba-c21ef0123a13",
+        "example": false,
+        "tool_calls": [],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      }
+    }
+  ],
+  "task_agent_pairs": [],
+  "final_response": null,
+  "pending_user_input": true,
+  "question_for_user": "I need more information to help you with: 'hi!'. Could you please provide more specific details about what you'd like me to do?",
+  "metadata": {
+    "original_prompt": null,
+    "completed_tasks": [],
+    "parsed_tasks": [],
+    "currentStage": "completed",
+    "stageMessage": "Orchestration completed successfully!",
+    "progress": 100
+  },
+  "uploaded_files": [],
+  "plan": [],
+  "has_canvas": false,
+  "canvas_content": null,
+  "canvas_type": null,
+  "timestamp": 1761058396.7054331
+}

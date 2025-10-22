@@ -41,6 +41,7 @@ import { forwardRef, useImperativeHandle } from 'react';
 
 export interface OrchestrationDetailsSidebarRef {
   refreshPlan: () => void;
+  viewCanvas: (canvasContent: string, canvasType: 'html' | 'markdown') => void;
 }
 
 const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, OrchestrationDetailsSidebarProps>(
@@ -48,6 +49,11 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
     const [plan, setPlan] = useState<Plan>({ pendingTasks: [], completedTasks: [] });
     const [isLoadingPlan, setIsLoadingPlan] = useState(false);
     const [agents, setAgents] = useState<Agent[]>([]);
+    const [activeTab, setActiveTab] = useState<string>("metadata");
+    const [lastCanvasContent, setLastCanvasContent] = useState<string | undefined>(undefined);
+    // State for viewing specific canvas content from messages
+    const [viewedCanvasContent, setViewedCanvasContent] = useState<string | undefined>(undefined);
+    const [viewedCanvasType, setViewedCanvasType] = useState<'html' | 'markdown' | undefined>(undefined);
     
     // Get conversation state from Zustand store
     const conversationState = useConversationStore();
@@ -55,6 +61,13 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
     const messages = conversationState.messages || [];
     const uploadedFiles = conversationState.uploaded_files || [];
     const planData = conversationState.plan || [];
+    const hasCanvas = conversationState.has_canvas;
+    const canvasContent = conversationState.canvas_content;
+    const canvasType = conversationState.canvas_type;
+    
+    // Determine which canvas to display - viewed canvas takes precedence
+    const displayCanvasContent = viewedCanvasContent || canvasContent;
+    const displayCanvasType = viewedCanvasType || canvasType;
 
     // Process plan data from conversation store
     useEffect(() => {
@@ -99,6 +112,21 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
         setIsLoadingPlan(false);
     }, [planData, conversationState.metadata]);
 
+    // Auto-switch to canvas tab when NEW canvas content is created
+    useEffect(() => {
+        // Only switch if:
+        // 1. We have canvas content
+        // 2. The canvas content is different from what we've seen before (NEW content)
+        if (hasCanvas && canvasContent && canvasContent !== lastCanvasContent) {
+            console.log('Auto-switching to canvas tab due to NEW canvas content');
+            setActiveTab('canvas');
+            setLastCanvasContent(canvasContent);
+            // Clear any viewed canvas content to show the latest
+            setViewedCanvasContent(undefined);
+            setViewedCanvasType(undefined);
+        }
+    }, [hasCanvas, canvasContent, lastCanvasContent]);
+
     useEffect(() => {
         const uniqueAgentsFromPairs = Array.from(new Set(taskAgentPairs.map((pair: TaskAgentPair) => pair.primary.id)))
             .map(id => taskAgentPairs.find((pair: TaskAgentPair) => pair.primary.id === id)!.primary);
@@ -120,6 +148,19 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
         // For now, we'll just reset the loading state
         setTimeout(() => setIsLoadingPlan(false), 500);
     };
+    
+    // Method to view specific canvas content from a message
+    const viewCanvas = (canvasContent: string, canvasType: 'html' | 'markdown') => {
+        setViewedCanvasContent(canvasContent);
+        setViewedCanvasType(canvasType);
+        setActiveTab('canvas');
+    };
+    
+    // Expose methods via ref
+    useImperativeHandle(ref, () => ({
+        refreshPlan,
+        viewCanvas
+    }));
 
 
     const totalCost = executionResults.reduce((sum, result) => sum + result.cost, 0)
@@ -148,7 +189,7 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
 
     return (
         <aside className={cn("border-l bg-gray-50/50 p-4 flex flex-col h-full", className)}>
-            <Tabs defaultValue="metadata" className="h-full flex flex-col">
+            <Tabs value={activeTab} onValueChange={setActiveTab} className="h-full flex flex-col">
                 <TabsList className="grid w-full grid-cols-4">
                     <TabsTrigger value="metadata">Metadata</TabsTrigger>
                     <TabsTrigger value="plan">Plan</TabsTrigger>
@@ -279,19 +320,33 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                     )}
                 </TabsContent>
                 <TabsContent value="canvas" className="flex-1 overflow-y-auto mt-4">
-                    {conversationState.has_canvas && conversationState.canvas_content ? (
+                    {(hasCanvas || viewedCanvasContent) && displayCanvasContent ? (
                         <div className="h-full flex flex-col">
+                            {viewedCanvasContent && (
+                                <div className="bg-blue-50 border-b border-blue-200 px-4 py-2 text-sm text-blue-800">
+                                    Viewing canvas from a previous message
+                                    <button 
+                                        onClick={() => {
+                                            setViewedCanvasContent(undefined);
+                                            setViewedCanvasType(undefined);
+                                        }}
+                                        className="ml-2 text-blue-600 hover:text-blue-800 underline"
+                                    >
+                                        Return to latest
+                                    </button>
+                                </div>
+                            )}
                             <div className="flex-1 overflow-auto">
-                                {conversationState.canvas_type === 'html' ? (
+                                {displayCanvasType === 'html' ? (
                                     <iframe
-                                        srcDoc={conversationState.canvas_content}
+                                        srcDoc={displayCanvasContent}
                                         className="w-full h-full min-h-[300px] border-0"
                                         title="Canvas HTML Content"
                                         sandbox="allow-scripts allow-same-origin"
                                     />
                                 ) : (
                                     <div className="prose prose-sm max-w-none p-4">
-                                        <Markdown content={conversationState.canvas_content} />
+                                        <Markdown content={displayCanvasContent} />
                                     </div>
                                 )}
                             </div>

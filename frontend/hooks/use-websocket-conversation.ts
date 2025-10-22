@@ -41,10 +41,10 @@ export function useWebSocketManager({
       ws.current.onopen = () => {
         console.log('WebSocket connected');
         setIsConnected(true);
-        
+
         // Expose WebSocket to window for conversation store to use
         (window as any).__websocket = ws.current;
-        
+
         // The WebSocket will wait for the first message from the client
         // which will be sent when startConversation or continueConversation is called
         console.log('WebSocket ready to receive messages');
@@ -163,28 +163,48 @@ export function useWebSocketManager({
           // The '__end__' node now contains the final, complete state.
           // We use this as the single source of truth to update our store.
           else if (eventData.node === '__end__' && eventData.data) {
+            console.log('Received __end__ event, processing final state...');
             // The backend sends the complete state in the data field
             const finalState: ConversationState = eventData.data;
-            
+            console.log('Final state:', {
+              hasMessages: !!finalState.messages,
+              messagesCount: finalState.messages?.length || 0,
+              hasFinalResponse: !!finalState.final_response,
+              finalResponseLength: finalState.final_response?.length || 0,
+              hasCanvas: finalState.has_canvas
+            });
+
             // Get current messages to preserve them
             const currentMessages = useConversationStore.getState().messages;
-            
-            // Merge current messages with any new messages from the backend
-            let mergedMessages = currentMessages;
-            if (finalState.messages && finalState.messages.length > 0) {
-              // If backend sent messages, merge them carefully
-              mergedMessages = [...currentMessages];
-              finalState.messages.forEach(newMsg => {
-                // Only add if it's not already in our messages
-                if (!mergedMessages.some(existingMsg => existingMsg.id === newMsg.id)) {
-                  mergedMessages.push(newMsg);
-                }
-              });
-            }
-            
+
+            // Filter out any empty assistant messages from backend messages first
+            const backendMessages = (finalState.messages || []).filter(msg => {
+              // Keep all non-assistant messages
+              if (msg.type !== 'assistant') return true;
+              // Keep assistant messages that have content
+              return msg.content && msg.content.trim() !== '';
+            });
+
+            // Merge current messages with filtered backend messages
+            let mergedMessages = [...currentMessages];
+            backendMessages.forEach(newMsg => {
+              // Only add if it's not already in our messages
+              if (!mergedMessages.some(existingMsg => existingMsg.id === newMsg.id)) {
+                mergedMessages.push(newMsg);
+              }
+            });
+
             // Handle canvas content - don't add it as a regular message if it should be in canvas
             let finalMessages = mergedMessages;
-            
+
+            // Filter out any empty assistant messages again to prevent empty bubbles
+            finalMessages = finalMessages.filter(msg => {
+              // Keep all non-assistant messages
+              if (msg.type !== 'assistant') return true;
+              // Keep assistant messages that have content
+              return msg.content && msg.content.trim() !== '';
+            });
+
             // Check if the final response contains HTML that should be in canvas
             const isHtmlContent = finalState.final_response && (
               finalState.final_response.includes('<!DOCTYPE html>') ||
@@ -192,7 +212,7 @@ export function useWebSocketManager({
               finalState.final_response.includes('<button') ||
               finalState.final_response.includes('<script>')
             );
-            
+
             console.log('CANVAS DEBUG: Frontend canvas detection:', {
               hasCanvas: finalState.has_canvas,
               canvasType: finalState.canvas_type,
@@ -200,15 +220,19 @@ export function useWebSocketManager({
               finalResponseLength: finalState.final_response?.length,
               isHtmlContent: isHtmlContent
             });
-            
+
             if (finalState.has_canvas && finalState.canvas_content) {
-              // If we have canvas content, don't add the final response as a regular message
-              // The canvas will display the content separately
-              console.log('Canvas content detected, not adding final response as regular message');
+              // If we have canvas content, we should still show a text response in the chat
+              // The canvas will display the content separately, but users need to know what was done
+              console.log('Canvas content detected, adding explanatory text response');
               console.log('Canvas content preview:', finalState.canvas_content?.substring(0, 200));
-              
-              // Remove any HTML content from messages if it exists
-              finalMessages = mergedMessages.filter(msg => {
+
+              // Create a text response that explains the canvas content
+              const canvasExplanation = finalState.final_response ||
+                `I've created an interactive ${finalState.canvas_type} visualization for your request. You can view it in the Canvas tab.`;
+
+              // Remove any HTML content from messages if it exists, but add the explanation
+              finalMessages = finalMessages.filter(msg => {
                 if (msg.type === 'assistant' && msg.content) {
                   const content = msg.content;
                   const hasHtml = (
@@ -224,33 +248,72 @@ export function useWebSocketManager({
                 }
                 return true;
               });
-              
-            } else if (finalState.final_response && !mergedMessages.some(msg => msg.type === 'assistant' && msg.content === finalState.final_response)) {
-              // Only add the final response if it's not already in our messages to prevent duplicates
-              // Check if the last message is an empty assistant message and replace it instead of adding a new one
-              const lastMessage = mergedMessages[mergedMessages.length - 1];
-              if (lastMessage && lastMessage.type === 'assistant' && !lastMessage.content) {
-                // Replace the empty assistant message with the final response
-                mergedMessages[mergedMessages.length - 1] = {
-                  ...lastMessage,
-                  content: finalState.final_response,
-                  timestamp: new Date()
-                };
-              } else {
-                // Add as a new message only if there's no empty assistant message to replace
+
+              // Add the canvas explanation as a text message with canvas metadata
+              const explanationMessage: Message = {
+                id: Date.now().toString(),
+                type: 'assistant',
+                content: canvasExplanation,
+                timestamp: new Date(),
+                // Attach canvas information to this message
+                canvas_content: finalState.canvas_content,
+                canvas_type: finalState.canvas_type,
+                has_canvas: true
+              };
+              finalMessages = [...finalMessages, explanationMessage];
+
+            } else {
+              // Check if we have any assistant messages in finalMessages
+              const hasAssistantMessage = finalMessages.some(msg => msg.type === 'assistant');
+
+              // If we don't have any assistant messages and we have a final_response, add it
+              if (!hasAssistantMessage && finalState.final_response && finalState.final_response.trim() !== '') {
+                console.log('No assistant message found in backend messages, adding final_response');
                 const assistantMessage: Message = {
                   id: Date.now().toString(),
                   type: 'assistant',
                   content: finalState.final_response,
                   timestamp: new Date()
                 };
-                finalMessages = [...mergedMessages, assistantMessage];
+                finalMessages = [...finalMessages, assistantMessage];
+              } else {
+                console.log('Using messages from backend, not adding final_response separately');
               }
             }
-            
+
+            // Additional filtering to ensure no HTML content appears in chat messages
+            finalMessages = finalMessages.map(msg => {
+              if (msg.type === 'assistant' && msg.content) {
+                // Check if the message content contains HTML that should be in canvas
+                const hasHtmlTags = (
+                  msg.content.includes('<!DOCTYPE html>') ||
+                  msg.content.includes('<html') ||
+                  msg.content.includes('<button') ||
+                  msg.content.includes('<script>') ||
+                  msg.content.includes('<div') ||
+                  msg.content.includes('<span') ||
+                  msg.content.includes('<p>') ||
+                  msg.content.includes('<h1>') ||
+                  msg.content.includes('<h2>') ||
+                  msg.content.includes('<h3>') ||
+                  msg.content.includes('<style>') ||
+                  msg.content.includes('<head>')
+                );
+
+                if (hasHtmlTags) {
+                  // If this message contains HTML, replace it with a clean explanation
+                  return {
+                    ...msg,
+                    content: "I've created an interactive visualization for your request. You can view it in the Canvas tab.",
+                  };
+                }
+              }
+              return msg;
+            });
+
             // Preserve existing data that might be missing from finalState
             const currentState = useConversationStore.getState();
-            
+
             _setConversationState({
               ...finalState,
               messages: finalMessages,
@@ -272,7 +335,9 @@ export function useWebSocketManager({
               has_canvas: finalState.has_canvas !== undefined ? finalState.has_canvas : currentState.has_canvas
             });
             // Explicitly set isLoading to false in the store
+            console.log('Setting isLoading to false after __end__ event');
             useConversationStore.setState({ isLoading: false });
+            console.log('Final state updated, isLoading:', useConversationStore.getState().isLoading);
           }
           // Handle intermediate states or errors
           else if (eventData.node === '__user_input_required__') {
@@ -283,7 +348,7 @@ export function useWebSocketManager({
               content: eventData.data?.question_for_user || 'Additional information required.',
               timestamp: new Date()
             };
-            
+
             const currentMessages = useConversationStore.getState().messages;
             _setConversationState({
               messages: [...currentMessages, questionMessage],

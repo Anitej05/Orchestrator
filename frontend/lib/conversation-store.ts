@@ -305,23 +305,46 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
           updatedTaskAgentPairs = [...updatedTaskAgentPairs, ...newPairs];
         }
         
-        // Handle plan - preserve existing plan if new plan is empty or undefined
+        // Handle plan - accumulate plans throughout conversation
         let updatedPlan = state.plan || [];
         if (newState.plan && newState.plan.length > 0) {
-          // For plans, we want to show the current plan, not accumulate
+          // Update with new plan but keep it if it's more recent
           updatedPlan = newState.plan;
         }
+        // If newState.plan is empty/undefined, keep the existing plan
         
-        // Handle metadata - merge deeply to preserve all information
+        // Handle metadata - merge deeply to preserve all information throughout conversation
         let updatedMetadata = state.metadata || {};
         if (newState.metadata) {
           // Deep merge metadata to preserve all fields
+          // Accumulate completed_tasks and parsed_tasks
+          const existingCompletedTasks = updatedMetadata.completed_tasks || [];
+          const newCompletedTasks = newState.metadata.completed_tasks || [];
+          const mergedCompletedTasks = [...existingCompletedTasks];
+          
+          // Add new completed tasks that aren't already in the list
+          newCompletedTasks.forEach((newTask: any) => {
+            if (!mergedCompletedTasks.some((existingTask: any) => existingTask.task_name === newTask.task_name)) {
+              mergedCompletedTasks.push(newTask);
+            }
+          });
+          
+          const existingParsedTasks = updatedMetadata.parsed_tasks || [];
+          const newParsedTasks = newState.metadata.parsed_tasks || [];
+          const mergedParsedTasks = [...existingParsedTasks];
+          
+          // Add new parsed tasks that aren't already in the list
+          newParsedTasks.forEach((newTask: any) => {
+            if (!mergedParsedTasks.some((existingTask: any) => existingTask.task_name === newTask.task_name)) {
+              mergedParsedTasks.push(newTask);
+            }
+          });
+          
           updatedMetadata = {
             ...updatedMetadata,
             ...newState.metadata,
-            // Specifically preserve completed_tasks and parsed_tasks if they exist
-            completed_tasks: newState.metadata.completed_tasks || updatedMetadata.completed_tasks || [],
-            parsed_tasks: newState.metadata.parsed_tasks || updatedMetadata.parsed_tasks || [],
+            completed_tasks: mergedCompletedTasks,
+            parsed_tasks: mergedParsedTasks,
             // Preserve original_prompt throughout conversation
             original_prompt: newState.metadata.original_prompt || updatedMetadata.original_prompt || state.metadata?.original_prompt
           };
@@ -334,12 +357,20 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
           task_agent_pairs: updatedTaskAgentPairs,
           plan: updatedPlan,
           metadata: updatedMetadata,
-          // Handle canvas data
-          canvas_content: newState.canvas_content !== undefined ? newState.canvas_content : state.canvas_content,
-          canvas_type: newState.canvas_type !== undefined ? newState.canvas_type : state.canvas_type,
-          has_canvas: newState.has_canvas !== undefined ? newState.has_canvas : state.has_canvas,
-          // Ensure messages are properly created with Date objects for timestamps
-          messages: (newState.messages || state.messages || []).map((msg: any) => ({
+        // Handle canvas data
+        canvas_content: newState.canvas_content !== undefined ? newState.canvas_content : state.canvas_content,
+        canvas_type: newState.canvas_type !== undefined ? newState.canvas_type : state.canvas_type,
+        has_canvas: newState.has_canvas !== undefined ? newState.has_canvas : state.has_canvas,
+        // Ensure messages are properly created with Date objects for timestamps
+        // Also filter out empty assistant messages to prevent empty bubbles
+        messages: (newState.messages || state.messages || [])
+          .filter((msg: any) => {
+            // Keep all non-assistant messages
+            if (msg.type !== 'assistant') return true;
+            // Keep assistant messages that have content
+            return msg.content && msg.content.trim() !== '';
+          })
+          .map((msg: any) => ({
             ...msg,
             timestamp: new Date(msg.timestamp || Date.now()),
           })),

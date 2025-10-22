@@ -79,6 +79,10 @@ export interface Message {
     task_agent_pairs?: TaskAgentPair[];
     progress?: number;
   };
+  // Canvas information for this specific message
+  canvas_content?: string;
+  canvas_type?: 'html' | 'markdown';
+  has_canvas?: boolean;
 }
 
 export type FileObject = {

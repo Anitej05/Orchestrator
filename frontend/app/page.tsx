@@ -105,6 +105,11 @@ export default function Home() {
       });
     }
   };
+  
+  const handleViewCanvas = (canvasContent: string, canvasType: 'html' | 'markdown') => {
+    // Call the sidebar's viewCanvas method to switch to canvas tab and display the content
+    sidebarRef.current?.viewCanvas(canvasContent, canvasType);
+  };
 
 
   const handleConversationSelect = async (threadId: string) => {
@@ -238,6 +243,7 @@ export default function Home() {
                     apiResponseData={apiResponseData}
                     onThreadIdUpdate={handleThreadIdUpdate}
                     onExecutionResultsUpdate={handleExecutionResultsUpdate}
+                    onViewCanvas={handleViewCanvas}
                  />
               </main>
             </ResizablePanel>

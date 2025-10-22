@@ -1,0 +1,31 @@
+{
+  "thread_id": "a4f4951c-3762-434c-b459-a225e844c57f",
+  "status": "completed",
+  "messages": [
+    {
+      "id": "1761155329.2762973",
+      "type": "assistant",
+      "content": "Hello! How can I assist you today?",
+      "timestamp": 1761155329.2762973
+    }
+  ],
+  "task_agent_pairs": [],
+  "final_response": "Hello! How can I assist you today?",
+  "pending_user_input": false,
+  "question_for_user": null,
+  "metadata": {
+    "original_prompt": null,
+    "completed_tasks": [],
+    "parsed_tasks": [],
+    "currentStage": "completed",
+    "stageMessage": "Orchestration completed successfully!",
+    "progress": 100
+  },
+  "uploaded_files": [],
+  "plan": [],
+  "has_canvas": false,
+  "canvas_content": null,
+  "canvas_type": null,
+  "needs_canvas": false,
+  "timestamp": 1761155329.2762973
+}
