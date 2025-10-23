@@ -59,7 +59,9 @@ class ForceJsonSerializer(JsonPlusSerializer):
     def loads_typed(self, data: tuple[str, bytes]) -> Any:
         return self.loads(data[1])
 
-CONVERSATION_HISTORY_DIR = "conversation_history"
+# Use absolute path relative to backend directory
+BACKEND_DIR_FOR_HISTORY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+CONVERSATION_HISTORY_DIR = os.path.join(BACKEND_DIR_FOR_HISTORY, "conversation_history")
 os.makedirs(CONVERSATION_HISTORY_DIR, exist_ok=True)
 
 # --- Imports for Document Processing ---
@@ -407,7 +409,10 @@ logging.info("ChatCerebras has been monkey-patched to strip  and handle JSON man
 load_dotenv()
 
 logger = logging.getLogger("AgentOrchestrator")
-PLAN_DIR = "agent_plans"
+# Use absolute path relative to this file's directory
+ORCHESTRATOR_DIR = os.path.dirname(os.path.abspath(__file__))
+BACKEND_DIR = os.path.dirname(ORCHESTRATOR_DIR)
+PLAN_DIR = os.path.join(BACKEND_DIR, "agent_plans")
 os.makedirs(PLAN_DIR, exist_ok=True)
 os.makedirs("storage/vector_store", exist_ok=True)
 
@@ -640,6 +645,26 @@ def parse_prompt(state: State):
 
     capability_texts, _ = get_all_capabilities()
     capabilities_list_str = ", ".join(f"'{c}'" for c in capability_texts)
+    
+    # Add file context if files are uploaded
+    file_context = ""
+    uploaded_files = state.get("uploaded_files", [])
+    if uploaded_files:
+        # Handle both dict and FileObject instances
+        file_names = []
+        for f in uploaded_files:
+            if isinstance(f, dict):
+                file_names.append(f.get('file_name', 'unknown'))
+            else:
+                file_names.append(f.file_name)
+        
+        file_context = f'''
+        **UPLOADED FILES:**
+        The user has uploaded the following file(s): {", ".join(file_names)}
+        When the user refers to "this document", "the file", "the PDF", etc., they are referring to these uploaded files.
+        You MUST include the file information in the task_description so the agent knows which file to process.
+        For document-related tasks, the task_description should include: "Analyze the uploaded document: {file_names[0]}" or similar.
+        '''
 
     # Initialize both primary and fallback LLMs
     primary_llm = ChatCerebras(model="gpt-oss-120b")
@@ -663,6 +688,8 @@ def parse_prompt(state: State):
         ---
         {history}
         ---
+        
+        {file_context}
 
         Here is a list of agent capabilities that already exist in the system:
         ---
@@ -693,14 +720,28 @@ def parse_prompt(state: State):
         {state['original_prompt']}
         ---
 
-        **EXAMPLE:**
-        If the user prompt is "Get the latest 10 news headlines for AAPL with publishers and article links.", your output should be:
+        **EXAMPLES:**
+        
+        Example 1: If the user prompt is "Get the latest 10 news headlines for AAPL with publishers and article links.", your output should be:
         ```json
         {{
             "tasks": [
                 {{
                     "task_name": "get company news headlines",
                     "task_description": "Get the latest 10 news headlines for AAPL, including the publisher and a link to the article for each headline."
+                }}
+            ],
+            "user_expectations": {{}}
+        }}
+        ```
+        
+        Example 2: If the user uploads a file "resume.pdf" and says "Please summarise this document", your output should be:
+        ```json
+        {{
+            "tasks": [
+                {{
+                    "task_name": "summarize_document",
+                    "task_description": "Provide a comprehensive summary of the uploaded document 'resume.pdf', including key information, main points, and relevant details."
                 }}
             ],
             "user_expectations": {{}}
@@ -1135,11 +1176,18 @@ def validate_plan_for_execution(state: State):
     - All Available System Capabilities: [{capabilities_str}]
 
     **Your Decision Process:**
-    1.  **Check Context:** Can all `Required Parameters` (e.g., 'image_path', 'vector_store_path') be filled using the `Original User Prompt`, `Conversation History`, `Previously Completed Tasks`, or the `Available File Context`? The file paths provided are the values you should use.
-    2. **If YES:** The task is ready to run. Respond with `status: "ready"` and `reasoning: null`.
-    3.  **If NO:** Determine the root cause.
+    1.  **Check Context:** Can all `Required Parameters` (e.g., 'image_path', 'vector_store_path', 'query') be filled using the `Original User Prompt`, `Conversation History`, `Previously Completed Tasks`, or the `Available File Context`? The file paths provided are the values you should use.
+    
+    2.  **Special Case - Document Summarization:** If the task is about summarizing, analyzing, or describing a document, and a 'query' parameter is required:
+        - If the user's prompt contains words like "summarize", "summary", "describe", "analyze", "what is in", or similar, treat this as a valid query.
+        - The query can be inferred as "Provide a comprehensive summary of this document" or "Describe the contents of this document".
+        - In this case, respond with `status: "ready"` because the intent is clear.
+    
+    3. **If YES (all parameters can be filled):** The task is ready to run. Respond with `status: "ready"` and `reasoning: null`.
+    
+    4.  **If NO:** Determine the root cause.
         a. **Can another agent find the missing info?** If a value is missing (e.g., a city name) but a capability like "perform web search and summarize" could find it, respond with `status: "replan_needed"` and a clear `reasoning` (e.g., "Missing coordinates for the city mentioned, which can be found via web search.").
-        b. **Is user input the only way?** If the information is something only the user would know, respond with `status: "user_input_required"` and a clear, direct `question` for the user.
+        b. **Is user input the only way?** If the information is something only the user would know AND cannot be inferred from context, respond with `status: "user_input_required"` and a clear, direct `question` for the user.
 
     Respond in a valid JSON format conforming to the PlanValidationResult schema.
     '''
@@ -1494,13 +1542,8 @@ def render_canvas_output(state: State):
     Renders canvas output when needed for complex visualizations, documents, or webpages.
     This function is called after generate_final_response and uses the canvas decision made there.
     """
-    logger.info("=== CANVAS RENDER: Starting canvas output rendering ===")
-    logger.info(f"CANVAS RENDER: Full state keys: {list(state.keys())}")
-    logger.info(f"CANVAS RENDER: needs_canvas: {state.get('needs_canvas')}")
-    logger.info(f"CANVAS RENDER: canvas_type: {state.get('canvas_type')}")
-    logger.info(f"CANVAS RENDER: canvas_prompt: {state.get('canvas_prompt')}")
-    logger.info(f"CANVAS RENDER: has_canvas: {state.get('has_canvas')}")
-    logger.info(f"CANVAS RENDER: canvas_content: {state.get('canvas_content')}")
+    logger.info("=== CANVAS RENDER: Starting ===")
+    logger.info(f"Canvas type: {state.get('canvas_type')}, needs_canvas: {state.get('needs_canvas')}")
     
     # Check if canvas is needed based on the decision from generate_final_response
     needs_canvas = state.get("needs_canvas")
@@ -1874,22 +1917,13 @@ def generate_final_response(state: State):
     Generates the final response and determines if canvas is needed.
     This replaces the old aggregate_responses node.
     """
-    logger.info("=== GENERATE_FINAL_RESPONSE: Starting final response generation ===")
-    logger.info(f"CANVAS DEBUG: Full state keys: {list(state.keys())}")
-    logger.info(f"CANVAS DEBUG: Original prompt: {state.get('original_prompt', 'NOT FOUND')}")
-    logger.info(f"CANVAS DEBUG: Completed tasks count: {len(state.get('completed_tasks', []))}")
-    logger.info(f"CANVAS DEBUG: Messages count: {len(state.get('messages', []))}")
+    logger.info("=== GENERATE_FINAL_RESPONSE: Starting ===")
     
     # First generate the text answer
     text_result = generate_text_answer(state)
     
-    logger.info(f"CANVAS DEBUG: Text result keys: {list(text_result.keys())}")
-    logger.info(f"CANVAS DEBUG: Text result final_response length: {len(text_result.get('final_response', ''))}")
-    
     # Check if the text result contains HTML content that should be in canvas
     final_response = text_result.get('final_response', '')
-    
-    logger.info(f"CANVAS DEBUG: Final response preview: {final_response[:200]}...")
     
     # Enhanced canvas detection - check for HTML content in the response
     contains_html = False
@@ -1898,15 +1932,11 @@ def generate_final_response(state: State):
         '<div', '<span>', '<p>', '<h1>', '<h2>', '<h3>', '<style>', '<head>'
     ]
     
-    logger.info("CANVAS DEBUG: Starting HTML detection...")
     for indicator in html_indicators:
         if indicator in final_response:
             contains_html = True
-            logger.info(f"CANVAS DEBUG: Found HTML indicator '{indicator}' in response")
-            logger.info(f"CANVAS DEBUG: Found at position: {final_response.find(indicator)}")
+            logger.info(f"HTML content detected (indicator: {indicator})")
             break
-    
-    logger.info(f"CANVAS DEBUG: HTML detection result: contains_html={contains_html}")
     
     # Now analyze if canvas is needed using LLM
     # Initialize both primary and fallback LLMs
@@ -2008,8 +2038,7 @@ def generate_final_response(state: State):
                 "has_canvas": False,  # Explicitly set to False initially
                 "canvas_content": None  # Explicitly set to None initially
             }
-            logger.info(f"CANVAS DEBUG: generate_final_response returning: {result}")
-            logger.info(f"CANVAS DEBUG: About to return with needs_canvas=True")
+            logger.info(f"Returning with needs_canvas=True, canvas_type={result.get('canvas_type')}")
             return result
         else:
             logger.info(f"Text-only response sufficient: {response.reasoning}")
@@ -2022,8 +2051,7 @@ def generate_final_response(state: State):
                 "has_canvas": False,
                 "canvas_content": None
             }
-            logger.info(f"CANVAS DEBUG: generate_final_response returning: {result}")
-            logger.info(f"CANVAS DEBUG: About to return with needs_canvas=False")
+            logger.info("Returning with needs_canvas=False")
             return result
             
     except Exception as e:
@@ -2037,7 +2065,7 @@ def generate_final_response(state: State):
             "has_canvas": False,
             "canvas_content": None
         }
-        logger.info(f"CANVAS DEBUG: generate_final_response returning (error case): {result}")
+        logger.info("Returning (error case)")
         return result
 
 

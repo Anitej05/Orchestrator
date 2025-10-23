@@ -4,7 +4,7 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { DollarSign, Clock, FileIcon } from "lucide-react"
+import { DollarSign, Clock, FileIcon, FileText, Image as ImageIcon } from "lucide-react"
 import CollapsibleSection from "@/components/CollapsibleSection"
 import PlanGraph from "@/components/PlanGraph"
 import { useEffect, useState } from "react"
@@ -166,24 +166,40 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
     const totalCost = executionResults.reduce((sum, result) => sum + result.cost, 0)
     const totalTime = executionResults.reduce((sum, result) => sum + result.executionTime, 0)
     const allTasks = [...plan.pendingTasks, ...plan.completedTasks];
-    // Collect attachments from messages and uploaded files
+    // Collect attachments - merge uploadedFiles with message attachments to get content
     const messageAttachments = messages.flatMap((m: Message) => m.attachments || []);
-    const fileAttachments = (uploadedFiles || []).map((file: any) => ({
-      name: file.file_name || file.name || 'Unknown File',
-      type: file.file_type || file.type || 'unknown',
-      content: file.content || ''
-    }));
     
-    // Combine attachments and deduplicate based on name, type, and content
-    // This prevents duplicates while preserving unique files with the same name
-    const allAttachments = [...messageAttachments, ...fileAttachments].filter(
-      (att, index, self) => 
-        index === self.findIndex(a => 
-          a.name === att.name && 
-          a.type === att.type && 
-          a.content === att.content
-        )
-    );
+    // Create a map of message attachments by name for quick lookup
+    const messageAttachmentMap = new Map<string, any>();
+    messageAttachments.forEach(att => {
+      messageAttachmentMap.set(att.name.toLowerCase(), att);
+    });
+    
+    // Map uploadedFiles and enrich with content from message attachments if available
+    const allAttachments = (uploadedFiles || []).map((file: any) => {
+      const fileName = file.file_name || file.name || 'Unknown File';
+      const messageAtt = messageAttachmentMap.get(fileName.toLowerCase());
+      
+      // For images, try to get content from message attachments or construct URL from file path
+      let content = messageAtt?.content || file.content || '';
+      
+      // If no content but we have a file_path for an image, try to construct a URL
+      if (!content && file.file_path) {
+        const fileExt = fileName.toLowerCase();
+        if (fileExt.endsWith('.jpg') || fileExt.endsWith('.jpeg') || 
+            fileExt.endsWith('.png') || fileExt.endsWith('.gif') || 
+            fileExt.endsWith('.webp')) {
+          // Construct URL to serve the image from backend
+          content = `http://localhost:8000/api/files/${encodeURIComponent(file.file_path)}`;
+        }
+      }
+      
+      return {
+        name: fileName,
+        type: file.file_type || file.type || 'unknown',
+        content: content
+      };
+    });
 
     const hasResults = executionResults.length > 0 || allTasks.length > 0
 
@@ -290,30 +306,50 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                 </TabsContent>
                 <TabsContent value="attachments" className="flex-1 overflow-y-auto mt-4">
                     {allAttachments.length > 0 ? (
-                        <ul className="space-y-2">
-                        {allAttachments.map((att: any, index: number) => (
-                            <li key={`${att.name}-${index}`} className="flex items-center gap-2 text-sm p-2 rounded-md bg-white border">
-                            {att.type.startsWith('image/') ? (
-                                <>
-                                    <FileIcon className="w-4 h-4 text-gray-500" />
-                                    <div className="flex flex-col">
-                                        <span className="truncate" title={att.name}>{att.name}</span>
-                                        {att.content && (
-                                            <img src={att.content} alt={att.name} className="max-w-xs max-h-32 rounded mt-1" />
-                                        )}
-                                    </div>
-                                </>
-                            ) : (
-                                <>
-                                    <FileIcon className="w-4 h-4 text-gray-500" />
-                                    <span className="truncate" title={att.name}>{att.name}</span>
-                                </>
-                            )}
-                            </li>
-                        ))}
-                        </ul>
+                        <div className="grid grid-cols-2 gap-3">
+                        {allAttachments.map((att: any, index: number) => {
+                            // Check both type and file extension for images
+                            const fileName = att.name.toLowerCase();
+                            const isImageType = att.type.startsWith('image/');
+                            const isImageExt = fileName.endsWith('.jpg') || fileName.endsWith('.jpeg') || 
+                                             fileName.endsWith('.png') || fileName.endsWith('.gif') || 
+                                             fileName.endsWith('.webp') || fileName.endsWith('.svg');
+                            const isImage = isImageType || isImageExt;
+                            const isPdf = fileName.endsWith('.pdf');
+                            const isDoc = fileName.endsWith('.doc') || fileName.endsWith('.docx');
+                            const isExcel = fileName.endsWith('.xls') || fileName.endsWith('.xlsx');
+                            
+                            return (
+                                <div key={`${att.name}-${index}`} className="flex flex-col items-center p-3 rounded-lg bg-white border hover:shadow-md transition-shadow">
+                                    {isImage && att.content ? (
+                                        <div className="w-full aspect-square rounded-md overflow-hidden bg-gray-100 mb-2">
+                                            <img src={att.content} alt={att.name} className="w-full h-full object-cover" />
+                                        </div>
+                                    ) : (
+                                        <div className="w-full aspect-square rounded-md bg-gradient-to-br from-gray-50 to-gray-100 flex items-center justify-center mb-2">
+                                            {isPdf ? (
+                                                <FileText className="w-16 h-16 text-red-500" />
+                                            ) : isDoc ? (
+                                                <FileText className="w-16 h-16 text-blue-500" />
+                                            ) : isExcel ? (
+                                                <FileText className="w-16 h-16 text-green-500" />
+                                            ) : isImage ? (
+                                                <ImageIcon className="w-16 h-16 text-purple-500" />
+                                            ) : (
+                                                <FileIcon className="w-16 h-16 text-gray-400" />
+                                            )}
+                                        </div>
+                                    )}
+                                    <span className="text-xs text-center text-gray-700 font-medium truncate w-full" title={att.name}>
+                                        {att.name}
+                                    </span>
+                                </div>
+                            );
+                        })}
+                        </div>
                     ) : (
                         <div className="text-center text-gray-500 py-8">
+                            <FileIcon className="w-12 h-12 mx-auto mb-2 text-gray-300" />
                             <p className="font-semibold">No Attachments</p>
                             <p className="text-sm mt-2">Files you upload will appear here.</p>
                         </div>

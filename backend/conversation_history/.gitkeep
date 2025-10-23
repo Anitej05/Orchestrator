@@ -1,0 +1,2 @@
+# This file ensures the conversation_history directory is tracked by git
+# All conversation files in this directory are ignored via .gitignore

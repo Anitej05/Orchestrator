@@ -1,0 +1,2 @@
+# This file ensures the agent_plans directory is tracked by git
+# All plan files in this directory are ignored via .gitignore

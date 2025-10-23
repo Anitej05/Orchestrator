@@ -47,25 +47,43 @@ app = FastAPI(
 )
 
 # Configure logging
+# Backend logger - only for backend/main.py logs
 logger = logging.getLogger("uvicorn.error")
 
-# Set up logging for the orchestrator to show debug logs
-orchestrator_logger = logging.getLogger("AgentOrchestrator")
-orchestrator_logger.setLevel(logging.INFO)
-
-# Add a handler to print orchestrator logs to console
-console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setLevel(logging.INFO)
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-console_handler.setFormatter(formatter)
-orchestrator_logger.addHandler(console_handler)
-
-# Also configure the root logger to show all logs
+# Configure root logger for backend only (not orchestrator)
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
+
+# Set up orchestrator logger to write to temp file only (not console)
+# This keeps backend console clean and stores orchestrator logs separately
+orchestrator_logger = logging.getLogger("AgentOrchestrator")
+orchestrator_logger.setLevel(logging.INFO)
+orchestrator_logger.propagate = False  # Don't propagate to root logger
+
+# Create logs directory if it doesn't exist
+os.makedirs("logs", exist_ok=True)
+
+# File handler for orchestrator logs - overwrites on each run (last conversation only)
+orchestrator_log_file = "logs/orchestrator_temp.log"
+file_handler = logging.FileHandler(orchestrator_log_file, mode='w')  # 'w' mode overwrites
+file_handler.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(formatter)
+orchestrator_logger.addHandler(file_handler)
+
+logger.info(f"Orchestrator logs will be saved to: {orchestrator_log_file}")
+
+def clear_orchestrator_log():
+    """Clear the orchestrator log file for a new conversation."""
+    try:
+        with open(orchestrator_log_file, 'w') as f:
+            f.write('')  # Clear the file
+        orchestrator_logger.info("=== New Conversation Started ===")
+    except Exception as e:
+        logger.error(f"Failed to clear orchestrator log: {e}")
 
 # Initialize memory for persistent conversations
 checkpointer = MemorySaver()
@@ -77,15 +95,6 @@ graph = create_graph_with_checkpointer(checkpointer)
 conversation_store: Dict[str, Dict[str, Any]] = {}
 from threading import Lock
 store_lock = Lock()
-
-# log_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-# logger = logging.getLogger("AgentOrchestrator")
-# logger.setLevel(logging.INFO)
-
-# # Add a handler to print to the console
-# stream_handler = logging.StreamHandler(sys.stdout)
-# stream_handler.setFormatter(log_formatter)
-# logger.addHandler(stream_handler)
 
 app.add_middleware(
     CORSMiddleware,
@@ -226,7 +235,10 @@ def start_agent_servers():
                     )
 
             # Wait for the port to be in use with a timeout
-            if wait_for_port(port, agent_file, timeout=30):  # Increased timeout
+            # With lazy imports and reload=False, agents should start quickly
+            agent_timeout = 15  # Reasonable timeout for fast startup
+            
+            if wait_for_port(port, agent_file, timeout=agent_timeout):
                 logger.info(f"Successfully started agent '{agent_file}' on port {port}")
                 started_agents.append({
                     'agent': agent_file,
@@ -320,6 +332,31 @@ async def upload_files(files: List[UploadFile] = File(...)):
         ))
     return file_objects
 
+@app.get("/api/files/{file_path:path}")
+async def serve_file(file_path: str):
+    """
+    Serves uploaded files (images, documents) from the storage directory.
+    """
+    # Decode the file path
+    from urllib.parse import unquote
+    file_path = unquote(file_path)
+    
+    # Security: ensure the path doesn't escape the storage directory
+    if ".." in file_path or file_path.startswith("/"):
+        raise HTTPException(status_code=400, detail="Invalid file path")
+    
+    # Check if file exists
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    # Determine media type based on file extension
+    from mimetypes import guess_type
+    media_type, _ = guess_type(file_path)
+    
+    # Return the file
+    from fastapi.responses import FileResponse
+    return FileResponse(file_path, media_type=media_type)
+
 # --- Unified Orchestration Service ---
 async def execute_orchestration(
     prompt: Optional[str],
@@ -395,6 +432,10 @@ async def execute_orchestration(
         if not prompt:
             raise ValueError("Prompt is required for new conversations")
         logger.info(f"Starting new conversation for thread_id: {thread_id}")
+        
+        # Clear orchestrator log for new conversation
+        clear_orchestrator_log()
+        
         initial_state = {
             "original_prompt": prompt,
             "messages": [HumanMessage(content=prompt)],
@@ -954,7 +995,9 @@ async def websocket_chat(websocket: WebSocket):
                 await websocket.send_json({
                     "node": "__user_input_required__",
                     "thread_id": thread_id,
-                    "question_for_user": final_state.get("question_for_user"),
+                    "data": {
+                        "question_for_user": final_state.get("question_for_user")
+                    },
                     "message": "Additional information required to complete your request.",
                     "status": "pending_user_input",
                     "timestamp": time.time()

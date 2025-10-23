@@ -361,6 +361,8 @@ export function useWebSocketManager({
                 progress: 50
               }
             });
+            // Set isLoading to false so user can input their response
+            useConversationStore.setState({ isLoading: false });
           }
           else if (eventData.node === '__error__') {
             const errorMessage = eventData.error || 'An unknown WebSocket error occurred';

@@ -3,13 +3,12 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 import uvicorn
-from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain.chains import RetrievalQA
-from langchain_cerebras import ChatCerebras
 import os
 from dotenv import load_dotenv
 import logging
+
+# Lazy imports for heavy dependencies - imported only when needed
+# This significantly speeds up agent startup time
 
 # Load environment variables from a .env file at the project root
 load_dotenv()
@@ -23,13 +22,30 @@ CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY")
 if not CEREBRAS_API_KEY:
     raise RuntimeError("CEREBRAS_API_KEY is not set in the environment. The agent cannot start.")
 
-# --- Model and Embeddings Loading ---
-# Initialize the embedding model. This runs locally to convert text chunks into vectors.
-# 'all-mpnet-base-v2' is a high-performance model, great for semantic search.
-hf_embeddings = HuggingFaceEmbeddings(model_name='all-mpnet-base-v2')
+# --- Model and Embeddings Loading (Lazy) ---
+# Initialize these as None and load them on first request to speed up startup
+hf_embeddings = None
+llm = None
 
-# Initialize the Groq Chat client for the generation step of the RAG pipeline.
-llm = ChatCerebras(model="gpt-oss-120b")
+def get_embeddings():
+    """Lazy load the embeddings model on first use."""
+    global hf_embeddings
+    if hf_embeddings is None:
+        logger.info("Loading HuggingFace embeddings model (first request)...")
+        from langchain_huggingface import HuggingFaceEmbeddings
+        hf_embeddings = HuggingFaceEmbeddings(model_name='all-mpnet-base-v2')
+        logger.info("HuggingFace embeddings model loaded successfully")
+    return hf_embeddings
+
+def get_llm():
+    """Lazy load the LLM on first use."""
+    global llm
+    if llm is None:
+        logger.info("Initializing Cerebras LLM (first request)...")
+        from langchain_cerebras import ChatCerebras
+        llm = ChatCerebras(model="gpt-oss-120b")
+        logger.info("Cerebras LLM initialized successfully")
+    return llm
 
 # --- FastAPI Application ---
 app = FastAPI(
@@ -72,20 +88,29 @@ def analyze_document(request: AnalyzeDocumentRequest):
         )
 
     try:
+        # Lazy import heavy dependencies
+        from langchain_community.vectorstores import FAISS
+        from langchain.chains import RetrievalQA
+        
         # 2. Load the vector store from the path provided by the orchestrator.
         # This is the core of the RAG pipeline's retrieval step.
         # The `allow_dangerous_deserialization` flag is required for FAISS with pickle.
         logger.info(f"Loading vector store from: {request.vector_store_path}")
+        
+        # Get the lazy-loaded embeddings and LLM
+        embeddings = get_embeddings()
+        llm_instance = get_llm()
+        
         vector_store = FAISS.load_local(
             request.vector_store_path,
-            hf_embeddings,
+            embeddings,
             allow_dangerous_deserialization=True
         )
 
         # 3. Create a RetrievalQA chain, a standard LangChain component for RAG.
         # It automates retrieving relevant documents and passing them to the LLM.
         qa_chain = RetrievalQA.from_chain_type(
-            llm=llm,
+            llm=llm_instance,
             chain_type="stuff",  # "stuff" chain type includes all retrieved text in the prompt.
             retriever=vector_store.as_retriever(search_kwargs={"k": 5}) # Retrieve top 5 chunks
         )
@@ -111,4 +136,5 @@ if __name__ == "__main__":
     # Use: python backend/agents/document_analysis_agent.py
     port = int(os.getenv("DOCUMENT_AGENT_PORT", 8070))
     logger.info(f"Starting Document Analysis Agent on port {port}")
-    uvicorn.run("document_analysis_agent:app", host="127.0.0.1", port=port, reload=True)
+    # reload=False for faster startup - use reload=True only during development
+    uvicorn.run("document_analysis_agent:app", host="127.0.0.1", port=port, reload=False)
