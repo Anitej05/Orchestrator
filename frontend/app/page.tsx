@@ -64,6 +64,15 @@ export default function Home() {
   // and keep the Zustand store in sync with backend updates.
   useWebSocketManager();
   
+  // Load conversation from localStorage on page load (persistence)
+  useEffect(() => {
+    const savedThreadId = localStorage.getItem('thread_id');
+    if (savedThreadId && !conversationState.thread_id) {
+      console.log('Restoring conversation from localStorage:', savedThreadId);
+      loadConversation(savedThreadId);
+    }
+  }, []); // Run only once on mount
+  
   // Effect to handle side-effects when the conversation completes or errors
   useEffect(() => {
     if (conversationState.status === 'completed' && conversationState.final_response) {

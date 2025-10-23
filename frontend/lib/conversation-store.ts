@@ -6,10 +6,7 @@ import {
   Attachment,
 } from '@/lib/types';
 import {
-  startConversation as apiStartConversation,
-  continueConversation as apiContinueConversation,
   uploadFiles as apiUploadFiles,
-  getConversationStatus,
 } from '@/lib/api-client';
 
 // Helper to read a file as a Data URL for image previews
@@ -34,7 +31,7 @@ interface ConversationStore extends ConversationState {
   };
 }
 
-export const useConversationStore = create<ConversationStore>((set, get) => ({
+export const useConversationStore = create<ConversationStore>((set: any, get: any) => ({
   thread_id: undefined,
   status: 'idle',
   messages: [],
@@ -52,8 +49,22 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
   isLoading: false,
 
   actions: {
-    startConversation: async (input, files = []) => {
-      set({ isLoading: true, status: 'processing' });
+    startConversation: async (input: string, files: File[] = []) => {
+      // Clear previous conversation state when starting a new conversation
+      set({ 
+        isLoading: true, 
+        status: 'processing',
+        thread_id: undefined,
+        messages: [],
+        task_agent_pairs: [],
+        final_response: undefined,
+        metadata: {},
+        plan: [],
+        canvas_content: undefined,
+        canvas_type: undefined,
+        has_canvas: false,
+      });
+      
       try {
         let uploadedFiles: FileObject[] = [];
         if (files.length > 0) {
@@ -76,11 +87,10 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
           attachments: attachments.length > 0 ? attachments : undefined,
         };
 
-        set((state) => ({
-          messages: [...state.messages, userMessage],
-          // Add uploaded files to state immediately for optimistic UI update
-          uploaded_files: [...(state.uploaded_files || []), ...uploadedFiles],
-        }));
+        set({
+          messages: [userMessage],
+          uploaded_files: uploadedFiles,
+        });
 
         // Send message to WebSocket with connection wait
         const sendMessageToWebSocket = async () => {
@@ -119,10 +129,13 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
             content: 'Error: WebSocket connection failed. Please check if the backend server is running on localhost:8000.',
             timestamp: new Date()
           };
-          set(state => ({ messages: [...state.messages, errorSystemMessage] }));
+          set((state: ConversationStore) => ({ messages: [...state.messages, errorSystemMessage] }));
         };
         
         await sendMessageToWebSocket();
+        
+        // Note: Timeout handling is done by the WebSocket connection itself
+        // The backend will send __end__ or __error__ events to complete the request
         
       } catch (error: any) {
         const errorMessage = error.message || 'An unknown error occurred';
@@ -134,13 +147,11 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
           content: `Error: ${errorMessage}`,
           timestamp: new Date()
         };
-        set(state => ({ messages: [...state.messages, errorSystemMessage] }));
-      } finally {
-        // isLoading will be set to false by the WebSocket 'end' message handler
+        set((state: ConversationStore) => ({ messages: [...state.messages, errorSystemMessage] }));
       }
     },
 
-    continueConversation: async (input, files = []) => {
+    continueConversation: async (input: string, files: File[] = []) => {
       const thread_id = get().thread_id;
       if (!thread_id) {
         console.error('Cannot continue conversation without a thread ID.');
@@ -171,7 +182,7 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
           attachments: attachments.length > 0 ? attachments : undefined,
         };
 
-        set((state) => ({
+        set((state: ConversationStore) => ({
           messages: [...state.messages, userMessage],
           uploaded_files: [...(state.uploaded_files || []), ...uploadedFiles],
         }));
@@ -186,7 +197,7 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
             if (ws && ws.readyState === WebSocket.OPEN) {
               const messageData = {
                 thread_id: thread_id,
-                user_response: input,
+                prompt: input,  // Use 'prompt' for continuing conversation, not 'user_response'
                 files: uploadedFiles.map(file => ({
                   file_name: file.file_name,
                   file_path: file.file_path,
@@ -215,10 +226,13 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
             content: 'Error: WebSocket connection failed. Please check if the backend server is running on localhost:8000.',
             timestamp: new Date()
           };
-          set(state => ({ messages: [...state.messages, errorSystemMessage] }));
+          set((state: ConversationStore) => ({ messages: [...state.messages, errorSystemMessage] }));
         };
         
         await sendMessageToWebSocket();
+        
+        // Note: Timeout handling is done by the WebSocket connection itself
+        // The backend will send __end__ or __error__ events to complete the request
         
       } catch (error: any) {
         const errorMessage = error.message || 'An unknown error occurred';
@@ -230,31 +244,67 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
           content: `Error: ${errorMessage}`,
           timestamp: new Date()
         };
-        set(state => ({ messages: [...state.messages, errorSystemMessage] }));
+        set((state: ConversationStore) => ({ messages: [...state.messages, errorSystemMessage] }));
       }
     },
 
-    loadConversation: async (threadId) => {
+    loadConversation: async (threadId: string) => {
       if (!threadId) return;
       set({ isLoading: true });
       try {
-        const status = await getConversationStatus(threadId);
-        // Convert the status to a conversation state format
+        // Load full conversation history from backend
+        const response = await fetch(`http://localhost:8000/api/chat/history/${threadId}`);
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error('Failed to load conversation:', response.status, errorText);
+          throw new Error(`Failed to load conversation history: ${response.status}`);
+        }
+        
+        const conversationData = await response.json();
+        console.log('Loaded conversation data:', conversationData);
+        
+        // Convert message timestamps from strings to Date objects
+        const messages = (conversationData.messages || []).map((msg: any) => ({
+          ...msg,
+          timestamp: new Date(msg.timestamp)
+        }));
+        
+        // Set the full conversation state
         const conversationState: Partial<ConversationState> = {
-          thread_id: status.thread_id || undefined,
-          status: 'completed', // Assume completed since we're loading history
-          messages: [], // Will be populated by WebSocket or additional API call
-          isWaitingForUser: !!status.question_for_user,
-          currentQuestion: status.question_for_user || undefined,
-          task_agent_pairs: status.task_agent_pairs || [],
-          final_response: status.final_response || undefined,
+          thread_id: conversationData.thread_id || threadId,
+          status: conversationData.status || 'completed',
+          messages: messages,
+          isWaitingForUser: conversationData.pending_user_input || false,
+          currentQuestion: conversationData.question_for_user || undefined,
+          task_agent_pairs: conversationData.task_agent_pairs || [],
+          final_response: conversationData.final_response || undefined,
+          metadata: conversationData.metadata || {},
+          uploaded_files: conversationData.uploaded_files || [],
+          plan: conversationData.plan || [],
+          canvas_content: conversationData.canvas_content,
+          canvas_type: conversationData.canvas_type,
+          has_canvas: conversationData.has_canvas || false,
         };
+        
         get().actions._setConversationState(conversationState);
+        
+        // Explicitly set isLoading to false after loading
+        set({ isLoading: false });
+        
+        // Save thread_id to localStorage for persistence
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('thread_id', threadId);
+        }
+        
+        console.log('Conversation loaded successfully:', threadId);
       } catch (error: any) {
         console.error('Failed to load conversation:', error);
-        // If loading fails, reset to a clean state but keep the thread_id
-        get().actions.resetConversation();
-        set({ thread_id: threadId });
+        // If loading fails, just clear the localStorage to prevent infinite retry
+        if (typeof window !== 'undefined') {
+          localStorage.removeItem('thread_id');
+        }
+        // Don't reset - just log the error and keep current state
+        console.warn('Could not restore conversation from localStorage');
       } finally {
         set({ isLoading: false });
       }
@@ -279,75 +329,113 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
       }
     },
 
-    _setConversationState: (newState) => {
-      set((state) => {
-        // Handle uploaded_files - accumulate rather than replace to maintain history
+    _setConversationState: (newState: Partial<ConversationStore>) => {
+      set((state: ConversationStore) => {
+        // When loading a conversation (has thread_id but different from current), replace data
+        // When updating current conversation (same thread_id), merge data
+        const isLoadingConversation = newState.thread_id && newState.thread_id !== state.thread_id;
+        
+        // Handle uploaded_files
         let updatedUploadedFiles = state.uploaded_files || [];
-        if (newState.uploaded_files) {
-          // Merge new files with existing ones, avoiding duplicates
-          const newFiles = newState.uploaded_files.filter(
-            newFile => !updatedUploadedFiles.some(
-              existingFile => existingFile.file_path === newFile.file_path
-            )
-          );
-          updatedUploadedFiles = [...updatedUploadedFiles, ...newFiles];
+        if (newState.uploaded_files !== undefined) {
+          if (isLoadingConversation) {
+            // Replace when loading
+            updatedUploadedFiles = newState.uploaded_files;
+          } else {
+            // Merge when updating
+            const newFiles = newState.uploaded_files.filter(
+              (newFile: FileObject) => !updatedUploadedFiles.some(
+                (existingFile: FileObject) => existingFile.file_path === newFile.file_path
+              )
+            );
+            updatedUploadedFiles = [...updatedUploadedFiles, ...newFiles];
+          }
         }
         
-        // Handle task_agent_pairs - accumulate rather than replace to maintain history
+        // Handle task_agent_pairs
         let updatedTaskAgentPairs = state.task_agent_pairs || [];
-        if (newState.task_agent_pairs) {
-          // Merge new pairs with existing ones, avoiding duplicates
-          const newPairs = newState.task_agent_pairs.filter(
-            newPair => !updatedTaskAgentPairs.some(
-              existingPair => existingPair.task_name === newPair.task_name
-            )
-          );
-          updatedTaskAgentPairs = [...updatedTaskAgentPairs, ...newPairs];
+        if (newState.task_agent_pairs !== undefined) {
+          if (isLoadingConversation) {
+            // Replace when loading
+            updatedTaskAgentPairs = newState.task_agent_pairs;
+          } else {
+            // Merge when updating
+            const newPairs = newState.task_agent_pairs.filter(
+              (newPair: any) => !updatedTaskAgentPairs.some(
+                (existingPair: any) => existingPair.task_name === newPair.task_name
+              )
+            );
+            updatedTaskAgentPairs = [...updatedTaskAgentPairs, ...newPairs];
+          }
         }
         
-        // Handle plan - accumulate plans throughout conversation
+        // Handle plan
         let updatedPlan = state.plan || [];
-        if (newState.plan && newState.plan.length > 0) {
-          // Update with new plan but keep it if it's more recent
-          updatedPlan = newState.plan;
+        if (newState.plan !== undefined) {
+          if (isLoadingConversation || (newState.plan && newState.plan.length > 0)) {
+            // Replace when loading or when new plan exists
+            updatedPlan = newState.plan;
+          }
         }
-        // If newState.plan is empty/undefined, keep the existing plan
         
-        // Handle metadata - merge deeply to preserve all information throughout conversation
+        // Handle metadata
         let updatedMetadata = state.metadata || {};
         if (newState.metadata) {
-          // Deep merge metadata to preserve all fields
-          // Accumulate completed_tasks and parsed_tasks
-          const existingCompletedTasks = updatedMetadata.completed_tasks || [];
-          const newCompletedTasks = newState.metadata.completed_tasks || [];
-          const mergedCompletedTasks = [...existingCompletedTasks];
-          
-          // Add new completed tasks that aren't already in the list
-          newCompletedTasks.forEach((newTask: any) => {
-            if (!mergedCompletedTasks.some((existingTask: any) => existingTask.task_name === newTask.task_name)) {
-              mergedCompletedTasks.push(newTask);
-            }
-          });
-          
-          const existingParsedTasks = updatedMetadata.parsed_tasks || [];
-          const newParsedTasks = newState.metadata.parsed_tasks || [];
-          const mergedParsedTasks = [...existingParsedTasks];
-          
-          // Add new parsed tasks that aren't already in the list
-          newParsedTasks.forEach((newTask: any) => {
-            if (!mergedParsedTasks.some((existingTask: any) => existingTask.task_name === newTask.task_name)) {
-              mergedParsedTasks.push(newTask);
-            }
-          });
-          
-          updatedMetadata = {
-            ...updatedMetadata,
-            ...newState.metadata,
-            completed_tasks: mergedCompletedTasks,
-            parsed_tasks: mergedParsedTasks,
-            // Preserve original_prompt throughout conversation
-            original_prompt: newState.metadata.original_prompt || updatedMetadata.original_prompt || state.metadata?.original_prompt
-          };
+          if (isLoadingConversation) {
+            // Replace when loading
+            updatedMetadata = newState.metadata;
+          } else {
+            // Deep merge metadata to preserve all fields
+            // Accumulate completed_tasks and parsed_tasks
+            const existingCompletedTasks = updatedMetadata.completed_tasks || [];
+            const newCompletedTasks = newState.metadata.completed_tasks || [];
+            const mergedCompletedTasks = [...existingCompletedTasks];
+            
+            // Add new completed tasks that aren't already in the list
+            newCompletedTasks.forEach((newTask: any) => {
+              if (!mergedCompletedTasks.some((existingTask: any) => existingTask.task_name === newTask.task_name)) {
+                mergedCompletedTasks.push(newTask);
+              }
+            });
+            
+            const existingParsedTasks = updatedMetadata.parsed_tasks || [];
+            const newParsedTasks = newState.metadata.parsed_tasks || [];
+            const mergedParsedTasks = [...existingParsedTasks];
+            
+            // Add new parsed tasks that aren't already in the list
+            newParsedTasks.forEach((newTask: any) => {
+              if (!mergedParsedTasks.some((existingTask: any) => existingTask.task_name === newTask.task_name)) {
+                mergedParsedTasks.push(newTask);
+              }
+            });
+            
+            updatedMetadata = {
+              ...updatedMetadata,
+              ...newState.metadata,
+              completed_tasks: mergedCompletedTasks,
+              parsed_tasks: mergedParsedTasks,
+              // Preserve original_prompt throughout conversation
+              original_prompt: newState.metadata.original_prompt || updatedMetadata.original_prompt || state.metadata?.original_prompt
+            };
+          }
+        }
+
+        // Handle messages - use backend messages as source of truth
+        // Backend provides the complete, authoritative message history
+        let updatedMessages = state.messages;
+        if (newState.messages !== undefined) {
+          // Use backend messages directly - they are already complete and deduplicated
+          updatedMessages = newState.messages
+            .filter((msg: any) => {
+              // Keep all non-assistant messages
+              if (msg.type !== 'assistant') return true;
+              // Keep assistant messages that have content
+              return msg.content && msg.content.trim() !== '';
+            })
+            .map((msg: any) => ({
+              ...msg,
+              timestamp: msg.timestamp instanceof Date ? msg.timestamp : new Date(msg.timestamp || Date.now()),
+            }));
         }
 
         return {
@@ -357,23 +445,11 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
           task_agent_pairs: updatedTaskAgentPairs,
           plan: updatedPlan,
           metadata: updatedMetadata,
-        // Handle canvas data
-        canvas_content: newState.canvas_content !== undefined ? newState.canvas_content : state.canvas_content,
-        canvas_type: newState.canvas_type !== undefined ? newState.canvas_type : state.canvas_type,
-        has_canvas: newState.has_canvas !== undefined ? newState.has_canvas : state.has_canvas,
-        // Ensure messages are properly created with Date objects for timestamps
-        // Also filter out empty assistant messages to prevent empty bubbles
-        messages: (newState.messages || state.messages || [])
-          .filter((msg: any) => {
-            // Keep all non-assistant messages
-            if (msg.type !== 'assistant') return true;
-            // Keep assistant messages that have content
-            return msg.content && msg.content.trim() !== '';
-          })
-          .map((msg: any) => ({
-            ...msg,
-            timestamp: new Date(msg.timestamp || Date.now()),
-          })),
+          messages: updatedMessages,
+          // Handle canvas data
+          canvas_content: newState.canvas_content !== undefined ? newState.canvas_content : state.canvas_content,
+          canvas_type: newState.canvas_type !== undefined ? newState.canvas_type : state.canvas_type,
+          has_canvas: newState.has_canvas !== undefined ? newState.has_canvas : state.has_canvas,
         };
       });
       // Persist the thread_id to localStorage

@@ -26,8 +26,7 @@ export function useWebSocketManager({
 }: UseWebSocketManagerProps = {}) {
   const ws = useRef<WebSocket | null>(null);
   const [isConnected, setIsConnected] = useState(false);
-  const { _setConversationState } = useConversationStore(state => state.actions);
-  const currentThreadId = useConversationStore(state => state.thread_id);
+  const { _setConversationState } = useConversationStore((state: any) => state.actions);
 
   const connect = useCallback(() => {
     if (ws.current && ws.current.readyState === WebSocket.OPEN) {
@@ -174,10 +173,8 @@ export function useWebSocketManager({
               hasCanvas: finalState.has_canvas
             });
 
-            // Get current messages to preserve them
-            const currentMessages = useConversationStore.getState().messages;
-
-            // Filter out any empty assistant messages from backend messages first
+            // Use backend messages as the single source of truth
+            // The backend has the complete, authoritative message history
             const backendMessages = (finalState.messages || []).filter(msg => {
               // Keep all non-assistant messages
               if (msg.type !== 'assistant') return true;
@@ -185,17 +182,9 @@ export function useWebSocketManager({
               return msg.content && msg.content.trim() !== '';
             });
 
-            // Merge current messages with filtered backend messages
-            let mergedMessages = [...currentMessages];
-            backendMessages.forEach(newMsg => {
-              // Only add if it's not already in our messages
-              if (!mergedMessages.some(existingMsg => existingMsg.id === newMsg.id)) {
-                mergedMessages.push(newMsg);
-              }
-            });
-
-            // Handle canvas content - don't add it as a regular message if it should be in canvas
-            let finalMessages = mergedMessages;
+            // Don't merge with frontend messages - backend is the source of truth
+            // This prevents duplicates from optimistic UI updates
+            let finalMessages = backendMessages;
 
             // Filter out any empty assistant messages again to prevent empty bubbles
             finalMessages = finalMessages.filter(msg => {

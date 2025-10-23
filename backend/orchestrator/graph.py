@@ -1845,7 +1845,12 @@ def generate_text_answer(state: State):
             logger.info("Using existing final_response for simple request.")
         
         ai_message = AIMessage(content=final_response)
-        return {"final_response": final_response, "messages": [ai_message]}
+        # Use MessageManager to add message without duplicates
+        from orchestrator.message_manager import MessageManager
+        existing_messages = state.get("messages", [])
+        updated_messages = MessageManager.add_message(existing_messages, ai_message)
+        logger.info(f"Added AI message. Total messages: {len(updated_messages)}")
+        return {"final_response": final_response, "messages": updated_messages}
     else:
         # This is a complex request, synthesize results from completed tasks
         completed_tasks = state.get('completed_tasks', [])
@@ -1910,7 +1915,12 @@ def generate_text_answer(state: State):
                 logger.info("Generated concise text response for canvas visualization.")
         
         ai_message = AIMessage(content=final_response)
-        return {"final_response": final_response, "messages": [ai_message]}
+        # Use MessageManager to add message without duplicates
+        from orchestrator.message_manager import MessageManager
+        existing_messages = state.get("messages", [])
+        updated_messages = MessageManager.add_message(existing_messages, ai_message)
+        logger.info(f"Added AI message. Total messages: {len(updated_messages)}")
+        return {"final_response": final_response, "messages": updated_messages}
 
 def generate_final_response(state: State):
     """
@@ -2075,6 +2085,12 @@ def load_conversation_history(state: State, config: RunnableConfig):
     if not thread_id:
         return {}
 
+    # If messages already exist in state (from checkpointer), don't load from file
+    # This prevents duplicate messages when continuing a conversation
+    if state.get("messages") and len(state.get("messages", [])) > 0:
+        logger.info(f"Messages already exist in state for thread {thread_id}, skipping file load")
+        return {}
+
     history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
 
     if not os.path.exists(history_path):
@@ -2130,6 +2146,10 @@ def load_conversation_history(state: State, config: RunnableConfig):
                 logger.warning(f"Failed to create message object: {e}")
                 continue
 
+        # Deduplicate messages before returning
+        from orchestrator.message_manager import MessageManager
+        valid_messages = MessageManager.deduplicate_messages(valid_messages)
+        
         logger.info(f"Successfully loaded {len(valid_messages)} messages for conversation {thread_id}")
         
         return {
@@ -2185,8 +2205,15 @@ def get_serializable_state(state: dict | State, thread_id: str) -> dict:
                 continue
             
             # Convert to frontend format
+            # Generate unique ID for each message to avoid duplicates
+            msg_id = msg.get('id')
+            if not msg_id:
+                # Generate unique ID using timestamp + random component
+                import random
+                msg_id = f"{time.time()}_{random.randint(1000, 9999)}"
+            
             frontend_msg = {
-                'id': msg.get('id', str(time.time())),
+                'id': msg_id,
                 'type': 'assistant' if msg_type == 'ai' else 'user' if msg_type == 'human' else 'system',
                 'content': content,
                 'timestamp': msg_data.get('timestamp', time.time())

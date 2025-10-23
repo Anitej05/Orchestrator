@@ -88,14 +88,24 @@ export function InteractiveChatInterface({
     e.preventDefault();
     
     if (state.isWaitingForUser) {
+      // User is responding to a question from the system
       if (userResponse.trim()) {
         await continueConversation(userResponse, attachedFiles);
         setUserResponse('');
         setAttachedFiles([]); // Clear files after submission
       }
     } else {
+      // Check if this is a continuation of an existing conversation or a new one
+      const hasExistingConversation = state.thread_id && state.messages.length > 0;
+      
       if (inputValue.trim() || attachedFiles.length > 0) {
-        await startConversation(inputValue, attachedFiles);
+        if (hasExistingConversation) {
+          // Continue existing conversation
+          await continueConversation(inputValue, attachedFiles);
+        } else {
+          // Start new conversation
+          await startConversation(inputValue, attachedFiles);
+        }
         setInputValue('');
         setAttachedFiles([]);
       }
