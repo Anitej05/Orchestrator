@@ -1,0 +1,102 @@
+INFO:__main__:Starting Image Analysis Agent on port 8060
+INFO:     Will watch for changes in these directories: ['D:\\Internship\\Orbimesh\\backend']
+INFO:     Uvicorn running on http://127.0.0.1:8060 (Press CTRL+C to quit)
+INFO:     Started reloader process [4888] using WatchFiles
+INFO:     Started server process [24216]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:4 changes detected
+INFO:watchfiles.main:3 changes detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:2 changes detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:3 changes detected
+INFO:watchfiles.main:3 changes detected
+INFO:watchfiles.main:2 changes detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:3 changes detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:3 changes detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:2 changes detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:2 changes detected
+INFO:watchfiles.main:5 changes detected
+INFO:watchfiles.main:7 changes detected
+INFO:watchfiles.main:7 changes detected
+INFO:watchfiles.main:10 changes detected
+INFO:watchfiles.main:13 changes detected
+INFO:watchfiles.main:12 changes detected
+INFO:watchfiles.main:32 changes detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:2 changes detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:3 changes detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:2 changes detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:3 changes detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:2 changes detected
+INFO:watchfiles.main:1 change detected
+INFO:image_analysis_agent:Analyzing image at path: storage/images\133989734028138537.jpg with query: Provide a detailed description of the uploaded image file '133989734028138537.jpg', covering the main subjects, scene, colors, and any notable details.
+INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:image_analysis_agent:Image analysis completed successfully
+INFO:     127.0.0.1:63679 - "POST /analyze HTTP/1.1" 200 OK
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:2 changes detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:3 changes detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:2 changes detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:2 changes detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:3 changes detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:3 changes detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:2 changes detected
+INFO:watchfiles.main:2 changes detected
+INFO:image_analysis_agent:Analyzing image at path: storage/images\133989734028138537.jpg with query: Provide a detailed description of the uploaded image, covering its visual content, notable elements, colors, and any discernible context.
+INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:image_analysis_agent:Image analysis completed successfully
+INFO:     127.0.0.1:54800 - "POST /analyze HTTP/1.1" 200 OK
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:2 changes detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:3 changes detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:4 changes detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:2 changes detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:2 changes detected
+INFO:watchfiles.main:4 changes detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:6 changes detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:1 change detected
