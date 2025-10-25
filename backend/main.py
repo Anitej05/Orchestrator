@@ -469,9 +469,16 @@ async def execute_orchestration(
         if loaded_files_context:
             enhanced_prompt = f"{prompt}\n\n[FILE CONTEXT]\n{loaded_files_context}"
         
+        # Use MessageManager to add new message without duplicates
+        from orchestrator.message_manager import MessageManager
+        existing_messages = current_conversation.get("messages", [])
+        new_user_message = HumanMessage(content=enhanced_prompt)  # Enhanced with file context!
+        updated_messages = MessageManager.add_message(existing_messages, new_user_message)
+        logger.info(f"Continuing conversation. Total messages: {len(updated_messages)}")
+        
         initial_state = {
             # Carry over essential long-term memory from the previous turn
-            "messages": current_conversation.get("messages", []) + [HumanMessage(content=enhanced_prompt)],
+            "messages": updated_messages,  # Clean, deduplicated messages with file context
             "completed_tasks": [],  # Start fresh for new prompt, but keep conversation history
             "uploaded_files": uploaded_files,  # Persist files (already has file_path, file_name, file_type)
 
@@ -488,7 +495,7 @@ async def execute_orchestration(
             "user_response": None,
             "parsing_error_feedback": None,
             "parse_retry_count": 0,
-            "needs_complex_processing": None,  # Let analyze_request determine this
+            "needs_complex_processing": None,
             "analysis_reasoning": None,
             "orchestration_paused": False,
             "waiting_for_continue": False,
@@ -1134,9 +1141,16 @@ async def websocket_chat(websocket: WebSocket):
             if snapshot.next and len(snapshot.next) > 0:
                 # Check if it's actually interrupted (not just has next nodes)
                 if snapshot.tasks and len(snapshot.tasks) > 0 and snapshot.tasks[0].interrupts:
+                    # Backend-side duplicate resume prevention
+                    if not hasattr(websocket, "_orbimesh_resume_state"):
+                        websocket._orbimesh_resume_state = {}
+                    resume_state = websocket._orbimesh_resume_state
+                    if resume_state.get(thread_id) == "paused":
+                        logger.warning(f"Duplicate orchestration pause detected for thread_id {thread_id}. Ignoring.")
+                        continue
+                    resume_state[thread_id] = "paused"
                     # Extract interrupt data
                     interrupt_value = snapshot.tasks[0].interrupts[0].value
-                    
                     await websocket.send_json({
                         "node": "__orchestration_paused__",
                         "thread_id": thread_id,

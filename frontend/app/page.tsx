@@ -63,14 +63,14 @@ export default function Home() {
   // Initialize the WebSocket manager. It will automatically connect and keep the Zustand store in sync with backend updates.
   useWebSocketManager();
   
-  // Restore conversation from localStorage on mount
+  // Load conversation from localStorage on page load (persistence)
   useEffect(() => {
     const savedThreadId = localStorage.getItem('thread_id');
     if (savedThreadId && !conversationState.thread_id) {
-      console.log(`Restoring conversation from localStorage: ${savedThreadId}`);
+      console.log('Restoring conversation from localStorage:', savedThreadId);
       loadConversation(savedThreadId);
     }
-  }, []); // Only run once on mount
+  }, []); // Run only once on mount
   
   useEffect(() => {
     if (conversationState.status === 'completed' && conversationState.final_response) {
@@ -227,33 +227,16 @@ export default function Home() {
   // }, [conversationState.messages]);
   
   return (
-    <SidebarProvider>
-      <AppSidebar
-        onConversationSelect={handleConversationSelect}
-        onNewConversation={handleNewConversation}
-        currentThreadId={conversationState.thread_id || undefined}
-      />
-      <SidebarInset>
-        <div className="h-screen bg-gradient-to-br from-gray-50 to-gray-100 dark:from-gray-950 dark:to-gray-900 relative flex flex-col">
-          {/* Header */}
-          <div className="flex-shrink-0 sticky top-0 z-10 bg-white/80 dark:bg-gray-900/80 backdrop-blur-lg border-b border-gray-200 dark:border-gray-800 px-4 py-3 shadow-sm">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-4">
-                <SidebarTrigger className="h-8 w-8" />
-                <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Orchestrator</h1>
-              </div>
-              <div className="flex items-center gap-3">
-                <ThemeToggle />
-                <Link href="/agents">
-                  <Button className="bg-blue-600 hover:bg-blue-700 text-white shadow-sm">
-                    <Users className="w-4 h-4 mr-2" />
-                    See Agents
-                  </Button>
-                </Link>
-              </div>
-            </div>
-          </div>
-
+    <>
+      <Navbar />
+      <SidebarProvider>
+        <AppSidebar
+          onConversationSelect={handleConversationSelect}
+          onNewConversation={handleNewConversation}
+          currentThreadId={conversationState.thread_id || undefined}
+        />
+        <SidebarInset>
+          <div className="h-screen pt-[64px] bg-gradient-to-br from-gray-50 to-gray-100 dark:from-gray-950 dark:to-gray-900 relative flex flex-col">
           {/* Main Content Area - Resizable */}
           <ResizablePanelGroup direction="horizontal" className="flex-1 overflow-hidden">
             <ResizablePanel defaultSize={70} minSize={50}>
@@ -286,5 +269,6 @@ export default function Home() {
         </div>
       </SidebarInset>
     </SidebarProvider>
+    </>
   )
 }

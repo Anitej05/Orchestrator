@@ -1,9 +1,25 @@
-INFO:     Will watch for changes in these directories: ['D:\\Internship\\Orbimesh\\backend']
+INFO:     Will watch for changes in these directories: ['C:\\Users\\mahes\\OneDrive\\Desktop\\Projects\\Orbimesh\\Orbimesh-App-ambitious\\backend']
 INFO:     Uvicorn running on http://127.0.0.1:8050 (Press CTRL+C to quit)
-INFO:     Started reloader process [16812] using WatchFiles
-INFO:     Started server process [5404]
-INFO:     Waiting for application startup.
-INFO:     Application startup complete.
-WARNING:  WatchFiles detected changes in 'orchestrator\graph.py'. Reloading...
- INFO:     127.0.0.1:62333 - "POST /search-and-summarize HTTP/1.1" 500 Internal Server Error
-INFO:     127.0.0.1:63364 - "POST /search-and-summarize HTTP/1.1" 200 OK
+INFO:     Started reloader process [32296] using StatReload
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    from multiprocessing.spawn import spawn_main; spawn_main(parent_pid=32296, pipe_handle=900)
+                                                  ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\mahes\AppData\Local\Programs\Python\Python313\Lib\multiprocessing\spawn.py", line 122, in spawn_main
+    exitcode = _main(fd, parent_sentinel)
+  File "C:\Users\mahes\AppData\Local\Programs\Python\Python313\Lib\multiprocessing\spawn.py", line 132, in _main
+    self = reduction.pickle.load(from_parent)
+  File "C:\Users\mahes\AppData\Local\Programs\Python\Python313\Lib\multiprocessing\reduction.py", line 238, in _rebuild_socket
+    return ds.detach()
+           ~~~~~~~~~^^
+  File "C:\Users\mahes\AppData\Local\Programs\Python\Python313\Lib\multiprocessing\resource_sharer.py", line 38, in detach
+    with _resource_sharer.get_connection(self._id) as conn:
+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^
+  File "C:\Users\mahes\AppData\Local\Programs\Python\Python313\Lib\multiprocessing\resource_sharer.py", line 86, in get_connection
+    c = Client(address, authkey=process.current_process().authkey)
+  File "C:\Users\mahes\AppData\Local\Programs\Python\Python313\Lib\multiprocessing\connection.py", line 517, in Client
+    c = PipeClient(address)
+  File "C:\Users\mahes\AppData\Local\Programs\Python\Python313\Lib\multiprocessing\connection.py", line 719, in PipeClient
+    _winapi.WaitNamedPipe(address, 1000)
+    ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+FileNotFoundError: [WinError 2] The system cannot find the file specified

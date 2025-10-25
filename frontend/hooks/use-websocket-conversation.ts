@@ -172,6 +172,9 @@ export function useWebSocketManager({
               timestamp: new Date()
             };
             
+      // UI state transition: orchestration paused for user approval
+            // Reset resume flag globally to allow Accept/Continue button to function
+            window.__orbimesh_resume_sent = false;
             _setConversationState({
               thread_id: eventData.thread_id, // Save thread_id so continueConversation can use it
               status: 'orchestration_paused',

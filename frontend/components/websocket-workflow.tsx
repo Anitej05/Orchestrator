@@ -1,3 +1,9 @@
+// Add global property for duplicate resume prevention
+declare global {
+  interface Window {
+    __orbimesh_resume_sent?: boolean;
+  }
+}
 "use client"
 
 import React, { useState, useEffect } from 'react';
@@ -268,18 +274,21 @@ export function WebSocketWorkflow({
                 </div>
               )}
 
-              <Button 
-                onClick={() => {
-                  if (currentThreadId) {
-                    sendMessage('continue_orchestration', currentThreadId);
-                  }
-                }}
-                className="w-full bg-blue-600 hover:bg-blue-700"
-                disabled={isConversationLoading}
-              >
-                <Play className="w-4 h-4 mr-2" />
-                {isConversationLoading ? 'Continuing...' : 'Continue Orchestration'}
-              </Button>
+                {/* Accept/Continue button: disables during resume, prevents duplicate requests */}
+                {/* Only one Accept/Continue button exists in this app, here. This button resumes orchestration and disables itself to prevent duplicates. */}
+                <Button 
+                  onClick={() => {
+                    if (currentThreadId && !window.__orbimesh_resume_sent) {
+                      sendMessage('continue_orchestration', currentThreadId);
+                      window.__orbimesh_resume_sent = true; // Prevent duplicate resume requests
+                    }
+                  }}
+                  className="w-full bg-blue-600 hover:bg-blue-700"
+                  disabled={isConversationLoading || window.__orbimesh_resume_sent}
+                >
+                  <Play className="w-4 h-4 mr-2" />
+                  {isConversationLoading ? 'Continuing...' : 'Continue Orchestration'}
+                </Button>
             </div>
           )}
 

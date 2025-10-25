@@ -256,18 +256,22 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
         // Fetch the full conversation history from the API
         const response = await fetch(`http://localhost:8000/api/conversations/${threadId}`);
         if (!response.ok) {
-          throw new Error('Failed to load conversation history');
+          // Better error handling from Remote
+          const errorText = await response.text();
+          console.error('Failed to load conversation:', response.status, errorText);
+          throw new Error(`Failed to load conversation history: ${response.status}`);
         }
         
         const historyData = await response.json();
+        console.log('Loaded conversation data:', historyData); // Debug log from Remote
         
-        // Convert messages: ensure timestamp is a Date object
+        // Convert messages: ensure timestamp is a Date object (safer approach from HEAD)
         const messages = (historyData.messages || []).map((msg: any) => ({
           ...msg,
           timestamp: msg.timestamp instanceof Date ? msg.timestamp : new Date(msg.timestamp),
         }));
         
-        // Convert the history data to conversation state format
+        // Convert the history data to conversation state format (complete mapping from HEAD)
         const conversationState: Partial<ConversationState> = {
           thread_id: threadId,
           status: historyData.final_response ? 'completed' : 'idle',
@@ -275,14 +279,14 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
           isWaitingForUser: !!historyData.question_for_user || !!historyData.pending_user_input,
           currentQuestion: historyData.question_for_user || undefined,
           task_agent_pairs: historyData.task_agent_pairs || [],
-          parsed_tasks: historyData.parsed_tasks || [],
+          parsed_tasks: historyData.parsed_tasks || [], // Important: HEAD includes this
           final_response: historyData.final_response || undefined,
           metadata: historyData.metadata || {},
           uploaded_files: historyData.uploaded_files || [],
-          plan: historyData.task_plan || historyData.plan || [],
+          plan: historyData.task_plan || historyData.plan || [], // Fallback chain from HEAD
           canvas_content: historyData.canvas_content || undefined,
           canvas_type: historyData.canvas_type || undefined,
-          has_canvas: !!historyData.canvas_content,
+          has_canvas: !!historyData.canvas_content, // Dynamic calculation from HEAD
         };
         
         // Set the conversation state
@@ -293,6 +297,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
           localStorage.setItem('thread_id', threadId);
         }
         
+        // Detailed logging from HEAD
         console.log(`Loaded conversation ${threadId} with ${conversationState.messages?.length || 0} messages`);
         
       } catch (error: any) {
