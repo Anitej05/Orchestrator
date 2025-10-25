@@ -1,0 +1,7 @@
+INFO:__main__:Starting Document Analysis Agent on port 8070
+INFO:     Started server process [25088]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8070 (Press CTRL+C to quit)
+ERROR:document_analysis_agent:Document vector store not found at path: /path/to/iphone17_vector_store
+INFO:     127.0.0.1:59498 - "POST /analyze HTTP/1.1" 404 Not Found

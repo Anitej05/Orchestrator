@@ -98,7 +98,7 @@ export default function AppSidebar({ onConversationSelect, onNewConversation, cu
           <UserButton afterSignOutUrl="/sign-in" />
         </div>
         <Link href="/register-agent">
-          <Button className="w-full bg-blue-600 hover:bg-blue-700">
+          <Button className="w-full bg-blue-600 hover:bg-blue-700 text-white">
             <Plus className="w-4 h-4 mr-2" />
             Register Agent
           </Button>

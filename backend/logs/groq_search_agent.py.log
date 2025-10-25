@@ -1,6 +1,9 @@
-INFO:     Will watch for changes in these directories: ['C:\\Users\\mahes\\OneDrive\\Desktop\\Projects\\Orbimesh\\Orbimesh-App-ambitious\\backend']
+INFO:     Will watch for changes in these directories: ['D:\\Internship\\Orbimesh\\backend']
 INFO:     Uvicorn running on http://127.0.0.1:8050 (Press CTRL+C to quit)
-INFO:     Started reloader process [9928] using StatReload
-INFO:     Started server process [26612]
+INFO:     Started reloader process [16812] using WatchFiles
+INFO:     Started server process [5404]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
+WARNING:  WatchFiles detected changes in 'orchestrator\graph.py'. Reloading...
+ INFO:     127.0.0.1:62333 - "POST /search-and-summarize HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:63364 - "POST /search-and-summarize HTTP/1.1" 200 OK

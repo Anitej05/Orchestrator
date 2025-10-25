@@ -26,8 +26,7 @@ export function useWebSocketManager({
 }: UseWebSocketManagerProps = {}) {
   const ws = useRef<WebSocket | null>(null);
   const [isConnected, setIsConnected] = useState(false);
-  const { _setConversationState } = useConversationStore(state => state.actions);
-  const currentThreadId = useConversationStore(state => state.thread_id);
+  const { _setConversationState } = useConversationStore((state: any) => state.actions);
 
   const connect = useCallback(() => {
     if (ws.current && ws.current.readyState === WebSocket.OPEN) {
@@ -205,10 +204,8 @@ export function useWebSocketManager({
               hasCanvas: finalState.has_canvas
             });
 
-            // Get current messages to preserve them
-            const currentMessages = useConversationStore.getState().messages;
-
-            // Filter out any empty assistant messages from backend messages first
+            // Use backend messages as the single source of truth
+            // The backend has the complete, authoritative message history
             const backendMessages = (finalState.messages || []).filter(msg => {
               // Keep all non-assistant messages
               if (msg.type !== 'assistant') return true;
@@ -216,17 +213,9 @@ export function useWebSocketManager({
               return msg.content && msg.content.trim() !== '';
             });
 
-            // Merge current messages with filtered backend messages
-            let mergedMessages = [...currentMessages];
-            backendMessages.forEach(newMsg => {
-              // Only add if it's not already in our messages
-              if (!mergedMessages.some(existingMsg => existingMsg.id === newMsg.id)) {
-                mergedMessages.push(newMsg);
-              }
-            });
-
-            // Handle canvas content - don't add it as a regular message if it should be in canvas
-            let finalMessages = mergedMessages;
+            // Don't merge with frontend messages - backend is the source of truth
+            // This prevents duplicates from optimistic UI updates
+            let finalMessages = backendMessages;
 
             // Filter out any empty assistant messages again to prevent empty bubbles
             finalMessages = finalMessages.filter(msg => {
@@ -252,64 +241,53 @@ export function useWebSocketManager({
               isHtmlContent: isHtmlContent
             });
 
-            if (finalState.has_canvas && finalState.canvas_content) {
-              // If we have canvas content, we should still show a text response in the chat
-              // The canvas will display the content separately, but users need to know what was done
-              console.log('Canvas content detected, adding explanatory text response');
-              console.log('Canvas content preview:', finalState.canvas_content?.substring(0, 200));
-
-              // Create a text response that explains the canvas content
-              const canvasExplanation = finalState.final_response ||
-                `I've created an interactive ${finalState.canvas_type} visualization for your request. You can view it in the Canvas tab.`;
-
-              // Remove any HTML content from messages if it exists, but add the explanation
-              finalMessages = finalMessages.filter(msg => {
-                if (msg.type === 'assistant' && msg.content) {
-                  const content = msg.content;
-                  const hasHtml = (
-                    content.includes('<!DOCTYPE html>') ||
-                    content.includes('<html') ||
-                    content.includes('<button') ||
-                    content.includes('<script>')
-                  );
-                  if (hasHtml) {
-                    console.log('Filtering HTML content from message:', content.substring(0, 100));
-                  }
-                  return !hasHtml;
+            // Filter out HTML content from messages (it should be in canvas, not chat)
+            finalMessages = finalMessages.filter(msg => {
+              if (msg.type === 'assistant' && msg.content) {
+                const content = msg.content;
+                const hasHtml = (
+                  content.includes('<!DOCTYPE html>') ||
+                  content.includes('<html') ||
+                  content.includes('<button') ||
+                  content.includes('<script>')
+                );
+                if (hasHtml) {
+                  console.log('Filtering HTML content from message:', content.substring(0, 100));
                 }
-                return true;
-              });
+                return !hasHtml;
+              }
+              return true;
+            });
 
-              // Add the canvas explanation as a text message with canvas metadata
-              const explanationMessage: Message = {
+            // If canvas exists, attach canvas metadata to the last assistant message
+            if (finalState.has_canvas && finalState.canvas_content && finalMessages.length > 0) {
+              const lastMessage = finalMessages[finalMessages.length - 1];
+              if (lastMessage.type === 'assistant') {
+                lastMessage.canvas_content = finalState.canvas_content;
+                lastMessage.canvas_type = finalState.canvas_type;
+                lastMessage.has_canvas = true;
+              }
+            }
+
+            // Check if we have any assistant messages in finalMessages
+            const hasAssistantMessage = finalMessages.some(msg => msg.type === 'assistant');
+
+            // If we don't have any assistant messages and we have a final_response, add it
+            if (!hasAssistantMessage && finalState.final_response && finalState.final_response.trim() !== '') {
+              console.log('No assistant message found in backend messages, adding final_response');
+              const assistantMessage: Message = {
                 id: Date.now().toString(),
                 type: 'assistant',
-                content: canvasExplanation,
+                content: finalState.final_response,
                 timestamp: new Date(),
-                // Attach canvas information to this message
+                // Attach canvas metadata if present
                 canvas_content: finalState.canvas_content,
                 canvas_type: finalState.canvas_type,
-                has_canvas: true
+                has_canvas: finalState.has_canvas
               };
-              finalMessages = [...finalMessages, explanationMessage];
-
+              finalMessages = [...finalMessages, assistantMessage];
             } else {
-              // Check if we have any assistant messages in finalMessages
-              const hasAssistantMessage = finalMessages.some(msg => msg.type === 'assistant');
-
-              // If we don't have any assistant messages and we have a final_response, add it
-              if (!hasAssistantMessage && finalState.final_response && finalState.final_response.trim() !== '') {
-                console.log('No assistant message found in backend messages, adding final_response');
-                const assistantMessage: Message = {
-                  id: Date.now().toString(),
-                  type: 'assistant',
-                  content: finalState.final_response,
-                  timestamp: new Date()
-                };
-                finalMessages = [...finalMessages, assistantMessage];
-              } else {
-                console.log('Using messages from backend, not adding final_response separately');
-              }
+              console.log('Using messages from backend, not adding final_response separately');
             }
 
             // Additional filtering to ensure no HTML content appears in chat messages

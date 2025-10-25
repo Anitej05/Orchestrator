@@ -865,6 +865,37 @@ async def get_conversation_status(thread_id: str):
         logger.error(f"Error getting conversation status for thread_id {thread_id}: {e}")
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {e}")
 
+@app.get("/api/chat/history/{thread_id}")
+async def get_conversation_history(thread_id: str):
+    """
+    Load the full conversation history from the saved JSON file.
+    Returns all messages, metadata, plan, and uploaded files.
+    """
+    try:
+        # Use absolute path relative to backend directory
+        backend_dir = os.path.dirname(os.path.abspath(__file__))
+        history_dir = os.path.join(backend_dir, "conversation_history")
+        history_path = os.path.join(history_dir, f"{thread_id}.json")
+        
+        logger.info(f"Looking for conversation history at: {history_path}")
+        
+        if not os.path.exists(history_path):
+            logger.warning(f"Conversation history not found at: {history_path}")
+            raise HTTPException(status_code=404, detail=f"Conversation history not found for thread_id: {thread_id}")
+        
+        with open(history_path, 'r', encoding='utf-8') as f:
+            conversation_data = json.load(f)
+        
+        logger.info(f"Successfully loaded conversation history for thread_id: {thread_id}")
+        return conversation_data
+        
+    except HTTPException as http_exc:
+        raise http_exc
+    except Exception as e:
+        logger.error(f"Error loading conversation history for thread_id {thread_id}: {e}")
+        logger.exception("Full traceback:")
+        raise HTTPException(status_code=500, detail=f"Failed to load conversation history: {str(e)}")
+
 @app.delete("/api/chat/{thread_id}")
 async def clear_conversation(thread_id: str):
     """
@@ -1153,9 +1184,8 @@ async def websocket_chat(websocket: WebSocket):
 
             logger.info(f"WebSocket stream completed successfully for thread_id {thread_id}")
             
-            # For single-turn conversations, we might want to close the connection
-            # But for multi-turn conversations, we keep it open
-            # The frontend can send a special message to close the connection if needed
+            # Keep the connection open for multi-turn conversations
+            # The frontend will continue to send messages or close the connection when done
 
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected for thread_id {thread_id}")
@@ -1174,13 +1204,6 @@ async def websocket_chat(websocket: WebSocket):
         except:
             # If we can't send the error, the connection is likely already closed
             logger.error(f"Could not send error message to WebSocket for thread_id {thread_id}")
-    finally:
-        # Close the WebSocket connection
-        try:
-            await websocket.close()
-        except:
-            pass  # Connection might already be closed
-        logger.info(f"WebSocket connection closed for thread_id {thread_id}")
 
 @app.post("/api/agents/register", response_model=AgentCard)
 def register_or_update_agent(agent_data: AgentCard, response: Response, db: Session = Depends(get_db)):
