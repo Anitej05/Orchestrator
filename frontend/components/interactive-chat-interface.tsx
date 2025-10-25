@@ -180,6 +180,67 @@ export function InteractiveChatInterface({
               </div>
             );
           })}
+
+        {/* Orchestration Pause Section - Show Continue Button */}
+        {state.status === 'orchestration_paused' && (
+          <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-lg font-semibold text-blue-900 flex items-center gap-2">
+                <AlertCircle className="w-5 h-5" />
+                Orchestration Paused - Review & Continue
+              </h3>
+            </div>
+
+            {/* Show Parsed Tasks */}
+            {state.parsed_tasks && state.parsed_tasks.length > 0 && (
+              <div className="mb-4">
+                <h4 className="text-sm font-medium text-blue-800 mb-2">Parsed Tasks:</h4>
+                <div className="space-y-2">
+                  {state.parsed_tasks.map((task: any, index: number) => (
+                    <div key={index} className="p-3 bg-white rounded-lg border border-blue-100">
+                      <p className="text-sm text-gray-700">{task.description || task.task_description}</p>
+                      {task.capability && (
+                        <Badge variant="outline" className="mt-1 text-xs">
+                          {task.capability}
+                        </Badge>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Show Selected Agents */}
+            {state.task_agent_pairs && state.task_agent_pairs.length > 0 && (
+              <div className="mb-4">
+                <h4 className="text-sm font-medium text-blue-800 mb-2">Selected Agents:</h4>
+                <div className="space-y-2">
+                  {state.task_agent_pairs.map((pair: any, index: number) => (
+                    <div key={index} className="p-3 bg-white rounded-lg border border-blue-100">
+                      <div className="flex justify-between items-start">
+                        <p className="text-sm text-gray-700 flex-1">{pair.task?.description || pair.task?.task_description}</p>
+                        <Badge className="ml-2 bg-blue-600 text-white">
+                          {pair.agent?.name || 'Unknown Agent'}
+                        </Badge>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Continue Button */}
+            <Button 
+              onClick={async () => {
+                await continueConversation("continue_orchestration");
+              }}
+              className="w-full bg-green-600 hover:bg-green-700 text-white font-medium"
+            >
+              <CheckCircle className="w-4 h-4 mr-2" />
+              Continue Orchestration
+            </Button>
+          </div>
+        )}
       </div>
 
       {/* Input Form */}

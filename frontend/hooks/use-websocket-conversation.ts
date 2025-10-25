@@ -160,6 +160,37 @@ export function useWebSocketManager({
               }
             });
           }
+          // Handle orchestration pause for user approval
+          else if (eventData.node === '__orchestration_paused__') {
+            console.log('Orchestration paused for user approval:', eventData);
+            const currentMessages = useConversationStore.getState().messages;
+            
+            // Add a system message explaining the pause
+            const pauseMessage: Message = {
+              id: Date.now().toString(),
+              type: 'system',
+              content: 'Orchestration paused. Please review the parsed tasks and selected agents below, then click Continue to proceed.',
+              timestamp: new Date()
+            };
+            
+            _setConversationState({
+              thread_id: eventData.thread_id, // Save thread_id so continueConversation can use it
+              status: 'orchestration_paused',
+              messages: [...currentMessages, pauseMessage],
+              isLoading: false,
+              isWaitingForUser: true,
+              parsed_tasks: eventData.data?.parsed_tasks || [],
+              task_agent_pairs: eventData.data?.task_agent_pairs || [],
+              metadata: {
+                ...useConversationStore.getState().metadata,
+                currentStage: 'paused',
+                stageMessage: 'Waiting for your approval...',
+                progress: 50,
+                orchestrationPaused: true,
+                pauseReason: eventData.data?.pause_reason
+              }
+            });
+          }
           // The '__end__' node now contains the final, complete state.
           // We use this as the single source of truth to update our store.
           else if (eventData.node === '__end__' && eventData.data) {

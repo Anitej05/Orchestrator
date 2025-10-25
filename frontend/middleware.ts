@@ -1,14 +1,24 @@
-import { NextRequest, NextResponse } from 'next/server'
+import { clerkMiddleware, createRouteMatcher } from '@clerk/nextjs/server'
 
-export function middleware(request: NextRequest) {
-  // Handle Chrome DevTools requests gracefully
-  if (request.nextUrl.pathname.startsWith('/.well-known/appspecific/')) {
-    return new NextResponse(null, { status: 404 })
+// Define public routes (sign-in, sign-up, and any other public pages)
+const isPublicRoute = createRouteMatcher([
+  '/sign-in(.*)',
+  '/sign-up(.*)',
+  '/api/webhooks(.*)', // If you have webhook endpoints
+])
+
+export default clerkMiddleware(async (auth, request) => {
+  // Protect all routes except public ones
+  if (!isPublicRoute(request)) {
+    await auth.protect()
   }
-
-  return NextResponse.next()
-}
+})
 
 export const config = {
-  matcher: '/.well-known/appspecific/:path*'
+  matcher: [
+    // Skip Next.js internals and all static files, unless found in search params
+    '/((?!_next|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)',
+    // Always run for API routes
+    '/(api|trpc)(.*)',
+  ],
 }

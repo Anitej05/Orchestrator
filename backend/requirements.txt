@@ -27,3 +27,4 @@ langchain-experimental
 langchain-cerebras
 pypdf
 docx2txt
+wikipedia

@@ -47,11 +47,12 @@ export interface ConversationStatus {
 
 export interface ConversationState {
   thread_id?: string;
-  status: 'pending_user_input' | 'completed' | 'processing' | 'idle' | 'error';
+  status: 'pending_user_input' | 'completed' | 'processing' | 'idle' | 'error' | 'orchestration_paused';
   messages: Message[];
   isWaitingForUser: boolean;
   currentQuestion?: string;
   task_agent_pairs?: TaskAgentPair[];
+  parsed_tasks?: any[];
   final_response?: string;
   metadata?: any;
   uploaded_files?: FileObject[];

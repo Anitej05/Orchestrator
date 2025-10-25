@@ -41,6 +41,7 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
   isWaitingForUser: false,
   currentQuestion: undefined,
   task_agent_pairs: [],
+  parsed_tasks: [],
   final_response: undefined,
   metadata: {},
   uploaded_files: [],
@@ -238,18 +239,48 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
       if (!threadId) return;
       set({ isLoading: true });
       try {
-        const status = await getConversationStatus(threadId);
-        // Convert the status to a conversation state format
+        // Fetch the full conversation history from the API
+        const response = await fetch(`http://localhost:8000/api/conversations/${threadId}`);
+        if (!response.ok) {
+          throw new Error('Failed to load conversation history');
+        }
+        
+        const historyData = await response.json();
+        
+        // Convert messages: ensure timestamp is a Date object
+        const messages = (historyData.messages || []).map((msg: any) => ({
+          ...msg,
+          timestamp: msg.timestamp instanceof Date ? msg.timestamp : new Date(msg.timestamp),
+        }));
+        
+        // Convert the history data to conversation state format
         const conversationState: Partial<ConversationState> = {
-          thread_id: status.thread_id || undefined,
-          status: 'completed', // Assume completed since we're loading history
-          messages: [], // Will be populated by WebSocket or additional API call
-          isWaitingForUser: !!status.question_for_user,
-          currentQuestion: status.question_for_user || undefined,
-          task_agent_pairs: status.task_agent_pairs || [],
-          final_response: status.final_response || undefined,
+          thread_id: threadId,
+          status: historyData.final_response ? 'completed' : 'idle',
+          messages: messages,
+          isWaitingForUser: !!historyData.question_for_user || !!historyData.pending_user_input,
+          currentQuestion: historyData.question_for_user || undefined,
+          task_agent_pairs: historyData.task_agent_pairs || [],
+          parsed_tasks: historyData.parsed_tasks || [],
+          final_response: historyData.final_response || undefined,
+          metadata: historyData.metadata || {},
+          uploaded_files: historyData.uploaded_files || [],
+          plan: historyData.task_plan || historyData.plan || [],
+          canvas_content: historyData.canvas_content || undefined,
+          canvas_type: historyData.canvas_type || undefined,
+          has_canvas: !!historyData.canvas_content,
         };
+        
+        // Set the conversation state
         get().actions._setConversationState(conversationState);
+        
+        // Save thread_id to localStorage for persistence across refreshes
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('thread_id', threadId);
+        }
+        
+        console.log(`Loaded conversation ${threadId} with ${conversationState.messages?.length || 0} messages`);
+        
       } catch (error: any) {
         console.error('Failed to load conversation:', error);
         // If loading fails, reset to a clean state but keep the thread_id
@@ -348,6 +379,14 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
             // Preserve original_prompt throughout conversation
             original_prompt: newState.metadata.original_prompt || updatedMetadata.original_prompt || state.metadata?.original_prompt
           };
+        }
+
+        // Save thread_id to localStorage whenever it changes
+        if (newState.thread_id && newState.thread_id !== state.thread_id) {
+          if (typeof window !== 'undefined') {
+            localStorage.setItem('thread_id', newState.thread_id);
+            console.log(`Saved thread_id to localStorage: ${newState.thread_id}`);
+          }
         }
 
         return {

@@ -19,6 +19,7 @@ import {
   ResizablePanel,
   ResizableHandle,
 } from "@/components/ui/resizable"
+import Navbar from "@/components/navbar"
 
 interface ExecutionResult {
   taskId: string
@@ -53,18 +54,23 @@ export default function Home() {
   // The entire conversation state is now managed by the Zustand store.
   const conversationState = useConversationStore();
   const { 
-    startConversation, 
-    continueConversation, 
     resetConversation, 
     loadConversation 
   } = useConversationStore(state => state.actions);
   const isConversationLoading = useConversationStore((state: any) => state.isLoading);
 
-  // Initialize the WebSocket manager. It will automatically connect
-  // and keep the Zustand store in sync with backend updates.
+  // Initialize the WebSocket manager. It will automatically connect and keep the Zustand store in sync with backend updates.
   useWebSocketManager();
   
-  // Effect to handle side-effects when the conversation completes or errors
+  // Restore conversation from localStorage on mount
+  useEffect(() => {
+    const savedThreadId = localStorage.getItem('thread_id');
+    if (savedThreadId && !conversationState.thread_id) {
+      console.log(`Restoring conversation from localStorage: ${savedThreadId}`);
+      loadConversation(savedThreadId);
+    }
+  }, []); // Only run once on mount
+  
   useEffect(() => {
     if (conversationState.status === 'completed' && conversationState.final_response) {
       const result: ProcessResponse = {
@@ -107,7 +113,6 @@ export default function Home() {
   };
   
   const handleViewCanvas = (canvasContent: string, canvasType: 'html' | 'markdown') => {
-    // Call the sidebar's viewCanvas method to switch to canvas tab and display the content
     sidebarRef.current?.viewCanvas(canvasContent, canvasType);
   };
 
@@ -164,6 +169,20 @@ export default function Home() {
       });
     }
   };
+  
+  const handleNewConversation = () => {
+    resetConversation();
+    setTaskAgentPairs([]);
+    setSelectedAgents({});
+    setExecutionResults([]);
+    setApiResponseData(null);
+    setCurrentThreadId(null);
+    
+    toast({
+      title: "New conversation started",
+      description: "Ready to start a new orchestration",
+    });
+  };
 
   const handleOrchestrationComplete = (results: ExecutionResult[]) => {
     setExecutionResults(results)
@@ -210,25 +229,13 @@ export default function Home() {
     <SidebarProvider>
       <AppSidebar
         onConversationSelect={handleConversationSelect}
+        onNewConversation={handleNewConversation}
         currentThreadId={conversationState.thread_id || undefined}
       />
       <SidebarInset>
         <div className="h-screen bg-gray-50 relative flex flex-col">
-          {/* Header */}
-          <div className="flex-shrink-0 sticky top-0 z-10 bg-white border-b border-gray-200 px-4 py-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-4">
-                <SidebarTrigger className="h-8 w-8" />
-                <h1 className="text-xl font-semibold text-gray-900">Orchestrator</h1>
-              </div>
-              <Link href="/agents">
-                <Button className="bg-blue-600 hover:bg-blue-700 shadow-sm">
-                  <Users className="w-4 h-4 mr-2" />
-                  See Agents
-                </Button>
-              </Link>
-            </div>
-          </div>
+          {/* Header - use improved Navbar */}
+          <Navbar />
 
           {/* Main Content Area - Resizable */}
           <ResizablePanelGroup direction="horizontal" className="flex-1 overflow-hidden">
