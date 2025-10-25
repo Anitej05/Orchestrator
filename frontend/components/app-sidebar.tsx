@@ -74,7 +74,7 @@ export default function AppSidebar({ onConversationSelect, currentThreadId }: Ap
 
       <SidebarFooter className="border-t border-gray-200 p-4">
         <Link href="/register-agent">
-          <Button className="w-full bg-blue-600 hover:bg-blue-700">
+          <Button className="w-full bg-blue-600 hover:bg-blue-700 text-white">
             <Plus className="w-4 h-4 mr-2" />
             Register Agent
           </Button>

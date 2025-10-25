@@ -8,6 +8,7 @@ import { SidebarProvider, SidebarInset, SidebarTrigger } from "@/components/ui/s
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
 import { Users } from "lucide-react"
+import { ThemeToggle } from "@/components/theme-toggle"
 import OrchestrationDetailsSidebar, { type OrchestrationDetailsSidebarRef } from "@/components/orchestration-details-sidebar"
 import { type TaskAgentPair, type ProcessResponse } from "@/lib/types"
 import { useToast } from "@/hooks/use-toast"
@@ -222,20 +223,23 @@ export default function Home() {
         currentThreadId={conversationState.thread_id || undefined}
       />
       <SidebarInset>
-        <div className="h-screen bg-gray-50 relative flex flex-col">
+        <div className="h-screen bg-gradient-to-br from-gray-50 to-gray-100 dark:from-gray-950 dark:to-gray-900 relative flex flex-col">
           {/* Header */}
-          <div className="flex-shrink-0 sticky top-0 z-10 bg-white border-b border-gray-200 px-4 py-3">
+          <div className="flex-shrink-0 sticky top-0 z-10 bg-white/80 dark:bg-gray-900/80 backdrop-blur-lg border-b border-gray-200 dark:border-gray-800 px-4 py-3 shadow-sm">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-4">
                 <SidebarTrigger className="h-8 w-8" />
-                <h1 className="text-xl font-semibold text-gray-900">Orchestrator</h1>
+                <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Orchestrator</h1>
               </div>
-              <Link href="/agents">
-                <Button className="bg-blue-600 hover:bg-blue-700 shadow-sm">
-                  <Users className="w-4 h-4 mr-2" />
-                  See Agents
-                </Button>
-              </Link>
+              <div className="flex items-center gap-3">
+                <ThemeToggle />
+                <Link href="/agents">
+                  <Button className="bg-blue-600 hover:bg-blue-700 text-white shadow-sm">
+                    <Users className="w-4 h-4 mr-2" />
+                    See Agents
+                  </Button>
+                </Link>
+              </div>
             </div>
           </div>
 
@@ -259,7 +263,7 @@ export default function Home() {
             
             <ResizableHandle withHandle />
 
-            <ResizablePanel defaultSize={30} maxSize={40} minSize={25}>
+            <ResizablePanel defaultSize={30} maxSize={50} minSize={20}>
               <OrchestrationDetailsSidebar
                 ref={sidebarRef}
                 executionResults={executionResults}

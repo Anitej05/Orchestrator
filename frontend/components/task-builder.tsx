@@ -82,7 +82,7 @@ export default function TaskBuilder({
   }, [conversationState]);
 
   return (
-    <div className="h-full flex flex-col bg-white rounded-lg border shadow-sm">
+    <div className="h-full flex flex-col bg-gray-50/50 dark:bg-gray-900/50 backdrop-blur-sm rounded-lg border border-gray-200 dark:border-gray-800 shadow-sm">
       <InteractiveChatInterface
         onWorkflowComplete={onWorkflowComplete}
         onError={(error) => {

@@ -2239,6 +2239,17 @@ def get_serializable_state(state: dict | State, thread_id: str) -> dict:
                 serializable_messages.append(msg_dict)
             else:
                 serializable_messages.append(str(msg)) # Failsafe
+    
+    # If canvas exists, attach canvas metadata to the last assistant message
+    if state.get("has_canvas") and state.get("canvas_content") and serializable_messages:
+        # Find the last assistant message
+        for i in range(len(serializable_messages) - 1, -1, -1):
+            if serializable_messages[i].get('type') == 'assistant':
+                serializable_messages[i]['canvas_content'] = state.get('canvas_content')
+                serializable_messages[i]['canvas_type'] = state.get('canvas_type')
+                serializable_messages[i]['has_canvas'] = True
+                logger.info(f"Attached canvas metadata to message {serializable_messages[i].get('id')}")
+                break
 
     # Use the serialize_complex_object helper for other potentially complex fields
     # This ensures nested Pydantic models, HttpUrl, etc., are converted correctly.

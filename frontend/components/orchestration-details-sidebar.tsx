@@ -204,7 +204,7 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
     const hasResults = executionResults.length > 0 || allTasks.length > 0
 
     return (
-        <aside className={cn("border-l bg-gray-50/50 p-4 flex flex-col h-full", className)}>
+        <aside className={cn("border-l border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950 p-4 flex flex-col h-full", className)}>
             <Tabs value={activeTab} onValueChange={setActiveTab} className="h-full flex flex-col">
                 <TabsList className="grid w-full grid-cols-4">
                     <TabsTrigger value="metadata">Metadata</TabsTrigger>
@@ -320,9 +320,9 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                             const isExcel = fileName.endsWith('.xls') || fileName.endsWith('.xlsx');
                             
                             return (
-                                <div key={`${att.name}-${index}`} className="flex flex-col items-center p-3 rounded-lg bg-white border hover:shadow-md transition-shadow">
+                                <div key={`${att.name}-${index}`} className="flex flex-col items-center p-3 rounded-xl bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-800 hover:shadow-lg hover:scale-105 transition-all duration-200">
                                     {isImage && att.content ? (
-                                        <div className="w-full aspect-square rounded-md overflow-hidden bg-gray-100 mb-2">
+                                        <div className="w-full aspect-square rounded-lg overflow-hidden bg-gradient-to-br from-gray-100 to-gray-200 dark:from-gray-900 dark:to-black mb-2">
                                             <img src={att.content} alt={att.name} className="w-full h-full object-cover" />
                                         </div>
                                     ) : (

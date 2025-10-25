@@ -123,10 +123,12 @@ export function InteractiveChatInterface({
   return (
     <div className="flex flex-col h-full">
       {/* Chat Messages */}
-      <div className="flex-1 space-y-4 overflow-y-auto p-6">
+      <div className="flex-1 space-y-4 overflow-y-auto p-6 scrollbar-thin scrollbar-thumb-gray-300 dark:scrollbar-thumb-gray-700">
         {state.messages.length === 0 && (
-          <div className="text-center text-gray-500 py-8 h-full flex flex-col justify-center items-center">
-            <MessageCircle className="w-12 h-12 mx-auto mb-2 text-gray-300" />
+          <div className="text-center text-gray-500 dark:text-gray-400 py-8 h-full flex flex-col justify-center items-center">
+            <div className="p-4 rounded-full bg-gradient-to-br from-gray-100 to-gray-200 dark:from-gray-800 dark:to-gray-900 mb-4">
+              <MessageCircle className="w-12 h-12 text-gray-400 dark:text-gray-600" />
+            </div>
             <p>Start a conversation to orchestrate your workflow</p>
           </div>
         )}
@@ -145,12 +147,12 @@ export function InteractiveChatInterface({
             
             return (
               <div key={messageId} className={`message message-${message.type} w-full flex ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div className={`p-4 rounded-lg ${
+                <div className={`p-4 rounded-2xl shadow-sm ${
                   message.type === 'user' 
-                    ? 'bg-blue-600 text-white max-w-[85%]'
+                    ? 'bg-gradient-to-br from-blue-600 to-blue-700 dark:from-blue-600 dark:to-blue-800 text-white max-w-[85%] shadow-blue-500/20'
                     : message.type === 'system'
-                    ? 'bg-yellow-50 border border-yellow-200 text-yellow-800 max-w-[90%]'
-                    : 'bg-gray-100 border border-gray-200 max-w-[95%]'
+                    ? 'bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/50 text-amber-900 dark:text-amber-200 max-w-[90%]'
+                    : 'bg-gray-50/80 dark:bg-gray-800/90 border border-gray-200 dark:border-gray-700/50 text-gray-900 dark:text-gray-100 max-w-[95%] backdrop-blur-sm'
                 }`}>
                   <div className="message-content space-y-2">
                     {message.content && (message.type === 'assistant' ? <Markdown content={message.content} /> : <p>{message.content}</p>)}
@@ -183,7 +185,7 @@ export function InteractiveChatInterface({
                       </Button>
                     )}
                   </div>
-                  <div className={`text-xs opacity-70 mt-1 ${message.type === 'user' ? 'text-blue-200' : 'text-gray-500'}`}>
+                  <div className={`text-xs opacity-60 mt-1.5 font-medium ${message.type === 'user' ? 'text-blue-100 dark:text-blue-200' : 'text-gray-500 dark:text-gray-400'}`}>
                     {message.timestamp.toLocaleTimeString()}
                   </div>
                 </div>
@@ -193,7 +195,7 @@ export function InteractiveChatInterface({
       </div>
 
       {/* Input Form */}
-      <div className="p-4 border-t bg-white rounded-b-lg">
+      <div className="p-4 border-t border-gray-200 dark:border-gray-700/50 bg-gray-50/80 dark:bg-gray-900/80 backdrop-blur-lg rounded-b-lg">
         {/* Consolidated Status Indicator - Shows orchestration progress above input */}
         {(isLoading || state.status === 'processing' || state.isWaitingForUser) && (
           <div className={`status-indicator p-3 rounded-lg mb-4 ${
@@ -269,7 +271,7 @@ export function InteractiveChatInterface({
                 {state.metadata?.stageMessage || (state.isWaitingForUser ? 'Waiting for your response...' : 'Processing your request...')}
               </span>
               {state.metadata?.progress && !state.isWaitingForUser && state.metadata?.currentStage !== 'completed' && state.metadata?.currentStage !== 'error' && (
-                <div className="flex-1 bg-gray-200 rounded-full h-2 ml-4">
+                <div className="flex-1 bg-gray-200 dark:bg-gray-700/50 rounded-full h-2 ml-4 overflow-hidden">
                   <div 
                     className={`h-2 rounded-full transition-all duration-300 ${
                       state.metadata?.currentStage === 'initializing' ? 'bg-blue-500' :
@@ -293,7 +295,7 @@ export function InteractiveChatInterface({
         <form onSubmit={handleSubmit} className="space-y-4">
           {state.isWaitingForUser ? (
             <div className="space-y-2">
-              <label className="block text-sm font-medium text-gray-700">
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
                 {state.currentQuestion}
               </label>
               <Textarea
@@ -386,10 +388,10 @@ export function InteractiveChatInterface({
 
         {/* Status Indicator for user input */}
         {state.isWaitingForUser && !isLoading && (
-          <div className="status-indicator mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
+          <div className="status-indicator mt-4 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/50 rounded-xl shadow-sm">
             <div className="flex items-center space-x-2">
               <Clock className="w-4 h-4 text-yellow-600" />
-              <span className="text-yellow-800 font-medium text-sm">Waiting for your response...</span>
+              <span className="text-amber-900 dark:text-amber-200 font-medium text-sm">Waiting for your response...</span>
             </div>
           </div>
         )}
