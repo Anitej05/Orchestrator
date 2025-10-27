@@ -4,6 +4,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
+import { Switch } from '@/components/ui/switch';
 import { MessageCircle, Clock, CheckCircle, Paperclip, X, File as FileIcon, AlertCircle, Loader2, Brain, Search, Users, FileText, Play, BarChart3 } from 'lucide-react';
 import Markdown from '@/components/ui/markdown';
 import { type ProcessResponse, type ConversationState, type Message, type Attachment } from '@/lib/types';
@@ -53,6 +54,7 @@ export function InteractiveChatInterface({
   const [userResponse, setUserResponse] = useState('');
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
   const [previewUrls, setPreviewUrls] = useState<string[]>([]);
+  const [planningMode, setPlanningMode] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -103,8 +105,8 @@ export function InteractiveChatInterface({
           // Continue existing conversation
           await continueConversation(inputValue, attachedFiles);
         } else {
-          // Start new conversation
-          await startConversation(inputValue, attachedFiles);
+          // Start new conversation with planning mode
+          await startConversation(inputValue, attachedFiles, planningMode);
         }
         setInputValue('');
         setAttachedFiles([]);
@@ -330,6 +332,28 @@ export function InteractiveChatInterface({
                     <X className="w-3 h-3 cursor-pointer" onClick={() => removeFile(file.name)} />
                   </Badge>
                 ))}
+              </div>
+
+              {/* Planning Mode Toggle */}
+              <div className="flex items-center justify-between px-1 py-2">
+                <div className="flex items-center gap-2">
+                  <Switch
+                    id="planning-mode"
+                    checked={planningMode}
+                    onCheckedChange={setPlanningMode}
+                  />
+                  <label 
+                    htmlFor="planning-mode" 
+                    className="text-sm font-medium cursor-pointer select-none"
+                  >
+                    Planning Mode
+                  </label>
+                </div>
+                {planningMode && (
+                  <Badge variant="secondary" className="text-xs">
+                    Will pause for approval
+                  </Badge>
+                )}
               </div>
 
               <div className="space-y-2">

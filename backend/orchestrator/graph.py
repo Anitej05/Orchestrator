@@ -1111,8 +1111,16 @@ def pause_for_plan_approval(state: State, config: RunnableConfig):
     - Total estimated cost
     
     The workflow pauses here and waits for user approval via WebSocket.
+    Only pauses if planning_mode is enabled.
     '''
-    logger.info("=== APPROVAL CHECKPOINT: Pausing for user approval ===")
+    # Check if planning mode is enabled
+    planning_mode = state.get("planning_mode", False)
+    
+    if not planning_mode:
+        logger.info("=== APPROVAL CHECKPOINT: Planning mode disabled, skipping approval ===")
+        return {}  # Skip approval, proceed directly to execution
+    
+    logger.info("=== APPROVAL CHECKPOINT: Planning mode enabled, pausing for user approval ===")
     
     thread_id = config.get("configurable", {}).get("thread_id", "unknown")
     

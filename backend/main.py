@@ -366,13 +366,14 @@ async def execute_orchestration(
     thread_id: str,
     user_response: Optional[str] = None,
     files: Optional[List[FileObject]] = None,
-    stream_callback=None
+    stream_callback=None,
+    planning_mode: bool = False
 ):
     """
     Unified orchestration logic that correctly persists and merges file context
     across all turns in a conversation. Simplified and more robust version.
     """
-    logger.info(f"Starting orchestration for thread_id: {thread_id}")
+    logger.info(f"Starting orchestration for thread_id: {thread_id}, planning_mode: {planning_mode}")
 
     config = {"configurable": {"thread_id": thread_id}}
 
@@ -487,6 +488,7 @@ async def execute_orchestration(
             "parse_retry_count": 0,
             "needs_complex_processing": None,  # Let analyze_request determine this
             "analysis_reasoning": None,
+            "planning_mode": planning_mode,  # Set planning mode from parameter
         }
 
     # --- File Merging Logic ---
@@ -966,8 +968,9 @@ async def websocket_chat(websocket: WebSocket):
             prompt = data.get("prompt")
             user_response = data.get("user_response")  # For continuing conversations
             files_data = data.get("files", [])  # Get files from WebSocket message
+            planning_mode = data.get("planning_mode", False)  # Get planning mode flag
 
-            logger.info(f"WebSocket received message with thread_id: {thread_id}")
+            logger.info(f"WebSocket received message with thread_id: {thread_id}, planning_mode: {planning_mode}")
 
             if not prompt and not user_response:
                 await websocket.send_json({
@@ -1051,7 +1054,8 @@ async def websocket_chat(websocket: WebSocket):
                 thread_id=thread_id,
                 user_response=user_response,
                 files=file_objects if file_objects else None,
-                stream_callback=stream_callback
+                stream_callback=stream_callback,
+                planning_mode=planning_mode
             )
 
             # Check if workflow is paused for user input

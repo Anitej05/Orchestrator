@@ -22,7 +22,7 @@ const readFileAsDataURL = (file: File): Promise<string> => {
 interface ConversationStore extends ConversationState {
   isLoading: boolean;
   actions: {
-    startConversation: (input: string, files?: File[]) => Promise<void>;
+    startConversation: (input: string, files?: File[], planningMode?: boolean) => Promise<void>;
     continueConversation: (input: string, files?: File[]) => Promise<void>;
     loadConversation: (threadId: string) => Promise<void>;
     resetConversation: () => void;
@@ -53,8 +53,9 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
   isLoading: false,
 
   actions: {
-    startConversation: async (input: string, files: File[] = []) => {
+    startConversation: async (input: string, files: File[] = [], planningMode: boolean = false) => {
       // Clear previous conversation state when starting a new conversation
+      console.log(`Starting conversation with planning mode: ${planningMode}`);
       set({ 
         isLoading: true, 
         status: 'processing',
@@ -107,6 +108,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
               ws.send(JSON.stringify({
                 thread_id: get().thread_id,
                 prompt: input,
+                planning_mode: planningMode,
                 files: uploadedFiles.map(file => ({
                   file_name: file.file_name,
                   file_path: file.file_path,

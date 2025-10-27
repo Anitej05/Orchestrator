@@ -71,3 +71,6 @@ class State(TypedDict):
     canvas_content: Annotated[Optional[str], overwrite_reducer]
     canvas_type: Annotated[Optional[Literal["html", "markdown"]], overwrite_reducer]
     has_canvas: Annotated[bool, overwrite_reducer]
+    
+    # Planning mode flag
+    planning_mode: Annotated[bool, overwrite_reducer]
