@@ -2599,8 +2599,10 @@ builder.add_conditional_edges("parse_prompt", route_after_parse, {
 
 builder.add_edge("agent_directory_search", "rank_agents")
 builder.add_edge("rank_agents", "plan_execution")
-# After plan creation, go to approval checkpoint
-builder.add_conditional_edges("plan_execution", route_after_approval, {
+# After plan creation, always go to approval checkpoint (it will decide whether to pause)
+builder.add_edge("plan_execution", "pause_for_plan_approval")
+# After approval checkpoint, route based on whether approval is needed
+builder.add_conditional_edges("pause_for_plan_approval", route_after_approval, {
     "ask_user": "ask_user",
     "validate_plan_for_execution": "validate_plan_for_execution"
 })
