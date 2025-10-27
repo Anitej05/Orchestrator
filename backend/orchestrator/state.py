@@ -71,8 +71,3 @@ class State(TypedDict):
     canvas_content: Annotated[Optional[str], overwrite_reducer]
     canvas_type: Annotated[Optional[Literal["html", "markdown"]], overwrite_reducer]
     has_canvas: Annotated[bool, overwrite_reducer]
-    
-    # Orchestration pause/resume fields
-    orchestration_paused: Annotated[bool, overwrite_reducer]
-    waiting_for_continue: Annotated[bool, overwrite_reducer]
-    pause_reason: Annotated[Optional[str], overwrite_reducer]

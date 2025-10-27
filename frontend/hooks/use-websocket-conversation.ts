@@ -159,48 +159,6 @@ export function useWebSocketManager({
               }
             });
           }
-          // Handle orchestration pause for user approval
-          else if (eventData.node === '__orchestration_paused__') {
-            console.log('Orchestration paused for user approval:', eventData);
-            const currentMessages = useConversationStore.getState().messages;
-            
-            // Extract the execution plan from interrupt data
-            const executionPlan = eventData.data?.execution_plan || [];
-            
-            console.log('Storing execution plan from interrupt:', executionPlan);
-            
-            // Add a system message explaining the pause
-            const pauseMessage: Message = {
-              id: Date.now().toString(),
-              type: 'system',
-              content: 'Orchestration paused. Please review the execution plan and costs in the Plan tab, then click Accept above to proceed.',
-              timestamp: new Date()
-            };
-            
-      // UI state transition: orchestration paused for user approval
-            // Reset resume flag globally to allow Accept/Continue button to function
-            window.__orbimesh_resume_sent = false;
-            _setConversationState({
-              thread_id: eventData.thread_id, // Save thread_id so continueConversation can use it
-              status: 'orchestration_paused',
-              messages: [...currentMessages, pauseMessage],
-              isLoading: false,
-              isWaitingForUser: true,
-              parsed_tasks: eventData.data?.parsed_tasks || [],
-              task_agent_pairs: eventData.data?.task_agent_pairs || [],
-              plan: executionPlan, // Store the execution plan
-              metadata: {
-                ...useConversationStore.getState().metadata,
-                currentStage: 'paused',
-                stageMessage: 'Review the execution plan and approve to proceed',
-                progress: 50,
-                orchestrationPaused: true,
-                pauseReason: eventData.data?.pause_reason || eventData.data?.message
-              }
-            });
-            
-            console.log('State updated with plan:', useConversationStore.getState().plan);
-          }
           // The '__end__' node now contains the final, complete state.
           // We use this as the single source of truth to update our store.
           else if (eventData.node === '__end__' && eventData.data) {

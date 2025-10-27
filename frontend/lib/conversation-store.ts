@@ -38,7 +38,6 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
   isWaitingForUser: false,
   currentQuestion: undefined,
   task_agent_pairs: [],
-  parsed_tasks: [],
   final_response: undefined,
   metadata: {},
   uploaded_files: [],
@@ -253,53 +252,51 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
       if (!threadId) return;
       set({ isLoading: true });
       try {
-        // Fetch the full conversation history from the API
-        const response = await fetch(`http://localhost:8000/api/conversations/${threadId}`);
+        // Load full conversation history from backend
+        const response = await fetch(`http://localhost:8000/api/chat/history/${threadId}`);
         if (!response.ok) {
-          // Better error handling from Remote
           const errorText = await response.text();
           console.error('Failed to load conversation:', response.status, errorText);
           throw new Error(`Failed to load conversation history: ${response.status}`);
         }
         
-        const historyData = await response.json();
-        console.log('Loaded conversation data:', historyData); // Debug log from Remote
+        const conversationData = await response.json();
+        console.log('Loaded conversation data:', conversationData);
         
-        // Convert messages: ensure timestamp is a Date object (safer approach from HEAD)
-        const messages = (historyData.messages || []).map((msg: any) => ({
+        // Convert message timestamps from strings to Date objects
+        const messages = (conversationData.messages || []).map((msg: any) => ({
           ...msg,
-          timestamp: msg.timestamp instanceof Date ? msg.timestamp : new Date(msg.timestamp),
+          timestamp: new Date(msg.timestamp)
         }));
         
-        // Convert the history data to conversation state format (complete mapping from HEAD)
+        // Set the full conversation state
         const conversationState: Partial<ConversationState> = {
-          thread_id: threadId,
-          status: historyData.final_response ? 'completed' : 'idle',
+          thread_id: conversationData.thread_id || threadId,
+          status: conversationData.status || 'completed',
           messages: messages,
-          isWaitingForUser: !!historyData.question_for_user || !!historyData.pending_user_input,
-          currentQuestion: historyData.question_for_user || undefined,
-          task_agent_pairs: historyData.task_agent_pairs || [],
-          parsed_tasks: historyData.parsed_tasks || [], // Important: HEAD includes this
-          final_response: historyData.final_response || undefined,
-          metadata: historyData.metadata || {},
-          uploaded_files: historyData.uploaded_files || [],
-          plan: historyData.task_plan || historyData.plan || [], // Fallback chain from HEAD
-          canvas_content: historyData.canvas_content || undefined,
-          canvas_type: historyData.canvas_type || undefined,
-          has_canvas: !!historyData.canvas_content, // Dynamic calculation from HEAD
+          isWaitingForUser: conversationData.pending_user_input || false,
+          currentQuestion: conversationData.question_for_user || undefined,
+          task_agent_pairs: conversationData.task_agent_pairs || [],
+          final_response: conversationData.final_response || undefined,
+          metadata: conversationData.metadata || {},
+          uploaded_files: conversationData.uploaded_files || [],
+          plan: conversationData.plan || [],
+          canvas_content: conversationData.canvas_content,
+          canvas_type: conversationData.canvas_type,
+          has_canvas: conversationData.has_canvas || false,
         };
         
-        // Set the conversation state
         get().actions._setConversationState(conversationState);
         
-        // Save thread_id to localStorage for persistence across refreshes
+        // Explicitly set isLoading to false after loading
+        set({ isLoading: false });
+        
+        // Save thread_id to localStorage for persistence
         if (typeof window !== 'undefined') {
           localStorage.setItem('thread_id', threadId);
         }
         
-        // Detailed logging from HEAD
-        console.log(`Loaded conversation ${threadId} with ${conversationState.messages?.length || 0} messages`);
-        
+        console.log('Conversation loaded successfully:', threadId);
       } catch (error: any) {
         console.error('Failed to load conversation:', error);
         // If loading fails, just clear the localStorage to prevent infinite retry
@@ -439,14 +436,6 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
               ...msg,
               timestamp: msg.timestamp instanceof Date ? msg.timestamp : new Date(msg.timestamp || Date.now()),
             }));
-        }
-
-        // Save thread_id to localStorage whenever it changes
-        if (newState.thread_id && newState.thread_id !== state.thread_id) {
-          if (typeof window !== 'undefined') {
-            localStorage.setItem('thread_id', newState.thread_id);
-            console.log(`Saved thread_id to localStorage: ${newState.thread_id}`);
-          }
         }
 
         return {
