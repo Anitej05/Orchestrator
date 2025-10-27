@@ -155,13 +155,23 @@ def serialize_complex_object(obj):
             # Handle lists/tuples of complex objects
             try:
                 # Check if this is a list of LangChain message objects
-                if all(hasattr(item, '_type') for item in obj if item is not None):
+                if obj and all(hasattr(item, '_type') for item in obj if item is not None):
                     # Use LangChain's messages_to_dict for message objects
                     return messages_to_dict(obj)
                 else:
-                    return [serialize_complex_object(item) for item in obj]
-            except:
-                pass
+                    # Recursively serialize each item in the list
+                    result = []
+                    for item in obj:
+                        try:
+                            serialized = serialize_complex_object(item)
+                            result.append(serialized)
+                        except Exception as e:
+                            logger.warning(f"Failed to serialize list item: {e}")
+                            result.append(str(item))
+                    return result
+            except Exception as e:
+                logger.warning(f"Failed to serialize list: {e}")
+                return [str(item) for item in obj]
         elif hasattr(obj, '_type'):  # Check for LangChain message objects
             # Handle LangChain message objects specifically
             try:
