@@ -130,8 +130,15 @@ def serialize_complex_object(obj):
         return obj
     except (TypeError, ValueError):
         # Handle different object types
-        if isinstance(obj, HttpUrl):
+        # Check for HttpUrl by type name instead of isinstance (avoids subscripted generics error)
+        if type(obj).__name__ == 'HttpUrl' or (hasattr(obj, '__class__') and 'HttpUrl' in str(type(obj))):
             return str(obj)  # Convert HttpUrl to string
+        elif hasattr(obj, 'model_dump'):
+            # Pydantic v2 models
+            try:
+                return obj.model_dump(mode='json')
+            except:
+                pass
         elif hasattr(obj, 'dict'):
             # Pydantic models
             try:

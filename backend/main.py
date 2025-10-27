@@ -51,10 +51,13 @@ app = FastAPI(
 logger = logging.getLogger("uvicorn.error")
 
 # Configure root logger for backend only (not orchestrator)
+# Use UTF-8 encoding for console output to handle emojis
+import io
+console_handler = logging.StreamHandler(io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace'))
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
+    handlers=[console_handler]
 )
 
 # Set up orchestrator logger to write to temp file only (not console)
@@ -68,7 +71,7 @@ os.makedirs("logs", exist_ok=True)
 
 # File handler for orchestrator logs - overwrites on each run (last conversation only)
 orchestrator_log_file = "logs/orchestrator_temp.log"
-file_handler = logging.FileHandler(orchestrator_log_file, mode='w')  # 'w' mode overwrites
+file_handler = logging.FileHandler(orchestrator_log_file, mode='w', encoding='utf-8')  # UTF-8 encoding for emojis
 file_handler.setLevel(logging.INFO)
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 file_handler.setFormatter(formatter)
