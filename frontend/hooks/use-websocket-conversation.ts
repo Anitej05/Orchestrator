@@ -319,27 +319,48 @@ export function useWebSocketManager({
           }
           // Handle intermediate states or errors
           else if (eventData.node === '__user_input_required__') {
-            // Add the question as a system message to appear below the user's message
-            const questionMessage: Message = {
-              id: Date.now().toString(),
-              type: 'system',
-              content: eventData.data?.question_for_user || 'Additional information required.',
-              timestamp: new Date()
-            };
+            // Check if this is an approval request
+            const isApprovalRequest = eventData.data?.approval_required === true;
+            
+            if (isApprovalRequest) {
+              // This is a plan approval request - set approval state
+              const currentState = useConversationStore.getState();
+              _setConversationState({
+                isWaitingForUser: true,
+                currentQuestion: eventData.data?.question_for_user,
+                approval_required: true,
+                estimated_cost: eventData.data?.estimated_cost || 0,
+                task_count: eventData.data?.task_count || 0,
+                metadata: {
+                  ...currentState.metadata,
+                  currentStage: 'approval_required',
+                  stageMessage: 'Waiting for plan approval...',
+                  progress: 50
+                }
+              });
+            } else {
+              // Regular user input required - add as system message
+              const questionMessage: Message = {
+                id: Date.now().toString(),
+                type: 'system',
+                content: eventData.data?.question_for_user || 'Additional information required.',
+                timestamp: new Date()
+              };
 
-            const currentMessages = useConversationStore.getState().messages;
-            _setConversationState({
-              messages: [...currentMessages, questionMessage],
-              isWaitingForUser: true,
-              currentQuestion: eventData.data?.question_for_user,
-              metadata: {
-                ...useConversationStore.getState().metadata,
-                currentStage: 'waiting_for_user',
-                stageMessage: 'Waiting for your response...',
-                progress: 50
-              }
-            });
-            // Set isLoading to false so user can input their response
+              const currentMessages = useConversationStore.getState().messages;
+              _setConversationState({
+                messages: [...currentMessages, questionMessage],
+                isWaitingForUser: true,
+                currentQuestion: eventData.data?.question_for_user,
+                metadata: {
+                  ...useConversationStore.getState().metadata,
+                  currentStage: 'waiting_for_user',
+                  stageMessage: 'Waiting for your response...',
+                  progress: 50
+                }
+              });
+            }
+            // Set isLoading to false so user can respond
             useConversationStore.setState({ isLoading: false });
           }
           else if (eventData.node === '__error__') {

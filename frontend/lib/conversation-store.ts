@@ -46,6 +46,10 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
   canvas_content: undefined,
   canvas_type: undefined,
   has_canvas: false,
+  // Plan approval fields
+  approval_required: false,
+  estimated_cost: 0,
+  task_count: 0,
   isLoading: false,
 
   actions: {

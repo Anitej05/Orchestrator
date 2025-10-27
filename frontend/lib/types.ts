@@ -60,6 +60,10 @@ export interface ConversationState {
   canvas_content?: string;
   canvas_type?: 'html' | 'markdown';
   has_canvas?: boolean;
+  // Plan approval fields
+  approval_required?: boolean;
+  estimated_cost?: number;
+  task_count?: number;
 }
 
 export interface Attachment {
