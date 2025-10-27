@@ -1083,6 +1083,50 @@ def plan_execution(state: State, config: RunnableConfig):
     return output_state
 
 
+def pause_for_plan_approval(state: State, config: RunnableConfig):
+    '''
+    WebSocket-compatible approval checkpoint that pauses after plan creation.
+    
+    This allows users to review:
+    - Parsed tasks
+    - Selected agents with ratings
+    - Execution plan with estimated costs
+    - Total estimated cost
+    
+    The workflow pauses here and waits for user approval via WebSocket.
+    '''
+    logger.info("=== APPROVAL CHECKPOINT: Pausing for user approval ===")
+    
+    thread_id = config.get("configurable", {}).get("thread_id", "unknown")
+    
+    # Get plan details
+    task_plan = state.get("task_plan", [])
+    task_agent_pairs = state.get("task_agent_pairs", [])
+    
+    # Calculate total estimated cost
+    total_cost = 0.0
+    task_count = 0
+    for batch in task_plan:
+        for task_dict in batch:
+            task_count += 1
+            if isinstance(task_dict, dict):
+                primary_agent = task_dict.get('primary', {})
+                cost = primary_agent.get('price_per_call_usd', 0.0)
+                if cost:
+                    total_cost += cost
+    
+    logger.info(f"Plan summary: {task_count} tasks, estimated cost: ${total_cost:.4f}")
+    
+    # Set state to indicate we're waiting for approval
+    return {
+        "pending_user_input": True,
+        "question_for_user": f"Review the execution plan: {task_count} tasks will be executed with an estimated cost of ${total_cost:.4f}. Type 'approve' to proceed or 'cancel' to stop.",
+        "approval_required": True,
+        "estimated_cost": total_cost,
+        "task_count": task_count
+    }
+
+
 def validate_plan_for_execution(state: State):
     '''
     Performs an advanced pre-flight check on the next task, now with full file
@@ -2342,6 +2386,15 @@ def route_after_search(state: State):
             return "parse_prompt"
     return "rank_agents"
 
+def route_after_approval(state: State):
+    '''Routes after plan approval checkpoint.'''
+    if state.get("approval_required") and state.get("pending_user_input"):
+        logger.info("Routing to ask_user for plan approval.")
+        return "ask_user"
+    else:
+        logger.info("Plan approved or no approval needed. Routing to validate_plan_for_execution.")
+        return "validate_plan_for_execution"
+
 def route_after_validation(state: State):
     '''This router acts as the gate after the plan is validated.'''
     if state.get("replan_reason"):
@@ -2495,6 +2548,7 @@ builder.add_node("preprocess_files", preprocess_files)
 builder.add_node("agent_directory_search", agent_directory_search)
 builder.add_node("rank_agents", rank_agents)
 builder.add_node("plan_execution", plan_execution)
+builder.add_node("pause_for_plan_approval", pause_for_plan_approval)
 builder.add_node("validate_plan_for_execution", validate_plan_for_execution)
 builder.add_node("execute_batch", execute_batch)
 builder.add_node("evaluate_agent_response", evaluate_agent_response)
@@ -2520,7 +2574,11 @@ builder.add_conditional_edges("parse_prompt", route_after_parse, {
 
 builder.add_edge("agent_directory_search", "rank_agents")
 builder.add_edge("rank_agents", "plan_execution")
-builder.add_edge("plan_execution", "validate_plan_for_execution")
+# After plan creation, go to approval checkpoint
+builder.add_conditional_edges("plan_execution", route_after_approval, {
+    "ask_user": "ask_user",
+    "validate_plan_for_execution": "validate_plan_for_execution"
+})
 builder.add_edge("execute_batch", "evaluate_agent_response") 
 builder.add_edge("ask_user", "save_history")
 builder.add_edge("generate_final_response", "render_canvas_output")

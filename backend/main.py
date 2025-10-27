@@ -388,6 +388,28 @@ async def execute_orchestration(
         initial_state["pending_user_input"] = False
         initial_state["question_for_user"] = None
         initial_state["parse_retry_count"] = 0
+        
+        # Handle plan approval responses
+        if initial_state.get("approval_required"):
+            user_response_lower = user_response.lower().strip()
+            if user_response_lower in ["approve", "yes", "proceed", "continue", "execute", "go", "ok"]:
+                logger.info(f"User approved execution plan for thread_id: {thread_id}")
+                initial_state["approval_required"] = False
+                initial_state["plan_approved"] = True
+            elif user_response_lower in ["cancel", "no", "stop", "abort", "reject"]:
+                logger.info(f"User cancelled execution plan for thread_id: {thread_id}")
+                initial_state["approval_required"] = False
+                initial_state["plan_approved"] = False
+                initial_state["final_response"] = "Execution cancelled by user. The plan was not executed."
+                # Skip to end
+                return initial_state
+            else:
+                # Invalid response, ask again
+                logger.warning(f"Invalid approval response: {user_response}")
+                initial_state["pending_user_input"] = True
+                initial_state["question_for_user"] = "Please respond with 'approve' to proceed or 'cancel' to stop the execution."
+                return initial_state
+        
         if "original_prompt" in initial_state:
             initial_state["original_prompt"] = f"{initial_state['original_prompt']}\n\nAdditional context from user: {user_response}"
         else:
