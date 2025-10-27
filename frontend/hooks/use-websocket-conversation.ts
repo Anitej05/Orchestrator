@@ -164,11 +164,16 @@ export function useWebSocketManager({
             console.log('Orchestration paused for user approval:', eventData);
             const currentMessages = useConversationStore.getState().messages;
             
+            // Extract the execution plan from interrupt data
+            const executionPlan = eventData.data?.execution_plan || [];
+            
+            console.log('Storing execution plan from interrupt:', executionPlan);
+            
             // Add a system message explaining the pause
             const pauseMessage: Message = {
               id: Date.now().toString(),
               type: 'system',
-              content: 'Orchestration paused. Please review the parsed tasks and selected agents below, then click Continue to proceed.',
+              content: 'Orchestration paused. Please review the execution plan and costs in the Plan tab, then click Accept above to proceed.',
               timestamp: new Date()
             };
             
@@ -183,15 +188,18 @@ export function useWebSocketManager({
               isWaitingForUser: true,
               parsed_tasks: eventData.data?.parsed_tasks || [],
               task_agent_pairs: eventData.data?.task_agent_pairs || [],
+              plan: executionPlan, // Store the execution plan
               metadata: {
                 ...useConversationStore.getState().metadata,
                 currentStage: 'paused',
-                stageMessage: 'Waiting for your approval...',
+                stageMessage: 'Review the execution plan and approve to proceed',
                 progress: 50,
                 orchestrationPaused: true,
-                pauseReason: eventData.data?.pause_reason
+                pauseReason: eventData.data?.pause_reason || eventData.data?.message
               }
             });
+            
+            console.log('State updated with plan:', useConversationStore.getState().plan);
           }
           // The '__end__' node now contains the final, complete state.
           // We use this as the single source of truth to update our store.

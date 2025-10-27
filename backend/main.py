@@ -564,13 +564,21 @@ async def execute_orchestration(
             node_count = 0
             expected_nodes = ["analyze_request", "parse_prompt", "agent_directory_search", "rank_agents", "plan_execution", "execute_batch", "aggregate_responses"]
 
-            # When resuming from pause, we need to send a Command to resume the interrupt
+            # When resuming from pause, check if there's an interrupted state
             if is_resuming_from_pause:
-                logger.info(f"Resuming from pause with user approval.")
-                # Import Command for resuming interrupts
-                from langgraph.types import Command
-                # Resume the graph by passing None as input and "approved" as resume value
-                input_state = Command(resume="approved")
+                logger.info(f"Checking for interrupted state for thread {thread_id}")
+                snapshot = graph.get_state(config)
+                
+                # Check if graph is interrupted
+                if snapshot.tasks and len(snapshot.tasks) > 0 and any(task.interrupts for task in snapshot.tasks):
+                    logger.info(f"Found interrupted state. Resuming from checkpoint.")
+                    from langgraph.types import Command
+                    # Resume the graph from interrupt
+                    input_state = None  # Pass None to continue from checkpoint
+                else:
+                    logger.warning(f"No interrupted state found for thread {thread_id}. Using current_conversation.")
+                    # No interrupt found, use the state we already built
+                    input_state = initial_state
             else:
                 # Starting fresh, pass the initial state
                 input_state = initial_state
@@ -593,8 +601,16 @@ async def execute_orchestration(
         else:
             # Single response mode for HTTP
             if is_resuming_from_pause:
-                from langgraph.types import Command
-                input_state = Command(resume="approved")
+                # Check if there's an interrupted state
+                snapshot = graph.get_state(config)
+                
+                # Check if graph is interrupted
+                if snapshot.tasks and len(snapshot.tasks) > 0 and any(task.interrupts for task in snapshot.tasks):
+                    logger.info(f"Found interrupted state. Resuming from checkpoint (HTTP mode).")
+                    input_state = None  # Pass None to continue from checkpoint
+                else:
+                    logger.warning(f"No interrupted state found for thread {thread_id}. Using current_conversation.")
+                    input_state = initial_state
             else:
                 input_state = initial_state
             final_state = await graph.ainvoke(input_state, config=config)
@@ -1157,9 +1173,10 @@ async def websocket_chat(websocket: WebSocket):
                         "data": {
                             "parsed_tasks": interrupt_value.get("parsed_tasks", []),
                             "task_agent_pairs": interrupt_value.get("task_agent_pairs", []),
+                            "execution_plan": interrupt_value.get("execution_plan", []),
                             "pause_reason": interrupt_value.get("message", "Waiting for approval")
                         },
-                        "message": "Orchestration paused. Please review tasks and agents, then click Continue.",
+                        "message": "Orchestration paused. Please review the execution plan, then click Accept to proceed.",
                         "status": "orchestration_paused",
                         "timestamp": time.time()
                     })
@@ -1206,18 +1223,20 @@ async def websocket_chat(websocket: WebSocket):
     except Exception as e:
         logger.error(f"Error in WebSocket stream for thread_id {thread_id}: {e}", exc_info=True)
         try:
-            await websocket.send_json({
-                "node": "__error__",
-                "thread_id": thread_id,
-                "error": str(e),
-                "error_type": type(e).__name__,
-                "message": f"An error occurred during orchestration: {str(e)}",
-                "status": "error",
-                "timestamp": time.time()
-            })
-        except:
+            # Only try to send error if websocket is still open
+            if websocket.client_state.name == 'CONNECTED':
+                await websocket.send_json({
+                    "node": "__error__",
+                    "thread_id": thread_id,
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "message": f"An error occurred during orchestration: {str(e)}",
+                    "status": "error",
+                    "timestamp": time.time()
+                })
+        except Exception as send_error:
             # If we can't send the error, the connection is likely already closed
-            logger.error(f"Could not send error message to WebSocket for thread_id {thread_id}")
+            logger.debug(f"Could not send error message to WebSocket for thread_id {thread_id}: {send_error}")
 
 @app.post("/api/agents/register", response_model=AgentCard)
 def register_or_update_agent(agent_data: AgentCard, response: Response, db: Session = Depends(get_db)):

@@ -255,6 +255,40 @@ export function InteractiveChatInterface({
         )}
       </div>
 
+      {/* Accept/Modify Buttons - Above input box (NOT in chat flow) */}
+      {state.status === 'orchestration_paused' && (
+        <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 flex items-center justify-between">
+          <div className="flex items-center space-x-2">
+            <AlertCircle className="w-5 h-5 text-blue-600" />
+            <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
+              Review the execution plan in the Plan tab, then approve to continue
+            </span>
+          </div>
+          <div className="flex space-x-2">
+            <Button 
+              onClick={async () => {
+                await continueConversation("continue_orchestration");
+              }}
+              className="bg-green-600 hover:bg-green-700"
+              disabled={isLoading}
+            >
+              <CheckCircle className="w-4 h-4 mr-2" />
+              Accept & Continue
+            </Button>
+            <Button 
+              variant="outline"
+              onClick={() => {
+                // TODO: Implement modify functionality
+                console.log('Modify plan - feature to be implemented');
+              }}
+              disabled={isLoading}
+            >
+              Modify Plan
+            </Button>
+          </div>
+        </div>
+      )}
+
       {/* Input Form */}
       <div className="p-4 border-t border-gray-200 dark:border-gray-700/50 bg-gray-50/80 dark:bg-gray-900/80 backdrop-blur-lg rounded-b-lg">
         {/* Consolidated Status Indicator - Shows orchestration progress above input */}

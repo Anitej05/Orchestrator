@@ -952,43 +952,70 @@ def rank_agents(state: State):
     logger.debug(f"Final agent selections: {[p for p in serializable_pairs]}")
     return {"task_agent_pairs": serializable_pairs}
 
-def pause_for_user_approval(state: State):
+def pause_for_user_approval(state: State, config: RunnableConfig):
     '''
-    Pauses orchestration after agent selection to show parsed tasks and selected agents.
-    Uses interrupt to actually pause the graph execution.
-    '''
-    logger.info("Pausing orchestration for user approval of tasks and agents.")
+    ARCHITECTURE: Pause orchestration after PLAN creation (not agent selection).
     
-    # Serialize parsed_tasks to ensure they're JSON serializable
+    This is the critical checkpoint where we:
+    1. Have parsed tasks
+    2. Have selected agents
+    3. Have created an execution plan with endpoints and costs
+    4. Pause and show everything to user for approval
+    
+    The plan is now ready to execute, but we wait for user approval before proceeding.
+    '''
+    logger.info("PAUSE POINT: Orchestration paused for user approval of execution plan.")
+    
+    thread_id = config.get("configurable", {}).get("thread_id", "unknown")
+    
+    # Serialize the complete plan information
     parsed_tasks = state.get("parsed_tasks", [])
+    task_agent_pairs = state.get("task_agent_pairs", [])
+    task_plan = state.get("task_plan", [])
+    
+    # Serialize tasks
     serializable_tasks = []
     for task in parsed_tasks:
-        if hasattr(task, 'model_dump'):  # Pydantic v2
+        if hasattr(task, 'model_dump'):
             serializable_tasks.append(task.model_dump(mode='json'))
-        elif hasattr(task, 'dict'):  # Pydantic v1
+        elif hasattr(task, 'dict'):
             serializable_tasks.append(task.dict())
         elif isinstance(task, dict):
             serializable_tasks.append(task)
         else:
-            # Fallback for any other type
             serializable_tasks.append({"task_name": str(task), "task_description": ""})
     
+    # Save state to persistent storage BEFORE pausing
     from langgraph.types import interrupt
     
-    # This will actually interrupt the graph and wait for user approval
-    # The value returned from interrupt() will be the user's response
-    user_approval = interrupt({
-        "type": "user_approval_required",
+    # Set pause state
+    pause_data = {
+        "type": "execution_plan_ready",
+        "thread_id": thread_id,
         "parsed_tasks": serializable_tasks,
-        "task_agent_pairs": state.get("task_agent_pairs", []),
-        "message": "Please review the parsed tasks and selected agents, then approve to continue."
-    })
+        "task_agent_pairs": task_agent_pairs,
+        "execution_plan": task_plan,
+        "status": "awaiting_approval",
+        "message": "Review the execution plan and costs, then approve to proceed with execution."
+    }
     
-    logger.info(f"User approval received: {user_approval}")
+    logger.info(f"Interrupting graph execution for thread {thread_id}")
     
+    # Set state flags to indicate pause
+    state["waiting_for_continue"] = True
+    state["orchestration_paused"] = True
+    state["pause_reason"] = "Awaiting user approval of execution plan"
+    
+    # This interrupt pauses the graph - the value returned will be the user's response
+    user_response = interrupt(pause_data)
+    
+    logger.info(f"User approval received for thread {thread_id}: {user_response}")
+    
+    # Return the state indicating approval was given
     return {
-        "parsed_tasks": serializable_tasks,
-        "user_response": "approved"
+        "waiting_for_continue": False,
+        "orchestration_paused": False,
+        "pause_reason": None
     }
 
 def plan_execution(state: State, config: RunnableConfig):
@@ -2323,12 +2350,16 @@ def get_serializable_state(state: dict | State, thread_id: str) -> dict:
     logger.info(f"Final response length: {len(state.get('final_response', '')) if state.get('final_response') else 0}")
     
     # Determine status based on orchestration state
-    if state.get("waiting_for_continue"):
+    if state.get("waiting_for_continue") or state.get("orchestration_paused"):
         status = "orchestration_paused"
     elif state.get("pending_user_input"):
         status = "pending_user_input"
     else:
         status = "completed"
+    
+    # Get plan from state
+    task_plan = state.get("task_plan", [])
+    serializable_plan = serialize_complex_object(task_plan)
     
     return {
         "thread_id": thread_id,
@@ -2344,16 +2375,16 @@ def get_serializable_state(state: dict | State, thread_id: str) -> dict:
             "original_prompt": state.get("original_prompt"),
             "completed_tasks": serialize_complex_object(state.get("completed_tasks", [])),
             "parsed_tasks": serialize_complex_object(state.get("parsed_tasks", [])),
-            "currentStage": "paused" if state.get("waiting_for_continue") else "completed",
-            "stageMessage": state.get("pause_reason") if state.get("waiting_for_continue") else "Orchestration completed successfully!",
-            "progress": 50 if state.get("waiting_for_continue") else 100,
-            "orchestrationPaused": state.get("orchestration_paused", False),
+            "currentStage": "paused" if (state.get("waiting_for_continue") or state.get("orchestration_paused")) else "completed",
+            "stageMessage": state.get("pause_reason") if (state.get("waiting_for_continue") or state.get("orchestration_paused")) else "Orchestration completed successfully!",
+            "progress": 50 if (state.get("waiting_for_continue") or state.get("orchestration_paused")) else 100,
+            "orchestrationPaused": state.get("orchestration_paused", False) or state.get("waiting_for_continue", False),
             "pauseReason": state.get("pause_reason")
         },
         # Attachments for the sidebar
         "uploaded_files": serialize_complex_object(state.get("uploaded_files", [])),
         # Plan for the sidebar
-        "plan": serialize_complex_object(state.get("task_plan", [])),
+        "plan": serializable_plan,
         # Canvas fields for the sidebar
         "has_canvas": state.get("has_canvas", False),
         "canvas_content": state.get("canvas_content"),
@@ -2597,11 +2628,11 @@ builder.add_conditional_edges("parse_prompt", route_after_parse, {
 })
 
 builder.add_edge("agent_directory_search", "rank_agents")
-# After rank_agents, always pause for user approval
-builder.add_edge("rank_agents", "pause_for_user_approval")
-# After pause approval, go to plan execution
-builder.add_edge("pause_for_user_approval", "plan_execution")
-builder.add_edge("plan_execution", "validate_plan_for_execution")
+builder.add_edge("rank_agents", "plan_execution")
+# After plan creation, pause for user approval of the complete plan
+builder.add_edge("plan_execution", "pause_for_user_approval")
+# After approval, validate and execute
+builder.add_edge("pause_for_user_approval", "validate_plan_for_execution")
 builder.add_edge("execute_batch", "evaluate_agent_response") 
 builder.add_edge("ask_user", "save_history")
 builder.add_edge("generate_final_response", "render_canvas_output")
