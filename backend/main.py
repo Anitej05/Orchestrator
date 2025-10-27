@@ -38,8 +38,6 @@ from schemas import AgentCard, ProcessRequest, ProcessResponse, PlanResponse, Fi
 from orchestrator.graph import ForceJsonSerializer, graph, create_graph_with_checkpointer, messages_from_dict, messages_to_dict, serialize_complex_object
 from orchestrator.state import State
 from langgraph.checkpoint.memory import MemorySaver
-from utils.title_generator import generate_title, generate_improved_title
-from utils.file_loader import load_files, build_file_context, ensure_storage_dirs
 
 # --- App Initialization and Configuration ---
 app = FastAPI(
@@ -359,43 +357,6 @@ async def serve_file(file_path: str):
     from fastapi.responses import FileResponse
     return FileResponse(file_path, media_type=media_type)
 
-# --- Title Generation Helper ---
-def save_conversation_title(thread_id: str, prompt: str, title: Optional[str] = None):
-    """
-    Generate and save a conversation title to the conversation JSON file.
-    If title is not provided, it will be generated from the prompt.
-    """
-    try:
-        history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
-        if not os.path.exists(history_path):
-            logger.warning(f"Conversation file not found for thread {thread_id}")
-            return
-        
-        # Generate title if not provided
-        if not title:
-            try:
-                title = generate_title(prompt)
-            except Exception as e:
-                logger.warning(f"Failed to generate title using LLM: {e}. Using simple title.")
-                # Fallback to simple title
-                words = prompt.split()[:3]
-                title = " ".join(words).strip() or "Untitled"
-        
-        # Read existing conversation
-        with open(history_path, 'r', encoding='utf-8') as f:
-            conversation_data = json.load(f)
-        
-        # Add or update title
-        conversation_data["title"] = title
-        
-        # Write back to file
-        with open(history_path, 'w', encoding='utf-8') as f:
-            json.dump(conversation_data, f, ensure_ascii=False, indent=2)
-        
-        logger.info(f"Saved title '{title}' for conversation {thread_id}")
-    except Exception as e:
-        logger.error(f"Failed to save conversation title: {e}")
-
 # --- Unified Orchestration Service ---
 async def execute_orchestration(
     prompt: Optional[str],
@@ -420,70 +381,40 @@ async def execute_orchestration(
 
     # --- State Initialization ---
     if user_response:
-        # Continuing an interactive workflow where the user answered a question OR approved orchestration
+        # Continuing an interactive workflow where the user answered a question
         logger.info(f"Resuming conversation for thread_id: {thread_id} with user response.")
         initial_state = dict(current_conversation)  # Convert to dict if it's a State object
-        
-        # Check if this is a continue orchestration request
-        if user_response == "continue_orchestration":
-            logger.info(f"User approved orchestration continuation for thread_id: {thread_id}")
-            initial_state["user_response"] = "continue_orchestration"
-            initial_state["waiting_for_continue"] = False
-            initial_state["orchestration_paused"] = False
-            initial_state["pause_reason"] = None
+        initial_state["user_response"] = user_response
+        initial_state["pending_user_input"] = False
+        initial_state["question_for_user"] = None
+        initial_state["parse_retry_count"] = 0
+        if "original_prompt" in initial_state:
+            initial_state["original_prompt"] = f"{initial_state['original_prompt']}\n\nAdditional context from user: {user_response}"
         else:
-            # Regular user response to a question
-            initial_state["user_response"] = user_response
-            initial_state["pending_user_input"] = False
-            initial_state["question_for_user"] = None
-            initial_state["parse_retry_count"] = 0
-            if "original_prompt" in initial_state:
-                initial_state["original_prompt"] = f"{initial_state['original_prompt']}\n\nAdditional context from user: {user_response}"
-            else:
-                initial_state["original_prompt"] = user_response
+            initial_state["original_prompt"] = user_response
             
         # Clear any previous final response to avoid confusion
         initial_state["final_response"] = None
 
     elif prompt and current_conversation:
-        # A new prompt is sent in an existing conversation thread (HYBRID APPROACH)
+        # A new prompt is sent in an existing conversation thread
         logger.info(f"Continuing conversation for thread_id: {thread_id} with new prompt.")
-        
-        # Build file context from already-uploaded files
-        # uploaded_files is already persisted in the conversation and contains: file_name, file_path, file_type
-        uploaded_files = current_conversation.get("uploaded_files", [])
-        loaded_files_context = ""
-        if uploaded_files:
-            try:
-                # Extract file paths from uploaded_files dicts
-                file_paths = [f.get("file_path") for f in uploaded_files if f.get("file_path")]
-                if file_paths:
-                    loaded_files = load_files(file_paths)
-                    loaded_files_context = build_file_context(loaded_files)
-                    logger.info(f"Loaded {len(loaded_files)} files for conversation continuation")
-            except Exception as e:
-                logger.warning(f"Failed to load files for conversation: {e}")
-        
-        # Create enhanced prompt with conversation history and file context
-        enhanced_prompt = prompt
-        if loaded_files_context:
-            enhanced_prompt = f"{prompt}\n\n[FILE CONTEXT]\n{loaded_files_context}"
         
         # Use MessageManager to add new message without duplicates
         from orchestrator.message_manager import MessageManager
         existing_messages = current_conversation.get("messages", [])
-        new_user_message = HumanMessage(content=enhanced_prompt)  # Enhanced with file context!
+        new_user_message = HumanMessage(content=prompt)
         updated_messages = MessageManager.add_message(existing_messages, new_user_message)
         logger.info(f"Continuing conversation. Total messages: {len(updated_messages)}")
         
         initial_state = {
             # Carry over essential long-term memory from the previous turn
-            "messages": updated_messages,  # Clean, deduplicated messages with file context
+            "messages": updated_messages,
             "completed_tasks": [],  # Start fresh for new prompt, but keep conversation history
-            "uploaded_files": uploaded_files,  # Persist files (already has file_path, file_name, file_type)
+            "uploaded_files": current_conversation.get("uploaded_files", []), # Persist files
 
             # Reset short-term memory for the new task
-            "original_prompt": enhanced_prompt,
+            "original_prompt": prompt,
             "parsed_tasks": [],
             "user_expectations": {},
             "candidate_agents": {},
@@ -495,11 +426,8 @@ async def execute_orchestration(
             "user_response": None,
             "parsing_error_feedback": None,
             "parse_retry_count": 0,
-            "needs_complex_processing": None,
+            "needs_complex_processing": None,  # Let analyze_request determine this
             "analysis_reasoning": None,
-            "orchestration_paused": False,
-            "waiting_for_continue": False,
-            "pause_reason": None,
         }
     
     elif current_conversation:
@@ -534,9 +462,6 @@ async def execute_orchestration(
             "parse_retry_count": 0,
             "needs_complex_processing": None,  # Let analyze_request determine this
             "analysis_reasoning": None,
-            "orchestration_paused": False,
-            "waiting_for_continue": False,
-            "pause_reason": None,
         }
 
     # --- File Merging Logic ---
@@ -554,9 +479,6 @@ async def execute_orchestration(
     with store_lock:
         conversation_store[thread_id] = initial_state.copy()
 
-    # Determine if we're resuming from a pause
-    is_resuming_from_pause = user_response == "continue_orchestration"
-    
     final_state = None
     try:
         if stream_callback:
@@ -564,26 +486,7 @@ async def execute_orchestration(
             node_count = 0
             expected_nodes = ["analyze_request", "parse_prompt", "agent_directory_search", "rank_agents", "plan_execution", "execute_batch", "aggregate_responses"]
 
-            # When resuming from pause, check if there's an interrupted state
-            if is_resuming_from_pause:
-                logger.info(f"Checking for interrupted state for thread {thread_id}")
-                snapshot = graph.get_state(config)
-                
-                # Check if graph is interrupted
-                if snapshot.tasks and len(snapshot.tasks) > 0 and any(task.interrupts for task in snapshot.tasks):
-                    logger.info(f"Found interrupted state. Resuming from checkpoint.")
-                    from langgraph.types import Command
-                    # Resume the graph from interrupt
-                    input_state = None  # Pass None to continue from checkpoint
-                else:
-                    logger.warning(f"No interrupted state found for thread {thread_id}. Using current_conversation.")
-                    # No interrupt found, use the state we already built
-                    input_state = initial_state
-            else:
-                # Starting fresh, pass the initial state
-                input_state = initial_state
-
-            async for event in graph.astream(input_state, config=config, stream_mode="updates"):
+            async for event in graph.astream(initial_state, config=config, stream_mode="updates"):
                 for node_name, node_output in event.items():
                     node_count += 1
                     # More accurate progress calculation
@@ -595,25 +498,10 @@ async def execute_orchestration(
                         logger.info(f"Workflow paused for user input in thread_id: {thread_id}")
                         break
             if not final_state:
-                # Get the current state from checkpoint
-                snapshot = graph.get_state(config)
-                final_state = snapshot.values if snapshot else initial_state
+                final_state = await graph.ainvoke(initial_state, config=config)
         else:
             # Single response mode for HTTP
-            if is_resuming_from_pause:
-                # Check if there's an interrupted state
-                snapshot = graph.get_state(config)
-                
-                # Check if graph is interrupted
-                if snapshot.tasks and len(snapshot.tasks) > 0 and any(task.interrupts for task in snapshot.tasks):
-                    logger.info(f"Found interrupted state. Resuming from checkpoint (HTTP mode).")
-                    input_state = None  # Pass None to continue from checkpoint
-                else:
-                    logger.warning(f"No interrupted state found for thread {thread_id}. Using current_conversation.")
-                    input_state = initial_state
-            else:
-                input_state = initial_state
-            final_state = await graph.ainvoke(input_state, config=config)
+            final_state = await graph.ainvoke(initial_state, config=config)
 
         # Store the final state after the graph run
         with store_lock:
@@ -625,14 +513,6 @@ async def execute_orchestration(
             save_conversation_history(final_state, {"configurable": {"thread_id": thread_id}})
         except Exception as e:
             logger.error(f"Failed to save conversation history for {thread_id}: {e}")
-
-        # Generate and save conversation title (especially useful for new conversations)
-        try:
-            if not current_conversation:
-                # This is a new conversation, generate a title
-                save_conversation_title(thread_id, prompt or initial_state.get("original_prompt", ""))
-        except Exception as e:
-            logger.warning(f"Failed to generate/save title for conversation {thread_id}: {e}")
 
         # Ensure a plan file is saved for every conversation
         try:
@@ -1149,40 +1029,6 @@ async def websocket_chat(websocket: WebSocket):
                 stream_callback=stream_callback
             )
 
-            # Check if the graph is interrupted (paused for approval)
-            config = {"configurable": {"thread_id": thread_id}}
-            snapshot = graph.get_state(config)
-            
-            # If there's an interrupt, the graph is waiting for user approval
-            if snapshot.next and len(snapshot.next) > 0:
-                # Check if it's actually interrupted (not just has next nodes)
-                if snapshot.tasks and len(snapshot.tasks) > 0 and snapshot.tasks[0].interrupts:
-                    # Backend-side duplicate resume prevention
-                    if not hasattr(websocket, "_orbimesh_resume_state"):
-                        websocket._orbimesh_resume_state = {}
-                    resume_state = websocket._orbimesh_resume_state
-                    if resume_state.get(thread_id) == "paused":
-                        logger.warning(f"Duplicate orchestration pause detected for thread_id {thread_id}. Ignoring.")
-                        continue
-                    resume_state[thread_id] = "paused"
-                    # Extract interrupt data
-                    interrupt_value = snapshot.tasks[0].interrupts[0].value
-                    await websocket.send_json({
-                        "node": "__orchestration_paused__",
-                        "thread_id": thread_id,
-                        "data": {
-                            "parsed_tasks": interrupt_value.get("parsed_tasks", []),
-                            "task_agent_pairs": interrupt_value.get("task_agent_pairs", []),
-                            "execution_plan": interrupt_value.get("execution_plan", []),
-                            "pause_reason": interrupt_value.get("message", "Waiting for approval")
-                        },
-                        "message": "Orchestration paused. Please review the execution plan, then click Accept to proceed.",
-                        "status": "orchestration_paused",
-                        "timestamp": time.time()
-                    })
-                    logger.info(f"WebSocket orchestration paused for approval in thread_id {thread_id}")
-                    continue  # Continue waiting for continue message - DON'T close WebSocket
-
             # Check if workflow is paused for user input
             if final_state.get("pending_user_input"):
                 await websocket.send_json({
@@ -1223,20 +1069,18 @@ async def websocket_chat(websocket: WebSocket):
     except Exception as e:
         logger.error(f"Error in WebSocket stream for thread_id {thread_id}: {e}", exc_info=True)
         try:
-            # Only try to send error if websocket is still open
-            if websocket.client_state.name == 'CONNECTED':
-                await websocket.send_json({
-                    "node": "__error__",
-                    "thread_id": thread_id,
-                    "error": str(e),
-                    "error_type": type(e).__name__,
-                    "message": f"An error occurred during orchestration: {str(e)}",
-                    "status": "error",
-                    "timestamp": time.time()
-                })
-        except Exception as send_error:
+            await websocket.send_json({
+                "node": "__error__",
+                "thread_id": thread_id,
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "message": f"An error occurred during orchestration: {str(e)}",
+                "status": "error",
+                "timestamp": time.time()
+            })
+        except:
             # If we can't send the error, the connection is likely already closed
-            logger.debug(f"Could not send error message to WebSocket for thread_id {thread_id}: {send_error}")
+            logger.error(f"Could not send error message to WebSocket for thread_id {thread_id}")
 
 @app.post("/api/agents/register", response_model=AgentCard)
 def register_or_update_agent(agent_data: AgentCard, response: Response, db: Session = Depends(get_db)):

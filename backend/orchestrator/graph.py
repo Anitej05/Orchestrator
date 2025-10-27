@@ -790,21 +790,8 @@ def parse_prompt(state: State):
 
     current_retry_count = state.get('parse_retry_count', 0)
 
-    # Serialize parsed_tasks to ensure JSON compatibility
-    serializable_tasks = []
-    if parsed_tasks:
-        for task in parsed_tasks:
-            if hasattr(task, 'model_dump'):  # Pydantic v2
-                serializable_tasks.append(task.model_dump(mode='json'))
-            elif hasattr(task, 'dict'):  # Pydantic v1
-                serializable_tasks.append(task.dict())
-            elif isinstance(task, dict):
-                serializable_tasks.append(task)
-            else:
-                serializable_tasks.append({"task_name": str(task), "task_description": ""})
-    
     return {
-        "parsed_tasks": serializable_tasks,
+        "parsed_tasks": parsed_tasks,
         "user_expectations": user_expectations or {},
         "parsing_error_feedback": None,
         "parse_retry_count": current_retry_count + 1
@@ -812,9 +799,7 @@ def parse_prompt(state: State):
 
 async def agent_directory_search(state: State):
     parsed_tasks = state.get('parsed_tasks', [])
-    # Extract task names for logging (handle both dict and object)
-    task_names = [t.get('task_name') if isinstance(t, dict) else t.task_name for t in parsed_tasks]
-    logger.info(f"Searching for agents for tasks: {task_names}")
+    logger.info(f"Searching for agents for tasks: {[t.task_name for t in parsed_tasks]}")
     
     if not parsed_tasks:
         logger.warning("No valid tasks to process in agent_directory_search")
@@ -825,18 +810,14 @@ async def agent_directory_search(state: State):
     user_expectations = state.get('user_expectations') or {}
 
     for task in parsed_tasks:
-        # Handle both dict and Task object
-        task_name = task.get('task_name') if isinstance(task, dict) else task.task_name
-        task_description = task.get('task_description') if isinstance(task, dict) else task.task_description
-        
-        params: Dict[str, Any] = {'capabilities': task_name}
+        params: Dict[str, Any] = {'capabilities': task.task_name}
         if 'price' in user_expectations:
             params['max_price'] = user_expectations['price']
         if 'rating' in user_expectations:
             params['min_rating'] = user_expectations['rating']
         
         request = httpx.Request("GET", base_url, params=params)
-        urls_to_fetch.append((task_name, str(request.url), task_description))
+        urls_to_fetch.append((task.task_name, str(request.url), task.task_description))
     
     logger.info(f"Dispatching {len(urls_to_fetch)} agent search requests.")
     async with httpx.AsyncClient() as client:
@@ -846,18 +827,14 @@ async def agent_directory_search(state: State):
     logger.info("Agent search complete.")
 
     for task in parsed_tasks:
-        # Handle both dict and Task object
-        task_name = task.get('task_name') if isinstance(task, dict) else task.task_name
-        task_description = task.get('task_description') if isinstance(task, dict) else task.task_description
-        
-        if not candidate_agents_map.get(task_name):
+        if not candidate_agents_map.get(task.task_name):
             error_feedback = (
                 f"The previous attempt to parse the prompt resulted in the task description "
-                f"'{task_description}', which was matched to the capability '{task_name}'. "
+                f"'{task.task_description}', which was matched to the capability '{task.task_name}'. "
                 f"However, no agents were found that could perform this task. Please generate a new, "
                 f"more detailed and specific task description that better captures the user's intent."
             )
-            logger.warning(f"Semantic failure for task '{task_name}'. Looping back to re-parse.")
+            logger.warning(f"Semantic failure for task '{task.task_name}'. Looping back to re-parse.")
             return {"candidate_agents": {}, "parsing_error_feedback": error_feedback}
 
     return {"candidate_agents": candidate_agents_map, "parsing_error_feedback": None}
@@ -867,9 +844,7 @@ class RankedAgents(BaseModel):
 
 def rank_agents(state: State):
     parsed_tasks = state.get('parsed_tasks', [])
-    # Extract task names for logging (handle both dict and object)
-    task_names = [t.get('task_name') if isinstance(t, dict) else t.task_name for t in parsed_tasks]
-    logger.info(f"Ranking agents for tasks: {task_names}")
+    logger.info(f"Ranking agents for tasks: {[t.task_name for t in parsed_tasks]}")
     
     if not parsed_tasks:
         logger.warning("No tasks to rank in rank_agents")
@@ -881,9 +856,7 @@ def rank_agents(state: State):
     
     final_selections = []
     for task in parsed_tasks:
-        # Handle both dict and Task object
-        task_name = task.get('task_name') if isinstance(task, dict) else task.task_name
-        task_description = task.get('task_description') if isinstance(task, dict) else task.task_description
+        task_name = task.task_name
         
         # Rehydrate here. Convert dicts from state back into AgentCard objects.
         candidate_agent_dicts = state.get('candidate_agents', {}).get(task_name, [])
@@ -900,9 +873,9 @@ def rank_agents(state: State):
             
             prompt = f'''
             You are an expert at selecting the best agent for a given task.
-            The user's task is: "{task_description}"
+            The user's task is: "{task.task_description}"
 
-            Here are the available agents that claim to have the capability '{task_name}':
+            Here are the available agents that claim to have the capability '{task.task_name}':
             ---
             {json.dumps(serializable_agents, indent=2)}
             ---
@@ -939,7 +912,7 @@ def rank_agents(state: State):
 
         pair = TaskAgentPair(
             task_name=task_name,
-            task_description=task_description,
+            task_description=task.task_description,
             primary=primary_agent,
             fallbacks=fallback_agents
         )
@@ -951,72 +924,6 @@ def rank_agents(state: State):
     logger.info("Agent ranking complete.")
     logger.debug(f"Final agent selections: {[p for p in serializable_pairs]}")
     return {"task_agent_pairs": serializable_pairs}
-
-def pause_for_user_approval(state: State, config: RunnableConfig):
-    '''
-    ARCHITECTURE: Pause orchestration after PLAN creation (not agent selection).
-    
-    This is the critical checkpoint where we:
-    1. Have parsed tasks
-    2. Have selected agents
-    3. Have created an execution plan with endpoints and costs
-    4. Pause and show everything to user for approval
-    
-    The plan is now ready to execute, but we wait for user approval before proceeding.
-    '''
-    logger.info("PAUSE POINT: Orchestration paused for user approval of execution plan.")
-    
-    thread_id = config.get("configurable", {}).get("thread_id", "unknown")
-    
-    # Serialize the complete plan information
-    parsed_tasks = state.get("parsed_tasks", [])
-    task_agent_pairs = state.get("task_agent_pairs", [])
-    task_plan = state.get("task_plan", [])
-    
-    # Serialize tasks
-    serializable_tasks = []
-    for task in parsed_tasks:
-        if hasattr(task, 'model_dump'):
-            serializable_tasks.append(task.model_dump(mode='json'))
-        elif hasattr(task, 'dict'):
-            serializable_tasks.append(task.dict())
-        elif isinstance(task, dict):
-            serializable_tasks.append(task)
-        else:
-            serializable_tasks.append({"task_name": str(task), "task_description": ""})
-    
-    # Save state to persistent storage BEFORE pausing
-    from langgraph.types import interrupt
-    
-    # Set pause state
-    pause_data = {
-        "type": "execution_plan_ready",
-        "thread_id": thread_id,
-        "parsed_tasks": serializable_tasks,
-        "task_agent_pairs": task_agent_pairs,
-        "execution_plan": task_plan,
-        "status": "awaiting_approval",
-        "message": "Review the execution plan and costs, then approve to proceed with execution."
-    }
-    
-    logger.info(f"Interrupting graph execution for thread {thread_id}")
-    
-    # Set state flags to indicate pause
-    state["waiting_for_continue"] = True
-    state["orchestration_paused"] = True
-    state["pause_reason"] = "Awaiting user approval of execution plan"
-    
-    # This interrupt pauses the graph - the value returned will be the user's response
-    user_response = interrupt(pause_data)
-    
-    logger.info(f"User approval received for thread {thread_id}: {user_response}")
-    
-    # Return the state indicating approval was given
-    return {
-        "waiting_for_continue": False,
-        "orchestration_paused": False,
-        "pause_reason": None
-    }
 
 def plan_execution(state: State, config: RunnableConfig):
     '''
@@ -2349,24 +2256,11 @@ def get_serializable_state(state: dict | State, thread_id: str) -> dict:
     logger.info(f"Serialized {len(serializable_messages)} messages for thread {thread_id}")
     logger.info(f"Final response length: {len(state.get('final_response', '')) if state.get('final_response') else 0}")
     
-    # Determine status based on orchestration state
-    if state.get("waiting_for_continue") or state.get("orchestration_paused"):
-        status = "orchestration_paused"
-    elif state.get("pending_user_input"):
-        status = "pending_user_input"
-    else:
-        status = "completed"
-    
-    # Get plan from state
-    task_plan = state.get("task_plan", [])
-    serializable_plan = serialize_complex_object(task_plan)
-    
     return {
         "thread_id": thread_id,
-        "status": status,
+        "status": "pending_user_input" if state.get("pending_user_input") else "completed",
         "messages": serializable_messages,
         "task_agent_pairs": serialize_complex_object(state.get("task_agent_pairs", [])),
-        "parsed_tasks": serialize_complex_object(state.get("parsed_tasks", [])),
         "final_response": state.get("final_response"),
         "pending_user_input": state.get("pending_user_input", False),
         "question_for_user": state.get("question_for_user"),
@@ -2375,16 +2269,14 @@ def get_serializable_state(state: dict | State, thread_id: str) -> dict:
             "original_prompt": state.get("original_prompt"),
             "completed_tasks": serialize_complex_object(state.get("completed_tasks", [])),
             "parsed_tasks": serialize_complex_object(state.get("parsed_tasks", [])),
-            "currentStage": "paused" if (state.get("waiting_for_continue") or state.get("orchestration_paused")) else "completed",
-            "stageMessage": state.get("pause_reason") if (state.get("waiting_for_continue") or state.get("orchestration_paused")) else "Orchestration completed successfully!",
-            "progress": 50 if (state.get("waiting_for_continue") or state.get("orchestration_paused")) else 100,
-            "orchestrationPaused": state.get("orchestration_paused", False) or state.get("waiting_for_continue", False),
-            "pauseReason": state.get("pause_reason")
+            "currentStage": "completed",
+            "stageMessage": "Orchestration completed successfully!",
+            "progress": 100
         },
         # Attachments for the sidebar
         "uploaded_files": serialize_complex_object(state.get("uploaded_files", [])),
         # Plan for the sidebar
-        "plan": serializable_plan,
+        "plan": serialize_complex_object(state.get("task_plan", [])),
         # Canvas fields for the sidebar
         "has_canvas": state.get("has_canvas", False),
         "canvas_content": state.get("canvas_content"),
@@ -2602,7 +2494,6 @@ builder.add_node("parse_prompt", parse_prompt)
 builder.add_node("preprocess_files", preprocess_files)
 builder.add_node("agent_directory_search", agent_directory_search)
 builder.add_node("rank_agents", rank_agents)
-builder.add_node("pause_for_user_approval", pause_for_user_approval)
 builder.add_node("plan_execution", plan_execution)
 builder.add_node("validate_plan_for_execution", validate_plan_for_execution)
 builder.add_node("execute_batch", execute_batch)
@@ -2629,10 +2520,7 @@ builder.add_conditional_edges("parse_prompt", route_after_parse, {
 
 builder.add_edge("agent_directory_search", "rank_agents")
 builder.add_edge("rank_agents", "plan_execution")
-# After plan creation, pause for user approval of the complete plan
-builder.add_edge("plan_execution", "pause_for_user_approval")
-# After approval, validate and execute
-builder.add_edge("pause_for_user_approval", "validate_plan_for_execution")
+builder.add_edge("plan_execution", "validate_plan_for_execution")
 builder.add_edge("execute_batch", "evaluate_agent_response") 
 builder.add_edge("ask_user", "save_history")
 builder.add_edge("generate_final_response", "render_canvas_output")
