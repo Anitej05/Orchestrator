@@ -42,6 +42,13 @@ class AgentCard(BaseModel):
 
     class Config:
         from_attributes = True
+    
+    @field_validator('status', mode='before')
+    def serialize_status(cls, v):
+        """Convert StatusEnum to string"""
+        if hasattr(v, 'value'):
+            return v.value
+        return v
 
     @field_validator('public_key_pem')
     def validate_public_key(cls, pem: Optional[str]):
