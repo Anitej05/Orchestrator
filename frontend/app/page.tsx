@@ -227,21 +227,21 @@ export default function Home() {
   // }, [conversationState.messages]);
   
   return (
-    <>
-      <Navbar />
-      <SidebarProvider>
+    <SidebarProvider>
+      <div className="flex h-screen w-full overflow-hidden">
         <AppSidebar
           onConversationSelect={handleConversationSelect}
           onNewConversation={handleNewConversation}
           currentThreadId={conversationState.thread_id || undefined}
         />
-        <SidebarInset>
-          <div className="h-screen pt-[64px] bg-gradient-to-br from-gray-50 to-gray-100 dark:from-gray-950 dark:to-gray-900 relative flex flex-col">
-          {/* Main Content Area - Resizable */}
-          <ResizablePanelGroup direction="horizontal" className="flex-1 overflow-hidden">
-            <ResizablePanel defaultSize={70} minSize={50}>
-              <main className="h-full p-6">
-                 <TaskBuilder
+        <SidebarInset className="flex-1 flex flex-col overflow-hidden">
+          <Navbar />
+          <div className="flex-1 bg-gradient-to-br from-gray-50 to-gray-100 dark:from-gray-950 dark:to-gray-900 overflow-hidden">
+            {/* Main Content Area - Resizable */}
+            <ResizablePanelGroup direction="horizontal" className="h-full">
+              <ResizablePanel defaultSize={70} minSize={50}>
+                <main className="h-full p-6 overflow-auto">
+                  <TaskBuilder
                     onWorkflowComplete={handleInteractiveWorkflowComplete}
                     onOrchestrationComplete={handleOrchestrationComplete}
                     taskAgentPairs={taskAgentPairs}
@@ -251,24 +251,24 @@ export default function Home() {
                     onThreadIdUpdate={handleThreadIdUpdate}
                     onExecutionResultsUpdate={handleExecutionResultsUpdate}
                     onViewCanvas={handleViewCanvas}
-                 />
-              </main>
-            </ResizablePanel>
-            
-            <ResizableHandle withHandle />
+                  />
+                </main>
+              </ResizablePanel>
+              
+              <ResizableHandle withHandle />
 
-            <ResizablePanel defaultSize={30} maxSize={50} minSize={20}>
-              <OrchestrationDetailsSidebar
-                ref={sidebarRef}
-                executionResults={executionResults}
-                threadId={currentThreadId || conversationState.thread_id || null}
-                onThreadIdUpdate={handleThreadIdUpdate}
-              />
-            </ResizablePanel>
-          </ResizablePanelGroup>
-        </div>
-      </SidebarInset>
+              <ResizablePanel defaultSize={30} maxSize={50} minSize={20}>
+                <OrchestrationDetailsSidebar
+                  ref={sidebarRef}
+                  executionResults={executionResults}
+                  threadId={currentThreadId || conversationState.thread_id || null}
+                  onThreadIdUpdate={handleThreadIdUpdate}
+                />
+              </ResizablePanel>
+            </ResizablePanelGroup>
+          </div>
+        </SidebarInset>
+      </div>
     </SidebarProvider>
-    </>
   )
 }
