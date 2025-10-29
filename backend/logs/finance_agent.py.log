@@ -1,8 +1,0 @@
-INFO:     Will watch for changes in these directories: ['C:\\Users\\mahes\\OneDrive\\Desktop\\Projects\\Orbimesh\\Orbimesh-App-ambitious\\backend']
-INFO:     Uvicorn running on http://127.0.0.1:8010 (Press CTRL+C to quit)
-INFO:     Started reloader process [13360] using StatReload
-INFO:     Started server process [37636]
-INFO:     Waiting for application startup.
-INFO:     Application startup complete.
-WARNING:  StatReload detected changes in 'orchestrator\graph.py'. Reloading...
- 

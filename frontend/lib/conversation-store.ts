@@ -19,11 +19,27 @@ const readFileAsDataURL = (file: File): Promise<string> => {
   });
 };
 
+// Helper to create deterministic message IDs (matches backend logic)
+const createMessageId = (content: string, type: string, timestampMs: number): string => {
+  // Convert milliseconds to seconds to match backend (Python's time.time())
+  const timestampSeconds = Math.floor(timestampMs / 1000);
+  // Use MD5-like hash to match backend exactly
+  // For browser compatibility, we'll use a simple hash that produces consistent results
+  const str = `${type}:${content}:${timestampSeconds}`;
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32bit integer
+  }
+  return Math.abs(hash).toString(16).padStart(16, '0').substring(0, 16);
+};
+
 interface ConversationStore extends ConversationState {
   isLoading: boolean;
   actions: {
     startConversation: (input: string, files?: File[], planningMode?: boolean) => Promise<void>;
-    continueConversation: (input: string, files?: File[]) => Promise<void>;
+    continueConversation: (input: string, files?: File[], planningMode?: boolean) => Promise<void>;
     loadConversation: (threadId: string) => Promise<void>;
     resetConversation: () => void;
     // Internal action to set the full state from an API response
@@ -84,11 +100,14 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
           }))
         );
 
+        const timestamp = Date.now();
+        const messageId = createMessageId(input, 'human', timestamp);
+        console.log(`Frontend creating user message: id=${messageId}, timestamp=${timestamp}, content=${input.substring(0, 50)}`);
         const userMessage: Message = {
-          id: Date.now().toString(),
+          id: messageId,
           type: 'user',
           content: input,
-          timestamp: new Date(),
+          timestamp: new Date(timestamp),
           attachments: attachments.length > 0 ? attachments : undefined,
         };
 
@@ -157,13 +176,17 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
       }
     },
 
-    continueConversation: async (input: string, files: File[] = []) => {
+    continueConversation: async (input: string, files: File[] = [], planningMode: boolean = false) => {
       const thread_id = get().thread_id;
       if (!thread_id) {
         console.error('Cannot continue conversation without a thread ID.');
         return;
       }
-      console.log(`Continuing conversation with thread_id: ${thread_id}`);
+      
+      // Capture isWaitingForUser BEFORE we modify it
+      const wasWaitingForUser = get().isWaitingForUser;
+      
+      console.log(`Continuing conversation with thread_id: ${thread_id}, planning_mode: ${planningMode}, wasWaitingForUser: ${wasWaitingForUser}`);
       set({ isLoading: true, status: 'processing', isWaitingForUser: false });
 
       try {
@@ -180,18 +203,34 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
           }))
         );
 
-        const userMessage: Message = {
-          id: Date.now().toString(),
-          type: 'user',
-          content: input,
-          timestamp: new Date(),
-          attachments: attachments.length > 0 ? attachments : undefined,
-        };
+        // Check if this is an approval/cancel response (should not be shown as a message)
+        const isApprovalResponse = wasWaitingForUser && get().approval_required === false && 
+                                   (input.toLowerCase() === 'approve' || input.toLowerCase() === 'cancel');
 
-        set((state: ConversationStore) => ({
-          messages: [...state.messages, userMessage],
-          uploaded_files: [...(state.uploaded_files || []), ...uploadedFiles],
-        }));
+        // Only add user message if it's not an approval response
+        if (!isApprovalResponse) {
+          const timestamp = Date.now();
+          const messageId = createMessageId(input, 'human', timestamp);
+          console.log(`Frontend creating user message (continue): id=${messageId}, timestamp=${timestamp}, content=${input.substring(0, 50)}`);
+          const userMessage: Message = {
+            id: messageId,
+            type: 'user',
+            content: input,
+            timestamp: new Date(timestamp),
+            attachments: attachments.length > 0 ? attachments : undefined,
+          };
+
+          set((state: ConversationStore) => ({
+            messages: [...state.messages, userMessage],
+            uploaded_files: [...(state.uploaded_files || []), ...uploadedFiles],
+          }));
+        } else {
+          // For approval responses, just update uploaded files without adding a message
+          console.log('Skipping message addition for approval response:', input);
+          set((state: ConversationStore) => ({
+            uploaded_files: [...(state.uploaded_files || []), ...uploadedFiles],
+          }));
+        }
 
         // Send message to WebSocket with connection wait
         const sendMessageToWebSocket = async () => {
@@ -201,16 +240,27 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
           for (let attempt = 0; attempt < maxAttempts; attempt++) {
             const ws = (window as any).__websocket;
             if (ws && ws.readyState === WebSocket.OPEN) {
+              // Use the captured state from before we modified it
+              const isAnsweringQuestion = wasWaitingForUser;
+              
               const messageData = {
                 thread_id: thread_id,
-                prompt: input,  // Use 'prompt' for continuing conversation, not 'user_response'
+                // Use 'user_response' only when answering a question, otherwise use 'prompt'
+                ...(isAnsweringQuestion ? { user_response: input } : { prompt: input }),
+                planning_mode: planningMode,
                 files: uploadedFiles.map(file => ({
                   file_name: file.file_name,
                   file_path: file.file_path,
                   file_type: file.file_type
                 }))
               };
-              console.log('Sending continue conversation message:', messageData);
+              console.log('=== FRONTEND: Sending WebSocket message ===');
+              console.log('  wasWaitingForUser:', wasWaitingForUser);
+              console.log('  isAnsweringQuestion:', isAnsweringQuestion);
+              console.log('  sending as:', isAnsweringQuestion ? 'user_response' : 'prompt');
+              console.log('  input:', input);
+              console.log('  planning_mode:', planningMode);
+              console.log('  full message:', messageData);
               ws.send(JSON.stringify(messageData));
               console.log(`WebSocket message sent successfully on attempt ${attempt + 1}`);
               return; // Successfully sent
@@ -426,22 +476,84 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
           }
         }
 
-        // Handle messages - use backend messages as source of truth
-        // Backend provides the complete, authoritative message history
-        let updatedMessages = state.messages;
+        // Handle messages - merge backend messages with frontend messages intelligently
+        let updatedMessages = state.messages || [];
         if (newState.messages !== undefined) {
-          // Use backend messages directly - they are already complete and deduplicated
-          updatedMessages = newState.messages
-            .filter((msg: any) => {
-              // Keep all non-assistant messages
-              if (msg.type !== 'assistant') return true;
-              // Keep assistant messages that have content
-              return msg.content && msg.content.trim() !== '';
-            })
-            .map((msg: any) => ({
-              ...msg,
-              timestamp: msg.timestamp instanceof Date ? msg.timestamp : new Date(msg.timestamp || Date.now()),
-            }));
+          // When loading a conversation (different thread_id), replace all messages
+          if (isLoadingConversation) {
+            updatedMessages = newState.messages
+              .filter((msg: any) => {
+                // Keep all non-assistant messages
+                if (msg.type !== 'assistant') return true;
+                // Keep assistant messages that have content
+                return msg.content && msg.content.trim() !== '';
+              })
+              .map((msg: any) => ({
+                ...msg,
+                timestamp: msg.timestamp instanceof Date ? msg.timestamp : new Date(msg.timestamp || Date.now()),
+              }));
+          } else {
+            // When updating current conversation, merge messages intelligently
+            // Create a map of existing messages by ID for quick lookup
+            const existingMessagesMap = new Map(
+              updatedMessages.map((msg: any) => [msg.id, msg])
+            );
+            
+            // Process backend messages
+            const backendMessages = newState.messages
+              .filter((msg: any) => {
+                // Keep all non-assistant messages
+                if (msg.type !== 'assistant') return true;
+                // Keep assistant messages that have content
+                return msg.content && msg.content.trim() !== '';
+              })
+              .map((msg: any) => ({
+                ...msg,
+                timestamp: msg.timestamp instanceof Date ? msg.timestamp : new Date(msg.timestamp || Date.now()),
+              }));
+            
+            // Merge: Add new messages from backend that don't exist in frontend
+            // Use content-based deduplication as fallback since IDs might not match
+            backendMessages.forEach((backendMsg: any) => {
+              // First try ID-based matching
+              let isDuplicate = existingMessagesMap.has(backendMsg.id);
+              
+              // If not found by ID, check for content-based duplicates
+              // (in case hash algorithms don't match between frontend and backend)
+              if (!isDuplicate) {
+                isDuplicate = updatedMessages.some((existingMsg: any) => 
+                  existingMsg.type === backendMsg.type &&
+                  existingMsg.content === backendMsg.content
+                  // Don't check timestamp - same content + type = duplicate regardless of time
+                );
+              }
+              
+              if (!isDuplicate) {
+                // New message from backend - add it
+                console.log(`Adding new message from backend: id=${backendMsg.id}, type=${backendMsg.type}, content=${backendMsg.content?.substring(0, 50)}`);
+                updatedMessages.push(backendMsg);
+              } else {
+                // Message exists - skip or update
+                console.log(`Skipping duplicate message: id=${backendMsg.id}, type=${backendMsg.type}, content=${backendMsg.content?.substring(0, 50)}`);
+                // Optionally update the existing message with backend data
+                const existingMsg = existingMessagesMap.get(backendMsg.id) || 
+                  updatedMessages.find((msg: any) => 
+                    msg.type === backendMsg.type &&
+                    msg.content === backendMsg.content
+                  );
+                if (existingMsg) {
+                  Object.assign(existingMsg, backendMsg);
+                }
+              }
+            });
+            
+            // Sort messages by timestamp to maintain order
+            updatedMessages.sort((a: any, b: any) => {
+              const timeA = a.timestamp instanceof Date ? a.timestamp.getTime() : new Date(a.timestamp).getTime();
+              const timeB = b.timestamp instanceof Date ? b.timestamp.getTime() : new Date(b.timestamp).getTime();
+              return timeA - timeB;
+            });
+          }
         }
 
         return {

@@ -35,7 +35,7 @@ CONVERSATION_HISTORY_DIR = "conversation_history"
 from database import SessionLocal
 from models import Agent, StatusEnum, AgentCapability, AgentEndpoint, EndpointParameter
 from schemas import AgentCard, ProcessRequest, ProcessResponse, PlanResponse, FileObject
-from orchestrator.graph import ForceJsonSerializer, graph, create_graph_with_checkpointer, messages_from_dict, messages_to_dict, serialize_complex_object
+from orchestrator.graph import ForceJsonSerializer, graph, create_graph_with_checkpointer, create_execution_subgraph, messages_from_dict, messages_to_dict, serialize_complex_object
 from orchestrator.state import State
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -91,8 +91,9 @@ def clear_orchestrator_log():
 # Initialize memory for persistent conversations
 checkpointer = MemorySaver()
 
-# Create the graph with the checkpointer
+# Create the main graph and execution subgraph with the checkpointer
 graph = create_graph_with_checkpointer(checkpointer)
+execution_subgraph = create_execution_subgraph(checkpointer)
 
 # Simple in-memory conversation store as backup
 conversation_store: Dict[str, Dict[str, Any]] = {}
@@ -377,16 +378,23 @@ async def execute_orchestration(
 
     config = {"configurable": {"thread_id": thread_id}}
 
-    # Get the current state of the conversation from the checkpointer
-    current_checkpoint = checkpointer.get(config)
-    # Extract the state from the checkpoint if it exists
-    # The checkpoint structure is { "values": State, "next": List[str], "config": RunnableConfig }
-    current_conversation = current_checkpoint.get("values", {}) if current_checkpoint else {}
+    # Get the current state of the conversation from the in-memory store first (most recent)
+    # Fall back to checkpointer if not in memory
+    with store_lock:
+        current_conversation = conversation_store.get(thread_id)
+    
+    if not current_conversation:
+        # If not in memory, try checkpointer
+        current_checkpoint = checkpointer.get(config)
+        # Extract the state from the checkpoint if it exists
+        # The checkpoint structure is { "values": State, "next": List[str], "config": RunnableConfig }
+        current_conversation = current_checkpoint.get("values", {}) if current_checkpoint else {}
 
     # --- State Initialization ---
     if user_response:
         # Continuing an interactive workflow where the user answered a question
         logger.info(f"Resuming conversation for thread_id: {thread_id} with user response.")
+        logger.info(f"USER RESPONSE BRANCH: user_response='{user_response}', planning_mode={planning_mode}")
         initial_state = dict(current_conversation)  # Convert to dict if it's a State object
         initial_state["user_response"] = user_response
         initial_state["pending_user_input"] = False
@@ -394,49 +402,74 @@ async def execute_orchestration(
         initial_state["parse_retry_count"] = 0
         
         # Handle plan approval responses
-        if initial_state.get("approval_required"):
+        needs_approval = initial_state.get("needs_approval", False)
+        print(f"!!! USER RESPONSE: needs_approval={needs_approval}, response='{user_response}' !!!")
+        logger.info(f"Checking approval state: needs_approval={needs_approval}, user_response='{user_response}'")
+        
+        if needs_approval:
             user_response_lower = user_response.lower().strip()
+            logger.info(f"Processing approval response: '{user_response_lower}'")
+            
             if user_response_lower in ["approve", "yes", "proceed", "continue", "execute", "go", "ok"]:
-                logger.info(f"User approved execution plan for thread_id: {thread_id}")
+                print(f"!!! USER APPROVED - Setting planning_mode=False and plan_approved=True !!!")
+                logger.info(f"User APPROVED execution plan for thread_id: {thread_id}")
+                logger.info(f"Clearing approval flags and continuing execution")
+                # Simply turn off planning mode and clear approval flags
+                initial_state["needs_approval"] = False
                 initial_state["approval_required"] = False
-                initial_state["plan_approved"] = True
+                initial_state["planning_mode"] = False  # This is the key - let it run normally now
+                initial_state["pending_user_input"] = False
+                initial_state["question_for_user"] = None
+                initial_state["plan_approved"] = True  # NEW: Flag to skip validation and go straight to execution
+                logger.info(f"State after approval: needs_approval={initial_state['needs_approval']}, planning_mode={initial_state['planning_mode']}, pending_user_input={initial_state['pending_user_input']}, plan_approved={initial_state.get('plan_approved')}")
+                # Don't modify original_prompt - keep everything as is
             elif user_response_lower in ["cancel", "no", "stop", "abort", "reject"]:
-                logger.info(f"User cancelled execution plan for thread_id: {thread_id}")
-                initial_state["approval_required"] = False
-                initial_state["plan_approved"] = False
-                initial_state["final_response"] = "Execution cancelled by user. The plan was not executed."
-                # Skip to end
+                logger.info(f"User CANCELLED execution plan for thread_id: {thread_id}")
+                print(f"!!! USER CANCELLED - Stopping execution !!!")
+                initial_state["final_response"] = "Execution cancelled by user."
                 return initial_state
             else:
-                # Invalid response, ask again
-                logger.warning(f"Invalid approval response: {user_response}")
+                # Invalid response
+                logger.warning(f"Invalid approval response: '{user_response_lower}'")
+                print(f"!!! INVALID APPROVAL RESPONSE: '{user_response_lower}' !!!")
                 initial_state["pending_user_input"] = True
-                initial_state["question_for_user"] = "Please respond with 'approve' to proceed or 'cancel' to stop the execution."
+                initial_state["question_for_user"] = "Please respond with 'approve' to proceed or 'cancel' to stop."
                 return initial_state
-        
-        if "original_prompt" in initial_state:
-            initial_state["original_prompt"] = f"{initial_state['original_prompt']}\n\nAdditional context from user: {user_response}"
         else:
-            initial_state["original_prompt"] = user_response
+            # Regular user response - add to context
+            if "original_prompt" in initial_state:
+                initial_state["original_prompt"] = f"{initial_state['original_prompt']}\n\nAdditional context: {user_response}"
+            else:
+                initial_state["original_prompt"] = user_response
             
         # Clear any previous final response to avoid confusion
         initial_state["final_response"] = None
 
     elif prompt and current_conversation:
         # A new prompt is sent in an existing conversation thread
-        logger.info(f"Continuing conversation for thread_id: {thread_id} with new prompt.")
+        logger.info(f"NEW PROMPT IN EXISTING CONVERSATION BRANCH")
+        logger.info(f"Continuing conversation for thread_id: {thread_id} with new prompt, planning_mode: {planning_mode}")
+        logger.info(f"Prompt content: '{prompt[:100]}'")
         
         # Use MessageManager to add new message without duplicates
         from orchestrator.message_manager import MessageManager
         existing_messages = current_conversation.get("messages", [])
-        new_user_message = HumanMessage(content=prompt)
+        # Create message with metadata to preserve timestamp and ID
+        import hashlib
+        timestamp = time.time()
+        unique_string = f"human:{prompt}:{timestamp}"
+        msg_id = hashlib.md5(unique_string.encode()).hexdigest()[:16]
+        new_user_message = HumanMessage(
+            content=prompt,
+            additional_kwargs={"timestamp": timestamp, "id": msg_id}
+        )
         updated_messages = MessageManager.add_message(existing_messages, new_user_message)
         logger.info(f"Continuing conversation. Total messages: {len(updated_messages)}")
         
         initial_state = {
             # Carry over essential long-term memory from the previous turn
             "messages": updated_messages,
-            "completed_tasks": [],  # Start fresh for new prompt, but keep conversation history
+            "completed_tasks": current_conversation.get("completed_tasks", []),  # Preserve completed tasks for context
             "uploaded_files": current_conversation.get("uploaded_files", []), # Persist files
 
             # Reset short-term memory for the new task
@@ -454,6 +487,8 @@ async def execute_orchestration(
             "parse_retry_count": 0,
             "needs_complex_processing": None,  # Let analyze_request determine this
             "analysis_reasoning": None,
+            "planning_mode": planning_mode,  # Set planning mode from parameter
+            "plan_approved": False,  # Reset plan_approved for new request
         }
     
     elif current_conversation:
@@ -465,14 +500,24 @@ async def execute_orchestration(
         # A brand new conversation
         if not prompt:
             raise ValueError("Prompt is required for new conversations")
-        logger.info(f"Starting new conversation for thread_id: {thread_id}")
+        logger.info(f"NEW CONVERSATION BRANCH")
+        logger.info(f"Starting new conversation for thread_id: {thread_id}, planning_mode: {planning_mode}")
         
         # Clear orchestrator log for new conversation
         clear_orchestrator_log()
         
+        # Create message with metadata to preserve timestamp and ID
+        import hashlib
+        timestamp = time.time()
+        unique_string = f"human:{prompt}:{timestamp}"
+        msg_id = hashlib.md5(unique_string.encode()).hexdigest()[:16]
+        
         initial_state = {
             "original_prompt": prompt,
-            "messages": [HumanMessage(content=prompt)],
+            "messages": [HumanMessage(
+                content=prompt,
+                additional_kwargs={"timestamp": timestamp, "id": msg_id}
+            )],
             "uploaded_files": [], # Start with an empty file list
             "parsed_tasks": [],
             "user_expectations": {},
@@ -508,12 +553,27 @@ async def execute_orchestration(
 
     final_state = None
     try:
+        # Determine if we should use execution subgraph or main graph
+        is_post_approval = user_response is not None and initial_state.get("plan_approved") == True
+        
+        # Select the appropriate graph
+        if is_post_approval:
+            logger.info(f"Graph execution mode: POST-APPROVAL EXECUTION using subgraph")
+            print(f"!!! GRAPH EXECUTION: POST-APPROVAL - Using execution subgraph !!!")
+            selected_graph = execution_subgraph
+            graph_input = initial_state
+        else:
+            logger.info(f"Graph execution mode: NORMAL execution using main graph")
+            print(f"!!! GRAPH EXECUTION: NORMAL - Using main graph !!!")
+            selected_graph = graph
+            graph_input = initial_state
+        
         if stream_callback:
             # Streaming mode for WebSocket
             node_count = 0
-            expected_nodes = ["analyze_request", "parse_prompt", "agent_directory_search", "rank_agents", "plan_execution", "execute_batch", "aggregate_responses"]
+            expected_nodes = ["load_history", "execute_batch", "evaluate_agent_response", "generate_final_response"] if is_post_approval else ["analyze_request", "parse_prompt", "agent_directory_search", "rank_agents", "plan_execution", "execute_batch", "aggregate_responses"]
 
-            async for event in graph.astream(initial_state, config=config, stream_mode="updates"):
+            async for event in selected_graph.astream(graph_input, config=config, stream_mode="updates"):
                 for node_name, node_output in event.items():
                     node_count += 1
                     # More accurate progress calculation
@@ -524,11 +584,14 @@ async def execute_orchestration(
                     if isinstance(node_output, dict) and node_output.get("pending_user_input"):
                         logger.info(f"Workflow paused for user input in thread_id: {thread_id}")
                         break
+            
+            # After streaming, get the actual state if not available
             if not final_state:
-                final_state = await graph.ainvoke(initial_state, config=config)
+                # If no state from streaming, invoke to get final state
+                final_state = await selected_graph.ainvoke(graph_input, config=config)
         else:
             # Single response mode for HTTP
-            final_state = await graph.ainvoke(initial_state, config=config)
+            final_state = await selected_graph.ainvoke(graph_input, config=config)
 
         # Store the final state after the graph run
         with store_lock:
@@ -955,13 +1018,9 @@ async def websocket_chat(websocket: WebSocket):
             try:
                 data = await websocket.receive_json()
             except Exception as e:
-                await websocket.send_json({
-                    "node": "__error__",
-                    "error": "Failed to receive message",
-                    "thread_id": thread_id or "unknown",
-                    "timestamp": time.time()
-                })
-                continue  # Continue waiting for messages
+                # Connection closed or error receiving - just break the loop
+                logger.info(f"WebSocket receive error (connection likely closed): {e}")
+                break  # Exit the loop, connection is closed
 
             # Get thread_id from client, or generate a new one if not provided
             thread_id = data.get("thread_id") or str(uuid.uuid4())
@@ -971,6 +1030,7 @@ async def websocket_chat(websocket: WebSocket):
             planning_mode = data.get("planning_mode", False)  # Get planning mode flag
 
             logger.info(f"WebSocket received message with thread_id: {thread_id}, planning_mode: {planning_mode}")
+            logger.info(f"Message details: has_prompt={bool(prompt)}, has_user_response={bool(user_response)}, prompt_value='{prompt[:50] if prompt else None}', user_response_value='{user_response[:50] if user_response else None}'")
 
             if not prompt and not user_response:
                 await websocket.send_json({
@@ -1060,17 +1120,39 @@ async def websocket_chat(websocket: WebSocket):
 
             # Check if workflow is paused for user input
             if final_state.get("pending_user_input"):
+                # Check if this is an approval request
+                needs_approval = final_state.get("needs_approval", False)
+                
+                # Calculate cost if approval is needed
+                estimated_cost = 0.0
+                task_count = 0
+                if needs_approval:
+                    task_plan = final_state.get("task_plan", [])
+                    for batch in task_plan:
+                        for task_dict in batch:
+                            task_count += 1
+                            if isinstance(task_dict, dict):
+                                primary_agent = task_dict.get('primary', {})
+                                cost = primary_agent.get('price_per_call_usd', 0.0)
+                                if cost:
+                                    estimated_cost += cost
+                
                 await websocket.send_json({
                     "node": "__user_input_required__",
                     "thread_id": thread_id,
                     "data": {
-                        "question_for_user": final_state.get("question_for_user")
+                        "question_for_user": final_state.get("question_for_user"),
+                        "approval_required": needs_approval,
+                        "estimated_cost": estimated_cost,
+                        "task_count": task_count,
+                        "task_plan": final_state.get("task_plan", []),
+                        "task_agent_pairs": final_state.get("task_agent_pairs", [])
                     },
                     "message": "Additional information required to complete your request.",
                     "status": "pending_user_input",
                     "timestamp": time.time()
                 })
-                logger.info(f"WebSocket workflow paused for user input in thread_id {thread_id}")
+                logger.info(f"WebSocket workflow paused for user input in thread_id {thread_id}, needs_approval: {needs_approval}")
                 continue  # Continue waiting for user response message
 
             # --- **NEW**: Send the complete, standardized state object ---

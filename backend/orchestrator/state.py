@@ -53,8 +53,9 @@ class State(TypedDict):
     task_plan: Annotated[List[List[Dict]], overwrite_reducer]
     
     completed_tasks: Annotated[List[CompletedTask], operator.add]
+    latest_completed_tasks: Annotated[List[CompletedTask], overwrite_reducer]
     final_response: Annotated[Optional[str], overwrite_reducer]
-    pending_user_input: Annotated[bool, or_overwrite]
+    pending_user_input: Annotated[bool, overwrite_reducer]  # Changed from or_overwrite to overwrite_reducer
     question_for_user: Annotated[Optional[str], overwrite_reducer]
     user_response: Optional[str]
     parsing_error_feedback: Annotated[Optional[str], overwrite_reducer]
@@ -74,3 +75,10 @@ class State(TypedDict):
     
     # Planning mode flag
     planning_mode: Annotated[bool, overwrite_reducer]
+    
+    # Plan approval fields
+    approval_required: Annotated[bool, overwrite_reducer]
+    estimated_cost: Annotated[Optional[float], overwrite_reducer]
+    task_count: Annotated[Optional[int], overwrite_reducer]
+    plan_approved: Annotated[bool, overwrite_reducer]
+    needs_approval: Annotated[bool, overwrite_reducer]

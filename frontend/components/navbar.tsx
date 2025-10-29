@@ -11,7 +11,7 @@ export default function Navbar() {
   const { isSignedIn, user } = useUser()
 
   return (
-    <nav className="sticky top-0 w-full z-50 h-16 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between px-6 flex-shrink-0">
+    <nav className="fixed top-0 left-0 w-full z-[100] h-16 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between px-6">
       <div className="flex items-center gap-3">
         <Link href="/" className="flex items-center gap-2">
           <Image

@@ -8,6 +8,8 @@ import { Switch } from '@/components/ui/switch';
 import { MessageCircle, Clock, CheckCircle, Paperclip, X, File as FileIcon, AlertCircle, Loader2, Brain, Search, Users, FileText, Play, BarChart3 } from 'lucide-react';
 import Markdown from '@/components/ui/markdown';
 import { type ProcessResponse, type ConversationState, type Message, type Attachment } from '@/lib/types';
+import { PlanApprovalModal } from '@/components/plan-approval-modal';
+import { useConversationStore } from '@/lib/conversation-store';
 
 interface InteractiveChatInterfaceProps {
   onWorkflowComplete?: (result: ProcessResponse) => void;
@@ -15,8 +17,8 @@ interface InteractiveChatInterfaceProps {
   className?: string;
   state: ConversationState;
   isLoading: boolean;
-  startConversation: (input: string, files?: File[]) => Promise<void>;
-  continueConversation: (input: string, files?: File[]) => Promise<void>;
+  startConversation: (input: string, files?: File[], planningMode?: boolean) => Promise<void>;
+  continueConversation: (input: string, files?: File[], planningMode?: boolean) => Promise<void>;
   resetConversation: () => void;
   onViewCanvas?: (canvasContent: string, canvasType: 'html' | 'markdown') => void;
 }
@@ -57,6 +59,41 @@ export function InteractiveChatInterface({
   const [planningMode, setPlanningMode] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Plan approval modal handlers
+  const handleApprovePlan = async () => {
+    console.log('Plan approved by user');
+    // DON'T clear isWaitingForUser yet - continueConversation needs to see it's true
+    // Only clear approval_required to close the modal
+    useConversationStore.setState({ 
+      approval_required: false
+    });
+    // continueConversation will capture isWaitingForUser=true and send user_response
+    await continueConversation('approve', [], false);
+  };
+
+  const handleCancelPlan = async () => {
+    console.log('Plan cancelled by user');
+    // DON'T clear isWaitingForUser yet - continueConversation needs to see it's true
+    // Only clear approval_required to close the modal
+    useConversationStore.setState({ 
+      approval_required: false
+    });
+    // continueConversation will capture isWaitingForUser=true and send user_response
+    await continueConversation('cancel', [], false);
+  };
+
+  const handleModifyPlan = async () => {
+    console.log('User wants to modify plan');
+    // DON'T clear isWaitingForUser yet - continueConversation needs to see it's true
+    // Only clear approval_required to close the modal
+    useConversationStore.setState({ 
+      approval_required: false
+    });
+    // For now, just cancel and let user provide new instructions
+    // continueConversation will capture isWaitingForUser=true and send user_response
+    await continueConversation('cancel', [], false);
+  };
+
   useEffect(() => {
     const urls = attachedFiles
       .filter(file => file.type.startsWith('image/'))
@@ -92,7 +129,7 @@ export function InteractiveChatInterface({
     if (state.isWaitingForUser) {
       // User is responding to a question from the system
       if (userResponse.trim()) {
-        await continueConversation(userResponse, attachedFiles);
+        await continueConversation(userResponse, attachedFiles, planningMode);
         setUserResponse('');
         setAttachedFiles([]); // Clear files after submission
       }
@@ -102,8 +139,8 @@ export function InteractiveChatInterface({
       
       if (inputValue.trim() || attachedFiles.length > 0) {
         if (hasExistingConversation) {
-          // Continue existing conversation
-          await continueConversation(inputValue, attachedFiles);
+          // Continue existing conversation with planning mode
+          await continueConversation(inputValue, attachedFiles, planningMode);
         } else {
           // Start new conversation with planning mode
           await startConversation(inputValue, attachedFiles, planningMode);
@@ -294,6 +331,7 @@ export function InteractiveChatInterface({
           </div>
         )}
 
+        {!state.approval_required && (
         <form onSubmit={handleSubmit} className="space-y-4">
           {state.isWaitingForUser ? (
             <div className="space-y-2">
@@ -409,9 +447,10 @@ export function InteractiveChatInterface({
             </div>
           </div>
         </form>
+        )}
 
         {/* Status Indicator for user input */}
-        {state.isWaitingForUser && !isLoading && (
+        {state.isWaitingForUser && !isLoading && !state.approval_required && (
           <div className="status-indicator mt-4 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/50 rounded-xl shadow-sm">
             <div className="flex items-center space-x-2">
               <Clock className="w-4 h-4 text-yellow-600" />
@@ -420,6 +459,19 @@ export function InteractiveChatInterface({
           </div>
         )}
       </div>
+
+      {/* Plan Approval Modal */}
+      <PlanApprovalModal
+        isOpen={state.approval_required === true}
+        onClose={() => {}}
+        onApprove={handleApprovePlan}
+        onModify={handleModifyPlan}
+        onCancel={handleCancelPlan}
+        taskPlan={state.task_plan || []}
+        taskAgentPairs={state.task_agent_pairs || []}
+        estimatedCost={state.estimated_cost || 0}
+        taskCount={state.task_count || 0}
+      />
     </div>
   );
 }

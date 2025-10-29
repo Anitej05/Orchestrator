@@ -47,9 +47,9 @@ export function WebSocketWorkflow({
   
   const sendMessage = async (input: string, threadId?: string) => {
     if (threadId) {
-      await continueConversation(input);
+      await continueConversation(input, [], false);
     } else {
-      await startConversation(input);
+      await startConversation(input, [], false);
     }
   };
   

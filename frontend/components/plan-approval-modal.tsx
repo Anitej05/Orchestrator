@@ -31,6 +31,7 @@ interface PlanApprovalModalProps {
   onModify: () => void;
   onCancel: () => void;
   taskPlan: any[];
+  taskAgentPairs?: any[];
   estimatedCost: number;
   taskCount: number;
 }
@@ -42,17 +43,27 @@ export function PlanApprovalModal({
   onModify,
   onCancel,
   taskPlan,
+  taskAgentPairs = [],
   estimatedCost,
   taskCount
 }: PlanApprovalModalProps) {
   
-  // Flatten the task plan (it's an array of batches)
+  // Flatten the task plan (it's an array of batches) and enrich with agent details
   const allTasks: PlanTask[] = [];
   if (taskPlan && Array.isArray(taskPlan)) {
     taskPlan.forEach((batch: any) => {
       if (Array.isArray(batch)) {
         batch.forEach((task: any) => {
-          allTasks.push(task);
+          // Find matching agent pair for this task
+          const agentPair = taskAgentPairs?.find((pair: any) => pair.task_name === task.task_name);
+          
+          // Merge task with agent details
+          const enrichedTask = {
+            ...task,
+            primary: agentPair?.primary || task.primary
+          };
+          
+          allTasks.push(enrichedTask);
         });
       }
     });

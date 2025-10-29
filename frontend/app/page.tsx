@@ -4,7 +4,7 @@
 import { useState, useRef, useEffect } from "react"
 import AppSidebar from "@/components/app-sidebar"
 import TaskBuilder from "@/components/task-builder"
-import { SidebarProvider, SidebarInset, SidebarTrigger } from "@/components/ui/sidebar"
+import { SidebarProvider, SidebarInset, SidebarTrigger, useSidebar } from "@/components/ui/sidebar"
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
 import { Users } from "lucide-react"
@@ -41,8 +41,9 @@ interface ApiResponse {
   question_for_user: string | null
 }
 
-export default function Home() {
- const [taskAgentPairs, setTaskAgentPairs] = useState<TaskAgentPair[]>([])
+function HomeContent() {
+  const { open } = useSidebar()
+  const [taskAgentPairs, setTaskAgentPairs] = useState<TaskAgentPair[]>([])
   const [selectedAgents, setSelectedAgents] = useState<Record<string, string>>({})
   const [isExecuting, setIsExecuting] = useState(false)
   const [executionResults, setExecutionResults] = useState<ExecutionResult[]>([])
@@ -54,15 +55,15 @@ export default function Home() {
   // --- Zustand Store Integration ---
   // The entire conversation state is now managed by the Zustand store.
   const conversationState = useConversationStore();
-  const { 
-    resetConversation, 
-    loadConversation 
+  const {
+    resetConversation,
+    loadConversation
   } = useConversationStore(state => state.actions);
   const isConversationLoading = useConversationStore((state: any) => state.isLoading);
 
   // Initialize the WebSocket manager. It will automatically connect and keep the Zustand store in sync with backend updates.
   useWebSocketManager();
-  
+
   // Load conversation from localStorage on page load (persistence)
   useEffect(() => {
     const savedThreadId = localStorage.getItem('thread_id');
@@ -71,7 +72,7 @@ export default function Home() {
       loadConversation(savedThreadId);
     }
   }, []); // Run only once on mount
-  
+
   useEffect(() => {
     if (conversationState.status === 'completed' && conversationState.final_response) {
       const result: ProcessResponse = {
@@ -112,7 +113,7 @@ export default function Home() {
       });
     }
   };
-  
+
   const handleViewCanvas = (canvasContent: string, canvasType: 'html' | 'markdown') => {
     sidebarRef.current?.viewCanvas(canvasContent, canvasType);
   };
@@ -121,11 +122,11 @@ export default function Home() {
   const handleConversationSelect = async (threadId: string) => {
     try {
       await loadConversation(threadId);
-      
+
       // Update local state with loaded conversation data
       if (conversationState.task_agent_pairs && conversationState.task_agent_pairs.length > 0) {
         setTaskAgentPairs(conversationState.task_agent_pairs);
-        
+
         // Update selected agents
         const initialSelections: Record<string, string> = {};
         conversationState.task_agent_pairs.forEach((pair: TaskAgentPair) => {
@@ -140,7 +141,7 @@ export default function Home() {
             const statusData = await response.json();
             if (statusData.task_agent_pairs && statusData.task_agent_pairs.length > 0) {
               setTaskAgentPairs(statusData.task_agent_pairs);
-              
+
               const initialSelections: Record<string, string> = {};
               statusData.task_agent_pairs.forEach((pair: any) => {
                 initialSelections[pair.task_name] = pair.primary.id;
@@ -152,7 +153,7 @@ export default function Home() {
           console.error("Error fetching conversation status:", err);
         }
       }
-      
+
       toast({
         title: "Conversation loaded",
         description: `Loaded conversation ${threadId}`,
@@ -170,7 +171,7 @@ export default function Home() {
       });
     }
   };
-  
+
   const handleNewConversation = () => {
     resetConversation();
     setTaskAgentPairs([]);
@@ -178,7 +179,7 @@ export default function Home() {
     setExecutionResults([]);
     setApiResponseData(null);
     setCurrentThreadId(null);
-    
+
     toast({
       title: "New conversation started",
       description: "Ready to start a new orchestration",
@@ -225,50 +226,58 @@ export default function Home() {
   //     }
   //   }
   // }, [conversationState.messages]);
-  
-  return (
-    <SidebarProvider>
-      <div className="flex h-screen w-full overflow-hidden">
-        <AppSidebar
-          onConversationSelect={handleConversationSelect}
-          onNewConversation={handleNewConversation}
-          currentThreadId={conversationState.thread_id || undefined}
-        />
-        <SidebarInset className="flex-1 flex flex-col overflow-hidden">
-          <Navbar />
-          <div className="flex-1 bg-gradient-to-br from-gray-50 to-gray-100 dark:from-gray-950 dark:to-gray-900 overflow-hidden">
-            {/* Main Content Area - Resizable */}
-            <ResizablePanelGroup direction="horizontal" className="h-full">
-              <ResizablePanel defaultSize={70} minSize={50}>
-                <main className="h-full p-6 overflow-auto">
-                  <TaskBuilder
-                    onWorkflowComplete={handleInteractiveWorkflowComplete}
-                    onOrchestrationComplete={handleOrchestrationComplete}
-                    taskAgentPairs={taskAgentPairs}
-                    selectedAgents={selectedAgents}
-                    isExecuting={isExecuting}
-                    apiResponseData={apiResponseData}
-                    onThreadIdUpdate={handleThreadIdUpdate}
-                    onExecutionResultsUpdate={handleExecutionResultsUpdate}
-                    onViewCanvas={handleViewCanvas}
-                  />
-                </main>
-              </ResizablePanel>
-              
-              <ResizableHandle withHandle />
 
-              <ResizablePanel defaultSize={30} maxSize={50} minSize={20}>
-                <OrchestrationDetailsSidebar
-                  ref={sidebarRef}
-                  executionResults={executionResults}
-                  threadId={currentThreadId || conversationState.thread_id || null}
+  return (
+    <>
+      <AppSidebar
+        onConversationSelect={handleConversationSelect}
+        onNewConversation={handleNewConversation}
+        currentThreadId={conversationState.thread_id || undefined}
+      />
+      <SidebarInset className={!open ? "ml-16" : ""}>
+        <div className="h-screen pt-[64px] bg-gradient-to-br from-gray-50 to-gray-100 dark:from-gray-950 dark:to-gray-900 relative flex flex-col transition-all duration-300">
+          {/* Main Content Area - Resizable */}
+          <ResizablePanelGroup direction="horizontal" className="flex-1 overflow-hidden">
+            <ResizablePanel defaultSize={70} minSize={50}>
+              <main className="h-full p-6">
+                <TaskBuilder
+                  onWorkflowComplete={handleInteractiveWorkflowComplete}
+                  onOrchestrationComplete={handleOrchestrationComplete}
+                  taskAgentPairs={taskAgentPairs}
+                  selectedAgents={selectedAgents}
+                  isExecuting={isExecuting}
+                  apiResponseData={apiResponseData}
                   onThreadIdUpdate={handleThreadIdUpdate}
+                  onExecutionResultsUpdate={handleExecutionResultsUpdate}
+                  onViewCanvas={handleViewCanvas}
                 />
-              </ResizablePanel>
-            </ResizablePanelGroup>
-          </div>
-        </SidebarInset>
-      </div>
-    </SidebarProvider>
+              </main>
+            </ResizablePanel>
+
+            <ResizableHandle withHandle />
+
+            <ResizablePanel defaultSize={30} maxSize={50} minSize={20}>
+              <OrchestrationDetailsSidebar
+                ref={sidebarRef}
+                executionResults={executionResults}
+                threadId={currentThreadId || conversationState.thread_id || null}
+                onThreadIdUpdate={handleThreadIdUpdate}
+              />
+            </ResizablePanel>
+          </ResizablePanelGroup>
+        </div>
+      </SidebarInset>
+    </>
+  )
+}
+
+export default function Home() {
+  return (
+    <>
+      <Navbar />
+      <SidebarProvider>
+        <HomeContent />
+      </SidebarProvider>
+    </>
   )
 }

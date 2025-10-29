@@ -64,6 +64,7 @@ export interface ConversationState {
   approval_required?: boolean;
   estimated_cost?: number;
   task_count?: number;
+  task_plan?: any[];
 }
 
 export interface Attachment {

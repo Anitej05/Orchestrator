@@ -52,13 +52,19 @@ export function useWebSocketManager({
       ws.current.onmessage = (event) => {
         try {
           const eventData: WebSocketEventData = JSON.parse(event.data);
-          console.log('WebSocket message received:', eventData);
+          console.log('WebSocket message received:', {
+            node: eventData.node,
+            thread_id: eventData.thread_id,
+            hasData: !!eventData.data,
+            dataKeys: eventData.data ? Object.keys(eventData.data).slice(0, 10) : []
+          });
 
           // Handle orchestration stage updates with animations
           if (eventData.node === '__start__') {
             // Preserve existing messages when updating state
             const currentMessages = useConversationStore.getState().messages;
             _setConversationState({
+              thread_id: eventData.thread_id,
               status: 'processing',
               messages: currentMessages,
               metadata: {
@@ -161,10 +167,22 @@ export function useWebSocketManager({
           }
           // The '__end__' node now contains the final, complete state.
           // We use this as the single source of truth to update our store.
-          else if (eventData.node === '__end__' && eventData.data) {
-            console.log('Received __end__ event, processing final state...');
-            // The backend sends the complete state in the data field
-            const finalState: ConversationState = eventData.data;
+          else if (eventData.node === '__end__') {
+            try {
+              console.log('=== RECEIVED __END__ EVENT ===');
+              console.log('Event data:', eventData);
+              console.log('Has data field:', !!eventData.data);
+              
+              if (!eventData.data) {
+                console.error('__end__ event received but no data field!');
+                // Set isLoading to false even if there's no data
+                useConversationStore.setState({ isLoading: false, status: 'completed' });
+                return;
+              }
+              
+              console.log('Received __end__ event, processing final state...');
+              // The backend sends the complete state in the data field
+              const finalState: ConversationState = eventData.data;
             console.log('Final state:', {
               hasMessages: !!finalState.messages,
               messagesCount: finalState.messages?.length || 0,
@@ -316,14 +334,28 @@ export function useWebSocketManager({
             console.log('Setting isLoading to false after __end__ event');
             useConversationStore.setState({ isLoading: false });
             console.log('Final state updated, isLoading:', useConversationStore.getState().isLoading);
+            } catch (endError) {
+              console.error('Error processing __end__ event:', endError);
+              // Always set isLoading to false even if there's an error
+              useConversationStore.setState({ isLoading: false, status: 'error' });
+            }
           }
           // Handle intermediate states or errors
           else if (eventData.node === '__user_input_required__') {
             // Check if this is an approval request
             const isApprovalRequest = eventData.data?.approval_required === true;
             
+            console.log('User input required:', {
+              isApprovalRequest,
+              approval_required: eventData.data?.approval_required,
+              estimated_cost: eventData.data?.estimated_cost,
+              task_count: eventData.data?.task_count,
+              question: eventData.data?.question_for_user
+            });
+            
             if (isApprovalRequest) {
-              // This is a plan approval request - set approval state
+              // This is a plan approval request - set approval state WITHOUT adding a system message
+              // The approval modal will handle the UI
               const currentState = useConversationStore.getState();
               _setConversationState({
                 isWaitingForUser: true,
@@ -331,12 +363,19 @@ export function useWebSocketManager({
                 approval_required: true,
                 estimated_cost: eventData.data?.estimated_cost || 0,
                 task_count: eventData.data?.task_count || 0,
+                task_plan: eventData.data?.task_plan || currentState.task_plan || [],
+                task_agent_pairs: eventData.data?.task_agent_pairs || currentState.task_agent_pairs || [],
                 metadata: {
                   ...currentState.metadata,
                   currentStage: 'approval_required',
                   stageMessage: 'Waiting for plan approval...',
                   progress: 50
                 }
+              });
+              console.log('Set approval state in store (no system message added):', {
+                approval_required: true,
+                estimated_cost: eventData.data?.estimated_cost || 0,
+                task_count: eventData.data?.task_count || 0
               });
             } else {
               // Regular user input required - add as system message
@@ -352,6 +391,7 @@ export function useWebSocketManager({
                 messages: [...currentMessages, questionMessage],
                 isWaitingForUser: true,
                 currentQuestion: eventData.data?.question_for_user,
+                approval_required: false,
                 metadata: {
                   ...useConversationStore.getState().metadata,
                   currentStage: 'waiting_for_user',
@@ -386,9 +426,16 @@ export function useWebSocketManager({
             // Set isLoading to false when there's an error
             useConversationStore.setState({ isLoading: false });
           }
+          else {
+            // Catch-all for unhandled events
+            console.log(`Unhandled WebSocket event: ${eventData.node}`);
+          }
 
         } catch (parseError) {
           console.error('Failed to parse WebSocket message:', parseError);
+          console.error('Raw event data:', event.data);
+          // Set isLoading to false on parse error
+          useConversationStore.setState({ isLoading: false, status: 'error' });
         }
       };
 
