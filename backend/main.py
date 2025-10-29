@@ -3,16 +3,39 @@ import uuid
 import logging
 import json
 import time
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 from pydantic import BaseModel
 from pydantic.networks import HttpUrl
 from langchain_core.messages import HumanMessage
 import shutil
-from fastapi import UploadFile, File
+from fastapi import UploadFile, File, Request
 from aiofiles import open as aio_open
-from typing import List
-from pydantic import BaseModel
-from typing import Literal
+
+logger = logging.getLogger("orbimesh")
+logger.setLevel(logging.INFO)
+
+def persist_conversation_file(path: str, conversation: dict, http_request: Request | None = None) -> None:
+    """
+    Persist conversation JSON to disk and enforce owner if http_request provided.
+    Logs the incoming owner (or missing) for debugging.
+    """
+    try:
+        if http_request is not None:
+            try:
+                user = get_user_from_request(http_request)  # will raise 401 if invalid
+                user_id = user.get("sub") or user.get("user_id") or user.get("id")
+                conversation["owner"] = user_id
+                logger.info("Persisting conversation %s for owner=%s", conversation.get("thread_id"), user_id)
+            except Exception as e:
+                logger.warning("Failed to extract user from request when saving conversation %s: %s", conversation.get("thread_id"), str(e))
+                raise
+        else:
+            logger.info("Persisting conversation %s without http_request; existing owner=%s", conversation.get("thread_id"), conversation.get("owner"))
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(conversation, fh, ensure_ascii=False, indent=2)
+    except Exception:
+        logger.exception("Error persisting conversation file: %s", path)
+        raise
 
 # # --- Add parent directory to path ---
 # sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -24,7 +47,7 @@ import socket
 import re
 
 # --- Third-party Imports ---
-from fastapi import FastAPI, HTTPException, Depends, status, Query, Response, WebSocket, WebSocketDisconnect, Body
+from fastapi import FastAPI, HTTPException, Depends, status, Query, Response, WebSocket, WebSocketDisconnect, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_, cast, String, select
@@ -40,6 +63,7 @@ from orchestrator.state import State
 from langgraph.checkpoint.memory import MemorySaver
 from utils.title_generator import generate_title, generate_improved_title
 from utils.file_loader import load_files, build_file_context, ensure_storage_dirs
+from auth import get_user_from_request
 
 # --- App Initialization and Configuration ---
 app = FastAPI(
@@ -402,7 +426,8 @@ async def execute_orchestration(
     thread_id: str,
     user_response: Optional[str] = None,
     files: Optional[List[FileObject]] = None,
-    stream_callback=None
+    stream_callback=None,
+    owner: Optional[Dict[str, Any]] = None,
 ):
     """
     Unified orchestration logic that correctly persists and merges file context
@@ -423,6 +448,8 @@ async def execute_orchestration(
         # Continuing an interactive workflow where the user answered a question OR approved orchestration
         logger.info(f"Resuming conversation for thread_id: {thread_id} with user response.")
         initial_state = dict(current_conversation)  # Convert to dict if it's a State object
+        if owner:
+            initial_state["owner"] = owner
         
         # Check if this is a continue orchestration request
         if user_response == "continue_orchestration":
@@ -500,11 +527,15 @@ async def execute_orchestration(
             "orchestration_paused": False,
             "waiting_for_continue": False,
             "pause_reason": None,
+            # Owner info
+            "owner": owner or current_conversation.get("owner"),
         }
     
     elif current_conversation:
         # Resuming without a new prompt or user response (e.g., status check)
         initial_state = dict(current_conversation) # Convert to dict if it's a State object
+        if owner:
+            initial_state["owner"] = owner
         logger.info(f"Checking status for thread_id: {thread_id}")
 
     else:
@@ -537,6 +568,8 @@ async def execute_orchestration(
             "orchestration_paused": False,
             "waiting_for_continue": False,
             "pause_reason": None,
+            # Owner info
+            "owner": owner,
         }
 
     # --- File Merging Logic ---
@@ -619,12 +652,21 @@ async def execute_orchestration(
         with store_lock:
             conversation_store[thread_id] = final_state.copy()
             
-        # Save conversation history using orchestrator's save routine
-        try:
-            from orchestrator.graph import save_conversation_history
-            save_conversation_history(final_state, {"configurable": {"thread_id": thread_id}})
-        except Exception as e:
-            logger.error(f"Failed to save conversation history for {thread_id}: {e}")
+        # Ensure owner field is set in final_state before saving
+        if owner:
+            final_state["owner"] = owner
+        from orchestrator.graph import save_conversation_history
+
+        owner_id = None
+        if owner:
+            owner_id = owner.get("user_id") or owner.get("sub") or owner.get("id")
+        if not owner_id:
+            logger.error(f"Missing owner_id for thread {thread_id}. Conversation will NOT be saved.")
+            raise ValueError("Owner is required for saving conversation history.")
+
+        owner_obj = {"user_id": owner_id}
+        final_state["owner"] = owner_obj
+        save_conversation_history(final_state, {"configurable": {"thread_id": thread_id, "owner": owner_obj}})
 
         # Generate and save conversation title (especially useful for new conversations)
         try:
@@ -740,7 +782,7 @@ def process_node_data(node_name: str, node_output, progress: float, node_count: 
 
 # --- API Endpoints ---
 @app.post("/api/chat", response_model=ProcessResponse)
-async def find_agents(request: ProcessRequest):
+async def find_agents(request: ProcessRequest, http_request: Request):
     """
     Receives a prompt, runs it through the agent-finding graph,
     and returns the selected primary and fallback agents for each task.
@@ -750,11 +792,20 @@ async def find_agents(request: ProcessRequest):
     logger.info(f"Starting agent search with thread_id: {thread_id}")
 
     try:
+        # Extract user identity from Clerk token
+        try:
+            auth_header = http_request.headers.get("Authorization")
+            owner = get_user_from_request(auth_header)
+        except Exception:
+            # If auth fails, block the request
+            raise
+
         final_state = await execute_orchestration(
             prompt=request.prompt,
             thread_id=thread_id,
             files=request.files,  # Pass the files to the orchestrator
-            stream_callback=None
+            stream_callback=None,
+            owner=owner,
         )
 
         # Check if workflow is paused for user input
@@ -799,7 +850,7 @@ async def find_agents(request: ProcessRequest):
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {e}")
 
 @app.post("/api/chat/continue", response_model=ProcessResponse)
-async def continue_conversation(user_response: UserResponse):
+async def continue_conversation(user_response: UserResponse, http_request: Request):
     """
     Continue a paused conversation by providing user response to a question.
     """
@@ -816,12 +867,23 @@ async def continue_conversation(user_response: UserResponse):
     logger.info(f"Found existing conversation for thread_id: {user_response.thread_id}, pending_input: {existing_conversation.get('pending_user_input', False)}")
 
     try:
+        # Extract user identity
+        auth_header = http_request.headers.get("Authorization")
+        owner = get_user_from_request(auth_header)
+
+        # Enforce ownership before continuing
+        # If existing conversation has owner and it doesn't match, block
+        conv_owner = existing_conversation.get("owner") if isinstance(existing_conversation, dict) else None
+        if conv_owner and conv_owner.get("user_id") != owner.get("user_id"):
+            raise HTTPException(status_code=403, detail="You do not have access to this conversation")
+
         final_state = await execute_orchestration(
             prompt=None, # No new prompt needed
             thread_id=user_response.thread_id,
             user_response=user_response.response,
             files=user_response.files,  # Pass files if provided
-            stream_callback=None
+            stream_callback=None,
+            owner=owner,
         )
 
         # Check if workflow is paused again for more user input
@@ -855,7 +917,7 @@ async def continue_conversation(user_response: UserResponse):
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {e}")
 
 @app.get("/api/chat/status/{thread_id}", response_model=ConversationStatus)
-async def get_conversation_status(thread_id: str):
+async def get_conversation_status(thread_id: str, http_request: Request):
     """
     Get the current status of a conversation thread.
     """
@@ -863,6 +925,13 @@ async def get_conversation_status(thread_id: str):
         # Get conversation from our store
         with store_lock:
             state_data = conversation_store.get(thread_id)
+
+        # Enforce ownership if the state has owner info
+        if state_data and state_data.get("owner"):
+            auth_header = http_request.headers.get("Authorization")
+            owner = get_user_from_request(auth_header)
+            if state_data["owner"].get("user_id") != owner.get("user_id"):
+                raise HTTPException(status_code=403, detail="You do not have access to this conversation")
 
         if not state_data:
             raise HTTPException(status_code=404, detail="Conversation thread not found")
@@ -889,7 +958,7 @@ async def get_conversation_status(thread_id: str):
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {e}")
 
 @app.get("/api/chat/history/{thread_id}")
-async def get_conversation_history(thread_id: str):
+async def get_conversation_history(thread_id: str, http_request: Request):
     """
     Load the full conversation history from the saved JSON file.
     Returns all messages, metadata, plan, and uploaded files.
@@ -908,6 +977,13 @@ async def get_conversation_history(thread_id: str):
         
         with open(history_path, 'r', encoding='utf-8') as f:
             conversation_data = json.load(f)
+
+        # Enforce ownership using Clerk token
+        auth_header = http_request.headers.get("Authorization")
+        owner = get_user_from_request(auth_header)
+        file_owner = (conversation_data or {}).get("owner")
+        if file_owner and file_owner.get("user_id") != owner.get("user_id"):
+            raise HTTPException(status_code=403, detail="You do not have access to this conversation")
         
         logger.info(f"Successfully loaded conversation history for thread_id: {thread_id}")
         return conversation_data
@@ -962,7 +1038,7 @@ async def debug_conversations():
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {e}")
 
 @app.get("/api/conversations", response_model=List[str])
-async def get_all_conversations():
+async def get_all_conversations(http_request: Request):
     """
     Retrieves a list of all conversation thread_ids that have history.
     """
@@ -970,32 +1046,62 @@ async def get_all_conversations():
         return []
     
     files = os.listdir(CONVERSATION_HISTORY_DIR)
-    # Return filenames without the .json extension, sorted by modification time (newest first)
+    # Extract user
+    owner = get_user_from_request(http_request)
+    user_id = owner.get("user_id")
+
+    # Return only conversations owned by user
     files_with_path = [os.path.join(CONVERSATION_HISTORY_DIR, f) for f in files if f.endswith(".json")]
     files_with_path.sort(key=os.path.getmtime, reverse=True)
-    return [os.path.splitext(os.path.basename(f))[0] for f in files_with_path]
+    allowed_thread_ids: List[str] = []
+    for fp in files_with_path:
+        try:
+            with open(fp, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            file_owner = (data or {}).get("owner")
+            if file_owner and file_owner.get("user_id") == user_id:
+                allowed_thread_ids.append(os.path.splitext(os.path.basename(fp))[0])
+        except Exception:
+            continue
+    return allowed_thread_ids
 
 @app.get("/api/conversations/{thread_id}")
-async def get_conversation_history(thread_id: str):
+async def get_conversation_history(thread_id: str, http_request: Request):
     """
     Retrieves the full, standardized conversation state from its JSON file.
     This is the single source of truth for a conversation's history.
     """
     history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
-    
+
     if not os.path.exists(history_path):
         raise HTTPException(status_code=404, detail="Conversation history not found.")
-        
+
     try:
         with open(history_path, "r", encoding="utf-8") as f:
-            # The file already contains the standardized, serializable state.
-            # No further processing is needed.
             history_data = json.load(f)
+
+        # Enforce ownership only if owner field exists and is not null
+        try:
+            owner = get_user_from_request(http_request)
+        except HTTPException as auth_exc:
+            # Return 401 if missing/invalid Authorization header
+            raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+        file_owner = (history_data or {}).get("owner")
+        if file_owner is not None:
+            if file_owner.get("user_id") != owner.get("user_id"):
+                raise HTTPException(status_code=403, detail="You do not have access to this conversation")
+        # If owner field is missing or null, allow access
+        # Restore orchestration pause status if present
+        if "status" in history_data and history_data["status"] == "orchestration_paused":
+            history_data["status"] = "orchestration_paused"
         return history_data
-        
+
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse conversation history for {thread_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to parse conversation history file.")
+    except HTTPException as exc:
+        # Propagate HTTPException (401/403)
+        raise exc
     except Exception as e:
         logger.error(f"Error loading conversation history for {thread_id}: {e}")
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred while loading the conversation: {str(e)}")
@@ -1048,19 +1154,29 @@ async def websocket_chat(websocket: WebSocket):
             try:
                 data = await websocket.receive_json()
             except Exception as e:
-                await websocket.send_json({
-                    "node": "__error__",
-                    "error": "Failed to receive message",
-                    "thread_id": thread_id or "unknown",
-                    "timestamp": time.time()
-                })
-                continue  # Continue waiting for messages
+                from starlette.websockets import WebSocketDisconnect
+                if isinstance(e, WebSocketDisconnect):
+                    logger.info(f"WebSocket disconnected: {e}")
+                    break  # Exit loop cleanly
+                else:
+                    try:
+                        await websocket.send_json({
+                            "node": "__error__",
+                            "error": "Failed to receive message",
+                            "thread_id": thread_id or "unknown",
+                            "timestamp": time.time()
+                        })
+                    except Exception:
+                        pass
+                    continue  # Continue waiting for messages
 
             # Get thread_id from client, or generate a new one if not provided
             thread_id = data.get("thread_id") or str(uuid.uuid4())
             prompt = data.get("prompt")
             user_response = data.get("user_response")  # For continuing conversations
             files_data = data.get("files", [])  # Get files from WebSocket message
+            # Pass through owner info if frontend sends Clerk-verified identity
+            owner = data.get("owner")  # Expected shape: { user_id, email }
 
             logger.info(f"WebSocket received message with thread_id: {thread_id}")
 
@@ -1146,7 +1262,8 @@ async def websocket_chat(websocket: WebSocket):
                 thread_id=thread_id,
                 user_response=user_response,
                 files=file_objects if file_objects else None,
-                stream_callback=stream_callback
+                stream_callback=stream_callback,
+                owner=owner,
             )
 
             # Check if the graph is interrupted (paused for approval)
@@ -1198,6 +1315,20 @@ async def websocket_chat(websocket: WebSocket):
                 logger.info(f"WebSocket workflow paused for user input in thread_id {thread_id}")
                 continue  # Continue waiting for user response message
 
+            # Save conversation history with owner enforcement
+            from orchestrator.graph import save_conversation_history
+
+            owner_id = None
+            if owner:
+                owner_id = owner.get("user_id") or owner.get("sub") or owner.get("id")
+            if not owner_id:
+                logger.error(f"Missing owner_id for thread {thread_id}. Conversation will NOT be saved.")
+                raise ValueError("Owner is required for saving conversation history.")
+
+            owner_obj = {"user_id": owner_id}
+            final_state["owner"] = owner_obj
+            save_conversation_history(final_state, {"configurable": {"thread_id": thread_id, "owner": owner_obj}})
+            
             # --- **NEW**: Send the complete, standardized state object ---
             # This ensures the frontend has all information needed to update the UI,
             # including plan, metadata, and attachments, without needing a separate API call.

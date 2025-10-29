@@ -2370,6 +2370,8 @@ def get_serializable_state(state: dict | State, thread_id: str) -> dict:
         "final_response": state.get("final_response"),
         "pending_user_input": state.get("pending_user_input", False),
         "question_for_user": state.get("question_for_user"),
+        # Owner information (Clerk user)
+        "owner": serialize_complex_object(state.get("owner")),
         # Metadata for the sidebar
         "metadata": {
             "original_prompt": state.get("original_prompt"),
@@ -2423,14 +2425,26 @@ def save_conversation_history(state: State, config: RunnableConfig):
         else:
             state_dict = state
         
+        # Ensure owner field is present in state_dict
+        owner = None
+        if 'owner' in state_dict and state_dict['owner']:
+            owner = state_dict['owner']
+        elif 'owner' in config.get('configurable', {}) and config['configurable']['owner']:
+            owner = config['configurable']['owner']
+        if not owner:
+            logger.error(f"Missing owner for thread {thread_id}. Conversation will NOT be saved.")
+            raise ValueError("Owner is required for saving conversation history.")
+        state_dict['owner'] = owner
+
+        # Log owner value
+        logger.info(f"Saving conversation for thread {thread_id} with owner: {state_dict.get('owner')}")
+
         # Create the fully serializable state object
         serializable_state = get_serializable_state(state_dict, thread_id)
 
         # Write to file in a consistent JSON format
         with open(history_path, "w", encoding="utf-8") as f:
             json.dump(serializable_state, f, ensure_ascii=False, indent=2)
-            
-        logger.info(f"Successfully saved conversation history for thread {thread_id}.")
 
     except Exception as e:
         logger.error(f"Failed to write conversation history for {thread_id} to {history_path}: {e}")
