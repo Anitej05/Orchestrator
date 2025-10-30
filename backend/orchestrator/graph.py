@@ -130,8 +130,15 @@ def serialize_complex_object(obj):
         return obj
     except (TypeError, ValueError):
         # Handle different object types
-        if isinstance(obj, HttpUrl):
+        # Check for HttpUrl by type name instead of isinstance (avoids subscripted generics error)
+        if type(obj).__name__ == 'HttpUrl' or (hasattr(obj, '__class__') and 'HttpUrl' in str(type(obj))):
             return str(obj)  # Convert HttpUrl to string
+        elif hasattr(obj, 'model_dump'):
+            # Pydantic v2 models
+            try:
+                return obj.model_dump(mode='json')
+            except:
+                pass
         elif hasattr(obj, 'dict'):
             # Pydantic models
             try:
@@ -148,13 +155,23 @@ def serialize_complex_object(obj):
             # Handle lists/tuples of complex objects
             try:
                 # Check if this is a list of LangChain message objects
-                if all(hasattr(item, '_type') for item in obj if item is not None):
+                if obj and all(hasattr(item, '_type') for item in obj if item is not None):
                     # Use LangChain's messages_to_dict for message objects
                     return messages_to_dict(obj)
                 else:
-                    return [serialize_complex_object(item) for item in obj]
-            except:
-                pass
+                    # Recursively serialize each item in the list
+                    result = []
+                    for item in obj:
+                        try:
+                            serialized = serialize_complex_object(item)
+                            result.append(serialized)
+                        except Exception as e:
+                            logger.warning(f"Failed to serialize list item: {e}")
+                            result.append(str(item))
+                    return result
+            except Exception as e:
+                logger.warning(f"Failed to serialize list: {e}")
+                return [str(item) for item in obj]
         elif hasattr(obj, '_type'):  # Check for LangChain message objects
             # Handle LangChain message objects specifically
             try:
@@ -681,6 +698,19 @@ def parse_prompt(state: State):
         '''
 
     prompt = f'''
+        You are the Orbimesh Orchestrator, an intelligent AI system that coordinates multiple specialized agents to complete user requests.
+        
+        **YOUR IDENTITY AND CAPABILITIES:**
+        - You are Orbimesh, a multi-agent orchestration system
+        - You can delegate tasks to specialized agents in your agent directory
+        - You have a built-in Canvas feature that can render interactive HTML/CSS/JavaScript and Markdown content
+        - The Canvas is NOT an agent - it's your own built-in capability for creating visualizations, games, interactive demos, and rich content
+        
+        **IMPORTANT: When users ask for interactive content, games, visualizations, or web-based demos:**
+        - DO NOT create a task to search for a "canvas agent" or "visualization agent"
+        - These will be handled by your built-in Canvas feature in the final response generation
+        - Focus on breaking down only the data-fetching or computation tasks that need external agents
+        
         You are an expert at breaking down any user request—no matter how short, vague, or poorly written—into a clear list of distinct tasks that can each be handled by a single agent.
         {retry_prompt_injection}
 
@@ -790,21 +820,8 @@ def parse_prompt(state: State):
 
     current_retry_count = state.get('parse_retry_count', 0)
 
-    # Serialize parsed_tasks to ensure JSON compatibility
-    serializable_tasks = []
-    if parsed_tasks:
-        for task in parsed_tasks:
-            if hasattr(task, 'model_dump'):  # Pydantic v2
-                serializable_tasks.append(task.model_dump(mode='json'))
-            elif hasattr(task, 'dict'):  # Pydantic v1
-                serializable_tasks.append(task.dict())
-            elif isinstance(task, dict):
-                serializable_tasks.append(task)
-            else:
-                serializable_tasks.append({"task_name": str(task), "task_description": ""})
-    
     return {
-        "parsed_tasks": serializable_tasks,
+        "parsed_tasks": parsed_tasks,
         "user_expectations": user_expectations or {},
         "parsing_error_feedback": None,
         "parse_retry_count": current_retry_count + 1
@@ -812,9 +829,7 @@ def parse_prompt(state: State):
 
 async def agent_directory_search(state: State):
     parsed_tasks = state.get('parsed_tasks', [])
-    # Extract task names for logging (handle both dict and object)
-    task_names = [t.get('task_name') if isinstance(t, dict) else t.task_name for t in parsed_tasks]
-    logger.info(f"Searching for agents for tasks: {task_names}")
+    logger.info(f"Searching for agents for tasks: {[t.task_name for t in parsed_tasks]}")
     
     if not parsed_tasks:
         logger.warning("No valid tasks to process in agent_directory_search")
@@ -825,18 +840,14 @@ async def agent_directory_search(state: State):
     user_expectations = state.get('user_expectations') or {}
 
     for task in parsed_tasks:
-        # Handle both dict and Task object
-        task_name = task.get('task_name') if isinstance(task, dict) else task.task_name
-        task_description = task.get('task_description') if isinstance(task, dict) else task.task_description
-        
-        params: Dict[str, Any] = {'capabilities': task_name}
+        params: Dict[str, Any] = {'capabilities': task.task_name}
         if 'price' in user_expectations:
             params['max_price'] = user_expectations['price']
         if 'rating' in user_expectations:
             params['min_rating'] = user_expectations['rating']
         
         request = httpx.Request("GET", base_url, params=params)
-        urls_to_fetch.append((task_name, str(request.url), task_description))
+        urls_to_fetch.append((task.task_name, str(request.url), task.task_description))
     
     logger.info(f"Dispatching {len(urls_to_fetch)} agent search requests.")
     async with httpx.AsyncClient() as client:
@@ -846,18 +857,14 @@ async def agent_directory_search(state: State):
     logger.info("Agent search complete.")
 
     for task in parsed_tasks:
-        # Handle both dict and Task object
-        task_name = task.get('task_name') if isinstance(task, dict) else task.task_name
-        task_description = task.get('task_description') if isinstance(task, dict) else task.task_description
-        
-        if not candidate_agents_map.get(task_name):
+        if not candidate_agents_map.get(task.task_name):
             error_feedback = (
                 f"The previous attempt to parse the prompt resulted in the task description "
-                f"'{task_description}', which was matched to the capability '{task_name}'. "
+                f"'{task.task_description}', which was matched to the capability '{task.task_name}'. "
                 f"However, no agents were found that could perform this task. Please generate a new, "
                 f"more detailed and specific task description that better captures the user's intent."
             )
-            logger.warning(f"Semantic failure for task '{task_name}'. Looping back to re-parse.")
+            logger.warning(f"Semantic failure for task '{task.task_name}'. Looping back to re-parse.")
             return {"candidate_agents": {}, "parsing_error_feedback": error_feedback}
 
     return {"candidate_agents": candidate_agents_map, "parsing_error_feedback": None}
@@ -867,9 +874,7 @@ class RankedAgents(BaseModel):
 
 def rank_agents(state: State):
     parsed_tasks = state.get('parsed_tasks', [])
-    # Extract task names for logging (handle both dict and object)
-    task_names = [t.get('task_name') if isinstance(t, dict) else t.task_name for t in parsed_tasks]
-    logger.info(f"Ranking agents for tasks: {task_names}")
+    logger.info(f"Ranking agents for tasks: {[t.task_name for t in parsed_tasks]}")
     
     if not parsed_tasks:
         logger.warning("No tasks to rank in rank_agents")
@@ -881,9 +886,7 @@ def rank_agents(state: State):
     
     final_selections = []
     for task in parsed_tasks:
-        # Handle both dict and Task object
-        task_name = task.get('task_name') if isinstance(task, dict) else task.task_name
-        task_description = task.get('task_description') if isinstance(task, dict) else task.task_description
+        task_name = task.task_name
         
         # Rehydrate here. Convert dicts from state back into AgentCard objects.
         candidate_agent_dicts = state.get('candidate_agents', {}).get(task_name, [])
@@ -900,9 +903,9 @@ def rank_agents(state: State):
             
             prompt = f'''
             You are an expert at selecting the best agent for a given task.
-            The user's task is: "{task_description}"
+            The user's task is: "{task.task_description}"
 
-            Here are the available agents that claim to have the capability '{task_name}':
+            Here are the available agents that claim to have the capability '{task.task_name}':
             ---
             {json.dumps(serializable_agents, indent=2)}
             ---
@@ -939,7 +942,7 @@ def rank_agents(state: State):
 
         pair = TaskAgentPair(
             task_name=task_name,
-            task_description=task_description,
+            task_description=task.task_description,
             primary=primary_agent,
             fallbacks=fallback_agents
         )
@@ -951,72 +954,6 @@ def rank_agents(state: State):
     logger.info("Agent ranking complete.")
     logger.debug(f"Final agent selections: {[p for p in serializable_pairs]}")
     return {"task_agent_pairs": serializable_pairs}
-
-def pause_for_user_approval(state: State, config: RunnableConfig):
-    '''
-    ARCHITECTURE: Pause orchestration after PLAN creation (not agent selection).
-    
-    This is the critical checkpoint where we:
-    1. Have parsed tasks
-    2. Have selected agents
-    3. Have created an execution plan with endpoints and costs
-    4. Pause and show everything to user for approval
-    
-    The plan is now ready to execute, but we wait for user approval before proceeding.
-    '''
-    logger.info("PAUSE POINT: Orchestration paused for user approval of execution plan.")
-    
-    thread_id = config.get("configurable", {}).get("thread_id", "unknown")
-    
-    # Serialize the complete plan information
-    parsed_tasks = state.get("parsed_tasks", [])
-    task_agent_pairs = state.get("task_agent_pairs", [])
-    task_plan = state.get("task_plan", [])
-    
-    # Serialize tasks
-    serializable_tasks = []
-    for task in parsed_tasks:
-        if hasattr(task, 'model_dump'):
-            serializable_tasks.append(task.model_dump(mode='json'))
-        elif hasattr(task, 'dict'):
-            serializable_tasks.append(task.dict())
-        elif isinstance(task, dict):
-            serializable_tasks.append(task)
-        else:
-            serializable_tasks.append({"task_name": str(task), "task_description": ""})
-    
-    # Save state to persistent storage BEFORE pausing
-    from langgraph.types import interrupt
-    
-    # Set pause state
-    pause_data = {
-        "type": "execution_plan_ready",
-        "thread_id": thread_id,
-        "parsed_tasks": serializable_tasks,
-        "task_agent_pairs": task_agent_pairs,
-        "execution_plan": task_plan,
-        "status": "awaiting_approval",
-        "message": "Review the execution plan and costs, then approve to proceed with execution."
-    }
-    
-    logger.info(f"Interrupting graph execution for thread {thread_id}")
-    
-    # Set state flags to indicate pause
-    state["waiting_for_continue"] = True
-    state["orchestration_paused"] = True
-    state["pause_reason"] = "Awaiting user approval of execution plan"
-    
-    # This interrupt pauses the graph - the value returned will be the user's response
-    user_response = interrupt(pause_data)
-    
-    logger.info(f"User approval received for thread {thread_id}: {user_response}")
-    
-    # Return the state indicating approval was given
-    return {
-        "waiting_for_continue": False,
-        "orchestration_paused": False,
-        "pause_reason": None
-    }
 
 def plan_execution(state: State, config: RunnableConfig):
     '''
@@ -1173,7 +1110,77 @@ def plan_execution(state: State, config: RunnableConfig):
     else:
         logger.warning("No thread_id found in config, skipping plan save")
     
+    # If planning mode is on, set flag to indicate approval is needed
+    if state.get("planning_mode"):
+        logger.info("=== PLAN EXECUTION: Planning mode ON. Setting needs_approval flag ===")
+        print(f"!!! PLAN_EXECUTION: Setting needs_approval=True, pending_user_input=True !!!")
+        output_state["needs_approval"] = True
+        output_state["pending_user_input"] = True
+        output_state["question_for_user"] = "Please review and approve the execution plan."
+        logger.info(f"Plan execution output state: needs_approval={output_state['needs_approval']}, pending_user_input={output_state['pending_user_input']}")
+    else:
+        logger.info("=== PLAN EXECUTION: Planning mode OFF. No approval needed ===")
+    
     return output_state
+
+
+def pause_for_plan_approval(state: State, config: RunnableConfig):
+    '''
+    WebSocket-compatible approval checkpoint that pauses after plan creation.
+    
+    This allows users to review:
+    - Parsed tasks
+    - Selected agents with ratings
+    - Execution plan with estimated costs
+    - Total estimated cost
+    
+    The workflow pauses here and waits for user approval via WebSocket.
+    Only pauses if planning_mode is enabled.
+    '''
+    # Check if planning mode is enabled
+    planning_mode = state.get("planning_mode", False)
+    plan_approved = state.get("plan_approved", False)
+    
+    logger.info(f"=== APPROVAL CHECKPOINT ENTRY: planning_mode={planning_mode}, plan_approved={plan_approved} ===")
+    
+    if not planning_mode:
+        logger.info("=== APPROVAL CHECKPOINT: Planning mode disabled, skipping approval ===")
+        return {}  # Skip approval, proceed directly to execution
+    
+    if plan_approved:
+        logger.info("=== APPROVAL CHECKPOINT: Plan already approved, skipping approval ===")
+        return {}  # Plan was already approved, don't ask again
+    
+    logger.info("=== APPROVAL CHECKPOINT: Planning mode enabled, pausing for user approval ===")
+    
+    thread_id = config.get("configurable", {}).get("thread_id", "unknown")
+    
+    # Get plan details
+    task_plan = state.get("task_plan", [])
+    task_agent_pairs = state.get("task_agent_pairs", [])
+    
+    # Calculate total estimated cost
+    total_cost = 0.0
+    task_count = 0
+    for batch in task_plan:
+        for task_dict in batch:
+            task_count += 1
+            if isinstance(task_dict, dict):
+                primary_agent = task_dict.get('primary', {})
+                cost = primary_agent.get('price_per_call_usd', 0.0)
+                if cost:
+                    total_cost += cost
+    
+    logger.info(f"Plan summary: {task_count} tasks, estimated cost: ${total_cost:.4f}")
+    
+    # Set state to indicate we're waiting for approval
+    return {
+        "pending_user_input": True,
+        "question_for_user": f"Review the execution plan: {task_count} tasks will be executed with an estimated cost of ${total_cost:.4f}. Type 'approve' to proceed or 'cancel' to stop.",
+        "approval_required": True,
+        "estimated_cost": total_cost,
+        "task_count": task_count
+    }
 
 
 def validate_plan_for_execution(state: State):
@@ -1181,6 +1188,7 @@ def validate_plan_for_execution(state: State):
     Performs an advanced pre-flight check on the next task, now with full file
     context awareness to prevent premature pauses.
     '''
+    print(f"!!! VALIDATION ENTRY !!!")
     logger.info("Performing dynamic validation of the execution plan...")
     
     # Rehydrate the plan
@@ -1457,6 +1465,8 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
 
 async def execute_batch(state: State, config: RunnableConfig):
     '''Executes a single batch of tasks from the plan.'''
+    print(f"!!! EXECUTE_BATCH: Starting execution !!!")
+    
     # Rehydrate the plan
     task_plan_dicts = state.get('task_plan', [])
     if not task_plan_dicts:
@@ -1516,25 +1526,39 @@ async def execute_batch(state: State, config: RunnableConfig):
 
     batch_results = await asyncio.gather(*(try_task_with_fallbacks(planned_task) for planned_task in current_batch_plan))
     
+    print(f"!!! EXECUTE_BATCH: Got {len(batch_results)} results !!!")
+    logger.info(f"Got {len(batch_results)} batch results")
+    
     completed_tasks_with_desc = []
     for res in batch_results:
         task_name = res['task_name']
+        result_preview = str(res.get('result', {}))[:200]
+        print(f"!!! EXECUTE_BATCH: Task '{task_name}' result preview: {result_preview} !!!")
+        logger.info(f"Task '{task_name}' completed with result preview: {result_preview}")
         completed_tasks_with_desc.append(CompletedTask(
             task_name=task_name,
             result=res.get('result', {})
         ))
 
     completed_tasks = state.get('completed_tasks', []) + completed_tasks_with_desc
-    logger.info("Batch execution complete.")
+    print(f"!!! EXECUTE_BATCH: Total completed tasks: {len(completed_tasks)}, Latest: {len(completed_tasks_with_desc)} !!!")
+    logger.info(f"Batch execution complete. Total completed: {len(completed_tasks)}, Latest: {len(completed_tasks_with_desc)}")
     
     # FIX: Use mode='json' to convert HttpUrl and other special types to strings.
     remaining_plan_dicts = [[task.model_dump(mode='json') for task in batch] for batch in remaining_plan_objects]
 
+    # Convert CompletedTask objects to dicts for proper serialization
+    completed_tasks_dicts = [task.model_dump() if hasattr(task, 'model_dump') else task for task in completed_tasks]
+    latest_completed_tasks_dicts = [task.model_dump() if hasattr(task, 'model_dump') else task for task in completed_tasks_with_desc]
+
     output_state = {
         "task_plan": remaining_plan_dicts,
-        "completed_tasks": completed_tasks,
-        "latest_completed_tasks": completed_tasks_with_desc
+        "completed_tasks": completed_tasks_dicts,
+        "latest_completed_tasks": latest_completed_tasks_dicts
     }
+    
+    print(f"!!! EXECUTE_BATCH: Returning output_state with latest_completed_tasks count={len(output_state['latest_completed_tasks'])} !!!")
+    logger.info(f"Output state keys: {list(output_state.keys())}")
 
     # Save the updated plan (using the object version for readability)
     temp_save_state = {**state, **output_state}
@@ -1552,43 +1576,89 @@ def evaluate_agent_response(state: State):
     Critically evaluates the result of the last executed task to ensure it is
     logically correct and satisfies the user's intent before proceeding.
     '''
+    print(f"!!! EVALUATE_AGENT_RESPONSE: Starting evaluation !!!")
+    print(f"!!! EVALUATE: State keys: {list(state.keys())} !!!")
+    print(f"!!! EVALUATE: latest_completed_tasks in state: {'latest_completed_tasks' in state} !!!")
+    
     latest_tasks = state.get("latest_completed_tasks", [])
+    print(f"!!! EVALUATE: latest_tasks type={type(latest_tasks)}, value={latest_tasks} !!!")
+    
     if not latest_tasks:
         # No new tasks to evaluate
+        print(f"!!! EVALUATE: No tasks to evaluate (empty or None) !!!")
+        logger.info("No tasks to evaluate")
+        logger.info(f"State keys available: {list(state.keys())}")
+        logger.info(f"completed_tasks: {state.get('completed_tasks', [])}")
         return {"pending_user_input": False, "question_for_user": None}
 
     # Initialize both primary and fallback LLMs
     primary_llm = ChatCerebras(model="gpt-oss-120b")
     fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
     task_to_evaluate = latest_tasks[-1] # Evaluate the most recent task
+    
+    print(f"!!! EVALUATE: Task='{task_to_evaluate.get('task_name')}', Result preview={str(task_to_evaluate.get('result', ''))[:200]} !!!")
+    logger.info(f"Evaluating task: {task_to_evaluate.get('task_name')}")
+    logger.info(f"Result preview: {str(task_to_evaluate.get('result', ''))[:500]}")
 
     # If the agent itself reported an error, we don't need to evaluate it further
     if isinstance(task_to_evaluate.get('result'), str) and "Error:" in task_to_evaluate.get('result', ''):
+        print(f"!!! EVALUATE: Agent reported error, skipping evaluation !!!")
+        logger.info("Agent reported error, skipping evaluation")
         return {"pending_user_input": False, "question_for_user": None}
 
+    # Build conversation history for context
+    conversation_history = ""
+    if messages := state.get('messages'):
+        recent_messages = messages[-10:]  # Last 10 messages for context
+        for msg in recent_messages:
+            if hasattr(msg, 'type'):
+                if msg.type == "human":
+                    conversation_history += f"User: {msg.content}\n"
+                elif msg.type == "ai":
+                    conversation_history += f"Assistant: {msg.content}\n"
+    
+    # Include completed tasks for context
+    completed_context = ""
+    if completed_tasks := state.get('completed_tasks', []):
+        completed_context = "\n**Previously Completed Tasks:**\n"
+        for task in completed_tasks[-3:]:  # Last 3 tasks
+            task_name = task.get('task_name', 'Unknown')
+            result_preview = str(task.get('result', ''))[:200]
+            completed_context += f"- {task_name}: {result_preview}...\n"
+    
     prompt = f'''
-    You are a meticulous Quality Assurance AI. Your job is to determine if an agent's output is a successful and logical fulfillment of its assigned task.
+    You are a Quality Assurance AI. Determine if an agent's output successfully fulfills its task.
 
-    **Original User Prompt:** "{state['original_prompt']}"
-    **Task Description:** "{task_to_evaluate.get('task_description', 'N/A')}"
+    **Conversation History:**
+    {conversation_history}
+    {completed_context}
+
+    **Current Request:** "{state['original_prompt']}"
+    **Task:** "{task_to_evaluate.get('task_description', 'N/A')}"
     **Agent's Result:**
     ```json
-    {json.dumps(task_to_evaluate['result'], indent=2)}
+    {json.dumps(task_to_evaluate['result'], indent=2)[:1000]}
     ```
 
-    **Instructions:**
-    1.  **Check for Logical Consistency:** Does the `Agent's Result` make sense in the context of the `Task Description`? (e.g., If the task was to find a "technology company," is the result actually a tech company, not a newspaper?).
-    2.  **Check for Completeness:** Is the result empty, or does it contain placeholders like "N/A" or 0.0 when a real value was expected?
-    3.  **Check for Unverified Assumptions:** Does the result rely on information not present in the original prompt or task description?
+    **Rules:**
+    1. **Context is key:** If the user referenced "that company" or similar, check the conversation history for the company name.
+    2. **Data presence = success:** If the result contains actual data (not empty, not just errors), it's successful.
+    3. **Be pragmatic:** News/search results don't need to be perfectly filtered - if they contain relevant articles, that's good enough.
+    4. **Only ask if truly necessary:** Only request clarification if the result is completely empty, contains only errors, or is fundamentally wrong.
 
     **Decision:**
-    - If the result is logically sound and complete, respond with `{{"status": "complete"}}`.
-    - If the result is logically flawed, incomplete, or based on a wrong assumption, respond with `{{"status": "user_input_required", "question": "Formulate a clear, direct question to the user to correct the course of the plan."}}`. For example, "The news search returned an article about the lumber industry, not a tech company. Could you specify a tech company you're interested in?"
+    - If the result has useful data: `{{"status": "complete"}}`
+    - Only if truly broken/empty: `{{"status": "user_input_required", "question": "Brief question"}}`
     '''
     try:
         evaluation = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, AgentResponseEvaluation)
+        print(f"!!! EVALUATE: LLM evaluation status={evaluation.status} !!!")
+        logger.info(f"Evaluation result: status={evaluation.status}")
+        
         if evaluation.status == "user_input_required":
+            print(f"!!! EVALUATE: LLM says user input required - question='{evaluation.question}' !!!")
             logger.warning(f"Result for task '{task_to_evaluate['task_name']}' is unsatisfactory. Pausing for user input.")
+            logger.warning(f"Evaluation question: {evaluation.question}")
             # We add the failed task's result to the parsing feedback to prevent loops
             error_feedback = f"The previous attempt for a similar task resulted in an incorrect output: {task_to_evaluate['result']}. Please generate a more precise task to avoid this error."
             return {
@@ -1596,7 +1666,11 @@ def evaluate_agent_response(state: State):
                 "question_for_user": evaluation.question,
                 "parsing_error_feedback": error_feedback
             }
+        else:
+            print(f"!!! EVALUATE: Task passed evaluation !!!")
+            logger.info("Task passed evaluation")
     except Exception as e:
+        print(f"!!! EVALUATE: Evaluation failed with error: {e} !!!")
         logger.error(f"Failed to evaluate agent response for task '{task_to_evaluate['task_name']}': {e}")
     
     return {"pending_user_input": False, "question_for_user": None}
@@ -1621,13 +1695,37 @@ def ask_user(state: State):
     
     logger.info(f"Asking user for clarification: {question}")
 
-    ai_message = AIMessage(content=question)
-    return {
+    # Create AI message with timestamp metadata
+    import hashlib
+    timestamp = time.time()
+    unique_string = f"ai:{question}:{timestamp}"
+    msg_id = hashlib.md5(unique_string.encode()).hexdigest()[:16]
+    ai_message = AIMessage(
+        content=question,
+        additional_kwargs={"timestamp": timestamp, "id": msg_id}
+    )
+    
+    # Preserve approval-related fields if they exist (for plan approval flow)
+    result = {
         "pending_user_input": True,
         "question_for_user": question,
         "final_response": None, # Clear any previous final response
         "messages": [ai_message]
     }
+    
+    # Preserve approval state if this is a plan approval request
+    if state.get("approval_required"):
+        result["approval_required"] = state.get("approval_required")
+        result["estimated_cost"] = state.get("estimated_cost")
+        result["task_count"] = state.get("task_count")
+        logger.info(f"Preserving approval state: approval_required={result['approval_required']}, cost={result['estimated_cost']}, tasks={result['task_count']}")
+    
+    # CRITICAL: Also preserve plan_approved flag for routing after approval
+    if state.get("plan_approved"):
+        result["plan_approved"] = state.get("plan_approved")
+        logger.info(f"Preserving plan_approved={result['plan_approved']} for post-approval routing")
+    
+    return result
 
 
 def render_canvas_output(state: State):
@@ -1722,6 +1820,14 @@ def render_canvas_output(state: State):
     
     # Create a prompt to generate the canvas content with full context
     prompt = f'''
+    You are the Orbimesh Orchestrator with a built-in Canvas feature.
+    
+    **YOUR IDENTITY:**
+    - You are Orbimesh, a multi-agent orchestration system
+    - You have a built-in Canvas feature that can render interactive HTML/CSS/JavaScript and Markdown content
+    - You are now using your Canvas capability to create content for the user
+    
+    **YOUR TASK:**
     Generate {canvas_type} content for the following request:
     
     Original User Request: "{original_prompt}"
@@ -1737,7 +1843,7 @@ def render_canvas_output(state: State):
     **IMPORTANT INSTRUCTIONS FOR CANVAS GENERATION:**
     
     **PURPOSE AND ENVIRONMENT:**
-    - You are generating content for a canvas display area in a web application
+    - You are generating content for your built-in canvas display area
     - The canvas is displayed in an iframe with limited capabilities
     - The canvas should be a standalone, self-contained {canvas_type} document
     - Do NOT assume any existing libraries or frameworks are available unless explicitly imported
@@ -1937,7 +2043,15 @@ def generate_text_answer(state: State):
         else:
             logger.info("Using existing final_response for simple request.")
         
-        ai_message = AIMessage(content=final_response)
+        # Create AI message with timestamp metadata
+        import hashlib
+        timestamp = time.time()
+        unique_string = f"ai:{final_response}:{timestamp}"
+        msg_id = hashlib.md5(unique_string.encode()).hexdigest()[:16]
+        ai_message = AIMessage(
+            content=final_response,
+            additional_kwargs={"timestamp": timestamp, "id": msg_id}
+        )
         # Use MessageManager to add message without duplicates
         from orchestrator.message_manager import MessageManager
         existing_messages = state.get("messages", [])
@@ -2007,7 +2121,15 @@ def generate_text_answer(state: State):
                 final_response = invoke_llm_with_fallback(primary_llm, fallback_llm, concise_prompt, None).__str__()
                 logger.info("Generated concise text response for canvas visualization.")
         
-        ai_message = AIMessage(content=final_response)
+        # Create AI message with timestamp metadata
+        import hashlib
+        timestamp = time.time()
+        unique_string = f"ai:{final_response}:{timestamp}"
+        msg_id = hashlib.md5(unique_string.encode()).hexdigest()[:16]
+        ai_message = AIMessage(
+            content=final_response,
+            additional_kwargs={"timestamp": timestamp, "id": msg_id}
+        )
         # Use MessageManager to add message without duplicates
         from orchestrator.message_manager import MessageManager
         existing_messages = state.get("messages", [])
@@ -2047,10 +2169,16 @@ def generate_final_response(state: State):
     fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
     
     prompt = f'''
-    Analyze the user's request and the generated text response to determine if a canvas visualization would enhance the user experience.
+    You are the Orbimesh Orchestrator, an intelligent AI system with a built-in Canvas feature.
     
-    **YOUR PURPOSE AND ENVIRONMENT:**
-    You are a decision-making AI that determines whether to generate a canvas visualization for a web application.
+    **YOUR IDENTITY AND CAPABILITIES:**
+    - You are Orbimesh, a multi-agent orchestration system
+    - You have a built-in Canvas feature that can render interactive HTML/CSS/JavaScript and Markdown content
+    - The Canvas is your own capability - not an external agent or service
+    - You can create games, visualizations, interactive demos, and rich content directly
+    
+    **YOUR PURPOSE:**
+    Analyze the user's request and the generated text response to determine if your Canvas feature would enhance the user experience.
     The canvas is a separate display area that can show interactive content, visualizations, or rich media.
     The chat area should only contain text responses, while the canvas area shows interactive content.
     
@@ -2066,7 +2194,7 @@ def generate_final_response(state: State):
     - Complex layouts or formatting that text cannot represent well
     - Web pages, HTML content, or rich media
     - Documents that need markdown rendering
-    - When user explicitly asks for "canvas", "visual", "interactive", "demo", "show me"
+    - When user explicitly asks for "canvas", "visual", "interactive", "demo", "show me", "create a game"
     
     **CONSIDER CANVAS for:**
     - Numerical data that could benefit from visualization
@@ -2079,14 +2207,14 @@ def generate_final_response(state: State):
     - When no visual enhancement is needed
     
     **DECISION PROCESS:**
-    1. Look for explicit canvas requests in the original prompt
+    1. Look for explicit canvas requests in the original prompt (games, visualizations, interactive content)
     2. Analyze if the content would benefit from visual representation
     3. Consider if interactive elements would improve user experience
     4. Default to text-only if uncertain
     
     **IMPORTANT OUTPUT RULES:**
     - If the response contains HTML elements like buttons, scripts, or interactive content, ALWAYS use "html" canvas type, never "markdown".
-    - Your response will be used to generate a canvas visualization, so be precise in your decision.
+    - Your response will be used to generate canvas content using your built-in Canvas feature.
     - The canvas content will be displayed in an iframe with limited capabilities, so external libraries must be imported via CDN if needed.
     
     Respond with a JSON object:
@@ -2178,9 +2306,17 @@ def load_conversation_history(state: State, config: RunnableConfig):
     if not thread_id:
         return {}
 
-    # If messages already exist in state (from checkpointer), don't load from file
+    # Check if this is a resume after approval
+    is_resuming_after_approval = state.get("plan_approved") == True
+    
+    if is_resuming_after_approval:
+        print(f"!!! LOAD_HISTORY: Resuming after approval - will load history for context !!!")
+        logger.info(f"Resuming after approval for thread {thread_id}, loading history for context")
+        # Continue to load history for context, but preserve critical state fields
+    
+    # If messages already exist in state (from checkpointer) and we're not resuming after approval
     # This prevents duplicate messages when continuing a conversation
-    if state.get("messages") and len(state.get("messages", [])) > 0:
+    if state.get("messages") and len(state.get("messages", [])) > 0 and not is_resuming_after_approval:
         logger.info(f"Messages already exist in state for thread {thread_id}, skipping file load")
         return {}
 
@@ -2218,20 +2354,19 @@ def load_conversation_history(state: State, config: RunnableConfig):
             timestamp = msg_data.get("timestamp")
 
             try:
-                if msg_type == "user":
-                    msg = HumanMessage(content=content)
-                elif msg_type == "assistant":
-                    msg = AIMessage(content=content)
-                else:
-                    msg = SystemMessage(content=content)
-
-                # Add additional attributes
-                if msg_id:
-                    msg.id = msg_id
-                if metadata:
-                    msg.additional_kwargs = metadata
+                # Prepare additional_kwargs with timestamp and id
+                additional_kwargs = metadata.copy() if metadata else {}
                 if timestamp:
-                    msg.timestamp = timestamp
+                    additional_kwargs['timestamp'] = timestamp
+                if msg_id:
+                    additional_kwargs['id'] = msg_id
+                
+                if msg_type == "user":
+                    msg = HumanMessage(content=content, additional_kwargs=additional_kwargs)
+                elif msg_type == "assistant":
+                    msg = AIMessage(content=content, additional_kwargs=additional_kwargs)
+                else:
+                    msg = SystemMessage(content=content, additional_kwargs=additional_kwargs)
 
                 valid_messages.append(msg)
 
@@ -2244,6 +2379,13 @@ def load_conversation_history(state: State, config: RunnableConfig):
         valid_messages = MessageManager.deduplicate_messages(valid_messages)
         
         logger.info(f"Successfully loaded {len(valid_messages)} messages for conversation {thread_id}")
+        
+        # When resuming after approval, only return messages (don't overwrite final_response)
+        if state.get("plan_approved"):
+            print(f"!!! LOAD_HISTORY: Loaded {len(valid_messages)} messages for context after approval !!!")
+            return {
+                "messages": valid_messages
+            }
         
         return {
             "messages": valid_messages,
@@ -2298,21 +2440,31 @@ def get_serializable_state(state: dict | State, thread_id: str) -> dict:
                 continue
             
             # Convert to frontend format
-            # Generate unique ID for each message to avoid duplicates
-            msg_id = msg.get('id')
+            # Generate DETERMINISTIC ID for each message to avoid duplicates
+            # Check for ID and timestamp in additional_kwargs first (where we store them)
+            additional_kwargs = msg_data.get('additional_kwargs', {})
+            msg_id = msg.get('id') or msg_data.get('id') or additional_kwargs.get('id')
+            timestamp = msg_data.get('timestamp') or additional_kwargs.get('timestamp') or time.time()
+            
             if not msg_id:
-                # Generate unique ID using timestamp + random component
-                import random
-                msg_id = f"{time.time()}_{random.randint(1000, 9999)}"
+                # Generate deterministic ID based on content + type + timestamp
+                # This ensures the same message always gets the same ID
+                import hashlib
+                unique_string = f"{msg_type}:{content}:{timestamp}"
+                msg_id = hashlib.md5(unique_string.encode()).hexdigest()[:16]
+            
+            # Convert timestamp to milliseconds for frontend (JavaScript expects ms)
+            # If timestamp is in seconds (< year 3000), convert to milliseconds
+            timestamp_ms = timestamp * 1000 if timestamp < 10000000000 else timestamp
             
             frontend_msg = {
                 'id': msg_id,
                 'type': 'assistant' if msg_type == 'ai' else 'user' if msg_type == 'human' else 'system',
                 'content': content,
-                'timestamp': msg_data.get('timestamp', time.time())
+                'timestamp': timestamp_ms
             }
             serializable_messages.append(frontend_msg)
-            logger.debug(f"Converted message: type={msg_type}, content_length={len(content)}")
+            logger.debug(f"Converted message: type={msg_type}, id={msg_id}, content_length={len(content)}")
             
     except Exception as e:
         logger.warning(f"Failed to serialize messages with messages_to_dict: {e}")
@@ -2349,24 +2501,11 @@ def get_serializable_state(state: dict | State, thread_id: str) -> dict:
     logger.info(f"Serialized {len(serializable_messages)} messages for thread {thread_id}")
     logger.info(f"Final response length: {len(state.get('final_response', '')) if state.get('final_response') else 0}")
     
-    # Determine status based on orchestration state
-    if state.get("waiting_for_continue") or state.get("orchestration_paused"):
-        status = "orchestration_paused"
-    elif state.get("pending_user_input"):
-        status = "pending_user_input"
-    else:
-        status = "completed"
-    
-    # Get plan from state
-    task_plan = state.get("task_plan", [])
-    serializable_plan = serialize_complex_object(task_plan)
-    
     return {
         "thread_id": thread_id,
-        "status": status,
+        "status": "pending_user_input" if state.get("pending_user_input") else "completed",
         "messages": serializable_messages,
         "task_agent_pairs": serialize_complex_object(state.get("task_agent_pairs", [])),
-        "parsed_tasks": serialize_complex_object(state.get("parsed_tasks", [])),
         "final_response": state.get("final_response"),
         "pending_user_input": state.get("pending_user_input", False),
         "question_for_user": state.get("question_for_user"),
@@ -2377,16 +2516,14 @@ def get_serializable_state(state: dict | State, thread_id: str) -> dict:
             "original_prompt": state.get("original_prompt"),
             "completed_tasks": serialize_complex_object(state.get("completed_tasks", [])),
             "parsed_tasks": serialize_complex_object(state.get("parsed_tasks", [])),
-            "currentStage": "paused" if (state.get("waiting_for_continue") or state.get("orchestration_paused")) else "completed",
-            "stageMessage": state.get("pause_reason") if (state.get("waiting_for_continue") or state.get("orchestration_paused")) else "Orchestration completed successfully!",
-            "progress": 50 if (state.get("waiting_for_continue") or state.get("orchestration_paused")) else 100,
-            "orchestrationPaused": state.get("orchestration_paused", False) or state.get("waiting_for_continue", False),
-            "pauseReason": state.get("pause_reason")
+            "currentStage": "completed",
+            "stageMessage": "Orchestration completed successfully!",
+            "progress": 100
         },
         # Attachments for the sidebar
         "uploaded_files": serialize_complex_object(state.get("uploaded_files", [])),
         # Plan for the sidebar
-        "plan": serializable_plan,
+        "plan": serialize_complex_object(state.get("task_plan", [])),
         # Canvas fields for the sidebar
         "has_canvas": state.get("has_canvas", False),
         "canvas_content": state.get("canvas_content"),
@@ -2464,13 +2601,32 @@ def route_after_search(state: State):
             return "parse_prompt"
     return "rank_agents"
 
+def route_after_approval(state: State):
+    '''Routes after plan approval checkpoint.'''
+    approval_required = state.get("approval_required")
+    pending_user_input = state.get("pending_user_input")
+    
+    logger.info(f"=== ROUTING AFTER APPROVAL: approval_required={approval_required}, pending_user_input={pending_user_input} ===")
+    
+    if approval_required and pending_user_input:
+        logger.info("Routing to ask_user for plan approval.")
+        return "ask_user"
+    else:
+        logger.info(f"Plan approved or no approval needed. Routing to validate_plan_for_execution.")
+        return "validate_plan_for_execution"
+
 def route_after_validation(state: State):
-    '''This router acts as the gate after the plan is validated.'''
-    if state.get("replan_reason"):
-        logger.info("Routing back to plan_execution for a replan.")
+    '''Simple routing after validation.'''
+    replan_reason = state.get("replan_reason")
+    pending_user_input = state.get("pending_user_input")
+    
+    print(f"!!! ROUTER AFTER VALIDATION: replan={replan_reason}, pending={pending_user_input} !!!")
+    
+    if replan_reason:
+        logger.info("Replan needed. Routing back to plan_execution.")
         return "plan_execution"
-    if state.get("pending_user_input"):
-        logger.info("Routing to ask_user due to failed plan validation.")
+    if pending_user_input:
+        logger.info("Pending user input. Routing to ask_user.")
         return "ask_user"
     else:
         logger.info("Plan is valid. Routing to execute_batch.")
@@ -2518,6 +2674,17 @@ def analyze_request(state: State):
         tasks_context = "Previous results:\n" + "\n".join(tasks_info) + "\n\n"
     
     prompt = f'''
+    You are the Orbimesh Orchestrator, an intelligent AI system that coordinates multiple specialized agents to complete user requests.
+    
+    **YOUR IDENTITY AND CAPABILITIES:**
+    - You are Orbimesh, a multi-agent orchestration system
+    - You can delegate tasks to specialized agents in your agent directory
+    - You have a built-in Canvas feature that can render interactive HTML/CSS/JavaScript and Markdown content
+    - The Canvas is NOT an agent - it's your own built-in capability for creating visualizations, games, interactive demos, and rich content
+    - When users ask for interactive content, games, visualizations, or web-based demos, you can create them directly using your Canvas
+    
+    **IMPORTANT: Canvas is a built-in feature, not an agent to search for!**
+    
     Analyze the user's request and determine if it requires complex orchestration or can be handled with a simple response.
     
     Consider the following context:
@@ -2529,11 +2696,21 @@ def analyze_request(state: State):
     User's current request: "{state['original_prompt']}"
     
     Evaluate based on these criteria:
-    1. Is this a simple greeting, thanks, or general knowledge question?
+    1. Is this ONLY a simple greeting, thanks, acknowledgment, or casual conversation? (e.g., "hi", "thanks", "ok", "got it")
     2. Does this require accessing uploaded files or documents?
     3. Does this require multiple agents or complex operations?
     4. Is this a follow-up that builds on previous results?
-    5. Does this require external data or complex processing?
+    5. Does this require fetching external data (stock prices, news, weather, company info, etc.)?
+    6. Does this require performing any action or task that needs EXTERNAL AGENTS (search, analyze, calculate, fetch, get, find, etc.)?
+    7. Does this ONLY require creating interactive content, games, visualizations, or web-based demos using your Canvas (without needing external data)?
+    
+    IMPORTANT RULES:
+    - If the request asks to "fetch", "get", "find", "search", "analyze", "calculate" EXTERNAL DATA, it needs complex processing.
+    - If the request mentions specific data like stock prices, news, weather, company information, etc., it needs complex processing.
+    - If the request ONLY asks for interactive content, games, visualizations, or web demos that you can create with your Canvas WITHOUT external data, it does NOT need complex processing (mark as simple).
+    - Canvas-only requests (like "create a tic-tac-toe game", "make a counter", "show me a visualization") should be marked as simple since they don't need external agents.
+    - ONLY simple greetings, thanks, general knowledge questions, OR canvas-only requests should be marked as simple.
+    - When in doubt about whether external agents are needed, choose complex processing.
     
     Respond with a JSON object containing:
     {{
@@ -2571,18 +2748,28 @@ def analyze_request(state: State):
 
 
 def route_after_analysis(state: State):
-    """Routes the workflow based on the analysis result."""
-    if state.get("needs_complex_processing"):
-        logger.info("Request needs complex processing. Routing to preprocess_files or parse_prompt.")
+    """Route based on whether we have an existing plan or need to create one."""
+    has_plan = state.get("task_plan") and len(state.get("task_plan", [])) > 0
+    planning_mode = state.get("planning_mode", False)
+    needs_complex = state.get("needs_complex_processing")
+    plan_approved = state.get("plan_approved", False)
+    
+    print(f"!!! ROUTE AFTER ANALYSIS: has_plan={has_plan}, planning_mode={planning_mode}, needs_complex={needs_complex}, plan_approved={plan_approved} !!!")
+    
+    # If we have a plan and planning mode is OFF, skip to validation (normal continuation)
+    if has_plan and not planning_mode:
+        print("!!! HAS PLAN + NO PLANNING MODE = SKIP TO VALIDATION !!!")
+        logger.info("Plan exists and planning mode is off. Skipping to validation.")
+        return "validate_plan_for_execution"
+    
+    # Otherwise, normal routing (create new plan)
+    if needs_complex:
         if state.get("uploaded_files"):
-            logger.info("Request has files. Routing to preprocess_files.")
             return "preprocess_files"
         else:
-            logger.info("Request has no files. Routing to parse_prompt.")
             return "parse_prompt"
     else:
-        logger.info("Request is simple. Routing to final response generation.")
-        return "generate_final_response"  # For simple responses, we'll use the generate_final_response node
+        return "generate_final_response"
 
 
 def route_after_parse(state: State):
@@ -2594,15 +2781,25 @@ def route_after_parse(state: State):
 
 def should_continue_or_finish(state: State):
     '''This router runs after execution and evaluation to decide the next step.'''
-    if state.get("pending_user_input"):
+    pending = state.get("pending_user_input")
+    task_plan = state.get('task_plan')
+    
+    print(f"!!! SHOULD_CONTINUE_OR_FINISH: pending_user_input={pending}, task_plan_length={len(task_plan) if task_plan else 0} !!!")
+    logger.info(f"Router: pending_user_input={pending}, task_plan={len(task_plan) if task_plan else 0}")
+    
+    if pending:
         # If the evaluation failed and we need user input, go to ask_user
+        print(f"!!! ROUTING TO ASK_USER (pending_user_input=True) !!!")
+        logger.info("Routing to ask_user due to pending_user_input")
         return "ask_user"
-    if not state.get('task_plan'):
+    if not task_plan:
         # If the plan is empty and evaluation passed, we are done
+        print(f"!!! ROUTING TO GENERATE_FINAL_RESPONSE (plan complete) !!!")
         logger.info("Execution plan is complete. Routing to generate_final_response.")
         return "generate_final_response"
     else:
         # If there are more tasks and evaluation passed, continue to next batch
+        print(f"!!! ROUTING TO VALIDATE (more batches) !!!")
         logger.info("Plan has more batches. Routing back to validation for the next batch.")
         return "validate_plan_for_execution"
 
@@ -2616,8 +2813,8 @@ builder.add_node("parse_prompt", parse_prompt)
 builder.add_node("preprocess_files", preprocess_files)
 builder.add_node("agent_directory_search", agent_directory_search)
 builder.add_node("rank_agents", rank_agents)
-builder.add_node("pause_for_user_approval", pause_for_user_approval)
 builder.add_node("plan_execution", plan_execution)
+builder.add_node("pause_for_plan_approval", pause_for_plan_approval)
 builder.add_node("validate_plan_for_execution", validate_plan_for_execution)
 builder.add_node("execute_batch", execute_batch)
 builder.add_node("evaluate_agent_response", evaluate_agent_response)
@@ -2631,7 +2828,9 @@ builder.add_edge("load_history", "analyze_request")
 builder.add_conditional_edges("analyze_request", route_after_analysis, {
     "preprocess_files": "preprocess_files",
     "parse_prompt": "parse_prompt",
-    "generate_final_response": "generate_final_response"
+    "generate_final_response": "generate_final_response",
+    "validate_plan_for_execution": "validate_plan_for_execution",
+    "execute_batch": "execute_batch"
 })
 
 builder.add_edge("preprocess_files", "parse_prompt")
@@ -2643,12 +2842,65 @@ builder.add_conditional_edges("parse_prompt", route_after_parse, {
 
 builder.add_edge("agent_directory_search", "rank_agents")
 builder.add_edge("rank_agents", "plan_execution")
-# After plan creation, pause for user approval of the complete plan
-builder.add_edge("plan_execution", "pause_for_user_approval")
-# After approval, validate and execute
-builder.add_edge("pause_for_user_approval", "validate_plan_for_execution")
-builder.add_edge("execute_batch", "evaluate_agent_response") 
-builder.add_edge("ask_user", "save_history")
+
+# Simple routing: if planning mode, stop for approval; otherwise continue
+def route_after_plan_creation(state: State):
+    '''Stop for approval if planning mode, otherwise continue to execution.'''
+    planning_mode = state.get("planning_mode", False)
+    plan_approved = state.get("plan_approved", False)
+    
+    print(f"!!! ROUTE AFTER PLAN: planning_mode={planning_mode}, plan_approved={plan_approved} !!!")
+    logger.info(f"=== ROUTE AFTER PLAN: planning_mode={planning_mode}, plan_approved={plan_approved} ===")
+    
+    # If planning mode is ON (regardless of plan_approved), pause for approval
+    # The execution will happen in the subgraph after approval
+    if planning_mode:
+        print("!!! PLANNING MODE ON - PAUSING FOR APPROVAL !!!")
+        logger.info("=== ROUTING: Planning mode ON. Pausing for approval ===")
+        # The plan_execution node already set pending_user_input=True and needs_approval=True
+        # Just end the workflow here - execution will happen in subgraph after approval
+        return "save_history"
+    else:
+        print("!!! CONTINUING TO VALIDATION !!!")
+        logger.info("=== ROUTING: Planning mode OFF. Continuing to validation ===")
+        return "validate_plan_for_execution"  # Normal execution
+
+builder.add_conditional_edges("plan_execution", route_after_plan_creation, {
+    "execute_batch": "execute_batch",
+    "validate_plan_for_execution": "validate_plan_for_execution",
+    "save_history": "save_history"
+})
+builder.add_edge("execute_batch", "evaluate_agent_response")
+
+# Route from ask_user based on whether it was for approval or clarification  
+def route_after_ask_user(state: State):
+    '''Routes after ask_user based on context - approval vs clarification.'''
+    plan_approved = state.get("plan_approved")
+    pending_user_input = state.get("pending_user_input")
+    
+    logger.info(f"=== ROUTING AFTER ASK_USER: plan_approved={plan_approved}, pending_user_input={pending_user_input} ===")
+    
+    # Always end if we're waiting for user input (prevents loops)
+    # The only exception is the FIRST time after approval when pending_user_input was just cleared
+    if pending_user_input:
+        logger.info("=== ROUTING: Workflow paused for user input. Routing to save_history (end) ===")
+        return "save_history"
+    
+    # If plan was approved and we're NOT waiting for input, this is the continuation after approval
+    # Route to validation ONLY ONCE
+    if plan_approved:
+        logger.info("=== ROUTING: Plan approved, continuing to validation (ONE TIME ONLY) ===")
+        return "validate_plan_for_execution"
+    
+    # Default: end the workflow
+    logger.info("=== ROUTING: Default route to save_history (end) ===")
+    return "save_history"
+
+builder.add_conditional_edges("ask_user", route_after_ask_user, {
+    "validate_plan_for_execution": "validate_plan_for_execution",
+    "save_history": "save_history"
+})
+
 builder.add_edge("generate_final_response", "render_canvas_output")
 builder.add_edge("render_canvas_output", "save_history")
 builder.add_edge("save_history", END)
@@ -2676,4 +2928,49 @@ graph = builder.compile()
 
 def create_graph_with_checkpointer(checkpointer):
     """Attaches a checkpointer to the graph for persistent memory."""
+    # Don't use interrupt_before - we'll handle pausing manually with pending_user_input
     return builder.compile(checkpointer=checkpointer)
+
+
+# ============================================================================
+# EXECUTION SUBGRAPH - For post-approval execution in planning mode
+# ============================================================================
+
+def create_execution_subgraph(checkpointer):
+    """
+    Creates a lightweight execution-only subgraph for running approved plans.
+    This skips all the planning/parsing/searching steps and goes straight to execution.
+    
+    Flow: load_history → execute_batch → evaluate → generate_final_response → save_history → END
+    """
+    from langgraph.graph import StateGraph, END
+    
+    exec_builder = StateGraph(State)
+    
+    # Add only the nodes needed for execution
+    exec_builder.add_node("load_history", load_conversation_history)
+    exec_builder.add_node("execute_batch", execute_batch)
+    exec_builder.add_node("evaluate_agent_response", evaluate_agent_response)
+    exec_builder.add_node("generate_final_response", generate_final_response)
+    exec_builder.add_node("render_canvas_output", render_canvas_output)
+    exec_builder.add_node("save_history", save_conversation_history)
+    
+    # Set entry point
+    exec_builder.set_entry_point("load_history")
+    
+    # Simple linear flow for execution
+    exec_builder.add_edge("load_history", "execute_batch")
+    exec_builder.add_conditional_edges("execute_batch", should_continue_or_finish, {
+        "validate_plan_for_execution": "execute_batch",  # More batches
+        "generate_final_response": "generate_final_response",
+        "ask_user": "generate_final_response"  # Skip asking user, just generate response
+    })
+    exec_builder.add_edge("evaluate_agent_response", "generate_final_response")
+    exec_builder.add_edge("generate_final_response", "render_canvas_output")
+    exec_builder.add_edge("render_canvas_output", "save_history")
+    exec_builder.add_edge("save_history", END)
+    
+    return exec_builder.compile(checkpointer=checkpointer)
+
+# Create both graphs
+execution_subgraph = None  # Will be initialized when needed

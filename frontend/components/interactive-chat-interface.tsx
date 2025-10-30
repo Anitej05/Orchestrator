@@ -4,9 +4,12 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
+import { Switch } from '@/components/ui/switch';
 import { MessageCircle, Clock, CheckCircle, Paperclip, X, File as FileIcon, AlertCircle, Loader2, Brain, Search, Users, FileText, Play, BarChart3 } from 'lucide-react';
 import Markdown from '@/components/ui/markdown';
 import { type ProcessResponse, type ConversationState, type Message, type Attachment } from '@/lib/types';
+import { PlanApprovalModal } from '@/components/plan-approval-modal';
+import { useConversationStore } from '@/lib/conversation-store';
 
 interface InteractiveChatInterfaceProps {
   onWorkflowComplete?: (result: ProcessResponse) => void;
@@ -14,8 +17,8 @@ interface InteractiveChatInterfaceProps {
   className?: string;
   state: ConversationState;
   isLoading: boolean;
-  startConversation: (input: string, files?: File[]) => Promise<void>;
-  continueConversation: (input: string, files?: File[]) => Promise<void>;
+  startConversation: (input: string, files?: File[], planningMode?: boolean) => Promise<void>;
+  continueConversation: (input: string, files?: File[], planningMode?: boolean) => Promise<void>;
   resetConversation: () => void;
   onViewCanvas?: (canvasContent: string, canvasType: 'html' | 'markdown') => void;
 }
@@ -53,7 +56,43 @@ export function InteractiveChatInterface({
   const [userResponse, setUserResponse] = useState('');
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
   const [previewUrls, setPreviewUrls] = useState<string[]>([]);
+  const [planningMode, setPlanningMode] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Plan approval modal handlers
+  const handleApprovePlan = async () => {
+    console.log('Plan approved by user');
+    // DON'T clear isWaitingForUser yet - continueConversation needs to see it's true
+    // Only clear approval_required to close the modal
+    useConversationStore.setState({ 
+      approval_required: false
+    });
+    // continueConversation will capture isWaitingForUser=true and send user_response
+    await continueConversation('approve', [], false);
+  };
+
+  const handleCancelPlan = async () => {
+    console.log('Plan cancelled by user');
+    // DON'T clear isWaitingForUser yet - continueConversation needs to see it's true
+    // Only clear approval_required to close the modal
+    useConversationStore.setState({ 
+      approval_required: false
+    });
+    // continueConversation will capture isWaitingForUser=true and send user_response
+    await continueConversation('cancel', [], false);
+  };
+
+  const handleModifyPlan = async () => {
+    console.log('User wants to modify plan');
+    // DON'T clear isWaitingForUser yet - continueConversation needs to see it's true
+    // Only clear approval_required to close the modal
+    useConversationStore.setState({ 
+      approval_required: false
+    });
+    // For now, just cancel and let user provide new instructions
+    // continueConversation will capture isWaitingForUser=true and send user_response
+    await continueConversation('cancel', [], false);
+  };
 
   useEffect(() => {
     const urls = attachedFiles
@@ -90,7 +129,7 @@ export function InteractiveChatInterface({
     if (state.isWaitingForUser) {
       // User is responding to a question from the system
       if (userResponse.trim()) {
-        await continueConversation(userResponse, attachedFiles);
+        await continueConversation(userResponse, attachedFiles, planningMode);
         setUserResponse('');
         setAttachedFiles([]); // Clear files after submission
       }
@@ -100,11 +139,11 @@ export function InteractiveChatInterface({
       
       if (inputValue.trim() || attachedFiles.length > 0) {
         if (hasExistingConversation) {
-          // Continue existing conversation
-          await continueConversation(inputValue, attachedFiles);
+          // Continue existing conversation with planning mode
+          await continueConversation(inputValue, attachedFiles, planningMode);
         } else {
-          // Start new conversation
-          await startConversation(inputValue, attachedFiles);
+          // Start new conversation with planning mode
+          await startConversation(inputValue, attachedFiles, planningMode);
         }
         setInputValue('');
         setAttachedFiles([]);
@@ -192,102 +231,7 @@ export function InteractiveChatInterface({
               </div>
             );
           })}
-
-        {/* Orchestration Pause Section - Show Continue Button */}
-        {state.status === 'orchestration_paused' && (
-          <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="text-lg font-semibold text-blue-900 flex items-center gap-2">
-                <AlertCircle className="w-5 h-5" />
-                Orchestration Paused - Review & Continue
-              </h3>
-            </div>
-
-            {/* Show Parsed Tasks */}
-            {state.parsed_tasks && state.parsed_tasks.length > 0 && (
-              <div className="mb-4">
-                <h4 className="text-sm font-medium text-blue-800 mb-2">Parsed Tasks:</h4>
-                <div className="space-y-2">
-                  {state.parsed_tasks.map((task: any, index: number) => (
-                    <div key={index} className="p-3 bg-white rounded-lg border border-blue-100">
-                      <p className="text-sm text-gray-700">{task.description || task.task_description}</p>
-                      {task.capability && (
-                        <Badge variant="outline" className="mt-1 text-xs">
-                          {task.capability}
-                        </Badge>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Show Selected Agents */}
-            {state.task_agent_pairs && state.task_agent_pairs.length > 0 && (
-              <div className="mb-4">
-                <h4 className="text-sm font-medium text-blue-800 mb-2">Selected Agents:</h4>
-                <div className="space-y-2">
-                  {state.task_agent_pairs.map((pair: any, index: number) => (
-                    <div key={index} className="p-3 bg-white rounded-lg border border-blue-100">
-                      <div className="flex justify-between items-start">
-                        <p className="text-sm text-gray-700 flex-1">{pair.task?.description || pair.task?.task_description}</p>
-                        <Badge className="ml-2 bg-blue-600 text-white">
-                          {pair.agent?.name || 'Unknown Agent'}
-                        </Badge>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Continue Button */}
-            <Button 
-              onClick={async () => {
-                await continueConversation("continue_orchestration");
-              }}
-              className="w-full bg-green-600 hover:bg-green-700 text-white font-medium"
-            >
-              <CheckCircle className="w-4 h-4 mr-2" />
-              Continue Orchestration
-            </Button>
-          </div>
-        )}
       </div>
-
-      {/* Accept/Modify Buttons - Above input box (NOT in chat flow) */}
-      {state.status === 'orchestration_paused' && (
-        <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 flex items-center justify-between">
-          <div className="flex items-center space-x-2">
-            <AlertCircle className="w-5 h-5 text-blue-600" />
-            <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
-              Review the execution plan in the Plan tab, then approve to continue
-            </span>
-          </div>
-          <div className="flex space-x-2">
-            <Button 
-              onClick={async () => {
-                await continueConversation("continue_orchestration");
-              }}
-              className="bg-green-600 hover:bg-green-700"
-              disabled={isLoading}
-            >
-              <CheckCircle className="w-4 h-4 mr-2" />
-              Accept & Continue
-            </Button>
-            <Button 
-              variant="outline"
-              onClick={() => {
-                // TODO: Implement modify functionality
-                console.log('Modify plan - feature to be implemented');
-              }}
-              disabled={isLoading}
-            >
-              Modify Plan
-            </Button>
-          </div>
-        </div>
-      )}
 
       {/* Input Form */}
       <div className="p-4 border-t border-gray-200 dark:border-gray-700/50 bg-gray-50/80 dark:bg-gray-900/80 backdrop-blur-lg rounded-b-lg">
@@ -387,6 +331,7 @@ export function InteractiveChatInterface({
           </div>
         )}
 
+        {!state.approval_required && (
         <form onSubmit={handleSubmit} className="space-y-4">
           {state.isWaitingForUser ? (
             <div className="space-y-2">
@@ -425,6 +370,28 @@ export function InteractiveChatInterface({
                     <X className="w-3 h-3 cursor-pointer" onClick={() => removeFile(file.name)} />
                   </Badge>
                 ))}
+              </div>
+
+              {/* Planning Mode Toggle */}
+              <div className="flex items-center justify-between px-1 py-2">
+                <div className="flex items-center gap-2">
+                  <Switch
+                    id="planning-mode"
+                    checked={planningMode}
+                    onCheckedChange={setPlanningMode}
+                  />
+                  <label 
+                    htmlFor="planning-mode" 
+                    className="text-sm font-medium cursor-pointer select-none"
+                  >
+                    Planning Mode
+                  </label>
+                </div>
+                {planningMode && (
+                  <Badge variant="secondary" className="text-xs">
+                    Will pause for approval
+                  </Badge>
+                )}
               </div>
 
               <div className="space-y-2">
@@ -480,9 +447,10 @@ export function InteractiveChatInterface({
             </div>
           </div>
         </form>
+        )}
 
         {/* Status Indicator for user input */}
-        {state.isWaitingForUser && !isLoading && (
+        {state.isWaitingForUser && !isLoading && !state.approval_required && (
           <div className="status-indicator mt-4 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/50 rounded-xl shadow-sm">
             <div className="flex items-center space-x-2">
               <Clock className="w-4 h-4 text-yellow-600" />
@@ -491,6 +459,19 @@ export function InteractiveChatInterface({
           </div>
         )}
       </div>
+
+      {/* Plan Approval Modal */}
+      <PlanApprovalModal
+        isOpen={state.approval_required === true}
+        onClose={() => {}}
+        onApprove={handleApprovePlan}
+        onModify={handleModifyPlan}
+        onCancel={handleCancelPlan}
+        taskPlan={state.task_plan || []}
+        taskAgentPairs={state.task_agent_pairs || []}
+        estimatedCost={state.estimated_cost || 0}
+        taskCount={state.task_count || 0}
+      />
     </div>
   );
 }

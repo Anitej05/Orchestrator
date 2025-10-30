@@ -1,9 +1,3 @@
-// Add global property for duplicate resume prevention
-declare global {
-  interface Window {
-    __orbimesh_resume_sent?: boolean;
-  }
-}
 "use client"
 
 import React, { useState, useEffect } from 'react';
@@ -53,9 +47,9 @@ export function WebSocketWorkflow({
   
   const sendMessage = async (input: string, threadId?: string) => {
     if (threadId) {
-      await continueConversation(input);
+      await continueConversation(input, [], false);
     } else {
-      await startConversation(input);
+      await startConversation(input, [], false);
     }
   };
   
@@ -221,79 +215,8 @@ export function WebSocketWorkflow({
             </div>
           )}
 
-          {/* Orchestration Pause - Show Parsed Tasks and Selected Agents */}
-          {conversationState.status === 'orchestration_paused' && (
-            <div className="space-y-4 p-4 bg-blue-50 border-2 border-blue-300 rounded-lg">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center space-x-2">
-                  <Pause className="w-5 h-5 text-blue-600" />
-                  <span className="font-semibold text-blue-900">Orchestration Paused</span>
-                </div>
-                <Badge variant="outline" className="bg-blue-100">Review Required</Badge>
-              </div>
-              
-              <p className="text-sm text-blue-800">
-                Please review the parsed tasks and selected agents below. Click Continue to proceed with execution.
-              </p>
-
-              {/* Parsed Tasks */}
-              {conversationState.parsed_tasks && conversationState.parsed_tasks.length > 0 && (
-                <div className="space-y-2">
-                  <h4 className="font-medium text-blue-900">Parsed Tasks:</h4>
-                  <div className="space-y-2">
-                    {conversationState.parsed_tasks.map((task: any, index: number) => (
-                      <div key={index} className="p-3 bg-white border border-blue-200 rounded">
-                        <div className="font-medium text-sm text-gray-900">{task.task_name}</div>
-                        <div className="text-xs text-gray-600 mt-1">{task.task_description}</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Selected Agents */}
-              {conversationState.task_agent_pairs && conversationState.task_agent_pairs.length > 0 && (
-                <div className="space-y-2">
-                  <h4 className="font-medium text-blue-900">Selected Agents:</h4>
-                  <div className="space-y-2">
-                    {conversationState.task_agent_pairs.map((pair: any, index: number) => (
-                      <div key={index} className="p-3 bg-white border border-blue-200 rounded">
-                        <div className="flex items-center justify-between mb-2">
-                          <span className="font-medium text-sm text-gray-900">{pair.task_name}</span>
-                          <Badge className="bg-blue-600">{pair.primary?.name || 'Unknown Agent'}</Badge>
-                        </div>
-                        <div className="text-xs text-gray-600">{pair.task_description}</div>
-                        {pair.fallbacks && pair.fallbacks.length > 0 && (
-                          <div className="mt-2 text-xs text-gray-500">
-                            Fallbacks: {pair.fallbacks.map((f: any) => f.name).join(', ')}
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-                {/* Accept/Continue button: disables during resume, prevents duplicate requests */}
-                {/* Only one Accept/Continue button exists in this app, here. This button resumes orchestration and disables itself to prevent duplicates. */}
-                <Button 
-                  onClick={() => {
-                    if (currentThreadId && !window.__orbimesh_resume_sent) {
-                      sendMessage('continue_orchestration', currentThreadId);
-                      window.__orbimesh_resume_sent = true; // Prevent duplicate resume requests
-                    }
-                  }}
-                  className="w-full bg-blue-600 hover:bg-blue-700"
-                  disabled={isConversationLoading || window.__orbimesh_resume_sent}
-                >
-                  <Play className="w-4 h-4 mr-2" />
-                  {isConversationLoading ? 'Continuing...' : 'Continue Orchestration'}
-                </Button>
-            </div>
-          )}
-
           {/* User Input for Interactive Questions */}
-          {waitingForUser && currentQuestion && conversationState.status !== 'orchestration_paused' && (
+          {waitingForUser && currentQuestion && (
             <div className="space-y-3 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
               <div className="flex items-center space-x-2">
                 <MessageCircle className="w-4 h-4 text-yellow-600" />
