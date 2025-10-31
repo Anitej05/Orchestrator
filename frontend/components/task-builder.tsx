@@ -7,6 +7,7 @@ import type { ProcessResponse, TaskAgentPair } from "@/lib/types"
 import { useConversationStore } from "@/lib/conversation-store"
 import WorkflowOrchestration from "./workflow-orchestration"
 import dynamic from "next/dynamic"
+import { useUser } from "@clerk/nextjs"
  
 
 const InteractiveChatInterface = dynamic(
@@ -43,6 +44,7 @@ interface TaskBuilderProps {
     onThreadIdUpdate?: (threadId: string) => void;
     onExecutionResultsUpdate?: (results: ExecutionResult[]) => void;
     onViewCanvas?: (canvasContent: string, canvasType: 'html' | 'markdown') => void;
+    owner?: string;
 }
 
 export default function TaskBuilder({
@@ -54,9 +56,11 @@ export default function TaskBuilder({
     apiResponseData,
     onThreadIdUpdate,
     onExecutionResultsUpdate,
-    onViewCanvas
+    onViewCanvas,
+    owner
 }: TaskBuilderProps) {
   const { toast } = useToast()
+  const { user } = useUser()
   
   // Get conversation state from Zustand store
   const conversationState = useConversationStore();
@@ -98,6 +102,7 @@ export default function TaskBuilder({
         continueConversation={continueConversation}
         resetConversation={resetConversation}
         onViewCanvas={onViewCanvas}
+        owner={owner}
       />
 
       {/* Hidden component to handle execution logic */}

@@ -15,6 +15,7 @@ import { useToast } from "@/hooks/use-toast"
 import { useConversationStore } from "@/lib/conversation-store"
 import { useWebSocketManager } from "@/hooks/use-websocket-conversation"
 import { OrchestrationProgress } from "@/components/orchestration-progress"
+import { useUser } from "@clerk/nextjs"
 import {
   ResizablePanelGroup,
   ResizablePanel,
@@ -43,6 +44,7 @@ interface ApiResponse {
 
 function HomeContent() {
   const { open } = useSidebar()
+  const { user } = useUser()
   const [taskAgentPairs, setTaskAgentPairs] = useState<TaskAgentPair[]>([])
   const [selectedAgents, setSelectedAgents] = useState<Record<string, string>>({})
   const [isExecuting, setIsExecuting] = useState(false)
@@ -250,6 +252,7 @@ function HomeContent() {
                   onThreadIdUpdate={handleThreadIdUpdate}
                   onExecutionResultsUpdate={handleExecutionResultsUpdate}
                   onViewCanvas={handleViewCanvas}
+                  owner={user?.id}
                 />
               </main>
             </ResizablePanel>

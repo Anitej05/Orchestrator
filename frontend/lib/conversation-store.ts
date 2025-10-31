@@ -38,8 +38,8 @@ const createMessageId = (content: string, type: string, timestampMs: number): st
 interface ConversationStore extends ConversationState {
   isLoading: boolean;
   actions: {
-    startConversation: (input: string, files?: File[], planningMode?: boolean) => Promise<void>;
-    continueConversation: (input: string, files?: File[], planningMode?: boolean) => Promise<void>;
+    startConversation: (input: string, files?: File[], planningMode?: boolean, owner?: string) => Promise<void>;
+    continueConversation: (input: string, files?: File[], planningMode?: boolean, owner?: string) => Promise<void>;
     loadConversation: (threadId: string) => Promise<void>;
     resetConversation: () => void;
     // Internal action to set the full state from an API response
@@ -69,7 +69,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
   isLoading: false,
 
   actions: {
-    startConversation: async (input: string, files: File[] = [], planningMode: boolean = false) => {
+    startConversation: async (input: string, files: File[] = [], planningMode: boolean = false, owner?: string) => {
       // Clear previous conversation state when starting a new conversation
       console.log(`Starting conversation with planning mode: ${planningMode}`);
       set({ 
@@ -128,6 +128,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
                 thread_id: get().thread_id,
                 prompt: input,
                 planning_mode: planningMode,
+                owner: owner,
                 files: uploadedFiles.map(file => ({
                   file_name: file.file_name,
                   file_path: file.file_path,
@@ -176,7 +177,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
       }
     },
 
-    continueConversation: async (input: string, files: File[] = [], planningMode: boolean = false) => {
+    continueConversation: async (input: string, files: File[] = [], planningMode: boolean = false, owner?: string) => {
       const thread_id = get().thread_id;
       if (!thread_id) {
         console.error('Cannot continue conversation without a thread ID.');
@@ -248,6 +249,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
                 // Use 'user_response' only when answering a question, otherwise use 'prompt'
                 ...(isAnsweringQuestion ? { user_response: input } : { prompt: input }),
                 planning_mode: planningMode,
+                owner: owner,
                 files: uploadedFiles.map(file => ({
                   file_name: file.file_name,
                   file_path: file.file_path,
@@ -320,6 +322,10 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
           },
         });
         if (!response.ok) {
+          if (response.status === 404) {
+            console.log('Conversation not found, starting fresh');
+            return;
+          }
           const errorText = await response.text();
           console.error('Failed to load conversation:', response.status, errorText);
           throw new Error(`Failed to load conversation history: ${response.status}`);

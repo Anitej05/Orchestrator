@@ -124,7 +124,12 @@ def verify_clerk_token(authorization_header: Optional[str]) -> Dict[str, Any]:
 
 def get_user_from_request(request: Request):
     auth_header = request.headers.get("Authorization")
+    logger.info(f"Authorization header present: {bool(auth_header)}")
+    if auth_header:
+        logger.info(f"Authorization header value: {auth_header[:50]}...")
+    
     if not auth_header or not auth_header.startswith("Bearer "):
+        logger.error("Missing or invalid Authorization header")
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
     
     token = auth_header.split(" ")[1]
@@ -152,6 +157,7 @@ def get_user_from_request(request: Request):
                 public_key = jwk_to_pem(key)
                 break
         if not public_key:
+            logger.error("Invalid token: No matching key")
             raise HTTPException(status_code=401, detail="Invalid token: No matching key")
         # Decode and verify
         payload = jwt.decode(
@@ -161,6 +167,8 @@ def get_user_from_request(request: Request):
             audience=os.getenv("CLERK_JWT_AUDIENCE"),
             issuer=os.getenv("CLERK_JWT_ISSUER")
         )
+        logger.info(f"Full JWT payload: {payload}")
+        logger.info(f"User authenticated successfully: user_id={payload.get('sub')}, email={payload.get('email')}")
         return payload
     except jwt.ExpiredSignatureError:
         logger.error("JWT expired")
@@ -169,5 +177,3 @@ def get_user_from_request(request: Request):
         # python-jose does not have InvalidAudienceError/InvalidIssuerError, so handle generically
         logger.error(f"JWT error: {e}")
         raise HTTPException(status_code=401, detail=f"JWT error: {str(e)}")
-        logger.error(f"JWT verification failed: {str(e)}")
-        raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")

@@ -2582,6 +2582,8 @@ def save_conversation_history(state: State, config: RunnableConfig):
         # Write to file in a consistent JSON format
         with open(history_path, "w", encoding="utf-8") as f:
             json.dump(serializable_state, f, ensure_ascii=False, indent=2)
+        
+        logger.info(f"Conversation history successfully saved for thread {thread_id} to {history_path}")
 
     except Exception as e:
         logger.error(f"Failed to write conversation history for {thread_id} to {history_path}: {e}")

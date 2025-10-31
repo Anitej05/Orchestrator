@@ -56,7 +56,7 @@ from sentence_transformers import SentenceTransformer
 # --- Local Application Imports ---
 CONVERSATION_HISTORY_DIR = "conversation_history"
 from database import SessionLocal
-from models import Agent, StatusEnum, AgentCapability, AgentEndpoint, EndpointParameter
+from models import Agent, StatusEnum, AgentCapability, AgentEndpoint, EndpointParameter, UserThread
 from schemas import AgentCard, ProcessRequest, ProcessResponse, PlanResponse, FileObject
 from orchestrator.graph import ForceJsonSerializer, graph, create_graph_with_checkpointer, create_execution_subgraph, messages_from_dict, messages_to_dict, serialize_complex_object
 from orchestrator.state import State
@@ -638,7 +638,10 @@ async def execute_orchestration(
 
         owner_id = None
         if owner:
-            owner_id = owner.get("user_id") or owner.get("sub") or owner.get("id")
+            if isinstance(owner, str):
+                owner_id = owner
+            else:
+                owner_id = owner.get("user_id") or owner.get("sub") or owner.get("id")
         if not owner_id:
             logger.error(f"Missing owner_id for thread {thread_id}. Conversation will NOT be saved.")
             raise ValueError("Owner is required for saving conversation history.")
@@ -767,9 +770,23 @@ async def find_agents(request: ProcessRequest, http_request: Request):
         try:
             auth_header = http_request.headers.get("Authorization")
             owner = get_user_from_request(auth_header)
+            logger.info(f"User authenticated for /api/chat: user_id={owner.get('sub')}, thread_id={thread_id}")
         except Exception:
             # If auth fails, block the request
             raise
+
+        # Store user-thread relationship in database
+        db = SessionLocal()
+        try:
+            user_thread = UserThread(user_id=owner.get("sub"), thread_id=thread_id)
+            db.add(user_thread)
+            db.commit()
+            logger.info(f"Stored user-thread relationship: user_id={owner.get('sub')}, thread_id={thread_id}")
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Failed to store user-thread relationship: {e}")
+        finally:
+            db.close()
 
         final_state = await execute_orchestration(
             prompt=request.prompt,
@@ -841,6 +858,7 @@ async def continue_conversation(user_response: UserResponse, http_request: Reque
         # Extract user identity
         auth_header = http_request.headers.get("Authorization")
         owner = get_user_from_request(auth_header)
+        logger.info(f"User authenticated for /api/chat/continue: user_id={owner.get('sub')}, thread_id={user_response.thread_id}")
 
         # Enforce ownership before continuing
         # If existing conversation has owner and it doesn't match, block
@@ -1011,30 +1029,21 @@ async def debug_conversations():
 @app.get("/api/conversations", response_model=List[str])
 async def get_all_conversations(http_request: Request):
     """
-    Retrieves a list of all conversation thread_ids that have history.
+    Retrieves a list of all conversation thread_ids for the authenticated user from the database.
     """
-    if not os.path.isdir(CONVERSATION_HISTORY_DIR):
-        return []
-    
-    files = os.listdir(CONVERSATION_HISTORY_DIR)
     # Extract user
     owner = get_user_from_request(http_request)
-    user_id = owner.get("user_id")
+    user_id = owner.get("sub") or owner.get("user_id") or owner.get("id")
+    logger.info(f"Fetching conversations for user_id={user_id}")
 
-    # Return only conversations owned by user
-    files_with_path = [os.path.join(CONVERSATION_HISTORY_DIR, f) for f in files if f.endswith(".json")]
-    files_with_path.sort(key=os.path.getmtime, reverse=True)
-    allowed_thread_ids: List[str] = []
-    for fp in files_with_path:
-        try:
-            with open(fp, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            file_owner = (data or {}).get("owner")
-            if file_owner and file_owner.get("user_id") == user_id:
-                allowed_thread_ids.append(os.path.splitext(os.path.basename(fp))[0])
-        except Exception:
-            continue
-    return allowed_thread_ids
+    db = SessionLocal()
+    try:
+        user_threads = db.query(UserThread).filter(UserThread.user_id == user_id).all()
+        thread_ids = [ut.thread_id for ut in user_threads]
+        logger.info(f"Found {len(thread_ids)} conversations for user_id={user_id}")
+        return thread_ids
+    finally:
+        db.close()
 
 @app.get("/api/conversations/{thread_id}")
 async def get_conversation_history(thread_id: str, http_request: Request):
@@ -1054,12 +1063,14 @@ async def get_conversation_history(thread_id: str, http_request: Request):
         # Enforce ownership only if owner field exists and is not null
         try:
             owner = get_user_from_request(http_request)
+            logger.info(f"User authenticated for /api/conversations/{thread_id}: user_id={owner.get('sub')}")
         except HTTPException as auth_exc:
             # Return 401 if missing/invalid Authorization header
             raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
         file_owner = (history_data or {}).get("owner")
         if file_owner is not None:
             if file_owner.get("user_id") != owner.get("user_id"):
+                logger.warning(f"Access denied for user_id={owner.get('user_id')} to thread_id={thread_id}, owned by {file_owner.get('user_id')}")
                 raise HTTPException(status_code=403, detail="You do not have access to this conversation")
         # If owner field is missing or null, allow access
         # Restore orchestration pause status if present
@@ -1138,8 +1149,50 @@ async def websocket_chat(websocket: WebSocket):
             owner = data.get("owner")  # Expected shape: { user_id, email }
             planning_mode = data.get("planning_mode", False)  # Get planning mode flag
 
+            # Get thread_id from client, or generate a new one if not provided
+            thread_id = data.get("thread_id") or str(uuid.uuid4())
+            prompt = data.get("prompt")
+            user_response = data.get("user_response")  # For continuing conversations
+            files_data = data.get("files", [])  # Get files from WebSocket message
+            # Pass through owner info if frontend sends Clerk-verified identity
+            owner = data.get("owner")  # Expected shape: { user_id, email }
+            planning_mode = data.get("planning_mode", False)  # Get planning mode flag
+
             logger.info(f"WebSocket received message with thread_id: {thread_id}, planning_mode: {planning_mode}")
             logger.info(f"Message details: has_prompt={bool(prompt)}, has_user_response={bool(user_response)}, prompt_value='{prompt[:50] if prompt else None}', user_response_value='{user_response[:50] if user_response else None}'")
+            logger.info(f"Owner info: owner={owner}, type={type(owner)}")
+
+            # Determine if this is a new thread
+            is_new_thread = "thread_id" not in data or not data.get("thread_id")
+            
+            # For new threads, owner is required
+            if is_new_thread and not owner:
+                await websocket.send_json({
+                    "node": "__error__",
+                    "error": "Owner information is required for new conversations",
+                    "thread_id": thread_id,
+                    "timestamp": time.time()
+                })
+                continue  # Continue waiting for messages
+            
+            # For existing threads, if owner not provided, try to get from database
+            if not is_new_thread and not owner:
+                try:
+                    from database import SessionLocal
+                    from models import UserThread
+                    
+                    db = SessionLocal()
+                    try:
+                        user_thread = db.query(UserThread).filter_by(thread_id=thread_id).first()
+                        if user_thread:
+                            owner = user_thread.user_id
+                            logger.info(f"Retrieved owner from database for existing thread {thread_id}: {owner}")
+                        else:
+                            logger.warning(f"No user-thread relationship found for thread {thread_id}")
+                    finally:
+                        db.close()
+                except Exception as e:
+                    logger.error(f"Failed to retrieve owner for thread {thread_id}: {e}")
 
             if not prompt and not user_response:
                 await websocket.send_json({
@@ -1149,6 +1202,32 @@ async def websocket_chat(websocket: WebSocket):
                     "timestamp": time.time()
                 })
                 continue  # Continue waiting for messages
+
+            # If this is a new thread (generated, not provided), save user-thread relationship immediately
+            if is_new_thread:
+                try:
+                    from database import SessionLocal
+                    from models import UserThread
+                    
+                    owner_id = owner if isinstance(owner, str) else owner.get("user_id") or owner.get("sub") or owner.get("id")
+                    if owner_id:
+                        db = SessionLocal()
+                        try:
+                            # Check if relationship already exists
+                            existing = db.query(UserThread).filter_by(user_id=owner_id, thread_id=thread_id).first()
+                            if not existing:
+                                user_thread = UserThread(user_id=owner_id, thread_id=thread_id)
+                                db.add(user_thread)
+                                db.commit()
+                                logger.info(f"Created user-thread relationship: user_id={owner_id}, thread_id={thread_id}")
+                            else:
+                                logger.info(f"User-thread relationship already exists: user_id={owner_id}, thread_id={thread_id}")
+                        finally:
+                            db.close()
+                    else:
+                        logger.error(f"Could not extract owner_id from owner: {owner}")
+                except Exception as e:
+                    logger.error(f"Failed to save user-thread relationship for thread {thread_id}: {e}")
 
             logger.info(f"Received {'prompt' if prompt else 'user response'} for thread_id {thread_id}")
 
@@ -1270,7 +1349,10 @@ async def websocket_chat(websocket: WebSocket):
 
             owner_id = None
             if owner:
-                owner_id = owner.get("user_id") or owner.get("sub") or owner.get("id")
+                if isinstance(owner, str):
+                    owner_id = owner
+                else:
+                    owner_id = owner.get("user_id") or owner.get("sub") or owner.get("id")
             if not owner_id:
                 logger.error(f"Missing owner_id for thread {thread_id}. Conversation will NOT be saved.")
                 raise ValueError("Owner is required for saving conversation history.")
@@ -1484,9 +1566,99 @@ def health_check():
     """Simple health check endpoint."""
     return {"status": "ok"}
 
+@app.get("/api/conversations/{thread_id}")
+def get_conversation(thread_id: str, request: Request, db: Session = Depends(get_db)):
+    """
+    Get a conversation by thread_id, ensuring the user owns it.
+    """
+    try:
+        logger.info(f"Attempting to get conversation {thread_id}")
+        user = get_user_from_request(request)
+        user_id = user.get("user_id") or user.get("sub") or user.get("id")
+        logger.info(f"Extracted user_id: {user_id} from JWT payload")
+        
+        if not user_id:
+            raise HTTPException(status_code=401, detail="User not authenticated")
+        
+        # Check if user owns this thread
+        user_thread = db.query(UserThread).filter_by(user_id=user_id, thread_id=thread_id).first()
+        logger.info(f"User-thread lookup: user_id={user_id}, thread_id={thread_id}, found={bool(user_thread)}")
+        if not user_thread:
+            logger.warning(f"Access denied for user_id={user_id} to thread_id={thread_id}, owned by {user_thread.user_id if user_thread else 'unknown'}")
+            raise HTTPException(status_code=404, detail="Conversation not found or access denied")
+        
+        # Load conversation from file
+        history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
+        if not os.path.exists(history_path):
+            raise HTTPException(status_code=404, detail="Conversation file not found")
+        
+        with open(history_path, 'r', encoding='utf-8') as f:
+            conversation_data = json.load(f)
+        
+        return conversation_data
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error loading conversation {thread_id}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/api/conversations")
+def list_conversations(request: Request, db: Session = Depends(get_db)):
+    """
+    List all conversations for the authenticated user.
+    """
+    try:
+        logger.info("Attempting to list conversations")
+        user = get_user_from_request(request)
+        user_id = user.get("user_id") or user.get("sub") or user.get("id")
+        logger.info(f"Extracted user_id for list: {user_id}")
+        
+        if not user_id:
+            raise HTTPException(status_code=401, detail="User not authenticated")
+        
+        # Get all threads for this user
+        user_threads = db.query(UserThread).filter_by(user_id=user_id).all()
+        logger.info(f"Found {len(user_threads)} conversations for user {user_id}")
+        
+        conversations = []
+        for user_thread in user_threads:
+            thread_id = user_thread.thread_id
+            history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
+            
+            if os.path.exists(history_path):
+                try:
+                    with open(history_path, 'r', encoding='utf-8') as f:
+                        conversation_data = json.load(f)
+                    
+                    # Add basic info
+                    conversations.append({
+                        "thread_id": thread_id,
+                        "created_at": user_thread.created_at.isoformat(),
+                        "last_message": conversation_data.get("messages", [])[-1] if conversation_data.get("messages") else None,
+                        "status": conversation_data.get("status", "unknown")
+                    })
+                except Exception as e:
+                    logger.error(f"Error loading conversation {thread_id}: {e}")
+                    # Still include in list but with error status
+                    conversations.append({
+                        "thread_id": thread_id,
+                        "created_at": user_thread.created_at.isoformat(),
+                        "error": "Failed to load conversation data",
+                        "status": "error"
+                    })
+        
+        return {"conversations": conversations}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error listing conversations: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
 if __name__ == "__main__":
     # Start all agent servers in separate terminals
-    start_agent_servers()
+    # start_agent_servers()  # Temporarily disabled for testing
 
     # Run the main FastAPI app
     import uvicorn
