@@ -3,6 +3,7 @@ import uuid
 import logging
 import json
 import time
+import asyncio
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
 from pydantic.networks import HttpUrl
@@ -100,13 +101,31 @@ conversation_store: Dict[str, Dict[str, Any]] = {}
 from threading import Lock
 store_lock = Lock()
 
+# Global store for live canvas updates during browser execution
+live_canvas_updates: Dict[str, Dict[str, Any]] = {}
+canvas_lock = Lock()
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Allow all origins
     allow_credentials=True,
     allow_methods=["*"], # Allow all methods
     allow_headers=["*"],  # Allow all headers
+    expose_headers=["*"],  # Expose all headers
 )
+
+# --- Static Files for Screenshots ---
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
+
+# Create storage directory if it doesn't exist
+storage_path = Path("storage").absolute()
+storage_path.mkdir(exist_ok=True)
+(storage_path / "images").mkdir(exist_ok=True)
+
+# Mount storage directory for serving screenshots
+app.mount("/storage", StaticFiles(directory=str(storage_path)), name="storage")
+logger.info(f"Mounted /storage for serving screenshot files from {storage_path}")
 
 # --- Sentence Transformer Model Loading ---
 model = SentenceTransformer('all-mpnet-base-v2')
@@ -158,6 +177,8 @@ def start_agent_servers():
     Finds and starts agent servers, with enhanced logging and better error handling
     to track which agents start successfully and which fail.
     """
+    global agent_processes
+    
     # Use absolute path based on the project root directory
     project_root = os.path.dirname(os.path.abspath(__file__))  # This gets the backend directory
     agents_dir = os.path.join(project_root, "agents")
@@ -214,6 +235,7 @@ def start_agent_servers():
             log_path = os.path.join(logs_dir, f"{agent_file}.log")
 
             # Create the subprocess differently based on the OS
+            process = None
             if platform.system() == "Windows":
                 # For Windows, use subprocess.Popen with proper parameters to run in background
                 try:
@@ -222,8 +244,10 @@ def start_agent_servers():
                             [sys.executable, agent_path],
                             stdout=log_file,
                             stderr=log_file,
-                            creationflags=subprocess.CREATE_NEW_CONSOLE if os.environ.get('DEBUG_AGENT_STARTUP') else subprocess.CREATE_NEW_PROCESS_GROUP
+                            creationflags=subprocess.CREATE_NO_WINDOW  # Run without console window
                         )
+                        # Track the process globally
+                        agent_processes.append(process)
                 except Exception as e:
                     logger.error(f"Failed to start {agent_file} using Popen: {e}")
                     # Fallback to the start command
@@ -237,6 +261,8 @@ def start_agent_servers():
                         stdout=log_file,
                         stderr=log_file
                     )
+                    # Track the process globally
+                    agent_processes.append(process)
 
             # Wait for the port to be in use with a timeout
             # With lazy imports and reload=False, agents should start quickly
@@ -1009,7 +1035,13 @@ async def websocket_chat(websocket: WebSocket):
     Uses the unified orchestration service with streaming enabled.
     Now supports interactive workflows with user input.
     """
-    await websocket.accept()
+    try:
+        await websocket.accept()
+        logger.info(f"WebSocket connection accepted from {websocket.client}")
+    except Exception as e:
+        logger.error(f"Failed to accept WebSocket connection: {e}")
+        return
+    
     thread_id = None  # Initialize thread_id to None
     
     try:
@@ -1108,15 +1140,56 @@ async def websocket_chat(websocket: WebSocket):
                         except Exception as e:
                             logger.error(f"Failed to create FileObject from {file_data}: {e}")
             
-            # Use unified orchestration service with streaming
-            final_state = await execute_orchestration(
-                prompt=prompt,
-                thread_id=thread_id,
-                user_response=user_response,
-                files=file_objects if file_objects else None,
-                stream_callback=stream_callback,
-                planning_mode=planning_mode
-            )
+            # Start background task to poll for live canvas updates
+            polling_active = True
+            async def poll_live_canvas():
+                last_update_time = 0
+                while polling_active:
+                    await asyncio.sleep(0.5)  # Poll every 500ms
+                    try:
+                        # Check if there's a live canvas update in conversation store
+                        with store_lock:
+                            if thread_id in conversation_store:
+                                state = conversation_store[thread_id]
+                                live_update = state.get('live_canvas_update')
+                                if live_update and live_update.get('timestamp', 0) > last_update_time:
+                                    # New canvas update available
+                                    await websocket.send_json({
+                                        "node": "__live_canvas__",
+                                        "thread_id": thread_id,
+                                        "data": {
+                                            "has_canvas": live_update['has_canvas'],
+                                            "canvas_type": live_update['canvas_type'],
+                                            "canvas_content": live_update['canvas_content'],
+                                            "screenshot_count": live_update.get('screenshot_count', 0)
+                                        },
+                                        "timestamp": time.time()
+                                    })
+                                    last_update_time = live_update['timestamp']
+                                    logger.info(f"Sent live canvas update for thread {thread_id}")
+                    except Exception as e:
+                        logger.debug(f"Error polling live canvas: {e}")
+            
+            # Start polling task
+            polling_task = asyncio.create_task(poll_live_canvas())
+            
+            try:
+                # Use unified orchestration service with streaming
+                final_state = await execute_orchestration(
+                    prompt=prompt,
+                    thread_id=thread_id,
+                    user_response=user_response,
+                    files=file_objects if file_objects else None,
+                    stream_callback=stream_callback,
+                    planning_mode=planning_mode
+                )
+            finally:
+                # Stop polling
+                polling_active = False
+                try:
+                    await polling_task
+                except:
+                    pass
 
             # Check if workflow is paused for user input
             if final_state.get("pending_user_input"):
@@ -1360,10 +1433,55 @@ def health_check():
     """Simple health check endpoint."""
     return {"status": "ok"}
 
-if __name__ == "__main__":
-    # Start all agent servers in separate terminals
+# Global list to track agent processes
+agent_processes = []
+
+def cleanup_agents():
+    """Stop all agent processes"""
+    global agent_processes
+    logger.info("Stopping all agent processes...")
+    for process in agent_processes:
+        try:
+            process.terminate()
+            process.wait(timeout=5)
+            logger.info(f"Stopped agent process {process.pid}")
+        except Exception as e:
+            logger.warning(f"Error stopping agent process: {e}")
+            try:
+                process.kill()
+            except:
+                pass
+    agent_processes = []
+
+def start_agents_with_reload():
+    """Start agents and register cleanup on exit"""
+    global agent_processes
+    
+    # Clean up any existing agents first
+    cleanup_agents()
+    
+    # Start new agents
     start_agent_servers()
+    
+    # Register cleanup handler
+    import atexit
+    atexit.register(cleanup_agents)
+
+if __name__ == "__main__":
+    # Start all agent servers
+    start_agents_with_reload()
 
     # Run the main FastAPI app
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    # Use 0.0.0.0 to bind to all interfaces (fixes IPv4/IPv6 issues)
+    # Add ws_ping_interval and ws_ping_timeout for better WebSocket stability
+    uvicorn.run(
+        "main:app", 
+        host="0.0.0.0",  # Changed from 127.0.0.1 to support both IPv4 and IPv6
+        port=8000, 
+        reload=True,
+        reload_includes=["*.py"],  # Watch all Python files including agents
+        ws_ping_interval=20,  # Send ping every 20 seconds
+        ws_ping_timeout=20,   # Wait 20 seconds for pong
+        log_level="info"
+    )

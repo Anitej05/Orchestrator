@@ -74,6 +74,15 @@ export interface Attachment {
 }
 
 // Updated Message interface with the new `attachments` field
+export interface BrowsingTraceStep {
+  step_number: number;
+  action: string;
+  description: string;
+  status: 'success' | 'error' | 'pending';
+  duration?: number;
+  timestamp: string;
+}
+
 export interface Message {
   id: string;
   type: 'user' | 'assistant' | 'system';
@@ -88,6 +97,12 @@ export interface Message {
   canvas_content?: string;
   canvas_type?: 'html' | 'markdown';
   has_canvas?: boolean;
+  // Browser automation fields
+  is_browser_task?: boolean;
+  browser_in_progress?: boolean;
+  browsing_trace?: BrowsingTraceStep[];
+  screenshot_files?: FileObject[];
+  show_trace?: boolean;  // UI state for collapsible trace
 }
 
 export type FileObject = {

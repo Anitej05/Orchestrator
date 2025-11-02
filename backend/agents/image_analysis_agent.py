@@ -121,4 +121,4 @@ async def analyze_image(request: AnalyzeImageRequest):
 if __name__ == "__main__":
     port = int(os.getenv("IMAGE_AGENT_PORT", 8060))
     logger.info(f"Starting Image Analysis Agent on port {port}")
-    uvicorn.run("image_analysis_agent:app", host="127.0.0.1", port=port, reload=True)
+    uvicorn.run("image_analysis_agent:app", host="0.0.0.0", port=port, reload=False)

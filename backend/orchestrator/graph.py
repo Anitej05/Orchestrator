@@ -1425,23 +1425,125 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
         async with httpx.AsyncClient() as client:
             try:
                 logger.info(f"Calling agent '{agent_details.name}' at '{endpoint_url}' (Attempt {attempt + 1})")
-                if http_method == 'GET':
-                    response = await client.get(endpoint_url, params=payload, headers=headers, timeout=30.0)
-                else: # POST
-                    response = await client.post(endpoint_url, json=payload, headers=headers, timeout=30.0)
-
-                response.raise_for_status()
-                result = response.json()
-
-                # **INTELLIGENT VALIDATION** for semantic failure
-                is_result_empty = not result or (isinstance(result, list) and not result) or (isinstance(result, dict) and not any(result.values()))
-                if is_result_empty:
-                    logger.warning(f"Agent returned a successful but empty response. Retrying...")
-                    failed_attempts.append({"payload": payload, "result": str(result)})
-                    continue  # Continue to the next attempt in the loop
                 
-                logger.info(f"Agent call successful for task '{planned_task.task_name}'.")
-                return {"task_name": planned_task.task_name, "result": result}
+                # Check if this is a browser agent - use async endpoint with polling
+                is_browser_agent = 'browser' in agent_details.id.lower() or 'browser' in agent_details.name.lower()
+                
+                if is_browser_agent and '/browse' in endpoint_url and '/browse/async' not in endpoint_url:
+                    # Use async endpoint for browser agent with real-time polling
+                    async_endpoint = endpoint_url.replace('/browse', '/browse/async')
+                    logger.info(f"Browser agent detected - using async endpoint: {async_endpoint}")
+                    
+                    # Submit task
+                    response = await client.post(async_endpoint, json=payload, headers=headers, timeout=30.0)
+                    response.raise_for_status()
+                    task_data = response.json()
+                    task_id = task_data.get('task_id')
+                    
+                    if not task_id:
+                        logger.error("Browser agent didn't return task_id")
+                        return {"task_name": planned_task.task_name, "result": "Error: No task_id returned"}
+                    
+                    logger.info(f"Browser task submitted: {task_id}")
+                    
+                    # Poll for status and stream screenshots
+                    status_url = f"http://localhost:8070/browse/status/{task_id}"
+                    poll_interval = 1.0  # Poll every second
+                    max_wait = 300  # 5 minutes max
+                    elapsed = 0
+                    last_screenshot_count = 0
+                    
+                    while elapsed < max_wait:
+                        await asyncio.sleep(poll_interval)
+                        elapsed += poll_interval
+                        
+                        try:
+                            status_response = await client.get(status_url, timeout=10.0)
+                            status_response.raise_for_status()
+                            status_data = status_response.json()
+                            
+                            task_status = status_data.get('status')
+                            logger.debug(f"Browser task {task_id} status: {task_status}")
+                            
+                            # Check for new screenshots
+                            if status_data.get('result') and isinstance(status_data['result'], dict):
+                                result_data = status_data['result']
+                                screenshots = result_data.get('screenshot_files', [])
+                                
+                                if len(screenshots) > last_screenshot_count:
+                                    # New screenshots available
+                                    new_screenshots = screenshots[last_screenshot_count:]
+                                    logger.info(f"New screenshots available: {len(new_screenshots)} (total: {len(screenshots)})")
+                                    
+                                    # Update state with latest screenshot for canvas
+                                    if screenshots:
+                                        latest_screenshot = screenshots[-1]
+                                        file_path = latest_screenshot.get('file_path', '').replace('\\', '/')
+                                        
+                                        # Store all screenshots for final slideshow
+                                        state['browser_screenshots'] = screenshots
+                                        state['browser_screenshot_count'] = len(screenshots)
+                                        
+                                        # Store live canvas update for WebSocket streaming
+                                        canvas_html = f'<img src="/{file_path}" alt="Browser live view" style="width: 100%; border-radius: 8px;" />'
+                                        state['live_canvas_update'] = {
+                                            'has_canvas': True,
+                                            'canvas_type': 'html',
+                                            'canvas_content': canvas_html,
+                                            'screenshot_count': len(screenshots),
+                                            'timestamp': time.time()
+                                        }
+                                        
+                                        logger.info(f"Browser task progress: {len(screenshots)} screenshots captured - live canvas updated")
+                                    
+                                    last_screenshot_count = len(screenshots)
+                            
+                            # Check if completed
+                            if task_status == 'completed':
+                                result = status_data.get('result', {})
+                                
+                                # Ensure all screenshots are in the result
+                                if 'screenshot_files' not in result or not result['screenshot_files']:
+                                    # Use screenshots collected during polling
+                                    if state.get('browser_screenshots'):
+                                        result['screenshot_files'] = state['browser_screenshots']
+                                
+                                logger.info(f"Browser task completed with {last_screenshot_count} screenshots")
+                                return {"task_name": planned_task.task_name, "result": result}
+                            elif task_status == 'failed':
+                                error_msg = status_data.get('result', {}).get('error', 'Unknown error')
+                                logger.error(f"Browser task failed: {error_msg}")
+                                return {"task_name": planned_task.task_name, "result": f"Browser task failed: {error_msg}"}
+                                
+                        except Exception as poll_error:
+                            logger.warning(f"Error polling browser task status: {poll_error}")
+                            continue
+                    
+                    # Timeout
+                    logger.error(f"Browser task {task_id} timed out after {max_wait}s")
+                    return {"task_name": planned_task.task_name, "result": "Browser task timed out"}
+                
+                else:
+                    # Regular agent call (non-browser or already async)
+                    timeout_seconds = 300.0 if is_browser_agent else 30.0
+                    
+                    if http_method == 'GET':
+                        response = await client.get(endpoint_url, params=payload, headers=headers, timeout=timeout_seconds)
+                    else: # POST
+                        response = await client.post(endpoint_url, json=payload, headers=headers, timeout=timeout_seconds)
+
+                    response.raise_for_status()
+                    result = response.json()
+
+                    # **INTELLIGENT VALIDATION** for semantic failure
+                    is_result_empty = not result or (isinstance(result, list) and not result) or (isinstance(result, dict) and not any(result.values()))
+                    if is_result_empty:
+                        logger.warning(f"Agent returned a successful but empty response. Retrying...")
+                        failed_attempts.append({"payload": payload, "result": str(result)})
+                        continue  # Continue to the next attempt in the loop
+                    
+                    logger.info(f"Agent call successful for task '{planned_task.task_name}'.")
+                    return {"task_name": planned_task.task_name, "result": result}
             
             except httpx.HTTPStatusError as e:
                 # Handle rate limit errors from agents with exponential backoff
@@ -1455,7 +1557,9 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                     error_msg = f"Agent call failed with status {e.response.status_code}: {e.response.text}"
                     return {"task_name": planned_task.task_name, "result": error_msg, "raw_response": e.response.text, "status_code": e.response.status_code}
             except httpx.RequestError as e:
-                error_msg = f"Agent call failed with a network error: {e}"
+                error_msg = f"Agent call failed with a network error: {type(e).__name__} - {str(e)}"
+                logger.error(f"Network error calling agent '{agent_details.name}': {error_msg}")
+                logger.error(f"Endpoint: {endpoint_url}, Payload: {payload}")
                 return {"task_name": planned_task.task_name, "result": error_msg, "raw_response": str(e), "status_code": 500}
     
     # This block is reached only if all semantic retries in the loop fail
@@ -1644,11 +1748,12 @@ def evaluate_agent_response(state: State):
     1. **Context is key:** If the user referenced "that company" or similar, check the conversation history for the company name.
     2. **Data presence = success:** If the result contains actual data (not empty, not just errors), it's successful.
     3. **Be pragmatic:** News/search results don't need to be perfectly filtered - if they contain relevant articles, that's good enough.
-    4. **Only ask if truly necessary:** Only request clarification if the result is completely empty, contains only errors, or is fundamentally wrong.
+    4. **Check previous tasks:** If a previous task already accomplished the user's goal, mark this task as complete even if it failed.
+    5. **Only ask if truly necessary:** Only request clarification if the result is completely empty, contains only errors, or is fundamentally wrong AND no previous task succeeded.
 
     **Decision:**
-    - If the result has useful data: `{{"status": "complete"}}`
-    - Only if truly broken/empty: `{{"status": "user_input_required", "question": "Brief question"}}`
+    - If the result has useful data OR a previous task already satisfied the request: `{{"status": "complete"}}`
+    - Only if truly broken/empty AND no previous success: `{{"status": "user_input_required", "question": "Brief question"}}`
     '''
     try:
         evaluation = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, AgentResponseEvaluation)
@@ -1661,14 +1766,109 @@ def evaluate_agent_response(state: State):
             logger.warning(f"Evaluation question: {evaluation.question}")
             # We add the failed task's result to the parsing feedback to prevent loops
             error_feedback = f"The previous attempt for a similar task resulted in an incorrect output: {task_to_evaluate['result']}. Please generate a more precise task to avoid this error."
-            return {
+            
+            # Preserve canvas if it was set by a previous task
+            result = {
                 "pending_user_input": True,
                 "question_for_user": evaluation.question,
                 "parsing_error_feedback": error_feedback
             }
+            
+            # Check if we have canvas from previous tasks
+            if state.get('has_canvas'):
+                result['has_canvas'] = state['has_canvas']
+                result['canvas_type'] = state.get('canvas_type')
+                result['canvas_content'] = state.get('canvas_content')
+                logger.info("Preserving canvas from previous successful task")
+            
+            return result
         else:
             print(f"!!! EVALUATE: Task passed evaluation !!!")
             logger.info("Task passed evaluation")
+            
+            # Check if this is a browser task with screenshots
+            task_result = task_to_evaluate.get('result', {})
+            if isinstance(task_result, dict) and task_result.get('screenshot_files'):
+                screenshot_files = task_result['screenshot_files']
+                logger.info(f"Found {len(screenshot_files)} screenshot files in browser result")
+                
+                # Create canvas content with slideshow for multiple screenshots
+                if screenshot_files:
+                    if len(screenshot_files) == 1:
+                        # Single screenshot - just display it
+                        file_path = screenshot_files[0].get('file_path', '').replace('\\', '/')
+                        # Use absolute URL to backend server
+                        canvas_html = f'<img src="http://localhost:8000/{file_path}" alt="Browser screenshot" style="width: 100%; border-radius: 8px;" />'
+                    else:
+                        # Multiple screenshots - create slideshow
+                        screenshots_html = ""
+                        for idx, screenshot in enumerate(screenshot_files):
+                            file_path = screenshot.get('file_path', '').replace('\\', '/')
+                            display = "block" if idx == 0 else "none"
+                            # Use absolute URL to backend server
+                            screenshots_html += f'<img id="screenshot-{idx}" src="http://localhost:8000/{file_path}" alt="Browser screenshot {idx+1}" style="width: 100%; border-radius: 8px; display: {display};" />\n'
+                        
+                        canvas_html = f'''
+                        <div style="position: relative;">
+                            {screenshots_html}
+                            <div style="text-align: center; margin-top: 10px;">
+                                <span id="screenshot-counter">1 / {len(screenshot_files)}</span>
+                                <div style="margin-top: 5px;">
+                                    <button onclick="prevScreenshot()" style="margin: 0 5px; padding: 5px 15px; cursor: pointer;">← Previous</button>
+                                    <button onclick="nextScreenshot()" style="margin: 0 5px; padding: 5px 15px; cursor: pointer;">Next →</button>
+                                    <button id="play-btn" onclick="toggleAutoPlay()" style="margin: 0 5px; padding: 5px 15px; cursor: pointer;">▶ Play</button>
+                                </div>
+                            </div>
+                        </div>
+                        <script>
+                            let currentScreenshot = 0;
+                            const totalScreenshots = {len(screenshot_files)};
+                            let autoPlayInterval = null;
+                            
+                            function showScreenshot(index) {{
+                                for (let i = 0; i < totalScreenshots; i++) {{
+                                    document.getElementById('screenshot-' + i).style.display = 'none';
+                                }}
+                                document.getElementById('screenshot-' + index).style.display = 'block';
+                                document.getElementById('screenshot-counter').textContent = (index + 1) + ' / ' + totalScreenshots;
+                                currentScreenshot = index;
+                            }}
+                            
+                            function nextScreenshot() {{
+                                currentScreenshot = (currentScreenshot + 1) % totalScreenshots;
+                                showScreenshot(currentScreenshot);
+                            }}
+                            
+                            function prevScreenshot() {{
+                                currentScreenshot = (currentScreenshot - 1 + totalScreenshots) % totalScreenshots;
+                                showScreenshot(currentScreenshot);
+                            }}
+                            
+                            function toggleAutoPlay() {{
+                                const btn = document.getElementById('play-btn');
+                                if (autoPlayInterval) {{
+                                    clearInterval(autoPlayInterval);
+                                    autoPlayInterval = null;
+                                    btn.textContent = '▶ Play';
+                                }} else {{
+                                    autoPlayInterval = setInterval(nextScreenshot, 2000);
+                                    btn.textContent = '⏸ Pause';
+                                }}
+                            }}
+                            
+                            // Auto-play on load
+                            toggleAutoPlay();
+                        </script>
+                        '''
+                    
+                    logger.info(f"Setting canvas with {len(screenshot_files)} screenshot(s)")
+                    return {
+                        "pending_user_input": False,
+                        "question_for_user": None,
+                        "has_canvas": True,
+                        "canvas_type": "html",
+                        "canvas_content": canvas_html
+                    }
     except Exception as e:
         print(f"!!! EVALUATE: Evaluation failed with error: {e} !!!")
         logger.error(f"Failed to evaluate agent response for task '{task_to_evaluate['task_name']}': {e}")
@@ -2143,6 +2343,20 @@ def generate_final_response(state: State):
     This replaces the old aggregate_responses node.
     """
     logger.info("=== GENERATE_FINAL_RESPONSE: Starting ===")
+    
+    # Check if canvas was already set by evaluate_agent_response (e.g., browser screenshots)
+    if state.get('has_canvas') and state.get('canvas_content'):
+        logger.info("Canvas already set by previous node, preserving it")
+        # Still need to generate the text response
+        text_result = generate_text_answer(state)
+        return {
+            "final_response": text_result.get('final_response', ''),
+            "messages": text_result.get('messages', []),
+            "needs_canvas": False,  # Canvas already rendered
+            "has_canvas": True,
+            "canvas_type": state.get('canvas_type'),
+            "canvas_content": state.get('canvas_content')
+        }
     
     # First generate the text answer
     text_result = generate_text_answer(state)

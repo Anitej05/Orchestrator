@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
-import { MessageCircle, Clock, CheckCircle, Paperclip, X, File as FileIcon, AlertCircle, Loader2, Brain, Search, Users, FileText, Play, BarChart3 } from 'lucide-react';
+import { MessageCircle, Clock, CheckCircle, Paperclip, X, File as FileIcon, AlertCircle, Loader2, Brain, Search, Users, FileText, Play, BarChart3, ChevronDown, ChevronUp, Globe } from 'lucide-react';
 import Markdown from '@/components/ui/markdown';
 import { type ProcessResponse, type ConversationState, type Message, type Attachment } from '@/lib/types';
 import { PlanApprovalModal } from '@/components/plan-approval-modal';
@@ -57,7 +57,20 @@ export function InteractiveChatInterface({
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
   const [previewUrls, setPreviewUrls] = useState<string[]>([]);
   const [planningMode, setPlanningMode] = useState(false);
+  const [expandedTraces, setExpandedTraces] = useState<Set<string>>(new Set());
   const fileInputRef = useRef<HTMLInputElement>(null);
+  
+  const toggleTrace = (messageId: string) => {
+    setExpandedTraces(prev => {
+      const next = new Set(prev);
+      if (next.has(messageId)) {
+        next.delete(messageId);
+      } else {
+        next.add(messageId);
+      }
+      return next;
+    });
+  };
 
   // Plan approval modal handlers
   const handleApprovePlan = async () => {
@@ -194,7 +207,72 @@ export function InteractiveChatInterface({
                     : 'bg-gray-50/80 dark:bg-gray-800/90 border border-gray-200 dark:border-gray-700/50 text-gray-900 dark:text-gray-100 max-w-[95%] backdrop-blur-sm'
                 }`}>
                   <div className="message-content space-y-2">
+                    {/* Browser automation progress indicator */}
+                    {message.is_browser_task && message.browser_in_progress && (
+                      <div className="browser-progress mb-3 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
+                        <div className="flex items-center gap-2 text-blue-700 dark:text-blue-300">
+                          <Globe className="w-4 h-4 animate-pulse" />
+                          <span className="font-medium">Browser automation in progress...</span>
+                        </div>
+                        <div className="mt-2 flex items-center gap-2 text-sm text-blue-600 dark:text-blue-400">
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                          <span>Navigating and analyzing web page</span>
+                        </div>
+                      </div>
+                    )}
+                    
                     {message.content && (message.type === 'assistant' ? <Markdown content={message.content} /> : <p>{message.content}</p>)}
+                    
+                    {/* Collapsible browsing trace */}
+                    {message.browsing_trace && message.browsing_trace.length > 0 && (
+                      <div className="browsing-trace mt-3">
+                        <button
+                          onClick={() => toggleTrace(messageId)}
+                          className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 transition-colors"
+                        >
+                          {expandedTraces.has(messageId) ? (
+                            <ChevronUp className="w-4 h-4" />
+                          ) : (
+                            <ChevronDown className="w-4 h-4" />
+                          )}
+                          <span>
+                            {expandedTraces.has(messageId) ? 'Hide' : 'View'} browsing trace 
+                            ({message.browsing_trace.length} {message.browsing_trace.length === 1 ? 'action' : 'actions'})
+                          </span>
+                        </button>
+                        
+                        {expandedTraces.has(messageId) && (
+                          <div className="mt-2 space-y-2 p-3 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-gray-200 dark:border-gray-700">
+                            <h4 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Browsing Trace:</h4>
+                            {message.browsing_trace.map((step, i) => (
+                              <div key={i} className="flex items-start gap-3 p-2 bg-white dark:bg-gray-800 rounded border border-gray-100 dark:border-gray-700">
+                                <div className="flex-shrink-0 mt-0.5">
+                                  {step.status === 'success' && <CheckCircle className="w-4 h-4 text-green-500" />}
+                                  {step.status === 'error' && <AlertCircle className="w-4 h-4 text-red-500" />}
+                                  {step.status === 'pending' && <Loader2 className="w-4 h-4 animate-spin text-blue-500" />}
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-sm font-medium text-gray-900 dark:text-gray-100">
+                                      {step.step_number}. {step.action}
+                                    </span>
+                                    {step.duration && (
+                                      <span className="text-xs text-gray-500 dark:text-gray-400">
+                                        {step.duration.toFixed(1)}s
+                                      </span>
+                                    )}
+                                  </div>
+                                  <p className="text-xs text-gray-600 dark:text-gray-400 mt-1 truncate">
+                                    {step.description}
+                                  </p>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    
                     {message.attachments && message.attachments.length > 0 && (
                       <div className="flex flex-wrap gap-2 mt-2">
                         {message.attachments.map((att: Attachment, attIndex: number) => (

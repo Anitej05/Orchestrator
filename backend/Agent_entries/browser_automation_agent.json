@@ -1,0 +1,53 @@
+{
+  "id": "browser_automation_agent",
+  "owner_id": "orbimesh-vendor",
+  "name": "Browser Automation Agent",
+  "description": "An intelligent browser automation agent with vision AI that can navigate websites, take screenshots, analyze and describe visual content, extract information, and perform complex web-based tasks. Uses Qwen3-VL vision model to see and describe web pages - no separate image analysis needed.",
+  "capabilities": [
+    "take website screenshots",
+    "capture webpage screenshots",
+    "screenshot websites",
+    "describe screenshots",
+    "analyze screenshots",
+    "describe images from websites",
+    "describe visual content",
+    "automate web browsing",
+    "extract web data",
+    "scrape website content",
+    "interact with web pages",
+    "navigate websites",
+    "visit urls",
+    "analyze web pages visually",
+    "describe website content",
+    "check website information",
+    "browse the web",
+    "open websites",
+    "view web pages",
+    "see web pages",
+    "visual analysis of websites"
+  ],
+  "price_per_call_usd": 0.01,
+  "status": "active",
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA3FcU8hPhmFLgez6qPf801aQahasAlG5S4MPb16nWJPA=\n-----END PUBLIC KEY-----",
+  "endpoints": [
+    {
+      "endpoint": "http://localhost:8070/browse",
+      "http_method": "POST",
+      "description": "Executes a browser automation task with vision capabilities. Can navigate, interact, extract data, and take screenshots.",
+      "parameters": [
+        {
+          "name": "task",
+          "param_type": "string",
+          "required": true,
+          "description": "The task description for the browser agent (e.g., 'Navigate to github.com/browser-use and extract the repository stars count')."
+        },
+        {
+          "name": "extract_data",
+          "param_type": "boolean",
+          "required": false,
+          "description": "Whether to extract structured data from the page (default: False)."
+        }
+      ]
+    }
+  ]
+}
