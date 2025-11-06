@@ -850,6 +850,135 @@ async def continue_conversation(user_response: UserResponse):
         logger.error(f"An unexpected error occurred during conversation continuation for thread_id {user_response.thread_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {e}")
 
+@app.post("/api/canvas/update")
+async def update_canvas(update_data: Dict[str, Any] = Body(...)):
+    """
+    Receive canvas updates from browser agent and store for WebSocket streaming
+    Supports both browser view (screenshots) and plan view (task plan)
+    """
+    try:
+        thread_id = update_data.get("thread_id")
+        if not thread_id:
+            return {"status": "error", "message": "thread_id required"}
+        
+        screenshot_data = update_data.get("screenshot_data", "")
+        url = update_data.get("url", "")
+        step = update_data.get("step", 0)
+        task = update_data.get("task", "")
+        task_plan = update_data.get("task_plan", [])  # New: task plan for plan view
+        current_action = update_data.get("current_action", "")  # New: current action
+        
+        # Create browser view HTML with embedded base64 image
+        browser_view_html = f'''
+        <div style="text-align: center;">
+            <img src="data:image/png;base64,{screenshot_data}" alt="Browser live view" style="width: 100%; max-width: 1200px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);" />
+            <div style="margin-top: 10px; color: #666; font-size: 14px;">
+                <strong>🔴 Live Browser View</strong> | Step {step} | {url[:60] if url else 'Loading...'}
+            </div>
+        </div>
+        '''
+        
+        # Create plan view HTML with task progress
+        plan_view_html = '<div style="padding: 20px; font-family: system-ui, -apple-system, sans-serif;">'
+        plan_view_html += f'<h3 style="margin-bottom: 20px; color: #333;">📋 Task Plan - Step {step}</h3>'
+        
+        if task_plan:
+            plan_view_html += '<div style="background: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 20px;">'
+            plan_view_html += f'<div style="color: #666; font-size: 14px; margin-bottom: 10px;"><strong>Current Task:</strong> {task[:100]}</div>'
+            if current_action:
+                plan_view_html += f'<div style="color: #0066cc; font-size: 14px;"><strong>▶️ Current Action:</strong> {current_action}</div>'
+            plan_view_html += '</div>'
+            
+            plan_view_html += '<div style="display: flex; flex-direction: column; gap: 12px;">'
+            for i, subtask in enumerate(task_plan, 1):
+                status = subtask.get('status', 'pending')
+                subtask_text = subtask.get('subtask', 'Unknown')
+                
+                if status == 'completed':
+                    icon = '✅'
+                    color = '#28a745'
+                    bg_color = '#d4edda'
+                elif status == 'failed':
+                    icon = '❌'
+                    color = '#dc3545'
+                    bg_color = '#f8d7da'
+                else:  # pending
+                    icon = '⏳'
+                    color = '#6c757d'
+                    bg_color = '#e9ecef'
+                
+                plan_view_html += f'''
+                <div style="background: {bg_color}; padding: 12px 16px; border-radius: 6px; border-left: 4px solid {color};">
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <span style="font-size: 20px;">{icon}</span>
+                        <div style="flex: 1;">
+                            <div style="font-weight: 500; color: {color};">{i}. {subtask_text}</div>
+                            <div style="font-size: 12px; color: #666; margin-top: 4px;">Status: {status.upper()}</div>
+                        </div>
+                    </div>
+                </div>
+                '''
+            plan_view_html += '</div>'
+        else:
+            plan_view_html += '<div style="color: #999; text-align: center; padding: 40px;">No task plan available</div>'
+        
+        plan_view_html += '</div>'
+        
+        # Store both views in global canvas updates
+        with canvas_lock:
+            live_canvas_updates[thread_id] = {
+                'has_canvas': True,
+                'canvas_type': 'html',
+                'canvas_content': browser_view_html,  # Default to browser view
+                'browser_view': browser_view_html,
+                'plan_view': plan_view_html,
+                'timestamp': time.time(),
+                'url': url,
+                'step': step,
+                'task_plan': task_plan,
+                'current_action': current_action
+            }
+        
+        return {"status": "success"}
+        
+    except Exception as e:
+        logger.error(f"Error updating canvas: {e}")
+        return {"status": "error", "message": str(e)}
+
+@app.post("/api/canvas/toggle-view")
+async def toggle_canvas_view(data: Dict[str, Any] = Body(...)):
+    """
+    Toggle between browser view and plan view for a thread
+    """
+    try:
+        thread_id = data.get("thread_id")
+        view_type = data.get("view_type", "browser")  # "browser" or "plan"
+        
+        if not thread_id:
+            return {"status": "error", "message": "thread_id required"}
+        
+        with canvas_lock:
+            if thread_id in live_canvas_updates:
+                canvas_data = live_canvas_updates[thread_id]
+                
+                # Switch the canvas_content based on view_type
+                if view_type == "plan" and 'plan_view' in canvas_data:
+                    canvas_data['canvas_content'] = canvas_data['plan_view']
+                    canvas_data['current_view'] = 'plan'
+                elif view_type == "browser" and 'browser_view' in canvas_data:
+                    canvas_data['canvas_content'] = canvas_data['browser_view']
+                    canvas_data['current_view'] = 'browser'
+                
+                canvas_data['timestamp'] = time.time()  # Update timestamp to trigger refresh
+                
+                return {"status": "success", "view_type": view_type}
+        
+        return {"status": "error", "message": "No canvas data found for thread"}
+        
+    except Exception as e:
+        logger.error(f"Error toggling canvas view: {e}")
+        return {"status": "error", "message": str(e)}
+
 @app.get("/api/chat/status/{thread_id}", response_model=ConversationStatus)
 async def get_conversation_status(thread_id: str):
     """

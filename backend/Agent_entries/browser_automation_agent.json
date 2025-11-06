@@ -1,30 +1,35 @@
 {
   "id": "browser_automation_agent",
   "owner_id": "orbimesh-vendor",
-  "name": "Browser Automation Agent",
-  "description": "An intelligent browser automation agent with vision AI that can navigate websites, take screenshots, analyze and describe visual content, extract information, and perform complex web-based tasks. Uses Qwen3-VL vision model to see and describe web pages - no separate image analysis needed.",
+  "name": "Custom Browser Automation Agent",
+  "description": "A powerful custom browser automation agent with multi-provider LLM fallback (Cerebras → Groq → NVIDIA) and live screenshot streaming. Can navigate websites, interact with elements, extract information, and stream real-time browser activity to the canvas.",
   "capabilities": [
+    "web browsing",
+    "browser automation",
     "take website screenshots",
     "capture webpage screenshots",
     "screenshot websites",
-    "describe screenshots",
-    "analyze screenshots",
-    "describe images from websites",
-    "describe visual content",
+    "live browser streaming",
+    "real-time browser view",
     "automate web browsing",
     "extract web data",
     "scrape website content",
     "interact with web pages",
     "navigate websites",
     "visit urls",
-    "analyze web pages visually",
+    "click web elements",
+    "fill web forms",
+    "search websites",
+    "analyze web pages",
     "describe website content",
     "check website information",
     "browse the web",
     "open websites",
     "view web pages",
     "see web pages",
-    "visual analysis of websites"
+    "web page interaction",
+    "form filling",
+    "data extraction"
   ],
   "price_per_call_usd": 0.01,
   "status": "active",
@@ -33,13 +38,19 @@
     {
       "endpoint": "http://localhost:8070/browse",
       "http_method": "POST",
-      "description": "Executes a browser automation task with vision capabilities. Can navigate, interact, extract data, and take screenshots.",
+      "description": "Execute browser automation task with live streaming. Supports real-time screenshot streaming to canvas.",
       "parameters": [
         {
           "name": "task",
           "param_type": "string",
           "required": true,
-          "description": "The task description for the browser agent (e.g., 'Navigate to github.com/browser-use and extract the repository stars count')."
+          "description": "The task description for the browser agent (e.g., 'Go to leetcode.com/contest and find upcoming contests')."
+        },
+        {
+          "name": "max_steps",
+          "param_type": "integer",
+          "required": false,
+          "description": "Maximum number of steps to execute (default: 10)."
         },
         {
           "name": "extract_data",

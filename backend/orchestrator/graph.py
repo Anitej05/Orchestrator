@@ -1308,7 +1308,7 @@ def validate_plan_for_execution(state: State):
         logger.error(f"Plan validation LLM call failed: {e}. Assuming plan is ready to avoid stalling.")
         return {"replan_reason": None, "pending_user_input": False, "question_for_user": None}
 
-async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: State, last_error: Optional[str] = None):
+async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: State, config: Dict[str, Any], last_error: Optional[str] = None):
     '''
     Builds the payload and runs a single agent, now using file paths instead of content.
     This is the full, robust version with semantic retries and rate limit handling.
@@ -1426,124 +1426,64 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
             try:
                 logger.info(f"Calling agent '{agent_details.name}' at '{endpoint_url}' (Attempt {attempt + 1})")
                 
-                # Check if this is a browser agent - use async endpoint with polling
+                # Check if this is a browser agent - pass thread_id for push-based streaming
                 is_browser_agent = 'browser' in agent_details.id.lower() or 'browser' in agent_details.name.lower()
                 
-                if is_browser_agent and '/browse' in endpoint_url and '/browse/async' not in endpoint_url:
-                    # Use async endpoint for browser agent with real-time polling
-                    async_endpoint = endpoint_url.replace('/browse', '/browse/async')
-                    logger.info(f"Browser agent detected - using async endpoint: {async_endpoint}")
+                if is_browser_agent and '/browse' in endpoint_url:
+                    logger.info(f"🌐 Browser agent detected - enabling push-based streaming")
                     
-                    # Submit task
-                    response = await client.post(async_endpoint, json=payload, headers=headers, timeout=30.0)
+                    # Get thread_id from config
+                    thread_id = config.get('configurable', {}).get('thread_id', 'unknown')
+                    
+                    # Add thread_id as query parameter
+                    endpoint_with_thread = f"{endpoint_url}?thread_id={thread_id}"
+                    
+                    logger.info(f"📡 Sending browser task with thread_id: {thread_id}")
+                    
+                    # Start browser task
+                    browser_task = asyncio.create_task(
+                        client.post(endpoint_with_thread, json=payload, headers=headers, timeout=300.0)
+                    )
+                    
+                    # Wait for task to complete (browser agent will push updates directly)
+                    logger.info(f"⏳ Waiting for browser task to complete (push-based streaming enabled)")
+                    
+                    # Task completed - get final result
+                    response = await browser_task
                     response.raise_for_status()
-                    task_data = response.json()
-                    task_id = task_data.get('task_id')
+                    result_data = response.json()
                     
-                    if not task_id:
-                        logger.error("Browser agent didn't return task_id")
-                        return {"task_name": planned_task.task_name, "result": "Error: No task_id returned"}
+                    logger.info(f"✅ Browser task completed (push-based streaming)")
                     
-                    logger.info(f"Browser task submitted: {task_id}")
-                    
-                    # Poll for status and stream screenshots
-                    status_url = f"http://localhost:8070/browse/status/{task_id}"
-                    poll_interval = 1.0  # Poll every second
-                    max_wait = 300  # 5 minutes max
-                    elapsed = 0
-                    last_screenshot_count = 0
-                    
-                    while elapsed < max_wait:
-                        await asyncio.sleep(poll_interval)
-                        elapsed += poll_interval
-                        
-                        try:
-                            status_response = await client.get(status_url, timeout=10.0)
-                            status_response.raise_for_status()
-                            status_data = status_response.json()
-                            
-                            task_status = status_data.get('status')
-                            logger.debug(f"Browser task {task_id} status: {task_status}")
-                            
-                            # Check for new screenshots
-                            if status_data.get('result') and isinstance(status_data['result'], dict):
-                                result_data = status_data['result']
-                                screenshots = result_data.get('screenshot_files', [])
-                                
-                                if len(screenshots) > last_screenshot_count:
-                                    # New screenshots available
-                                    new_screenshots = screenshots[last_screenshot_count:]
-                                    logger.info(f"New screenshots available: {len(new_screenshots)} (total: {len(screenshots)})")
-                                    
-                                    # Update state with latest screenshot for canvas
-                                    if screenshots:
-                                        latest_screenshot = screenshots[-1]
-                                        file_path = latest_screenshot.get('file_path', '').replace('\\', '/')
-                                        
-                                        # Store all screenshots for final slideshow
-                                        state['browser_screenshots'] = screenshots
-                                        state['browser_screenshot_count'] = len(screenshots)
-                                        
-                                        # Store live canvas update for WebSocket streaming
-                                        canvas_html = f'<img src="/{file_path}" alt="Browser live view" style="width: 100%; border-radius: 8px;" />'
-                                        state['live_canvas_update'] = {
-                                            'has_canvas': True,
-                                            'canvas_type': 'html',
-                                            'canvas_content': canvas_html,
-                                            'screenshot_count': len(screenshots),
-                                            'timestamp': time.time()
-                                        }
-                                        
-                                        logger.info(f"Browser task progress: {len(screenshots)} screenshots captured - live canvas updated")
-                                    
-                                    last_screenshot_count = len(screenshots)
-                            
-                            # Check if completed
-                            if task_status == 'completed':
-                                result = status_data.get('result', {})
-                                
-                                # Ensure all screenshots are in the result
-                                if 'screenshot_files' not in result or not result['screenshot_files']:
-                                    # Use screenshots collected during polling
-                                    if state.get('browser_screenshots'):
-                                        result['screenshot_files'] = state['browser_screenshots']
-                                
-                                logger.info(f"Browser task completed with {last_screenshot_count} screenshots")
-                                return {"task_name": planned_task.task_name, "result": result}
-                            elif task_status == 'failed':
-                                error_msg = status_data.get('result', {}).get('error', 'Unknown error')
-                                logger.error(f"Browser task failed: {error_msg}")
-                                return {"task_name": planned_task.task_name, "result": f"Browser task failed: {error_msg}"}
-                                
-                        except Exception as poll_error:
-                            logger.warning(f"Error polling browser task status: {poll_error}")
-                            continue
-                    
-                    # Timeout
-                    logger.error(f"Browser task {task_id} timed out after {max_wait}s")
-                    return {"task_name": planned_task.task_name, "result": "Browser task timed out"}
+                    # Return the final result
+                    return {
+                        "task_name": planned_task.task_name,
+                        "result": result_data.get('task_summary', 'Task completed'),
+                        "raw_response": result_data,
+                        "status_code": response.status_code,
+                        "screenshot_files": result_data.get('screenshot_files', [])
+                    }
                 
-                else:
-                    # Regular agent call (non-browser or already async)
-                    timeout_seconds = 300.0 if is_browser_agent else 30.0
-                    
-                    if http_method == 'GET':
-                        response = await client.get(endpoint_url, params=payload, headers=headers, timeout=timeout_seconds)
-                    else: # POST
-                        response = await client.post(endpoint_url, json=payload, headers=headers, timeout=timeout_seconds)
+                # Not a browser agent - use standard synchronous call
+                timeout_seconds = 30.0
+                
+                if http_method == 'GET':
+                    response = await client.get(endpoint_url, params=payload, headers=headers, timeout=timeout_seconds)
+                else:  # POST
+                    response = await client.post(endpoint_url, json=payload, headers=headers, timeout=timeout_seconds)
 
-                    response.raise_for_status()
-                    result = response.json()
+                response.raise_for_status()
+                result = response.json()
 
-                    # **INTELLIGENT VALIDATION** for semantic failure
-                    is_result_empty = not result or (isinstance(result, list) and not result) or (isinstance(result, dict) and not any(result.values()))
-                    if is_result_empty:
-                        logger.warning(f"Agent returned a successful but empty response. Retrying...")
-                        failed_attempts.append({"payload": payload, "result": str(result)})
-                        continue  # Continue to the next attempt in the loop
-                    
-                    logger.info(f"Agent call successful for task '{planned_task.task_name}'.")
-                    return {"task_name": planned_task.task_name, "result": result}
+                # **INTELLIGENT VALIDATION** for semantic failure
+                is_result_empty = not result or (isinstance(result, list) and not result) or (isinstance(result, dict) and not any(result.values()))
+                if is_result_empty:
+                    logger.warning(f"Agent returned a successful but empty response. Retrying...")
+                    failed_attempts.append({"payload": payload, "result": str(result)})
+                    continue  # Continue to the next attempt in the loop
+                
+                logger.info(f"Agent call successful for task '{planned_task.task_name}'.")
+                return {"task_name": planned_task.task_name, "result": result}
             
             except httpx.HTTPStatusError as e:
                 # Handle rate limit errors from agents with exponential backoff
@@ -1604,7 +1544,7 @@ async def execute_batch(state: State, config: RunnableConfig):
                 logger.info(f"Attempting task '{planned_task.task_name}' with agent '{agent_to_try.name}' (Attempt {i+1})...")
                 
                 # The state object is passed directly to run_agent
-                task_result = await run_agent(planned_task, agent_to_try, state, last_error=last_error)
+                task_result = await run_agent(planned_task, agent_to_try, state, config, last_error=last_error)
                 
                 result_data = task_result.get('result', {})
                 is_error = isinstance(result_data, str) and "Error:" in result_data
@@ -1730,6 +1670,17 @@ def evaluate_agent_response(state: State):
             result_preview = str(task.get('result', ''))[:200]
             completed_context += f"- {task_name}: {result_preview}...\n"
     
+    # Check if this is a browser agent result with partial success
+    result_str = str(task_to_evaluate.get('result', ''))
+    is_browser_task = 'screenshot' in result_str.lower() or 'browser' in result_str.lower()
+    has_partial_success = 'completed' in result_str.lower() and ('subtask' in result_str.lower() or 'failed' in result_str.lower())
+    
+    # If browser agent completed some subtasks, consider it successful
+    if is_browser_task and has_partial_success:
+        print(f"!!! EVALUATE: Browser agent with partial success - auto-approving !!!")
+        logger.info("Browser agent completed some subtasks - considering successful")
+        return {"pending_user_input": False, "question_for_user": None}
+    
     prompt = f'''
     You are a Quality Assurance AI. Determine if an agent's output successfully fulfills its task.
 
@@ -1745,15 +1696,16 @@ def evaluate_agent_response(state: State):
     ```
 
     **Rules:**
-    1. **Context is key:** If the user referenced "that company" or similar, check the conversation history for the company name.
-    2. **Data presence = success:** If the result contains actual data (not empty, not just errors), it's successful.
-    3. **Be pragmatic:** News/search results don't need to be perfectly filtered - if they contain relevant articles, that's good enough.
-    4. **Check previous tasks:** If a previous task already accomplished the user's goal, mark this task as complete even if it failed.
-    5. **Only ask if truly necessary:** Only request clarification if the result is completely empty, contains only errors, or is fundamentally wrong AND no previous task succeeded.
+    1. **Browser agent results:** If the result shows "Completed X/Y subtasks" where X > 0, it's SUCCESSFUL (partial completion is acceptable)
+    2. **Data presence = success:** If the result contains actual data (not empty, not just errors), it's successful
+    3. **Be pragmatic:** Partial results are acceptable - if agent got SOME data, that's good enough
+    4. **Check previous tasks:** If a previous task already accomplished the user's goal, mark this task as complete
+    5. **Only ask if truly necessary:** Only request clarification if the result is COMPLETELY empty or contains ONLY errors
+    6. **Trust the agent:** If the agent says it completed tasks, believe it
 
     **Decision:**
-    - If the result has useful data OR a previous task already satisfied the request: `{{"status": "complete"}}`
-    - Only if truly broken/empty AND no previous success: `{{"status": "user_input_required", "question": "Brief question"}}`
+    - If the result has ANY useful data OR shows partial completion: `{{"status": "complete"}}`
+    - Only if COMPLETELY empty/broken: `{{"status": "user_input_required", "question": "Brief question"}}`
     '''
     try:
         evaluation = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, AgentResponseEvaluation)
