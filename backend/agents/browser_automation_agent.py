@@ -27,9 +27,17 @@ load_dotenv()
 CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
+OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY")
 
 if not CEREBRAS_API_KEY and not GROQ_API_KEY and not NVIDIA_API_KEY:
     raise RuntimeError("At least one of CEREBRAS_API_KEY, GROQ_API_KEY, or NVIDIA_API_KEY must be set")
+
+# Vision model configuration (optional)
+VISION_ENABLED = bool(OLLAMA_API_KEY)
+if VISION_ENABLED:
+    logger.info("🎨 Vision capabilities enabled with Ollama Qwen3-VL")
+else:
+    logger.info("📝 Running in text-only mode (set OLLAMA_API_KEY for vision)")
 
 # --- Agent Definition ---
 AGENT_DEFINITION = {
@@ -203,6 +211,9 @@ class BrowserAgent:
         self.last_page_url = None
         self.last_page_hash = None
         
+        # Vision modality tracking
+        self.next_step_needs_vision = False  # Vision model decides this for next step
+        
         # Performance metrics
         self.start_time = None
         self.metrics = {
@@ -265,8 +276,16 @@ class BrowserAgent:
         # Handle console errors for debugging
         self.page.on("console", lambda msg: logger.debug(f"Console: {msg.text}") if msg.type == "error" else None)
         
-        # Handle page errors
-        self.page.on("pageerror", lambda err: logger.warning(f"Page error: {err}"))
+        # Handle page errors (suppress common React/Pinterest errors)
+        def handle_page_error(err):
+            err_str = str(err)
+            # Suppress common harmless errors
+            if any(x in err_str.lower() for x in ['react', 'chunk', 'hydration', 'minified']):
+                logger.debug(f"Page error (suppressed): {err_str[:100]}")
+            else:
+                logger.warning(f"Page error: {err_str[:200]}")
+        
+        self.page.on("pageerror", handle_page_error)
         
         # Log failed requests for debugging
         self.page.on("requestfailed", lambda req: logger.debug(f"Request failed: {req.url[:100]}"))
@@ -337,23 +356,34 @@ class BrowserAgent:
             logger.warning(f"Failed to save download: {e}")
     
     async def capture_screenshot(self, name: str = "screenshot") -> str:
-        """Capture and save screenshot"""
-        try:
-            filename = f"{self.task_id}_{name}_{len(self.screenshots)}.png"
-            filepath = STORAGE_DIR / filename
-            # Use animations: "disabled" to speed up and avoid font loading issues
-            await self.page.screenshot(
-                path=str(filepath), 
-                full_page=False, 
-                timeout=10000,
-                animations="disabled"
-            )
-            self.screenshots.append(str(filepath))
-            logger.info(f"📸 Screenshot saved: {filename}")
-            return str(filepath)
-        except Exception as e:
-            logger.warning(f"⚠️  Screenshot failed: {e}, continuing without it")
-            return ""
+        """Capture and save screenshot with robust error handling"""
+        filename = f"{self.task_id}_{name}_{len(self.screenshots)}.png"
+        filepath = STORAGE_DIR / filename
+        
+        # Try multiple strategies to capture screenshot
+        strategies = [
+            # Strategy 1: Standard with animations disabled
+            {"full_page": False, "timeout": 15000, "animations": "disabled"},
+            # Strategy 2: Quick capture without waiting
+            {"full_page": False, "timeout": 5000},
+            # Strategy 3: Minimal capture
+            {"timeout": 3000}
+        ]
+        
+        for i, kwargs in enumerate(strategies):
+            try:
+                await self.page.screenshot(path=str(filepath), **kwargs)
+                self.screenshots.append(str(filepath))
+                logger.info(f"📸 Screenshot saved: {filename}")
+                return str(filepath)
+            except Exception as e:
+                if i == len(strategies) - 1:  # Last attempt
+                    logger.warning(f"⚠️  Screenshot failed after {len(strategies)} attempts, continuing without it")
+                    return ""
+                # Try next strategy
+                continue
+        
+        return ""
     
     async def push_screenshot_to_backend(self, screenshot_base64: str):
         """Push screenshot AND task plan update directly to backend"""
@@ -396,11 +426,23 @@ class BrowserAgent:
                 if self.page and self.page.url != "about:blank":
                     try:
                         # Capture screenshot to bytes (in-memory, not saved to disk)
-                        screenshot_bytes = await self.page.screenshot(
-                            full_page=False, 
-                            timeout=5000,
-                            animations="disabled"
-                        )
+                        # Try with multiple timeouts
+                        screenshot_bytes = None
+                        for timeout_val in [10000, 5000, 3000]:
+                            try:
+                                screenshot_bytes = await self.page.screenshot(
+                                    full_page=False, 
+                                    timeout=timeout_val,
+                                    animations="disabled" if timeout_val > 5000 else None
+                                )
+                                break
+                            except:
+                                if timeout_val == 3000:
+                                    raise
+                                continue
+                        
+                        if not screenshot_bytes:
+                            continue  # Skip this streaming update
                         
                         # Convert to base64 for transmission
                         screenshot_base64 = base64.b64encode(screenshot_bytes).decode('utf-8')
@@ -453,12 +495,14 @@ Respond with ONLY a JSON array of subtasks:
 Rules:
 - DO NOT include generic subtasks like "Launch browser", "Wait for page", "Parse data"
 - DO NOT include "Click search button" - most sites auto-submit on Enter (Wikipedia, Google, etc.)
-- Each subtask should be something you can DO (navigate, click, type, extract)
-- Combine typing and submitting into one subtask (e.g., "Search for X" not "Type X" + "Click search")
-- If task mentions multiple sites, create separate subtasks for each
+- Each subtask should be HIGH-LEVEL (e.g., "Get LeetCode contests" not "Navigate to LeetCode", "Click contests", "Extract data")
+- Combine multiple steps into one subtask (e.g., "Extract contests from LeetCode" includes navigate + extract)
+- If task mentions multiple sites, create ONE subtask per site
 - Keep subtasks specific and actionable
-- Maximum 4 subtasks
-- Focus on WHAT to do, not HOW to do it"""
+- MAXIMUM 3-4 subtasks total (be concise!)
+- Focus on WHAT to achieve, not HOW to do it
+- Example: For "Get contests from 3 sites" → 3 subtasks: "Get LeetCode contests", "Get CodeChef contests", "Get Codeforces contests"
+"""
 
         try:
             content, provider = self.llm_manager.get_completion(
@@ -490,7 +534,7 @@ Rules:
         try:
             await self.page.wait_for_load_state("domcontentloaded", timeout=5000)
         except:
-            logger.warning("Page not fully loaded, continuing anyway")
+            logger.debug("Page still loading, continuing anyway")
         
         # Check for iframes and log them
         try:
@@ -520,17 +564,44 @@ Rules:
                 
                 // Helper to generate reliable CSS selector
                 function getSelector(el) {
-                    // Priority: ID > Name > Aria-label > Class + Tag
-                    if (el.id) return `#${el.id}`;
-                    if (el.name) return `[name="${el.name}"]`;
-                    if (el.getAttribute('aria-label')) return `[aria-label="${el.getAttribute('aria-label')}"]`;
+                    // Priority: ID > Name > Aria-label > Data attributes > Placeholder > Type+Name combo
+                    if (el.id && !el.id.match(/^[\\d]/) && document.querySelectorAll(`#${el.id}`).length === 1) {
+                        return `#${el.id}`;
+                    }
                     
+                    if (el.name && document.querySelectorAll(`[name="${el.name}"]`).length <= 3) {
+                        return `[name="${el.name}"]`;
+                    }
+                    
+                    const ariaLabel = el.getAttribute('aria-label');
+                    if (ariaLabel && document.querySelectorAll(`[aria-label="${ariaLabel}"]`).length <= 3) {
+                        return `[aria-label="${ariaLabel}"]`;
+                    }
+                    
+                    // Try data attributes
+                    const dataTestId = el.getAttribute('data-test-id') || el.getAttribute('data-testid');
+                    if (dataTestId) {
+                        return `[data-test-id="${dataTestId}"], [data-testid="${dataTestId}"]`;
+                    }
+                    
+                    // For inputs with placeholder
+                    if (el.placeholder && el.tagName.toLowerCase() === 'input') {
+                        return `input[placeholder="${el.placeholder}"]`;
+                    }
+                    
+                    // Combination selector
                     let path = el.tagName.toLowerCase();
                     if (el.type) path += `[type="${el.type}"]`;
+                    if (el.name) path += `[name="${el.name}"]`;
+                    
+                    // Only add classes if they're stable (not random hashes)
                     if (el.className && typeof el.className === 'string') {
-                        const classes = el.className.trim().split(/\\s+/).filter(c => c && !c.match(/^[\\d]/)).slice(0, 2);
+                        const classes = el.className.trim().split(/\\s+/)
+                            .filter(c => c && !c.match(/^[\\d]/) && !c.match(/[a-f0-9]{6,}/i) && c.length < 20)
+                            .slice(0, 2);
                         if (classes.length > 0) path += '.' + classes.join('.');
                     }
+                    
                     return path;
                 }
                 
@@ -722,12 +793,15 @@ Decide the next action. Respond with ONLY a valid JSON object (no markdown, no e
 }}
 
 CRITICAL SELECTOR USAGE:
-- ALWAYS use the "selector" field from the INPUT FIELDS or BUTTONS list above
-- For typing: Use the exact selector from INPUT FIELDS (e.g., {{"selector": "#searchInput", "input_text": "query"}})
-- For clicking: Use the exact selector from BUTTONS (e.g., {{"selector": "[name='btnK']"}})
+- ALWAYS use the EXACT "selector" field from the INPUT FIELDS, BUTTONS, or LINKS list above
+- For typing: Copy the exact selector from INPUT FIELDS (e.g., {{"selector": "[name='searchBoxInput']", "input_text": "query"}})
+- For clicking buttons: Copy the exact selector from BUTTONS (e.g., {{"selector": "button.search-btn"}})
+- For clicking links: Use the "text" field from LINKS (e.g., {{"text": "Explore"}}) - DO NOT use href as selector
 - For upload: Use {{"action": "upload", "params": {{"file_path": "filename.pdf", "selector": "input[type='file']"}}}}
 - For download: Use {{"action": "download", "params": {{"selector": "download-button-selector"}}}}
-- DO NOT make up selectors - only use ones provided in the lists above
+- NEVER make up selectors - ONLY use selectors provided in the lists above
+- If you need to click a link, use the "text" field, NOT the href
+- If a selector is not in the list, use text-based clicking with the visible text
 
 AVAILABLE ACTIONS (YOU MUST USE EXACTLY ONE OF THESE):
 - "navigate": Go to a URL (provide full URL in params.url)
@@ -735,12 +809,14 @@ AVAILABLE ACTIONS (YOU MUST USE EXACTLY ONE OF THESE):
 - "type": Type text into input field (provide text in params.input_text and selector)
 - "scroll": Scroll down the page
 - "extract": Extract data from current page (marks subtask as completed)
+- "analyze_images": Use vision to analyze images on the page and make decisions (use when task requires looking at images)
+- "save_images": Save images from the page (vision will identify and save images with descriptions)
 - "upload": Upload a file (provide file_path and selector for file input)
 - "download": Download a file (provide selector or text for download button)
 - "skip": Skip current subtask if blocked/stuck
 - "done": Mark entire task as complete (ONLY when ALL subtasks are done)
 
-INVALID ACTIONS (DO NOT USE): "parse", "report", "wait", "analyze", or any other action not listed above!
+INVALID ACTIONS (DO NOT USE): "parse", "report", "wait", or any other action not listed above!
 
 RULES:
 1. If URL is "about:blank", use navigate action first
@@ -787,10 +863,639 @@ CRITICAL:
             logger.error(f"❌ All LLM providers failed: {e}")
             return {"action": "done", "is_complete": True, "result_summary": f"LLM Error: {e}"}
     
+    async def should_use_vision(self, page_content: Dict[str, Any]) -> bool:
+        """Decide if vision is needed for the next step - ONLY when absolutely necessary"""
+        if not VISION_ENABLED:
+            return False
+        
+        # If previous vision call decided modality for this step, use that
+        if hasattr(self, 'next_step_needs_vision') and self.next_step_needs_vision:
+            logger.info("🎨 Vision needed (decided by previous vision call)")
+            self.next_step_needs_vision = False  # Reset for next time
+            return True
+        
+        # Check current subtask to see if it requires vision
+        current_subtask = None
+        if self.task_plan:
+            for subtask in self.task_plan:
+                if subtask['status'] == 'pending':
+                    current_subtask = subtask['subtask'].lower()
+                    break
+        
+        # Vision ONLY needed if current subtask explicitly requires image analysis
+        if current_subtask:
+            vision_subtask_keywords = [
+                'look at', 'analyze', 'describe', 'pick', 'choose', 'select',
+                'evaluate', 'compare', 'find the best', 'which is better'
+            ]
+            
+            needs_vision_for_subtask = any(kw in current_subtask for kw in vision_subtask_keywords)
+            
+            if needs_vision_for_subtask and any(word in current_subtask for word in ['image', 'photo', 'picture', 'visual']):
+                logger.info(f"🎨 Vision needed (current subtask requires image analysis: {current_subtask})")
+                return True
+        
+        # Otherwise, use heuristics to detect if vision is needed
+        url = page_content.get('url', '')
+        title = page_content.get('title', '').lower()
+        body_text = page_content.get('bodyText', '').lower()
+        
+        # Skip vision for about:blank or empty pages
+        if url == 'about:blank' or not body_text:
+            return False
+        
+        # Vision ONLY needed for:
+        # 1. Cloudflare/CAPTCHA challenges (blocking navigation)
+        # 2. When NO interactive elements detected (page broken/unusual)
+        
+        element_count = page_content.get('elementCount', {}).get('total', 0)
+        
+        vision_indicators = [
+            'cloudflare' in title or ('cloudflare' in body_text and 'challenge' in body_text),
+            'captcha' in body_text or 'recaptcha' in body_text,
+            'verify you are human' in body_text,
+            'security check' in body_text and 'cloudflare' in body_text,
+            element_count == 0,  # NO elements detected at all
+        ]
+        
+        needs_vision = any(vision_indicators)
+        
+        if needs_vision:
+            logger.info("🎨 Vision needed (detected challenge or no elements)")
+        
+        return needs_vision
+    
+    async def plan_action_with_vision(self, screenshot_base64: str, page_content: Dict[str, Any], step_num: int) -> Dict[str, Any]:
+        """Single vision API call with fallback chain: Ollama → NVIDIA → Text-only"""
+        
+        # Build task plan status
+        plan_status = ""
+        if self.task_plan:
+            plan_status = "\n\nTASK PLAN:\n"
+            for i, subtask in enumerate(self.task_plan, 1):
+                status_icon = "✅" if subtask['status'] == 'completed' else "⏳"
+                plan_status += f"{status_icon} {i}. {subtask['subtask']} [{subtask['status']}]\n"
+        
+        # Try Ollama Qwen3-VL first
+        if OLLAMA_API_KEY:
+            try:
+                logger.info("🎨 Trying vision: Ollama Qwen3-VL")
+                result = await self._call_vision_model_ollama(screenshot_base64, page_content, step_num, plan_status)
+                if result:
+                    logger.info("✅ Vision success: Ollama Qwen3-VL")
+                    return result
+            except Exception as e:
+                logger.warning(f"⚠️  Ollama vision failed: {e}")
+        
+        # Fallback to NVIDIA Mistral vision
+        if NVIDIA_API_KEY:
+            try:
+                logger.info("🎨 Trying vision fallback: NVIDIA Mistral")
+                result = await self._call_vision_model_nvidia(screenshot_base64, page_content, step_num, plan_status)
+                if result:
+                    logger.info("✅ Vision success: NVIDIA Mistral")
+                    return result
+            except Exception as e:
+                logger.warning(f"⚠️  NVIDIA vision failed: {e}")
+        
+        # Final fallback: text-only (no vision)
+        logger.warning("⚠️  All vision models failed, falling back to text-only")
+        return None
+    
+    async def _call_vision_model_ollama(self, screenshot_base64: str, page_content: Dict[str, Any], step_num: int, plan_status: str) -> Dict[str, Any]:
+        """Call Ollama Qwen3-VL vision model"""
+        try:
+            # Check if task requires image analysis
+            task_needs_image_analysis = any(kw in self.task.lower() for kw in ['look at', 'analyze', 'describe', 'pick', 'choose', 'image', 'photo', 'picture'])
+            
+            image_analysis_instruction = ""
+            if task_needs_image_analysis:
+                image_analysis_instruction = """
+CRITICAL: This task requires IMAGE ANALYSIS!
+- Look carefully at ALL images visible in the screenshot
+- Use action "analyze_images" 
+- In "reasoning", provide DETAILED descriptions of what you see:
+  * Describe each image separately
+  * Include: colors, objects, style, composition, text visible
+  * Explain what makes each image interesting or notable
+  * Be specific and detailed (at least 2-3 sentences per image)
+"""
+            
+            prompt = f"""{image_analysis_instruction}
+
+Analyze this webpage screenshot and provide a COMPLETE response with:
+1. Bounding boxes of UI elements
+2. Next action with coordinates
+3. Whether NEXT step needs vision or text-only
+4. Plan updates if needed
+
+TASK: {self.task}
+{plan_status}
+
+CURRENT PAGE:
+URL: {page_content.get('url')}
+Title: {page_content.get('title')}
+STEP: {step_num}/{self.max_steps}
+
+Respond with ONLY a valid JSON object:
+{{
+    "bounding_boxes": [
+        {{
+            "type": "button|input|checkbox|link|dropdown",
+            "bbox": {{"x": 100, "y": 200, "width": 80, "height": 40}},
+            "text": "visible text",
+            "purpose": "what it does"
+        }}
+    ],
+    "action": "click|type|drag|hover|scroll_to|double_click|right_click|extract|navigate|done",
+    "reasoning": "what you see and why this action",
+    "params": {{
+        "x": 100,
+        "y": 200,
+        "x2": 300,
+        "y2": 400,
+        "text": "text to type",
+        "url": "url to navigate"
+    }},
+    "completed_subtask": "name of subtask if completed",
+    "new_subtask": "new subtask to add if discovered additional work",
+    "is_complete": false,
+    "next_step_needs_vision": true|false,
+    "next_step_reasoning": "why vision is/isn't needed for next step"
+}}
+
+MODALITY DECISION (next_step_needs_vision):
+- true: If next page will have CAPTCHA, challenge, complex visual layout, or few DOM elements
+- false: If next page will be standard HTML with good selectors (most websites)
+
+PLAN UPDATES:
+- Use "new_subtask" if you discover additional work needed
+- Use "completed_subtask" when you finish a subtask
+
+ACTIONS:
+- click: Click at (x, y) - buttons, checkboxes, links
+- type: Type text - provide x, y to click first, then text
+- drag: Drag from (x, y) to (x2, y2) - sliders, drag-drop
+- hover: Hover at (x, y) - dropdowns, tooltips
+- scroll_to: Scroll to (x, y)
+- extract: Extract visible data
+- navigate: Go to URL
+- done: Task complete
+
+EXAMPLES:
+Cloudflare: {{"action": "click", "params": {{"x": 50, "y": 300}}, "next_step_needs_vision": false, "reasoning": "Click checkbox, next page will be normal"}}
+Search: {{"action": "type", "params": {{"x": 100, "y": 200, "text": "query"}}, "next_step_needs_vision": false}}
+Slider: {{"action": "drag", "params": {{"x": 50, "y": 300, "x2": 200, "y2": 300}}, "next_step_needs_vision": false}}"""
+
+            # Call Ollama vision API
+            client = OpenAI(
+                api_key=OLLAMA_API_KEY,
+                base_url="https://ollama.com/v1"
+            )
+            
+            response = client.chat.completions.create(
+                model="qwen3-vl:235b-cloud",
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{screenshot_base64}"
+                            }
+                        }
+                    ]
+                }],
+                temperature=0.1,
+                max_tokens=2000  # Increased for bounding boxes + action
+            )
+            
+            content = response.choices[0].message.content
+            
+            # Extract JSON
+            json_match = re.search(r'\{.*\}', content, re.DOTALL)
+            if json_match:
+                result = json.loads(json_match.group())
+                
+                # Log bounding boxes detected
+                bboxes = result.get('bounding_boxes', [])
+                if bboxes:
+                    logger.info(f"✅ Detected {len(bboxes)} UI elements with bounding boxes")
+                
+                # Log modality decision for next step
+                next_needs_vision = result.get('next_step_needs_vision', False)
+                next_reasoning = result.get('next_step_reasoning', '')
+                if next_needs_vision:
+                    logger.info(f"🎨 Next step will use VISION: {next_reasoning}")
+                else:
+                    logger.info(f"📝 Next step will use TEXT-ONLY: {next_reasoning}")
+                
+                # Store modality decision for next iteration
+                self.next_step_needs_vision = next_needs_vision
+                
+                # Extract action plan with all fields
+                action_plan = {
+                    'action': result.get('action'),
+                    'reasoning': result.get('reasoning'),
+                    'params': result.get('params', {}),
+                    'completed_subtask': result.get('completed_subtask'),
+                    'new_subtask': result.get('new_subtask'),
+                    'is_complete': result.get('is_complete', False)
+                }
+                
+                # Add confidence and bbox to params for multi-strategy retry
+                action_plan['params']['confidence'] = result.get('confidence', 0.7)
+                
+                # Find relevant bbox for the action
+                bboxes = result.get('bounding_boxes', [])
+                if bboxes and action_plan['action'] in ['click', 'type', 'hover']:
+                    # Use first bbox (most relevant)
+                    action_plan['params']['bbox'] = bboxes[0].get('bbox')
+                
+                logger.info(f"✅ Ollama vision action: {action_plan.get('action')} (confidence: {action_plan['params']['confidence']:.2f})")
+                return action_plan
+            else:
+                logger.warning("Ollama vision didn't return valid JSON")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ Ollama vision failed: {e}")
+            raise  # Re-raise to trigger fallback
+    
+    async def _call_vision_model_nvidia(self, screenshot_base64: str, page_content: Dict[str, Any], step_num: int, plan_status: str) -> Dict[str, Any]:
+        """Call NVIDIA Mistral vision model as fallback"""
+        try:
+            # Check if task requires image analysis
+            task_needs_image_analysis = any(kw in self.task.lower() for kw in ['look at', 'analyze', 'describe', 'pick', 'choose', 'image', 'photo', 'picture'])
+            
+            image_analysis_instruction = ""
+            if task_needs_image_analysis:
+                image_analysis_instruction = """
+CRITICAL: This task requires IMAGE ANALYSIS!
+- Look carefully at ALL images visible in the screenshot
+- If task asks to SAVE images, use action "save_images" (not analyze_images)
+- If task asks to DESCRIBE/ANALYZE images, use action "analyze_images"
+- In "reasoning", provide DETAILED descriptions of what you see:
+  * Describe each image separately (Image 1, Image 2, Image 3)
+  * Include: car model/type, color, style, design features, condition
+  * Explain what makes each image appealing or notable
+  * Be specific and detailed (at least 2-3 sentences per image)
+  * Example: "Image 1: A pristine 1967 Ford Mustang GT in classic red with white racing stripes..."
+"""
+            
+            prompt = f"""{image_analysis_instruction}
+
+Analyze this webpage screenshot and provide a COMPLETE response with:
+1. Bounding boxes of UI elements
+2. Next action with coordinates
+3. Whether NEXT step needs vision or text-only
+4. Plan updates if needed
+
+TASK: {self.task}
+{plan_status}
+
+CURRENT PAGE:
+URL: {page_content.get('url')}
+Title: {page_content.get('title')}
+STEP: {step_num}/{self.max_steps}
+
+Respond with ONLY a valid JSON object:
+{{
+    "bounding_boxes": [
+        {{
+            "type": "button|input|checkbox|link|dropdown",
+            "bbox": {{"x": 100, "y": 200, "width": 80, "height": 40}},
+            "text": "visible text",
+            "purpose": "what it does"
+        }}
+    ],
+    "action": "click|type|drag|hover|scroll_to|double_click|right_click|extract|navigate|done",
+    "reasoning": "what you see and why this action",
+    "params": {{
+        "x": 100,
+        "y": 200,
+        "x2": 300,
+        "y2": 400,
+        "text": "text to type",
+        "url": "url to navigate"
+    }},
+    "completed_subtask": "name of subtask if completed",
+    "new_subtask": "new subtask to add if discovered additional work",
+    "is_complete": false,
+    "next_step_needs_vision": true|false,
+    "next_step_reasoning": "why vision is/isn't needed for next step"
+}}
+
+MODALITY DECISION (next_step_needs_vision):
+- true: If next page will have CAPTCHA, challenge, complex visual layout, or few DOM elements
+- false: If next page will be standard HTML with good selectors (most websites)
+
+ACTIONS:
+- click: Click at (x, y) - buttons, checkboxes, links
+- type: Type text - provide x, y to click first, then text
+- drag: Drag from (x, y) to (x2, y2) - sliders, drag-drop
+- hover: Hover at (x, y) - dropdowns, tooltips
+- scroll_to: Scroll to (x, y)
+- extract: Extract visible data
+- analyze_images: Analyze images and describe them (put descriptions in reasoning)
+- save_images: Save images from page (put descriptions in reasoning)
+- navigate: Go to URL
+- done: Task complete"""
+
+            # Call NVIDIA vision API
+            client = OpenAI(
+                api_key=NVIDIA_API_KEY,
+                base_url="https://integrate.api.nvidia.com/v1"
+            )
+            
+            response = client.chat.completions.create(
+                model="mistralai/mistral-medium-3-instruct",
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{screenshot_base64}"
+                            }
+                        }
+                    ]
+                }],
+                temperature=0.1,
+                max_tokens=2000
+            )
+            
+            content = response.choices[0].message.content
+            
+            # Extract JSON
+            json_match = re.search(r'\{.*\}', content, re.DOTALL)
+            if json_match:
+                result = json.loads(json_match.group())
+                
+                # Log bounding boxes detected
+                bboxes = result.get('bounding_boxes', [])
+                if bboxes:
+                    logger.info(f"✅ Detected {len(bboxes)} UI elements with bounding boxes")
+                
+                # Log modality decision for next step
+                next_needs_vision = result.get('next_step_needs_vision', False)
+                next_reasoning = result.get('next_step_reasoning', '')
+                if next_needs_vision:
+                    logger.info(f"🎨 Next step will use VISION: {next_reasoning}")
+                else:
+                    logger.info(f"📝 Next step will use TEXT-ONLY: {next_reasoning}")
+                
+                # Store modality decision for next iteration
+                self.next_step_needs_vision = next_needs_vision
+                
+                # Extract action plan with all fields
+                action_plan = {
+                    'action': result.get('action'),
+                    'reasoning': result.get('reasoning'),
+                    'params': result.get('params', {}),
+                    'completed_subtask': result.get('completed_subtask'),
+                    'new_subtask': result.get('new_subtask'),
+                    'is_complete': result.get('is_complete', False)
+                }
+                
+                # Add confidence and bbox to params for multi-strategy retry
+                action_plan['params']['confidence'] = result.get('confidence', 0.7)
+                
+                # Find relevant bbox for the action
+                bboxes = result.get('bounding_boxes', [])
+                if bboxes and action_plan['action'] in ['click', 'type', 'hover']:
+                    # Use first bbox (most relevant)
+                    action_plan['params']['bbox'] = bboxes[0].get('bbox')
+                
+                logger.info(f"✅ NVIDIA vision action: {action_plan.get('action')} (confidence: {action_plan['params']['confidence']:.2f})")
+                return action_plan
+            else:
+                logger.warning("NVIDIA vision didn't return valid JSON")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ NVIDIA vision failed: {e}")
+            raise  # Re-raise to trigger final fallback
+    
+    async def map_bbox_to_dom_selector(self, bbox: Dict[str, Any]) -> Optional[str]:
+        """Map bounding box to DOM selector using coordinates"""
+        try:
+            x = bbox.get('x', 0) + bbox.get('width', 0) // 2  # Center of bbox
+            y = bbox.get('y', 0) + bbox.get('height', 0) // 2
+            
+            # Get element at bbox center and generate selector
+            selector_info = await self.page.evaluate(f"""
+                () => {{
+                    const element = document.elementFromPoint({x}, {y});
+                    if (!element) return null;
+                    
+                    // Generate unique selector
+                    let selector = '';
+                    
+                    // Try ID first (most specific)
+                    if (element.id) {{
+                        selector = '#' + element.id;
+                    }}
+                    // Try name attribute
+                    else if (element.name) {{
+                        selector = element.tagName.toLowerCase() + '[name="' + element.name + '"]';
+                    }}
+                    // Try aria-label
+                    else if (element.getAttribute('aria-label')) {{
+                        selector = element.tagName.toLowerCase() + '[aria-label="' + element.getAttribute('aria-label') + '"]';
+                    }}
+                    // Try class combination
+                    else if (element.className && typeof element.className === 'string') {{
+                        const classes = element.className.trim().split(/\\s+/).slice(0, 2).join('.');
+                        if (classes) {{
+                            selector = element.tagName.toLowerCase() + '.' + classes;
+                        }}
+                    }}
+                    // Fallback to tag + text
+                    else {{
+                        const text = element.textContent?.trim().substring(0, 30);
+                        if (text) {{
+                            selector = element.tagName.toLowerCase() + ':has-text("' + text + '")';
+                        }} else {{
+                            selector = element.tagName.toLowerCase();
+                        }}
+                    }}
+                    
+                    return {{
+                        selector: selector,
+                        tagName: element.tagName.toLowerCase(),
+                        text: element.textContent?.trim().substring(0, 50) || '',
+                        isClickable: element.tagName.toLowerCase() === 'button' || 
+                                    element.tagName.toLowerCase() === 'a' ||
+                                    element.tagName.toLowerCase() === 'input' ||
+                                    element.getAttribute('role') === 'button' ||
+                                    element.onclick !== null,
+                        isVisible: element.offsetParent !== null
+                    }};
+                }}
+            """)
+            
+            if selector_info and selector_info['selector'] and selector_info['isVisible']:
+                logger.info(f"✅ Mapped bbox to selector: {selector_info['selector']} ({selector_info['tagName']})")
+                return selector_info['selector']
+            
+            return None
+            
+        except Exception as e:
+            logger.warning(f"⚠️  Bbox to DOM mapping failed: {e}")
+            return None
+    
+    async def verify_coordinates(self, x: int, y: int, expected_element_type: str = None) -> Dict[str, Any]:
+        """Verify coordinates and return element info with confidence"""
+        try:
+            # Get element at coordinates using JavaScript
+            element_info = await self.page.evaluate(f"""
+                () => {{
+                    const element = document.elementFromPoint({x}, {y});
+                    if (!element) return null;
+                    
+                    return {{
+                        tagName: element.tagName.toLowerCase(),
+                        type: element.type || '',
+                        role: element.getAttribute('role') || '',
+                        ariaLabel: element.getAttribute('aria-label') || '',
+                        text: element.textContent?.trim().substring(0, 50) || '',
+                        isClickable: element.tagName.toLowerCase() === 'button' || 
+                                    element.tagName.toLowerCase() === 'a' ||
+                                    element.tagName.toLowerCase() === 'input' ||
+                                    element.getAttribute('role') === 'button' ||
+                                    element.onclick !== null ||
+                                    window.getComputedStyle(element).cursor === 'pointer',
+                        isVisible: element.offsetParent !== null,
+                        rect: element.getBoundingClientRect()
+                    }};
+                }}
+            """)
+            
+            if not element_info:
+                logger.warning(f"⚠️  No element found at coordinates ({x}, {y})")
+                return {'valid': False, 'confidence': 0.0}
+            
+            # Calculate confidence score
+            confidence = 0.0
+            if element_info['isVisible']:
+                confidence += 0.4
+            if element_info['isClickable']:
+                confidence += 0.4
+            if element_info['text']:
+                confidence += 0.1
+            if element_info['ariaLabel'] or element_info['role']:
+                confidence += 0.1
+            
+            element_info['valid'] = element_info['isVisible'] and element_info['isClickable']
+            element_info['confidence'] = confidence
+            
+            if element_info['valid']:
+                logger.info(f"✅ Verified ({x}, {y}): {element_info['tagName']} - '{element_info['text']}' (confidence: {confidence:.2f})")
+            else:
+                logger.warning(f"⚠️  Invalid element at ({x}, {y}): visible={element_info['isVisible']}, clickable={element_info['isClickable']}")
+            
+            return element_info
+            
+        except Exception as e:
+            logger.warning(f"⚠️  Coordinate verification failed: {e}")
+            return {'valid': False, 'confidence': 0.0}
+    
+    async def verify_action_success(self, action: str, before_state: Dict[str, Any], after_state: Dict[str, Any]) -> Dict[str, Any]:
+        """Programmatically verify if action succeeded (no API calls)"""
+        try:
+            verification = {
+                'success': False,
+                'confidence': 0.0,
+                'changes_detected': [],
+                'reason': ''
+            }
+            
+            # 1. Visual change detection (screenshot hash)
+            if before_state.get('screenshot') and after_state.get('screenshot'):
+                import hashlib
+                before_hash = hashlib.md5(before_state['screenshot']).hexdigest()
+                after_hash = hashlib.md5(after_state['screenshot']).hexdigest()
+                
+                if before_hash != after_hash:
+                    verification['changes_detected'].append('visual_change')
+                    verification['confidence'] += 0.3
+            
+            # 2. URL change detection
+            if before_state.get('url') != after_state.get('url'):
+                verification['changes_detected'].append('url_change')
+                verification['confidence'] += 0.4
+                verification['success'] = True
+            
+            # 3. DOM change detection
+            if before_state.get('dom_hash') != after_state.get('dom_hash'):
+                verification['changes_detected'].append('dom_change')
+                verification['confidence'] += 0.2
+            
+            # 4. Page title change
+            if before_state.get('title') != after_state.get('title'):
+                verification['changes_detected'].append('title_change')
+                verification['confidence'] += 0.1
+            
+            # Determine success
+            if verification['confidence'] >= 0.3:
+                verification['success'] = True
+                verification['reason'] = f"Detected: {', '.join(verification['changes_detected'])}"
+            else:
+                verification['reason'] = "No significant changes detected"
+            
+            if verification['success']:
+                logger.info(f"✅ Action '{action}' verified: {verification['reason']} (confidence: {verification['confidence']:.2f})")
+            else:
+                logger.warning(f"⚠️  Action '{action}' may have failed: {verification['reason']}")
+            
+            return verification
+            
+        except Exception as e:
+            logger.warning(f"⚠️  Action verification failed: {e}")
+            return {'success': True, 'confidence': 0.5, 'changes_detected': [], 'reason': 'Verification error'}
+    
+    async def capture_page_state(self) -> Dict[str, Any]:
+        """Capture current page state for verification"""
+        try:
+            state = {
+                'url': self.page.url,
+                'title': await self.page.title(),
+            }
+            
+            # Capture screenshot
+            try:
+                state['screenshot'] = await self.page.screenshot(timeout=3000)
+            except:
+                state['screenshot'] = None
+            
+            # Capture DOM hash
+            try:
+                dom_text = await self.page.evaluate("() => document.body.innerText")
+                import hashlib
+                state['dom_hash'] = hashlib.md5(dom_text.encode()).hexdigest()
+            except:
+                state['dom_hash'] = None
+            
+            return state
+        except Exception as e:
+            logger.warning(f"⚠️  Failed to capture page state: {e}")
+            return {}
+    
     async def execute_action(self, action_plan: Dict[str, Any]) -> bool:
-        """Execute the planned action with robust error handling and retries"""
+        """Execute the planned action with coordinate verification and visual feedback"""
         action = action_plan.get("action", "done")
         params = action_plan.get("params", {})
+        
+        # Capture before screenshot for verification
+        before_screenshot = None
+        if action in ["click", "type", "drag", "hover"]:
+            try:
+                before_screenshot = await self.page.screenshot(timeout=3000)
+            except:
+                pass
         
         try:
             if action == "navigate":
@@ -799,89 +1504,134 @@ CRITICAL:
                     url = "https://" + url
                 logger.info(f"🌐 Navigating to: {url}")
                 
-                # Try multiple wait strategies
+                # Try multiple wait strategies with shorter timeouts
                 try:
-                    await self.page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                    await self.page.goto(url, wait_until="domcontentloaded", timeout=15000)
                 except:
                     # Fallback: try with networkidle
                     try:
-                        await self.page.goto(url, wait_until="networkidle", timeout=15000)
+                        await self.page.goto(url, wait_until="networkidle", timeout=10000)
                     except:
                         # Last resort: just load
-                        await self.page.goto(url, wait_until="load", timeout=10000)
+                        await self.page.goto(url, wait_until="load", timeout=8000)
                 
-                # Wait for page to stabilize
-                await self.page.wait_for_timeout(2000)
+                # Wait for page to stabilize (reduced from 2000ms)
+                await self.page.wait_for_timeout(1000)
                 
                 # Wait for network to be idle (dynamic content)
                 try:
-                    await self.page.wait_for_load_state("networkidle", timeout=5000)
+                    await self.page.wait_for_load_state("networkidle", timeout=3000)
                 except:
                     pass  # Continue even if network doesn't idle
                 
             elif action == "click":
                 text = params.get("text", "")
                 selector = params.get("selector")
+                x = params.get("x")
+                y = params.get("y")
+                bbox = params.get("bbox")  # Bounding box from vision
+                confidence = params.get("confidence", 0.5)
                 
+                # Multi-strategy retry with confidence-based decisions
+                strategies = []
+                
+                # Strategy 1: Vision → DOM mapping (if bbox available and high confidence)
+                if bbox and confidence >= 0.7:
+                    mapped_selector = await self.map_bbox_to_dom_selector(bbox)
+                    if mapped_selector:
+                        strategies.append(('dom_from_vision', mapped_selector, None, None))
+                        logger.info(f"🎯 Strategy 1: Using DOM selector from vision mapping: {mapped_selector}")
+                
+                # Strategy 2: Direct selector (if provided and valid)
                 if selector:
-                    logger.info(f"🖱️  Clicking selector: {selector}")
-                    element = self.page.locator(selector).first
-                    
-                    # Wait for element to be ready
-                    await element.wait_for(state="attached", timeout=5000)
-                    await element.wait_for(state="visible", timeout=5000)
-                    
-                    # Scroll element into view
-                    await element.scroll_into_view_if_needed()
-                    await self.page.wait_for_timeout(500)
-                    
-                    # Ensure element is clickable (not covered)
+                    # Validate selector exists before adding to strategies
                     try:
-                        await element.click(timeout=5000, force=False)
-                    except:
-                        # Fallback: force click
-                        logger.warning("Normal click failed, forcing click")
-                        await element.click(timeout=5000, force=True)
-                    
-                elif text:
-                    logger.info(f"🖱️  Clicking text: '{text}'")
-                    # Try multiple strategies with better error handling
-                    clicked = False
-                    
-                    # Wait for page to be stable
+                        count = await self.page.locator(selector).count()
+                        if count > 0:
+                            strategies.append(('selector', selector, None, None))
+                            logger.info(f"🎯 Strategy 2: Using provided selector: {selector} ({count} matches)")
+                        else:
+                            logger.warning(f"⚠️  Selector '{selector}' not found on page, skipping")
+                    except Exception as e:
+                        logger.warning(f"⚠️  Invalid selector '{selector}': {e}")
+                
+                # Strategy 3: Coordinates with verification (if provided)
+                if x is not None and y is not None:
+                    strategies.append(('coordinates', None, x, y))
+                    logger.info(f"🎯 Strategy 3: Using coordinates: ({x}, {y})")
+                
+                # Strategy 4: Text-based (if provided)
+                if text:
+                    strategies.append(('text', None, None, None))
+                    logger.info(f"🎯 Strategy 4: Using text search: '{text}'")
+                
+                # Try each strategy
+                for strategy_name, strat_selector, strat_x, strat_y in strategies:
                     try:
-                        await self.page.wait_for_load_state("networkidle", timeout=5000)
-                    except:
-                        await self.page.wait_for_load_state("domcontentloaded", timeout=3000)
-                    
-                    strategies = [
-                        lambda: self.page.get_by_text(text, exact=False).first,
-                        lambda: self.page.get_by_role("link", name=text).first,
-                        lambda: self.page.get_by_role("button", name=text).first,
-                        lambda: self.page.locator(f'text="{text}"').first,
-                        lambda: self.page.locator(f'a:has-text("{text}")').first,
-                        lambda: self.page.locator(f'button:has-text("{text}")').first
-                    ]
-                    
-                    for strategy in strategies:
-                        try:
-                            element = strategy()
+                        logger.info(f"🔄 Attempting click with strategy: {strategy_name}")
+                        
+                        # Capture before state
+                        before_state = await self.capture_page_state()
+                        
+                        # Execute click based on strategy
+                        if strategy_name in ['dom_from_vision', 'selector']:
+                            element = self.page.locator(strat_selector).first
                             await element.wait_for(state="visible", timeout=3000)
                             await element.scroll_into_view_if_needed()
+                            await self.page.wait_for_timeout(300)
                             await element.click(timeout=3000)
-                            clicked = True
-                            logger.info(f"✅ Successfully clicked element")
-                            break
-                        except Exception as e:
-                            continue
-                    
-                    if not clicked:
-                        logger.warning(f"Could not find clickable element with text: {text}")
-                        # Don't raise exception, just log and continue
-                        return False
+                            
+                        elif strategy_name == 'coordinates':
+                            # Verify coordinates first
+                            verification = await self.verify_coordinates(strat_x, strat_y)
+                            if verification['confidence'] < 0.5:
+                                logger.warning(f"⚠️  Low confidence ({verification['confidence']:.2f}), trying next strategy")
+                                continue
+                            await self.page.mouse.click(strat_x, strat_y)
+                            
+                        elif strategy_name == 'text':
+                            # Text-based click (existing logic)
+                            element = self.page.get_by_text(text, exact=False).first
+                            await element.wait_for(state="visible", timeout=3000)
+                            await element.click(timeout=3000)
                         
-                await self.page.wait_for_timeout(2000)
+                        await self.page.wait_for_timeout(800)
+                        
+                        # Capture after state and verify
+                        after_state = await self.capture_page_state()
+                        verification = await self.verify_action_success('click', before_state, after_state)
+                        
+                        if verification['success'] or verification['confidence'] >= 0.3:
+                            logger.info(f"✅ Click succeeded with strategy: {strategy_name}")
+                            return True
+                        else:
+                            logger.warning(f"⚠️  Click with {strategy_name} didn't produce expected changes, trying next strategy")
+                            continue
+                            
+                    except Exception as e:
+                        logger.warning(f"⚠️  Strategy {strategy_name} failed: {e}, trying next")
+                        continue
                 
+                # All strategies failed
+                logger.error(f"❌ All click strategies failed")
+                return False
+            
+            elif action == "double_click":
+                x = params.get("x")
+                y = params.get("y")
+                selector = params.get("selector")
+                
+                if x is not None and y is not None:
+                    logger.info(f"🖱️  Double-clicking at coordinates: ({x}, {y})")
+                    await self.page.mouse.dblclick(x, y)
+                    await self.page.wait_for_timeout(1000)
+                elif selector:
+                    logger.info(f"🖱️  Double-clicking selector: {selector}")
+                    element = self.page.locator(selector).first
+                    await element.wait_for(state="visible", timeout=5000)
+                    await element.dblclick()
+                    await self.page.wait_for_timeout(1000)
+            
             elif action == "type":
                 selector = params.get("selector")
                 input_text = params.get("input_text", "")
@@ -891,17 +1641,17 @@ CRITICAL:
                 if selector:
                     try:
                         element = self.page.locator(selector).first
-                        await element.wait_for(state="visible", timeout=5000)
+                        await element.wait_for(state="visible", timeout=3000)
                         await element.click()  # Focus the element
-                        await self.page.wait_for_timeout(300)
+                        await self.page.wait_for_timeout(200)
                         await element.fill(input_text)
-                        await self.page.wait_for_timeout(300)
+                        await self.page.wait_for_timeout(200)
                         # Press Enter if it's a search field
                         if "search" in selector.lower() or 'name="q"' in selector or 'type="search"' in selector:
                             await element.press("Enter")
                         logger.info(f"✅ Filled input using provided selector")
                     except Exception as e:
-                        logger.warning(f"Failed with provided selector: {e}")
+                        logger.warning(f"⚠️  Failed with provided selector: {e}")
                         return False
                 else:
                     # Try multiple strategies to find the input field
@@ -957,6 +1707,95 @@ CRITICAL:
                     await self.page.wait_for_load_state("networkidle", timeout=3000)
                 except:
                     pass
+            
+            elif action == "double_click":
+                x = params.get("x")
+                y = params.get("y")
+                selector = params.get("selector")
+                
+                if x is not None and y is not None:
+                    logger.info(f"🖱️  Double-clicking at coordinates: ({x}, {y})")
+                    await self.page.mouse.dblclick(x, y)
+                    await self.page.wait_for_timeout(1000)
+                elif selector:
+                    logger.info(f"🖱️  Double-clicking selector: {selector}")
+                    element = self.page.locator(selector).first
+                    await element.wait_for(state="visible", timeout=5000)
+                    await element.dblclick()
+                    await self.page.wait_for_timeout(1000)
+            
+            elif action == "right_click":
+                x = params.get("x")
+                y = params.get("y")
+                selector = params.get("selector")
+                
+                if x is not None and y is not None:
+                    logger.info(f"🖱️  Right-clicking at coordinates: ({x}, {y})")
+                    await self.page.mouse.click(x, y, button="right")
+                    await self.page.wait_for_timeout(1000)
+                elif selector:
+                    logger.info(f"🖱️  Right-clicking selector: {selector}")
+                    element = self.page.locator(selector).first
+                    await element.wait_for(state="visible", timeout=5000)
+                    await element.click(button="right")
+                    await self.page.wait_for_timeout(1000)
+            
+            elif action == "hover":
+                x = params.get("x")
+                y = params.get("y")
+                selector = params.get("selector")
+                
+                if x is not None and y is not None:
+                    logger.info(f"🖱️  Hovering at coordinates: ({x}, {y})")
+                    await self.page.mouse.move(x, y)
+                    await self.page.wait_for_timeout(1000)
+                elif selector:
+                    logger.info(f"🖱️  Hovering over selector: {selector}")
+                    element = self.page.locator(selector).first
+                    await element.wait_for(state="visible", timeout=5000)
+                    await element.hover()
+                    await self.page.wait_for_timeout(1000)
+            
+            elif action == "drag":
+                x = params.get("x")
+                y = params.get("y")
+                x2 = params.get("x2")
+                y2 = params.get("y2")
+                
+                if x is not None and y is not None and x2 is not None and y2 is not None:
+                    logger.info(f"🖱️  Dragging from ({x}, {y}) to ({x2}, {y2})")
+                    await self.page.mouse.move(x, y)
+                    await self.page.mouse.down()
+                    await self.page.wait_for_timeout(500)
+                    
+                    # Smooth drag motion (important for slider CAPTCHAs)
+                    steps = 10
+                    for i in range(steps + 1):
+                        intermediate_x = x + (x2 - x) * i / steps
+                        intermediate_y = y + (y2 - y) * i / steps
+                        await self.page.mouse.move(intermediate_x, intermediate_y)
+                        await self.page.wait_for_timeout(50)
+                    
+                    await self.page.mouse.up()
+                    await self.page.wait_for_timeout(1000)
+                else:
+                    logger.warning("Drag action requires x, y, x2, y2 coordinates")
+                    return False
+            
+            elif action == "scroll_to":
+                x = params.get("x")
+                y = params.get("y")
+                selector = params.get("selector")
+                
+                if x is not None and y is not None:
+                    logger.info(f"📜 Scrolling to coordinates: ({x}, {y})")
+                    await self.page.evaluate(f"window.scrollTo({x}, {y})")
+                    await self.page.wait_for_timeout(1000)
+                elif selector:
+                    logger.info(f"📜 Scrolling to selector: {selector}")
+                    element = self.page.locator(selector).first
+                    await element.scroll_into_view_if_needed()
+                    await self.page.wait_for_timeout(1000)
                 
             elif action == "scroll":
                 logger.info("📜 Scrolling page")
@@ -966,9 +1805,110 @@ CRITICAL:
             elif action == "extract":
                 logger.info("📊 Extracting data from current page")
                 await self.capture_screenshot("extract")
+            
+            elif action == "analyze_images":
+                logger.info("🎨 Analyzing images on current page using vision")
+                # Vision model already analyzed in planning step
+                # The descriptions are in action_plan['reasoning']
+                await self.capture_screenshot("analyze_images")
+                # Store analysis in actions_taken for final summary
+                self.actions_taken.append({
+                    'action': 'analyze_images',
+                    'analysis': action_plan.get('reasoning', 'Image analysis completed')
+                })
                 # Extract action means we got the data we need
                 # The completed_subtask should be set in action_plan
                 return False  # Continue to next subtask
+            
+            elif action == "save_images":
+                logger.info("💾 Saving images from current page using vision")
+                
+                # Take screenshot for vision analysis
+                screenshot_path = await self.capture_screenshot("save_images")
+                
+                # Use vision to identify and describe images
+                try:
+                    import base64
+                    with open(screenshot_path, 'rb') as f:
+                        screenshot_base64 = base64.b64encode(f.read()).decode('utf-8')
+                    
+                    # Get image URLs and descriptions from page
+                    image_data = await self.page.evaluate("""
+                        () => {
+                            const images = Array.from(document.querySelectorAll('img'))
+                                .filter(img => {
+                                    const rect = img.getBoundingClientRect();
+                                    return rect.width > 100 && rect.height > 100 && 
+                                           rect.top >= 0 && rect.top < window.innerHeight;
+                                })
+                                .slice(0, 5)  // Get first 5 visible images
+                                .map(img => ({
+                                    src: img.src,
+                                    alt: img.alt || '',
+                                    width: img.width,
+                                    height: img.height
+                                }));
+                            return images;
+                        }
+                    """)
+                    
+                    if not image_data:
+                        logger.warning("No images found on page")
+                        return False
+                    
+                    logger.info(f"Found {len(image_data)} images to save")
+                    
+                    # Download and save each image
+                    import httpx
+                    saved_count = 0
+                    image_descriptions = []
+                    
+                    for i, img in enumerate(image_data[:3], 1):  # Save first 3 images
+                        try:
+                            img_url = img['src']
+                            if not img_url.startswith('http'):
+                                continue
+                            
+                            # Download image
+                            async with httpx.AsyncClient(timeout=10.0) as client:
+                                response = await client.get(img_url)
+                                if response.status_code == 200:
+                                    # Save image
+                                    ext = 'jpg' if 'jpeg' in img_url or 'jpg' in img_url else 'png'
+                                    filename = f"{self.task_id}_image_{i}.{ext}"
+                                    filepath = DOWNLOADS_DIR / filename
+                                    
+                                    with open(filepath, 'wb') as f:
+                                        f.write(response.content)
+                                    
+                                    self.downloads.append(str(filepath))
+                                    saved_count += 1
+                                    
+                                    # Store image info for description
+                                    image_descriptions.append({
+                                        'filename': filename,
+                                        'alt': img.get('alt', ''),
+                                        'size': f"{img.get('width')}x{img.get('height')}"
+                                    })
+                                    
+                                    logger.info(f"💾 Saved image {i}: {filename}")
+                        except Exception as e:
+                            logger.warning(f"Failed to save image {i}: {e}")
+                    
+                    # Store descriptions in actions_taken
+                    self.actions_taken.append({
+                        'action': 'save_images',
+                        'saved_count': saved_count,
+                        'images': image_descriptions,
+                        'analysis': action_plan.get('reasoning', 'Images saved')
+                    })
+                    
+                    logger.info(f"✅ Saved {saved_count} images successfully")
+                    return False  # Continue to next subtask
+                    
+                except Exception as e:
+                    logger.error(f"Failed to save images: {e}")
+                    return False
             
             elif action == "upload":
                 file_path = params.get("file_path", "")
@@ -1114,9 +2054,40 @@ CRITICAL:
                 self.last_page_url = current_url
                 self.last_page_hash = current_hash
                 
-                # Plan next action
-                action_plan = self.plan_next_action(page_content, step)
-                self.metrics["llm_calls"] += 1
+                # Decide if vision is needed for next step
+                use_vision = await self.should_use_vision(page_content)
+                
+                # Plan next action (with vision if needed)
+                action_plan = None
+                if use_vision:
+                    # Capture screenshot for vision analysis with robust error handling
+                    screenshot_bytes = None
+                    for timeout_val in [15000, 5000, 3000]:
+                        try:
+                            screenshot_bytes = await self.page.screenshot(
+                                timeout=timeout_val,
+                                animations="disabled" if timeout_val > 5000 else None
+                            )
+                            break
+                        except Exception as e:
+                            if timeout_val == 3000:  # Last attempt
+                                logger.warning(f"⚠️  Vision screenshot failed, falling back to text-only")
+                                use_vision = False
+                                break
+                            continue
+                    
+                    if screenshot_bytes:
+                        screenshot_base64 = base64.b64encode(screenshot_bytes).decode('utf-8')
+                        
+                        # Try vision-based planning
+                        action_plan = await self.plan_action_with_vision(screenshot_base64, page_content, step)
+                        self.metrics["llm_calls"] += 1
+                
+                # Fallback to text-only if vision failed or not needed
+                if not action_plan:
+                    action_plan = self.plan_next_action(page_content, step)
+                    self.metrics["llm_calls"] += 1
+                
                 logger.info(f"💭 Plan: {action_plan.get('action')} - {action_plan.get('reasoning', '')}")
                 
                 # Check if a subtask was completed

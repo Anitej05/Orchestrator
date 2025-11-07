@@ -54,6 +54,7 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
     // State for viewing specific canvas content from messages
     const [viewedCanvasContent, setViewedCanvasContent] = useState<string | undefined>(undefined);
     const [viewedCanvasType, setViewedCanvasType] = useState<'html' | 'markdown' | undefined>(undefined);
+    const [canvasView, setCanvasView] = useState<'browser' | 'plan'>('browser');
     
     // Get conversation state from Zustand store
     const conversationState = useConversationStore();
@@ -64,10 +65,17 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
     const hasCanvas = conversationState.has_canvas;
     const canvasContent = conversationState.canvas_content;
     const canvasType = conversationState.canvas_type;
+    const browserView = (conversationState as any).browser_view;
+    const planView = (conversationState as any).plan_view;
     
-    // Determine which canvas to display - viewed canvas takes precedence
-    const displayCanvasContent = viewedCanvasContent || canvasContent;
+    // Determine which canvas to display - viewed canvas takes precedence, then toggle view
+    let displayCanvasContent = viewedCanvasContent || canvasContent;
     const displayCanvasType = viewedCanvasType || canvasType;
+    
+    // If we have both views and no viewed canvas, use the toggle
+    if (!viewedCanvasContent && browserView && planView) {
+        displayCanvasContent = canvasView === 'browser' ? browserView : planView;
+    }
 
     // Process plan data from conversation store
     useEffect(() => {
@@ -358,6 +366,36 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                 <TabsContent value="canvas" className="flex-1 overflow-y-auto mt-4">
                     {(hasCanvas || viewedCanvasContent) && displayCanvasContent ? (
                         <div className="h-full flex flex-col">
+                            {/* Toggle buttons for browser/plan view */}
+                            {!viewedCanvasContent && browserView && planView && (
+                                <div className="bg-gray-50 border-b border-gray-200 px-4 py-2 flex items-center justify-between">
+                                    <span className="text-sm font-medium text-gray-700">View:</span>
+                                    <div className="flex gap-2">
+                                        <button
+                                            onClick={() => setCanvasView('browser')}
+                                            className={cn(
+                                                "px-3 py-1 text-xs rounded-md transition-colors",
+                                                canvasView === 'browser'
+                                                    ? "bg-blue-500 text-white"
+                                                    : "bg-white text-gray-700 hover:bg-gray-100 border border-gray-300"
+                                            )}
+                                        >
+                                            🖥️ Browser View
+                                        </button>
+                                        <button
+                                            onClick={() => setCanvasView('plan')}
+                                            className={cn(
+                                                "px-3 py-1 text-xs rounded-md transition-colors",
+                                                canvasView === 'plan'
+                                                    ? "bg-blue-500 text-white"
+                                                    : "bg-white text-gray-700 hover:bg-gray-100 border border-gray-300"
+                                            )}
+                                        >
+                                            📋 Plan View
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
                             {viewedCanvasContent && (
                                 <div className="bg-blue-50 border-b border-blue-200 px-4 py-2 text-sm text-blue-800">
                                     Viewing canvas from a previous message

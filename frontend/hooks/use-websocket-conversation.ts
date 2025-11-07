@@ -237,6 +237,9 @@ export function useWebSocketManager({
               has_canvas: eventData.data.has_canvas,
               canvas_type: eventData.data.canvas_type,
               canvas_content: eventData.data.canvas_content,
+              browser_view: eventData.data.browser_view,
+              plan_view: eventData.data.plan_view,
+              current_view: eventData.data.current_view,
               metadata: {
                 ...currentState.metadata,
                 browserScreenshotCount: eventData.data.screenshot_count
@@ -406,7 +409,10 @@ export function useWebSocketManager({
               // Handle canvas data
               canvas_content: finalState.canvas_content !== undefined ? finalState.canvas_content : currentState.canvas_content,
               canvas_type: finalState.canvas_type !== undefined ? finalState.canvas_type : currentState.canvas_type,
-              has_canvas: finalState.has_canvas !== undefined ? finalState.has_canvas : currentState.has_canvas
+              has_canvas: finalState.has_canvas !== undefined ? finalState.has_canvas : currentState.has_canvas,
+              browser_view: (finalState as any).browser_view !== undefined ? (finalState as any).browser_view : (currentState as any).browser_view,
+              plan_view: (finalState as any).plan_view !== undefined ? (finalState as any).plan_view : (currentState as any).plan_view,
+              current_view: (finalState as any).current_view !== undefined ? (finalState as any).current_view : (currentState as any).current_view
             });
             // Explicitly set isLoading to false in the store
             console.log('Setting isLoading to false after __end__ event');

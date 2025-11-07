@@ -60,6 +60,9 @@ export interface ConversationState {
   canvas_content?: string;
   canvas_type?: 'html' | 'markdown';
   has_canvas?: boolean;
+  browser_view?: string;
+  plan_view?: string;
+  current_view?: 'browser' | 'plan';
   // Plan approval fields
   approval_required?: boolean;
   estimated_cost?: number;

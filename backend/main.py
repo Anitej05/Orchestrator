@@ -778,13 +778,26 @@ async def find_agents(request: ProcessRequest):
 
         logger.info(f"Successfully processed request for thread_id: {thread_id}")
 
+        # Check if there's canvas data from browser agent
+        canvas_data = {}
+        with canvas_lock:
+            if thread_id in live_canvas_updates:
+                canvas_data = live_canvas_updates[thread_id]
+                logger.info(f"📊 Including canvas data in response for thread {thread_id}")
+
         return ProcessResponse(
             message="Successfully processed the request.",
             thread_id=thread_id,
             task_agent_pairs=task_agent_pairs,
             final_response=final_response_str,
             pending_user_input=False,
-            question_for_user=None
+            question_for_user=None,
+            has_canvas=canvas_data.get('has_canvas', False),
+            canvas_content=canvas_data.get('canvas_content'),
+            canvas_type=canvas_data.get('canvas_type'),
+            browser_view=canvas_data.get('browser_view'),
+            plan_view=canvas_data.get('plan_view'),
+            current_view=canvas_data.get('current_view', 'browser')
         )
 
     except HTTPException as http_exc:
@@ -837,13 +850,26 @@ async def continue_conversation(user_response: UserResponse):
 
         logger.info(f"Successfully continued conversation for thread_id: {user_response.thread_id}")
 
+        # Check if there's canvas data from browser agent
+        canvas_data = {}
+        with canvas_lock:
+            if user_response.thread_id in live_canvas_updates:
+                canvas_data = live_canvas_updates[user_response.thread_id]
+                logger.info(f"📊 Including canvas data in continue response for thread {user_response.thread_id}")
+
         return ProcessResponse(
             message="Successfully processed the continued conversation.",
             thread_id=user_response.thread_id,
             task_agent_pairs=task_agent_pairs,
             final_response=final_response_str,
             pending_user_input=False,
-            question_for_user=None
+            question_for_user=None,
+            has_canvas=canvas_data.get('has_canvas', False),
+            canvas_content=canvas_data.get('canvas_content'),
+            canvas_type=canvas_data.get('canvas_type'),
+            browser_view=canvas_data.get('browser_view'),
+            plan_view=canvas_data.get('plan_view'),
+            current_view=canvas_data.get('current_view', 'browser')
         )
 
     except Exception as e:
@@ -860,6 +886,8 @@ async def update_canvas(update_data: Dict[str, Any] = Body(...)):
         thread_id = update_data.get("thread_id")
         if not thread_id:
             return {"status": "error", "message": "thread_id required"}
+        
+        logger.info(f"📥 Received canvas update for thread {thread_id} (step {update_data.get('step', 0)})")
         
         screenshot_data = update_data.get("screenshot_data", "")
         url = update_data.get("url", "")
@@ -1276,26 +1304,25 @@ async def websocket_chat(websocket: WebSocket):
                 while polling_active:
                     await asyncio.sleep(0.5)  # Poll every 500ms
                     try:
-                        # Check if there's a live canvas update in conversation store
-                        with store_lock:
-                            if thread_id in conversation_store:
-                                state = conversation_store[thread_id]
-                                live_update = state.get('live_canvas_update')
-                                if live_update and live_update.get('timestamp', 0) > last_update_time:
+                        # Check if there's a live canvas update from browser agent
+                        with canvas_lock:
+                            if thread_id in live_canvas_updates:
+                                live_update = live_canvas_updates[thread_id]
+                                if live_update.get('timestamp', 0) > last_update_time:
                                     # New canvas update available
                                     await websocket.send_json({
                                         "node": "__live_canvas__",
                                         "thread_id": thread_id,
                                         "data": {
-                                            "has_canvas": live_update['has_canvas'],
-                                            "canvas_type": live_update['canvas_type'],
-                                            "canvas_content": live_update['canvas_content'],
-                                            "screenshot_count": live_update.get('screenshot_count', 0)
+                                            "has_canvas": live_update.get('has_canvas', True),
+                                            "canvas_type": live_update.get('canvas_type', 'html'),
+                                            "canvas_content": live_update.get('canvas_content', ''),
+                                            "screenshot_count": live_update.get('step', 0)
                                         },
                                         "timestamp": time.time()
                                     })
                                     last_update_time = live_update['timestamp']
-                                    logger.info(f"Sent live canvas update for thread {thread_id}")
+                                    logger.info(f"📡 Sent live canvas update for thread {thread_id} (step {live_update.get('step', 0)})")
                     except Exception as e:
                         logger.debug(f"Error polling live canvas: {e}")
             
