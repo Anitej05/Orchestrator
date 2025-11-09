@@ -32,55 +32,33 @@ export default function ConversationsDropdown({
     const loadConversations = async () => {
       setLoading(true);
       try {
-        const { authFetch, getOwnerFromClerk } = await import('@/lib/auth-fetch');
+        const { authFetch } = await import('@/lib/auth-fetch');
         const response = await authFetch('http://localhost:8000/api/conversations');
         if (!response.ok) {
           throw new Error('Failed to load conversations');
         }
-        const conversationIds: string[] = await response.json();
+        
+        // The new endpoint returns full conversation objects with metadata
+        const conversationsData = await response.json();
+        
+        console.log('Loaded conversations:', conversationsData.length);
+        
+        // Map to the expected format
+        const conversationDetails: ConversationItem[] = conversationsData.map((conv: any) => ({
+          thread_id: conv.id,
+          created_at: conv.created_at,
+          title: conv.title,
+          preview: conv.last_message || conv.title
+        }));
 
-        // Get current user_id from Clerk
-        const owner = await getOwnerFromClerk();
-        const currentUserId = owner?.user_id;
-
-        // Fetch details for each conversation to get titles and previews
-        const conversationDetailsRaw = await Promise.all(
-          conversationIds.slice(0, 20).map(async (thread_id) => {
-            try {
-              const detailResponse = await authFetch(`http://localhost:8000/api/conversations/${thread_id}`);
-              if (detailResponse.ok) {
-                const data = await detailResponse.json();
-                // Only include if owner matches current user
-                if (data.owner?.user_id !== currentUserId) return null;
-                let title = data.title;
-                let preview = '';
-                if (!title) {
-                  const firstUserMessage = data.messages?.find((m: any) => m.type === 'user');
-                  preview = firstUserMessage?.content || 'Conversation';
-                  title = preview.length > 50 ? preview.substring(0, 50) + '...' : preview;
-                } else {
-                  const firstUserMessage = data.messages?.find((m: any) => m.type === 'user');
-                  preview = firstUserMessage?.content || data.title;
-                }
-                return {
-                  thread_id,
-                  created_at: data.created_at || new Date().toISOString(),
-                  title,
-                  preview
-                };
-              }
-            } catch (err) {
-              console.error(`Failed to load details for ${thread_id}:`, err);
-            }
-            return null;
-          })
+        // Sort by created_at (newest first)
+        conversationDetails.sort((a, b) => 
+          new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
         );
 
-        // Filter out nulls (conversations not owned by user)
-        const conversationDetails = conversationDetailsRaw.filter(Boolean) as ConversationItem[];
         setConversations(conversationDetails);
-      } catch (error) {
-        console.error('Failed to load conversations:', error);
+      } catch (err) {
+        console.error('Failed to load conversations:', err);
       } finally {
         setLoading(false);
       }

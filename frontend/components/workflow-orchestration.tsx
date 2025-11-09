@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react"
 import { Database, Users, BarChart3, Lightbulb, Loader2 } from "lucide-react"
+import { useUser } from "@clerk/nextjs"
 import type { TaskAgentPair } from "@/lib/types"
 
 interface ExecutionResult {
@@ -53,6 +54,9 @@ export default function WorkflowOrchestration({
   onThreadIdUpdate,
   onExecutionResultsUpdate,
 }: WorkflowOrchestrationProps) {
+  // Get user info from Clerk
+  const { user } = useUser()
+  
   // WebSocket ref for connection management (must be inside component)
   const wsRef = useRef<WebSocket | null>(null)
   const [currentPhase, setCurrentPhase] = useState<"" | "intro" | "loading" | "analysis" | "insights">("intro")
@@ -472,7 +476,10 @@ export default function WorkflowOrchestration({
       console.log("WebSocket connected, sending initial prompt...")
       // Send initial prompt when connection opens
       const prompt = taskInput || "Please analyze and execute the requested workflow"
-      ws.send(JSON.stringify({ prompt }))
+      ws.send(JSON.stringify({ 
+        prompt,
+        owner: user?.id || undefined
+      }))
     }
 
     ws.onmessage = (event) => {

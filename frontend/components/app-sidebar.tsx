@@ -66,7 +66,7 @@ export default function AppSidebar({ onConversationSelect, onNewConversation, cu
       )}
 
       {/* Main Sidebar */}
-      <Sidebar collapsible="offcanvas" className="border-r z-40">
+      <Sidebar collapsible="offcanvas" className="border-r z-40 fixed left-0 top-0 h-screen bg-gradient-to-br from-gray-50 to-gray-100 dark:from-gray-950 dark:to-gray-900 [&_[data-sidebar=sidebar]]:bg-transparent [&_[data-sidebar=sidebar]]:bg-gradient-to-br [&_[data-sidebar=sidebar]]:from-gray-50 [&_[data-sidebar=sidebar]]:to-gray-100 [&_[data-sidebar=sidebar]]:dark:from-gray-950 [&_[data-sidebar=sidebar]]:dark:to-gray-900" open={open} onOpenChange={setOpen}>
         <div className="flex h-full flex-col pt-16">
       {/* <SidebarHeader className="border-b border-gray-200 p-4">
         <Link href="/" className="flex items-center space-x-2">
@@ -95,7 +95,7 @@ export default function AppSidebar({ onConversationSelect, onNewConversation, cu
         </SidebarGroup>
 
         <SidebarGroup>
-          <SidebarGroupLabel>Conversations</SidebarGroupLabel>
+          {/* <SidebarGroupLabel>Conversations</SidebarGroupLabel> */}
           <SidebarGroupContent className="px-2 pt-2 flex flex-col items-center">
             {onConversationSelect && (
               <div className="w-full flex flex-col items-center">

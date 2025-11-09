@@ -71,7 +71,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
   actions: {
     startConversation: async (input: string, files: File[] = [], planningMode: boolean = false, owner?: string) => {
       // Clear previous conversation state when starting a new conversation
-      console.log(`Starting conversation with planning mode: ${planningMode}`);
+      console.debug(`Starting conversation with planning mode: ${planningMode}`);
       set({ 
         isLoading: true, 
         status: 'processing',
@@ -101,8 +101,8 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
         );
 
         const timestamp = Date.now();
-        const messageId = createMessageId(input, 'human', timestamp);
-        console.log(`Frontend creating user message: id=${messageId}, timestamp=${timestamp}, content=${input.substring(0, 50)}`);
+        const messageId = createMessageId(input, 'user', timestamp);
+          console.debug(`Frontend creating user message (continue): id=${messageId}, timestamp=${timestamp}, content=${input.substring(0, 50)}`);
         const userMessage: Message = {
           id: messageId,
           type: 'user',
@@ -135,11 +135,11 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
                   file_type: file.file_type
                 }))
               }));
-              console.log(`WebSocket message sent successfully on attempt ${attempt + 1}`);
+              console.debug(`WebSocket message sent successfully on attempt ${attempt + 1}`);
               return; // Successfully sent
             }
             
-            console.log(`WebSocket not ready, attempt ${attempt + 1}/${maxAttempts}, waiting ${delayMs}ms...`);
+            console.debug(`WebSocket not ready, attempt ${attempt + 1}/${maxAttempts}, waiting ${delayMs}ms...`);
             // Wait before retrying
             await new Promise(resolve => setTimeout(resolve, delayMs));
           }
@@ -256,19 +256,19 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
                   file_type: file.file_type
                 }))
               };
-              console.log('=== FRONTEND: Sending WebSocket message ===');
-              console.log('  wasWaitingForUser:', wasWaitingForUser);
-              console.log('  isAnsweringQuestion:', isAnsweringQuestion);
-              console.log('  sending as:', isAnsweringQuestion ? 'user_response' : 'prompt');
-              console.log('  input:', input);
-              console.log('  planning_mode:', planningMode);
-              console.log('  full message:', messageData);
+              console.debug('=== FRONTEND: Sending WebSocket message ===');
+              console.debug('  wasWaitingForUser:', wasWaitingForUser);
+              console.debug('  isAnsweringQuestion:', isAnsweringQuestion);
+              console.debug('  sending as:', isAnsweringQuestion ? 'user_response' : 'prompt');
+              console.debug('  input:', input);
+              console.debug('  planning_mode:', planningMode);
+              console.debug('  full message:', messageData);
               ws.send(JSON.stringify(messageData));
-              console.log(`WebSocket message sent successfully on attempt ${attempt + 1}`);
+              console.debug(`WebSocket message sent successfully on attempt ${attempt + 1}`);
               return; // Successfully sent
             }
             
-            console.log(`WebSocket not ready, attempt ${attempt + 1}/${maxAttempts}, waiting ${delayMs}ms...`);
+            console.debug(`WebSocket not ready, attempt ${attempt + 1}/${maxAttempts}, waiting ${delayMs}ms...`);
             // Wait before retrying
             await new Promise(resolve => setTimeout(resolve, delayMs));
           }
@@ -294,7 +294,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
         
       } catch (error: any) {
         const errorMessage = error.message || 'An unknown error occurred';
-        console.error('Error in continueConversation:', errorMessage);
+        console.debug('Error in continueConversation:', errorMessage);
         set({ status: 'error', isLoading: false });
         const errorSystemMessage: Message = {
           id: Date.now().toString(),
@@ -310,17 +310,13 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
       if (!threadId) return;
       set({ isLoading: true });
       try {
-        // Get Clerk JWT from localStorage or Clerk API
-        let token = '';
-        if (typeof window !== 'undefined') {
-          token = localStorage.getItem('clerk_jwt') || '';
-        }
-        // Fetch the full conversation history from the API with Authorization header
-        const response = await fetch(`http://localhost:8000/api/conversations/${threadId}`, {
-          headers: {
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          },
-        });
+        // Sanitize threadId - remove any appended index like :1 that LangGraph might add
+        const cleanThreadId = threadId.split(':')[0];
+        
+        // Use authFetch helper which handles Clerk JWT properly
+        const { authFetch } = await import('./auth-fetch');
+        const response = await authFetch(`http://localhost:8000/api/conversations/${cleanThreadId}`);
+        
         if (!response.ok) {
           if (response.status === 404) {
             console.log('Conversation not found, starting fresh');
@@ -362,9 +358,9 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
         // Explicitly set isLoading to false after loading
         set({ isLoading: false });
         
-        // Save thread_id to localStorage for persistence
+        // Save thread_id to localStorage for persistence (use clean version)
         if (typeof window !== 'undefined') {
-          localStorage.setItem('thread_id', threadId);
+          localStorage.setItem('thread_id', cleanThreadId);
         }
         
         console.log('Conversation loaded successfully:', threadId);

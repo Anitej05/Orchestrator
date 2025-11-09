@@ -72,4 +72,6 @@ class UserThread(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(String, nullable=False, index=True)
     thread_id = Column(String, nullable=False, unique=True, index=True)
+    title = Column(String, nullable=True)  # Title for the conversation
     created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

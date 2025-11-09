@@ -44,13 +44,14 @@ interface ApiResponse {
 
 function HomeContent() {
   const { open } = useSidebar()
-  const { user } = useUser()
+  const { user, isLoaded: clerkLoaded } = useUser()
   const [taskAgentPairs, setTaskAgentPairs] = useState<TaskAgentPair[]>([])
   const [selectedAgents, setSelectedAgents] = useState<Record<string, string>>({})
   const [isExecuting, setIsExecuting] = useState(false)
   const [executionResults, setExecutionResults] = useState<ExecutionResult[]>([])
   const [apiResponseData, setApiResponseData] = useState<ApiResponse | null>(null)
   const [currentThreadId, setCurrentThreadId] = useState<string | null>(null)
+  const [isRestoring, setIsRestoring] = useState(false)
   const { toast } = useToast()
   const sidebarRef = useRef<OrchestrationDetailsSidebarRef>(null);
 
@@ -67,15 +68,22 @@ function HomeContent() {
   useWebSocketManager();
 
   // Load conversation from localStorage on page load (persistence)
+  // Defer until Clerk is loaded to ensure auth tokens are available and avoid 401s
   useEffect(() => {
-    const savedThreadId = localStorage.getItem('thread_id');
+    if (!clerkLoaded) return;
+    const savedThreadId = typeof window !== 'undefined' ? localStorage.getItem('thread_id') : null;
     if (savedThreadId && !conversationState.thread_id) {
       console.log('Restoring conversation from localStorage:', savedThreadId);
-      loadConversation(savedThreadId);
+      setIsRestoring(true);
+      (async () => {
+        await loadConversation(savedThreadId);
+        setIsRestoring(false);
+      })();
     }
-  }, []); // Run only once on mount
+  }, [clerkLoaded, conversationState.thread_id, loadConversation]);
 
   useEffect(() => {
+    if (isRestoring) return; // Avoid side-effects while restoring existing convo
     if (conversationState.status === 'completed' && conversationState.final_response) {
       const result: ProcessResponse = {
         thread_id: conversationState.thread_id || '',
@@ -85,7 +93,9 @@ function HomeContent() {
         pending_user_input: false,
         question_for_user: null,
       };
-      handleInteractiveWorkflowComplete(result);
+      // Just update state presentation; don't auto-trigger execution
+      setApiResponseData(result as ApiResponse);
+      setTaskAgentPairs(result.task_agent_pairs);
     } else if (conversationState.status === 'error') {
       const lastMessage = conversationState.messages[conversationState.messages.length - 1];
       const errorMessage = lastMessage?.content || "An unknown error occurred.";
@@ -95,7 +105,7 @@ function HomeContent() {
         variant: "destructive",
       });
     }
-  }, [conversationState.status, conversationState.final_response, conversationState.thread_id]);
+  }, [conversationState.status, conversationState.final_response, conversationState.thread_id, isRestoring]);
 
   const handleInteractiveWorkflowComplete = (result: ProcessResponse) => {
     setApiResponseData(result as ApiResponse);
@@ -123,7 +133,9 @@ function HomeContent() {
 
   const handleConversationSelect = async (threadId: string) => {
     try {
+      setIsRestoring(true);
       await loadConversation(threadId);
+      setIsRestoring(false);
 
       // Update local state with loaded conversation data
       if (conversationState.task_agent_pairs && conversationState.task_agent_pairs.length > 0) {
@@ -135,25 +147,6 @@ function HomeContent() {
           initialSelections[pair.task_name] = pair.primary.id;
         });
         setSelectedAgents(initialSelections);
-      } else {
-        // If no task_agent_pairs in conversation state, try to get them from the API
-        try {
-          const response = await fetch(`http://localhost:8000/api/chat/status/${threadId}`);
-          if (response.ok) {
-            const statusData = await response.json();
-            if (statusData.task_agent_pairs && statusData.task_agent_pairs.length > 0) {
-              setTaskAgentPairs(statusData.task_agent_pairs);
-
-              const initialSelections: Record<string, string> = {};
-              statusData.task_agent_pairs.forEach((pair: any) => {
-                initialSelections[pair.task_name] = pair.primary.id;
-              });
-              setSelectedAgents(initialSelections);
-            }
-          }
-        } catch (err) {
-          console.error("Error fetching conversation status:", err);
-        }
       }
 
       toast({

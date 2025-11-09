@@ -455,16 +455,28 @@ CACHE_DURATION_SECONDS = 300
 
 # --- New File-Based Memory Functions ---
 def save_plan_to_file(state: dict):
-    '''Saves the current plan and completed tasks to a Markdown file.'''
+    '''TIER 1 FIX: Saves the current plan and completed tasks to a Markdown file with owner tracking.'''
     thread_id = state.get("thread_id")
     if not thread_id:
         logger.warning("No thread_id found in state, skipping plan save")
         return {}
+    
+    # Extract owner - should be passed in state
+    owner = state.get("owner")
+    if isinstance(owner, dict):
+        owner_id = owner.get("user_id") or owner.get("sub") or owner.get("id")
+    else:
+        owner_id = owner
+    
+    if not owner_id:
+        logger.warning(f"No owner found in state for thread {thread_id}, plan will be saved without owner")
+        owner_id = "unknown"
 
     plan_path = os.path.join(PLAN_DIR, f"{thread_id}-plan.md")
 
     with open(plan_path, "w", encoding="utf-8") as f:
-        f.write(f"# Execution Plan for Thread: {thread_id}\n\n")
+        f.write(f"# Execution Plan for Thread: {thread_id}\n")
+        f.write(f"**Owner:** {owner_id}\n")
         f.write(f"**Original Prompt:** {state.get('original_prompt', 'N/A')}\n\n")
 
         f.write("## Attachments\n")
@@ -1640,15 +1652,27 @@ def evaluate_agent_response(state: State):
     {json.dumps(task_to_evaluate['result'], indent=2)[:1000]}
     ```
 
-    **Rules:**
-    1. **Context is key:** If the user referenced "that company" or similar, check the conversation history for the company name.
-    2. **Data presence = success:** If the result contains actual data (not empty, not just errors), it's successful.
-    3. **Be pragmatic:** News/search results don't need to be perfectly filtered - if they contain relevant articles, that's good enough.
-    4. **Only ask if truly necessary:** Only request clarification if the result is completely empty, contains only errors, or is fundamentally wrong.
+    **CRITICAL RULES (MUST FOLLOW):**
+    1. **Default to ACCEPT:** Unless the result is completely empty or contains ONLY error messages, ACCEPT it as complete.
+    2. **Data presence = automatic success:** If there are ANY actual results/data in the response (headlines, prices, information), mark as COMPLETE.
+    3. **No second-guessing:** If data is present, DO NOT ask for clarification. The user can refine if they want more.
+    4. **Only REJECT if truly broken:** Only request "user_input_required" if:
+       - Result is 100% empty (no data at all)
+       - Result contains ONLY error messages with no data
+       - Result is malformed JSON/unreadable
+    5. **Assume user clarity:** The user's prompt should be taken at face value. If they said "yes" or "the ship" or "please search", they are clear about their intent.
+    6. **No uncertainty exemption:** Do NOT use "user_input_required" as a default when uncertain. If ANY data exists, mark as COMPLETE.
+
+    **Examples:**
+    - News headlines returned → COMPLETE (even if not perfectly filtered)
+    - Stock price data returned → COMPLETE (even if missing some fields)
+    - Search results returned → COMPLETE (even if not perfectly ranked)
+    - Empty result with error → user_input_required
+    - No data, error only → user_input_required
 
     **Decision:**
-    - If the result has useful data: `{{"status": "complete"}}`
-    - Only if truly broken/empty: `{{"status": "user_input_required", "question": "Brief question"}}`
+    - Result has ANY useful data: `{{"status": "complete"}}`
+    - Result is 100% empty/errors ONLY: `{{"status": "user_input_required", "question": "Brief question"}}`
     '''
     try:
         evaluation = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, AgentResponseEvaluation)
@@ -2563,18 +2587,26 @@ def save_conversation_history(state: State, config: RunnableConfig):
             state_dict = state
         
         # Ensure owner field is present in state_dict
-        owner = None
+        owner_raw = None
         if 'owner' in state_dict and state_dict['owner']:
-            owner = state_dict['owner']
+            owner_raw = state_dict['owner']
         elif 'owner' in config.get('configurable', {}) and config['configurable']['owner']:
-            owner = config['configurable']['owner']
-        if not owner:
+            owner_raw = config['configurable']['owner']
+        
+        # Normalize owner to string (handle both dict and string formats)
+        if isinstance(owner_raw, dict):
+            owner_id = owner_raw.get("user_id") or owner_raw.get("sub") or owner_raw.get("id")
+        else:
+            owner_id = owner_raw
+        
+        if not owner_id:
             logger.error(f"Missing owner for thread {thread_id}. Conversation will NOT be saved.")
             raise ValueError("Owner is required for saving conversation history.")
-        state_dict['owner'] = owner
+        
+        state_dict['owner'] = owner_id  # Store normalized string identifier
 
         # Log owner value
-        logger.info(f"Saving conversation for thread {thread_id} with owner: {state_dict.get('owner')}")
+        logger.info(f"Saving conversation for thread {thread_id} with owner: {owner_id}")
 
         # Create the fully serializable state object
         serializable_state = get_serializable_state(state_dict, thread_id)
