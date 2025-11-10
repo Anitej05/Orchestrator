@@ -17,10 +17,11 @@ interface InteractiveChatInterfaceProps {
   className?: string;
   state: ConversationState;
   isLoading: boolean;
-  startConversation: (input: string, files?: File[], planningMode?: boolean) => Promise<void>;
-  continueConversation: (input: string, files?: File[], planningMode?: boolean) => Promise<void>;
+  startConversation: (input: string, files?: File[], planningMode?: boolean, owner?: string) => Promise<void>;
+  continueConversation: (input: string, files?: File[], planningMode?: boolean, owner?: string) => Promise<void>;
   resetConversation: () => void;
   onViewCanvas?: (canvasContent: string, canvasType: 'html' | 'markdown') => void;
+  owner?: string;
 }
 
 export function InteractiveChatInterface({
@@ -38,7 +39,8 @@ export function InteractiveChatInterface({
   startConversation,
   continueConversation,
   resetConversation,
-  onViewCanvas
+  onViewCanvas,
+  owner
 }: InteractiveChatInterfaceProps) {
   useEffect(() => {
     if (!state) {
@@ -81,7 +83,7 @@ export function InteractiveChatInterface({
       approval_required: false
     });
     // continueConversation will capture isWaitingForUser=true and send user_response
-    await continueConversation('approve', [], false);
+    await continueConversation('approve', [], false, owner);
   };
 
   const handleCancelPlan = async () => {
@@ -92,7 +94,7 @@ export function InteractiveChatInterface({
       approval_required: false
     });
     // continueConversation will capture isWaitingForUser=true and send user_response
-    await continueConversation('cancel', [], false);
+    await continueConversation('cancel', [], false, owner);
   };
 
   const handleModifyPlan = async () => {
@@ -142,7 +144,7 @@ export function InteractiveChatInterface({
     if (state.isWaitingForUser) {
       // User is responding to a question from the system
       if (userResponse.trim()) {
-        await continueConversation(userResponse, attachedFiles, planningMode);
+        await continueConversation(userResponse, attachedFiles, planningMode, owner);
         setUserResponse('');
         setAttachedFiles([]); // Clear files after submission
       }
@@ -153,10 +155,10 @@ export function InteractiveChatInterface({
       if (inputValue.trim() || attachedFiles.length > 0) {
         if (hasExistingConversation) {
           // Continue existing conversation with planning mode
-          await continueConversation(inputValue, attachedFiles, planningMode);
+          await continueConversation(inputValue, attachedFiles, planningMode, owner);
         } else {
           // Start new conversation with planning mode
-          await startConversation(inputValue, attachedFiles, planningMode);
+          await startConversation(inputValue, attachedFiles, planningMode, owner);
         }
         setInputValue('');
         setAttachedFiles([]);
@@ -385,7 +387,7 @@ export function InteractiveChatInterface({
                   ? 'text-cyan-800'
                   : 'text-blue-800'  // default initializing state
               }`}>
-                {state.metadata?.stageMessage || (state.isWaitingForUser ? 'Waiting for your response...' : 'Processing your request...')}
+                 {state.metadata?.stageMessage || (state.isWaitingForUser ? 'Waiting for your response...' : 'Processing your request...')}
               </span>
               {state.metadata?.progress && !state.isWaitingForUser && state.metadata?.currentStage !== 'completed' && state.metadata?.currentStage !== 'error' && (
                 <div className="flex-1 bg-gray-200 dark:bg-gray-700/50 rounded-full h-2 ml-4 overflow-hidden">
@@ -413,9 +415,6 @@ export function InteractiveChatInterface({
         <form onSubmit={handleSubmit} className="space-y-4">
           {state.isWaitingForUser ? (
             <div className="space-y-2">
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                {state.currentQuestion}
-              </label>
               <Textarea
                 value={userResponse}
                 onChange={(e) => setUserResponse(e.target.value)}
@@ -525,16 +524,6 @@ export function InteractiveChatInterface({
             </div>
           </div>
         </form>
-        )}
-
-        {/* Status Indicator for user input */}
-        {state.isWaitingForUser && !isLoading && !state.approval_required && (
-          <div className="status-indicator mt-4 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/50 rounded-xl shadow-sm">
-            <div className="flex items-center space-x-2">
-              <Clock className="w-4 h-4 text-yellow-600" />
-              <span className="text-amber-900 dark:text-amber-200 font-medium text-sm">Waiting for your response...</span>
-            </div>
-          </div>
         )}
       </div>
 

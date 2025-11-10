@@ -3,11 +3,12 @@ import type { Agent, ProcessResponse, ConversationStatus, ConversationState, Mes
 
 // API base URL
 const API_BASE_URL = 'http://localhost:8000';
+import { authFetch } from './auth-fetch';
 
 // Agent Management Functions
 export async function fetchAllAgents(): Promise<Agent[]> {
   try {
-    const response = await fetch(`${API_BASE_URL}/api/agents/all`);
+    const response = await authFetch(`${API_BASE_URL}/api/agents/all`);
     
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}: ${response.statusText}`);
@@ -40,7 +41,7 @@ export async function fetchFilteredAgents(options: {
     }
     
     const url = `${API_BASE_URL}/api/agents/all${params.toString() ? `?${params.toString()}` : ''}`;
-    const response = await fetch(url);
+    const response = await authFetch(url);
     
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}: ${response.statusText}`);
@@ -77,7 +78,7 @@ export async function searchAgents(options: {
       params.append('similarity_threshold', options.similarityThreshold.toString());
     }
     
-    const response = await fetch(`${API_BASE_URL}/api/agents/search?${params.toString()}`);
+    const response = await authFetch(`${API_BASE_URL}/api/agents/search?${params.toString()}`);
     
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}: ${response.statusText}`);
@@ -97,7 +98,7 @@ export async function rateAgent(agentId: string, rating: number): Promise<Agent>
       throw new Error('Rating must be between 0 and 5');
     }
 
-    const response = await fetch(`${API_BASE_URL}/api/agents/${encodeURIComponent(agentId)}/rate`, {
+    const response = await authFetch(`${API_BASE_URL}/api/agents/${encodeURIComponent(agentId)}/rate`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -123,7 +124,7 @@ export async function rateAgentByName(agentName: string, rating: number): Promis
       throw new Error('Rating must be between 0 and 5');
     }
 
-    const response = await fetch(`${API_BASE_URL}/api/agents/by-name/${encodeURIComponent(agentName)}/rate`, {
+    const response = await authFetch(`${API_BASE_URL}/api/agents/by-name/${encodeURIComponent(agentName)}/rate`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -145,7 +146,7 @@ export async function rateAgentByName(agentName: string, rating: number): Promis
 
 export async function fetchAgentById(agentId: string): Promise<Agent> {
   try {
-    const response = await fetch(`${API_BASE_URL}/api/agents/${encodeURIComponent(agentId)}`);
+    const response = await authFetch(`${API_BASE_URL}/api/agents/${encodeURIComponent(agentId)}`);
     
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}: ${response.statusText}`);
@@ -161,7 +162,7 @@ export async function fetchAgentById(agentId: string): Promise<Agent> {
 
 export async function registerAgent(agentData: Agent): Promise<Agent> {
   try {
-    const response = await fetch(`${API_BASE_URL}/api/agents/register`, {
+    const response = await authFetch(`${API_BASE_URL}/api/agents/register`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -184,7 +185,7 @@ export async function registerAgent(agentData: Agent): Promise<Agent> {
 // Interactive Conversation Functions - Aligned with Backend API
 export async function startConversation(prompt: string, thread_id?: string, uploadedFiles?: any[]): Promise<ProcessResponse> {
   try {
-    const response = await fetch(`${API_BASE_URL}/api/chat`, {
+    const response = await authFetch(`${API_BASE_URL}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ prompt, thread_id, files: uploadedFiles }) // Pass thread_id and files if it exists
@@ -212,7 +213,7 @@ export async function startConversation(prompt: string, thread_id?: string, uplo
 
 export async function continueConversation(response: string, threadId: string, uploadedFiles?: any[]): Promise<ProcessResponse> {
   try {
-    const apiResponse = await fetch(`${API_BASE_URL}/api/chat/continue`, {
+    const apiResponse = await authFetch(`${API_BASE_URL}/api/chat/continue`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ response, thread_id: threadId, files: uploadedFiles })
@@ -240,7 +241,7 @@ export async function continueConversation(response: string, threadId: string, u
 
 export async function getConversationStatus(threadId: string): Promise<ConversationStatus> {
   try {
-    const response = await fetch(`${API_BASE_URL}/api/chat/status/${threadId}`);
+    const response = await authFetch(`${API_BASE_URL}/api/chat/status/${threadId}`);
     
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}: ${response.statusText}`);
@@ -263,7 +264,7 @@ export async function getConversationStatus(threadId: string): Promise<Conversat
 
 export async function clearConversation(threadId: string): Promise<{ message: string }> {
   try {
-    const response = await fetch(`${API_BASE_URL}/api/chat/${threadId}`, {
+    const response = await authFetch(`${API_BASE_URL}/api/chat/${threadId}`, {
       method: 'DELETE'
     });
     
@@ -285,7 +286,7 @@ export async function uploadFiles(files: File[]): Promise<any[]> {
   });
 
   try {
-    const response = await fetch(`${API_BASE_URL}/api/upload`, {
+    const response = await authFetch(`${API_BASE_URL}/api/upload`, {
       method: 'POST',
       body: formData,
     });
@@ -324,7 +325,7 @@ export async function processPrompt(request: { prompt: string }): Promise<{
 
 export async function fetchPlanFile(threadId: string): Promise<string> {
   try {
-    const response = await fetch(`${API_BASE_URL}/api/plan/${threadId}`);
+    const response = await authFetch(`${API_BASE_URL}/api/plan/${threadId}`);
     
     if (!response.ok) {
       if (response.status === 404) {
@@ -344,7 +345,7 @@ export async function fetchPlanFile(threadId: string): Promise<string> {
 
 export async function healthCheck(): Promise<{ status: string }> {
   try {
-    const response = await fetch(`${API_BASE_URL}/api/health`);
+    const response = await authFetch(`${API_BASE_URL}/api/health`);
     
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}: ${response.statusText}`);

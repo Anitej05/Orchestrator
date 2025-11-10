@@ -30,7 +30,7 @@ export function useWebSocketManager({
 
   const connect = useCallback(() => {
     if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-      console.log('WebSocket already connected.');
+      console.debug('WebSocket already connected.');
       return;
     }
 
@@ -38,7 +38,7 @@ export function useWebSocketManager({
       ws.current = new WebSocket(url);
 
       ws.current.onopen = () => {
-        console.log('WebSocket connected');
+        console.debug('WebSocket connected');
         setIsConnected(true);
 
         // Expose WebSocket to window for conversation store to use
@@ -46,13 +46,13 @@ export function useWebSocketManager({
 
         // The WebSocket will wait for the first message from the client
         // which will be sent when startConversation or continueConversation is called
-        console.log('WebSocket ready to receive messages');
+        console.debug('WebSocket ready to receive messages');
       };
 
       ws.current.onmessage = (event) => {
         try {
           const eventData: WebSocketEventData = JSON.parse(event.data);
-          console.log('WebSocket message received:', {
+          console.debug('WebSocket message received:', {
             node: eventData.node,
             thread_id: eventData.thread_id,
             hasData: !!eventData.data,
@@ -250,9 +250,9 @@ export function useWebSocketManager({
           // We use this as the single source of truth to update our store.
           else if (eventData.node === '__end__') {
             try {
-              console.log('=== RECEIVED __END__ EVENT ===');
-              console.log('Event data:', eventData);
-              console.log('Has data field:', !!eventData.data);
+              console.debug('=== RECEIVED __END__ EVENT ===');
+              console.debug('Event data:', eventData);
+              console.debug('Has data field:', !!eventData.data);
               
               if (!eventData.data) {
                 console.error('__end__ event received but no data field!');
@@ -261,10 +261,10 @@ export function useWebSocketManager({
                 return;
               }
               
-              console.log('Received __end__ event, processing final state...');
+              console.debug('Received __end__ event, processing final state...');
               // The backend sends the complete state in the data field
               const finalState: ConversationState = eventData.data;
-            console.log('Final state:', {
+            console.debug('Final state:', {
               hasMessages: !!finalState.messages,
               messagesCount: finalState.messages?.length || 0,
               hasFinalResponse: !!finalState.final_response,
@@ -301,7 +301,7 @@ export function useWebSocketManager({
               finalState.final_response.includes('<script>')
             );
 
-            console.log('CANVAS DEBUG: Frontend canvas detection:', {
+            console.debug('CANVAS DEBUG: Frontend canvas detection:', {
               hasCanvas: finalState.has_canvas,
               canvasType: finalState.canvas_type,
               canvasContentLength: finalState.canvas_content?.length,
@@ -320,7 +320,7 @@ export function useWebSocketManager({
                   content.includes('<script>')
                 );
                 if (hasHtml) {
-                  console.log('Filtering HTML content from message:', content.substring(0, 100));
+                  console.debug('Filtering HTML content from message:', content.substring(0, 100));
                 }
                 return !hasHtml;
               }
@@ -342,7 +342,7 @@ export function useWebSocketManager({
 
             // If we don't have any assistant messages and we have a final_response, add it
             if (!hasAssistantMessage && finalState.final_response && finalState.final_response.trim() !== '') {
-              console.log('No assistant message found in backend messages, adding final_response');
+              console.debug('No assistant message found in backend messages, adding final_response');
               const assistantMessage: Message = {
                 id: Date.now().toString(),
                 type: 'assistant',
@@ -355,7 +355,7 @@ export function useWebSocketManager({
               };
               finalMessages = [...finalMessages, assistantMessage];
             } else {
-              console.log('Using messages from backend, not adding final_response separately');
+              console.debug('Using messages from backend, not adding final_response separately');
             }
 
             // Additional filtering to ensure no HTML content appears in chat messages
@@ -415,9 +415,9 @@ export function useWebSocketManager({
               current_view: (finalState as any).current_view !== undefined ? (finalState as any).current_view : (currentState as any).current_view
             });
             // Explicitly set isLoading to false in the store
-            console.log('Setting isLoading to false after __end__ event');
+            console.debug('Setting isLoading to false after __end__ event');
             useConversationStore.setState({ isLoading: false });
-            console.log('Final state updated, isLoading:', useConversationStore.getState().isLoading);
+            console.debug('Final state updated, isLoading:', useConversationStore.getState().isLoading);
             } catch (endError) {
               console.error('Error processing __end__ event:', endError);
               // Always set isLoading to false even if there's an error
@@ -429,7 +429,7 @@ export function useWebSocketManager({
             // Check if this is an approval request
             const isApprovalRequest = eventData.data?.approval_required === true;
             
-            console.log('User input required:', {
+            console.debug('User input required:', {
               isApprovalRequest,
               approval_required: eventData.data?.approval_required,
               estimated_cost: eventData.data?.estimated_cost,
@@ -456,7 +456,7 @@ export function useWebSocketManager({
                   progress: 50
                 }
               });
-              console.log('Set approval state in store (no system message added):', {
+              console.debug('Set approval state in store (no system message added):', {
                 approval_required: true,
                 estimated_cost: eventData.data?.estimated_cost || 0,
                 task_count: eventData.data?.task_count || 0
@@ -510,9 +510,65 @@ export function useWebSocketManager({
             // Set isLoading to false when there's an error
             useConversationStore.setState({ isLoading: false });
           }
+          else if (eventData.node === 'load_history') {
+            // History loading event - just log it, messages are added separately
+            console.debug('History loading event received');
+          }
+          else if (eventData.node === 'analyze_request') {
+            // Request analysis event
+            const currentMessages = useConversationStore.getState().messages;
+            _setConversationState({
+              messages: currentMessages,
+              metadata: {
+                ...useConversationStore.getState().metadata,
+                currentStage: 'analyzing',
+                stageMessage: 'Analyzing your request...',
+                progress: 15
+              }
+            });
+          }
+          else if (eventData.node === 'evaluate_agent_response') {
+            // Agent response evaluation
+            const currentMessages = useConversationStore.getState().messages;
+            _setConversationState({
+              messages: currentMessages,
+              metadata: {
+                ...useConversationStore.getState().metadata,
+                currentStage: 'evaluating',
+                stageMessage: 'Evaluating agent response...',
+                progress: 85
+              }
+            });
+          }
+          else if (eventData.node === 'ask_user') {
+            // User input request (handled similarly to ask_user_input)
+            const questionMessage: Message = {
+              id: `ask_${Date.now()}`,
+              type: 'system',
+              content: eventData.data?.question_for_user || 'Please provide additional information',
+              timestamp: new Date()
+            };
+            const currentMessages = useConversationStore.getState().messages;
+            _setConversationState({
+              messages: [...currentMessages, questionMessage],
+              isWaitingForUser: true,
+              currentQuestion: eventData.data?.question_for_user,
+              metadata: {
+                ...useConversationStore.getState().metadata,
+                currentStage: 'waiting_for_user',
+                stageMessage: 'Waiting for your response...',
+                progress: 50
+              }
+            });
+            useConversationStore.setState({ isLoading: false });
+          }
+          else if (eventData.node === 'save_history') {
+            // History saving event - just log it
+            console.debug('History saving event received');
+          }
           else {
-            // Catch-all for unhandled events
-            console.log(`Unhandled WebSocket event: ${eventData.node}`);
+            // Catch-all for any remaining unhandled events
+            console.debug(`Unhandled WebSocket event: ${eventData.node}`, eventData);
           }
 
         } catch (parseError) {
@@ -581,6 +637,5 @@ export function useWebSocketManager({
   }, [connect, disconnect]);
 
   // This hook now only returns the connection status.
-  // All state is accessed via `useConversationStore`.
   return { isConnected };
 }

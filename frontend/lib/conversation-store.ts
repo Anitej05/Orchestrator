@@ -38,8 +38,8 @@ const createMessageId = (content: string, type: string, timestampMs: number): st
 interface ConversationStore extends ConversationState {
   isLoading: boolean;
   actions: {
-    startConversation: (input: string, files?: File[], planningMode?: boolean) => Promise<void>;
-    continueConversation: (input: string, files?: File[], planningMode?: boolean) => Promise<void>;
+    startConversation: (input: string, files?: File[], planningMode?: boolean, owner?: string) => Promise<void>;
+    continueConversation: (input: string, files?: File[], planningMode?: boolean, owner?: string) => Promise<void>;
     loadConversation: (threadId: string) => Promise<void>;
     resetConversation: () => void;
     // Internal action to set the full state from an API response
@@ -72,9 +72,9 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
   isLoading: false,
 
   actions: {
-    startConversation: async (input: string, files: File[] = [], planningMode: boolean = false) => {
+    startConversation: async (input: string, files: File[] = [], planningMode: boolean = false, owner?: string) => {
       // Clear previous conversation state when starting a new conversation
-      console.log(`Starting conversation with planning mode: ${planningMode}`);
+      console.debug(`Starting conversation with planning mode: ${planningMode}`);
       set({ 
         isLoading: true, 
         status: 'processing',
@@ -107,8 +107,8 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
         );
 
         const timestamp = Date.now();
-        const messageId = createMessageId(input, 'human', timestamp);
-        console.log(`Frontend creating user message: id=${messageId}, timestamp=${timestamp}, content=${input.substring(0, 50)}`);
+        const messageId = createMessageId(input, 'user', timestamp);
+          console.debug(`Frontend creating user message (continue): id=${messageId}, timestamp=${timestamp}, content=${input.substring(0, 50)}`);
         const userMessage: Message = {
           id: messageId,
           type: 'user',
@@ -134,17 +134,18 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
                 thread_id: get().thread_id,
                 prompt: input,
                 planning_mode: planningMode,
+                owner: owner,
                 files: uploadedFiles.map(file => ({
                   file_name: file.file_name,
                   file_path: file.file_path,
                   file_type: file.file_type
                 }))
               }));
-              console.log(`WebSocket message sent successfully on attempt ${attempt + 1}`);
+              console.debug(`WebSocket message sent successfully on attempt ${attempt + 1}`);
               return; // Successfully sent
             }
             
-            console.log(`WebSocket not ready, attempt ${attempt + 1}/${maxAttempts}, waiting ${delayMs}ms...`);
+            console.debug(`WebSocket not ready, attempt ${attempt + 1}/${maxAttempts}, waiting ${delayMs}ms...`);
             // Wait before retrying
             await new Promise(resolve => setTimeout(resolve, delayMs));
           }
@@ -182,7 +183,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
       }
     },
 
-    continueConversation: async (input: string, files: File[] = [], planningMode: boolean = false) => {
+    continueConversation: async (input: string, files: File[] = [], planningMode: boolean = false, owner?: string) => {
       const thread_id = get().thread_id;
       if (!thread_id) {
         console.error('Cannot continue conversation without a thread ID.');
@@ -254,25 +255,26 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
                 // Use 'user_response' only when answering a question, otherwise use 'prompt'
                 ...(isAnsweringQuestion ? { user_response: input } : { prompt: input }),
                 planning_mode: planningMode,
+                owner: owner,
                 files: uploadedFiles.map(file => ({
                   file_name: file.file_name,
                   file_path: file.file_path,
                   file_type: file.file_type
                 }))
               };
-              console.log('=== FRONTEND: Sending WebSocket message ===');
-              console.log('  wasWaitingForUser:', wasWaitingForUser);
-              console.log('  isAnsweringQuestion:', isAnsweringQuestion);
-              console.log('  sending as:', isAnsweringQuestion ? 'user_response' : 'prompt');
-              console.log('  input:', input);
-              console.log('  planning_mode:', planningMode);
-              console.log('  full message:', messageData);
+              console.debug('=== FRONTEND: Sending WebSocket message ===');
+              console.debug('  wasWaitingForUser:', wasWaitingForUser);
+              console.debug('  isAnsweringQuestion:', isAnsweringQuestion);
+              console.debug('  sending as:', isAnsweringQuestion ? 'user_response' : 'prompt');
+              console.debug('  input:', input);
+              console.debug('  planning_mode:', planningMode);
+              console.debug('  full message:', messageData);
               ws.send(JSON.stringify(messageData));
-              console.log(`WebSocket message sent successfully on attempt ${attempt + 1}`);
+              console.debug(`WebSocket message sent successfully on attempt ${attempt + 1}`);
               return; // Successfully sent
             }
             
-            console.log(`WebSocket not ready, attempt ${attempt + 1}/${maxAttempts}, waiting ${delayMs}ms...`);
+            console.debug(`WebSocket not ready, attempt ${attempt + 1}/${maxAttempts}, waiting ${delayMs}ms...`);
             // Wait before retrying
             await new Promise(resolve => setTimeout(resolve, delayMs));
           }
@@ -298,7 +300,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
         
       } catch (error: any) {
         const errorMessage = error.message || 'An unknown error occurred';
-        console.error('Error in continueConversation:', errorMessage);
+        console.debug('Error in continueConversation:', errorMessage);
         set({ status: 'error', isLoading: false });
         const errorSystemMessage: Message = {
           id: Date.now().toString(),
@@ -314,9 +316,18 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
       if (!threadId) return;
       set({ isLoading: true });
       try {
-        // Load full conversation history from backend
-        const response = await fetch(`http://localhost:8000/api/chat/history/${threadId}`);
+        // Sanitize threadId - remove any appended index like :1 that LangGraph might add
+        const cleanThreadId = threadId.split(':')[0];
+        
+        // Use authFetch helper which handles Clerk JWT properly
+        const { authFetch } = await import('./auth-fetch');
+        const response = await authFetch(`http://localhost:8000/api/conversations/${cleanThreadId}`);
+        
         if (!response.ok) {
+          if (response.status === 404) {
+            console.log('Conversation not found, starting fresh');
+            return;
+          }
           const errorText = await response.text();
           console.error('Failed to load conversation:', response.status, errorText);
           throw new Error(`Failed to load conversation history: ${response.status}`);
@@ -353,9 +364,9 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
         // Explicitly set isLoading to false after loading
         set({ isLoading: false });
         
-        // Save thread_id to localStorage for persistence
+        // Save thread_id to localStorage for persistence (use clean version)
         if (typeof window !== 'undefined') {
-          localStorage.setItem('thread_id', threadId);
+          localStorage.setItem('thread_id', cleanThreadId);
         }
         
         console.log('Conversation loaded successfully:', threadId);

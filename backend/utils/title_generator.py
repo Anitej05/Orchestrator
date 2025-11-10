@@ -4,7 +4,7 @@ Similar to how ChatGPT generates conversation titles.
 """
 
 import re
-from typing import Optional
+from typing import Optional, List, Tuple
 
 
 def generate_title(prompt: str, max_words: int = 3) -> str:
@@ -43,7 +43,10 @@ def generate_title(prompt: str, max_words: int = 3) -> str:
         'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would',
         'could', 'should', 'may', 'might', 'can', 'me', 'my', 'you', 'this',
         'that', 'what', 'which', 'who', 'where', 'when', 'why', 'how', 'get',
-        'give', 'make', 'take', 'please', 'pls', 'thx', 'thanks'
+        'give', 'make', 'take', 'please', 'pls', 'thx', 'thanks',
+        # add pronouns and generic verbs that cause vague titles
+        'i', 'we', 'us', 'our', 'it', 'they', 'them', 'their',
+        'analyze', 'analyse', 'analysis', 'execute', 'execution', 'requested', 'request', 'start'
     }
     
     # Filter out stop words
@@ -64,6 +67,15 @@ def generate_title(prompt: str, max_words: int = 3) -> str:
         title = "Untitled"
     
     return title
+
+
+def _extract_named_entities(prompt: str) -> List[str]:
+    """Very lightweight proper-noun extractor: returns capitalized word sequences."""
+    # Find sequences of Capitalized words (e.g., "Jensen Huang", "New York", "Tesla")
+    candidates = re.findall(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b", prompt)
+    # Filter generic words
+    blacklist = {"I", "The", "A", "An"}
+    return [c for c in candidates if c not in blacklist][:3]
 
 
 def generate_improved_title(prompt: str, tasks: list = None, max_words: int = 3) -> str:
@@ -90,7 +102,7 @@ def generate_improved_title(prompt: str, tasks: list = None, max_words: int = 3)
         # Map task types to keywords
         task_to_title = {
             'get_stock_price': 'Stock Quote',
-            'get_news': 'News Update',
+            'get_news': 'News',
             'weather': 'Weather Check',
             'document_analysis': 'Doc Analysis',
             'image_analysis': 'Image Analysis',
@@ -104,9 +116,26 @@ def generate_improved_title(prompt: str, tasks: list = None, max_words: int = 3)
         
         for task_key, title_value in task_to_title.items():
             if task_key.lower() in first_task.lower():
+                # Specialize "News" titles with an entity if present
+                if title_value == 'News':
+                    entities = _extract_named_entities(prompt)
+                    if entities:
+                        return f"{entities[0]} News"
+                    # Fallback to generic News Update with a key term from prompt
+                    keywords = [w for w in re.findall(r"[A-Za-z]+", prompt) if len(w) > 2]
+                    if keywords:
+                        return f"{keywords[0].title()} News"
+                    return "Latest News"
                 return title_value
     
     # Fall back to prompt-based title
+    # If prompt includes explicit news wording, try to extract entity for better titles
+    if 'news' in prompt.lower():
+        entities = _extract_named_entities(prompt)
+        if entities:
+            return f"{entities[0]} News"
+        return "Latest News"
+
     return generate_title(prompt, max_words)
 
 

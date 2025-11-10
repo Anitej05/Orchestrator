@@ -1,11 +1,12 @@
 # In Project_Agent_Directory/models.py
 
-from sqlalchemy import Column, String, Float, Text, Enum as SAEnum, ForeignKey, Integer, Boolean
+from sqlalchemy import Column, String, Float, Text, Enum as SAEnum, ForeignKey, Integer, Boolean, DateTime
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import ARRAY, JSON
 from pgvector.sqlalchemy import Vector
 from database import Base
 import enum
+from datetime import datetime
 
 class StatusEnum(str, enum.Enum):
     active = "active"
@@ -25,6 +26,7 @@ class Agent(Base):
     rating = Column(Float, default=0.0)
     rating_count = Column(Integer, default=0, nullable=False)
     public_key_pem = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)  # Track when the agent was created
 
     capability_vectors = relationship("AgentCapability", back_populates="agent", cascade="all, delete-orphan")
     endpoints = relationship("AgentEndpoint", back_populates="agent", cascade="all, delete-orphan", lazy="joined")
@@ -63,3 +65,13 @@ class EndpointParameter(Base):
     default_value = Column(String)
 
     endpoint = relationship("AgentEndpoint", back_populates="parameters")
+
+class UserThread(Base):
+    __tablename__ = "user_threads"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, nullable=False, index=True)
+    thread_id = Column(String, nullable=False, unique=True, index=True)
+    title = Column(String, nullable=True)  # Title for the conversation
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

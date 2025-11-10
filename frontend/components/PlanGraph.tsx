@@ -60,7 +60,21 @@ const CustomNode: React.FC<NodeProps<CustomNodeData>> = ({ data }) => {
     const isCompleted = data.status === 'completed';
 
     return (
-        <div className="p-3 bg-white rounded-md border shadow-sm w-64">
+        <div
+            className="p-3 bg-white rounded-md border shadow-sm"
+            style={{
+                minWidth: 220,
+                maxWidth: 320,
+                width: 'auto',
+                minHeight: 64,
+                height: 'auto',
+                whiteSpace: 'normal',
+                wordBreak: 'break-word',
+                display: 'flex',
+                flexDirection: 'column',
+                justifyContent: 'center',
+            }}
+        >
             <Handle type="target" position={Position.Top} className="!bg-gray-400" />
             <div className="flex items-center mb-2">
                 {isCompleted ? (
@@ -68,9 +82,9 @@ const CustomNode: React.FC<NodeProps<CustomNodeData>> = ({ data }) => {
                 ) : (
                     <Clock className="w-4 h-4 mr-2 text-yellow-600" />
                 )}
-                <p className="font-semibold text-sm text-gray-800 truncate">{data.label}</p>
+                <p className="font-semibold text-sm text-gray-800">{data.label}</p>
             </div>
-            <p className="text-xs text-gray-500 my-1 truncate">{data.description}</p>
+            <p className="text-xs text-gray-500 my-1">{data.description}</p>
             <Badge variant="outline">{data.agent}</Badge>
             <Handle type="source" position={Position.Bottom} className="!bg-gray-400" />
         </div>

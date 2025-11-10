@@ -47,9 +47,57 @@ class AddRatingCountMigration(Migration):
         conn.execute(text("ALTER TABLE agents ADD COLUMN rating_count INTEGER DEFAULT 0 NOT NULL"))
         conn.commit()
 
+class AddCreatedAtToAgentsMigration(Migration):
+    """Migration to add created_at column to agents table."""
+    
+    def __init__(self):
+        super().__init__(
+            name="add_created_at_to_agents",
+            description="Add created_at column to agents table"
+        )
+    
+    def should_run(self, inspector, conn) -> bool:
+        if not inspector.has_table("agents"):
+            return False
+        
+        columns = inspector.get_columns("agents")
+        column_names = [col['name'] for col in columns]
+        return 'created_at' not in column_names
+    
+    def execute(self, conn):
+        conn.execute(text("ALTER TABLE agents ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"))
+        conn.commit()
+
+class CreateUserThreadsTableMigration(Migration):
+    """Migration to create user_threads table."""
+    
+    def __init__(self):
+        super().__init__(
+            name="create_user_threads_table",
+            description="Create user_threads table for storing user-thread relationships"
+        )
+    
+    def should_run(self, inspector, conn) -> bool:
+        return not inspector.has_table("user_threads")
+    
+    def execute(self, conn):
+        conn.execute(text("""
+            CREATE TABLE user_threads (
+                id SERIAL PRIMARY KEY,
+                user_id VARCHAR(255) NOT NULL,
+                thread_id VARCHAR(255) NOT NULL UNIQUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX idx_user_threads_user_id ON user_threads(user_id);
+            CREATE INDEX idx_user_threads_thread_id ON user_threads(thread_id);
+        """))
+        conn.commit()
+
 # List of all migrations in order
 MIGRATIONS = [
     AddRatingCountMigration(),
+    AddCreatedAtToAgentsMigration(),
+    CreateUserThreadsTableMigration(),
     # Add new migrations here as they are created
 ]
 

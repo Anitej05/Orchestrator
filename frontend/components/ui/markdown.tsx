@@ -39,7 +39,7 @@ const Markdown: FC<MarkdownProps> = ({ content }) => {
       remarkPlugins={[remarkGfm]}
       rehypePlugins={[rehypeRaw]}
       components={{
-        // Customize table rendering to apply Tailwind CSS classes
+        // Tables (unchanged)
         table: ({ node, ...props }) => (
           <div className="overflow-x-auto">
             <table className="table-auto w-full my-4" {...props} />
@@ -50,13 +50,29 @@ const Markdown: FC<MarkdownProps> = ({ content }) => {
         tr: ({ node, ...props }) => <tr className="hover:bg-gray-50 dark:hover:bg-gray-900" {...props} />,
         th: ({ node, ...props }) => <th className="px-4 py-2 text-left font-semibold" {...props} />,
         td: ({ node, ...props }) => <td className="px-4 py-2" {...props} />,
-        // Fix for empty src attribute error
+        // Images (unchanged)
         img: ({ node, ...props }) => {
-          // Check if src is empty and replace with null to prevent browser warnings
           if (props.src === "") {
-            return <img {...props} src={null} alt={props.alt || ""} />;
+            return <img {...props} src="" alt={props.alt || ""} />;
           }
           return <img {...props} />;
+        },
+        // Code blocks: scrollable, non-overflowing, syntax-highlighted
+        code({node, className, children, ...props}: any) {
+          // 'inline' is not always present, so check props.inline
+          const language = className ? className.replace('language-', '') : '';
+          const isInline = props.inline;
+          return !isInline ? (
+            <pre className="overflow-x-auto max-w-full rounded-lg bg-gray-900 text-gray-100 p-4 my-2 text-sm whitespace-pre-wrap">
+              <code className={className} {...props}>
+                {children}
+              </code>
+            </pre>
+          ) : (
+            <code className="bg-gray-200 dark:bg-gray-800 rounded px-1 py-0.5 text-sm" {...props}>
+              {children}
+            </code>
+          );
         },
       }}
     >

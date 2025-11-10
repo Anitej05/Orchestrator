@@ -1,0 +1,154 @@
+{
+  "thread_id": "6655c7e3-6095-44ba-a433-67c4bc60deed",
+  "status": "completed",
+  "messages": [],
+  "task_agent_pairs": [
+    {
+      "task_name": "get current stock quote",
+      "task_description": "Retrieve the latest current stock price for Tesla (ticker TSLA).",
+      "primary": {
+        "id": "finance_agent",
+        "owner_id": "orbimesh-vendor",
+        "name": "Orbimesh Finance Agent",
+        "description": "Provides comprehensive, real-time, and historical financial data for stocks using the Yahoo Finance API. It can fetch current stock quotes, historical market data, company information and key statistics, and analyst recommendations.",
+        "capabilities": [
+          "get current stock quote",
+          "get historical stock prices",
+          "get company information and summary",
+          "get key financial statistics",
+          "get analyst recommendations"
+        ],
+        "price_per_call_usd": 0.002,
+        "status": "active",
+        "endpoints": [
+          {
+            "endpoint": "http://localhost:8010/quote",
+            "http_method": "GET",
+            "description": "Fetches the latest price data for a given stock ticker, including current price, day's high, low, and trading volume.",
+            "parameters": [
+              {
+                "name": "ticker",
+                "description": "The stock ticker symbol (e.g., 'AAPL', 'GOOGL').",
+                "param_type": "string",
+                "required": true,
+                "default_value": null
+              }
+            ]
+          },
+          {
+            "endpoint": "http://localhost:8010/history",
+            "http_method": "POST",
+            "description": "Returns historical Open, High, Low, Close, and Volume (OHLCV) prices for a ticker over a specified period.",
+            "parameters": [
+              {
+                "name": "ticker",
+                "description": "The stock ticker symbol.",
+                "param_type": "string",
+                "required": true,
+                "default_value": null
+              },
+              {
+                "name": "period",
+                "description": "The time period for the data. Valid values are '1d', '5d', '1mo', '3mo', '6mo', '1y', '2y', '5y', '10y', 'ytd', 'max'.",
+                "param_type": "string",
+                "required": false,
+                "default_value": "1y"
+              }
+            ]
+          },
+          {
+            "endpoint": "http://localhost:8010/company_info",
+            "http_method": "GET",
+            "description": "Provides key information about a company, including its sector, industry, and a long business summary.",
+            "parameters": [
+              {
+                "name": "ticker",
+                "description": "The stock ticker symbol.",
+                "param_type": "string",
+                "required": true,
+                "default_value": null
+              }
+            ]
+          },
+          {
+            "endpoint": "http://localhost:8010/key_statistics",
+            "http_method": "GET",
+            "description": "Returns a dictionary of key financial metrics, such as market cap, P/E ratio, EPS, and dividend yield.",
+            "parameters": [
+              {
+                "name": "ticker",
+                "description": "The stock ticker symbol.",
+                "param_type": "string",
+                "required": true,
+                "default_value": null
+              }
+            ]
+          },
+          {
+            "endpoint": "http://localhost:8010/recommendations",
+            "http_method": "GET",
+            "description": "Fetches the latest analyst recommendations and ratings for a given stock ticker.",
+            "parameters": [
+              {
+                "name": "ticker",
+                "description": "The stock ticker symbol.",
+                "param_type": "string",
+                "required": true,
+                "default_value": null
+              }
+            ]
+          }
+        ],
+        "rating": 5.0,
+        "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAmALfvbLoYmXlkUEpLI26x6WvHuhTgTTbWcYQOqfOPw4=\n-----END PUBLIC KEY-----"
+      },
+      "fallbacks": []
+    }
+  ],
+  "parsed_tasks": [
+    {
+      "task_name": "get current stock quote",
+      "task_description": "Retrieve the latest current stock price for Tesla (ticker TSLA)."
+    }
+  ],
+  "final_response": null,
+  "pending_user_input": false,
+  "question_for_user": null,
+  "metadata": {
+    "original_prompt": null,
+    "completed_tasks": [],
+    "parsed_tasks": [
+      {
+        "task_name": "get current stock quote",
+        "task_description": "Retrieve the latest current stock price for Tesla (ticker TSLA)."
+      }
+    ],
+    "currentStage": "completed",
+    "stageMessage": "Orchestration completed successfully!",
+    "progress": 100,
+    "orchestrationPaused": false,
+    "pauseReason": null
+  },
+  "uploaded_files": [],
+  "plan": [
+    [
+      {
+        "task_name": "get current stock quote",
+        "task_description": "Retrieve the latest current stock price for Tesla (ticker TSLA).",
+        "primary": {
+          "id": "finance_agent",
+          "http_method": "GET",
+          "endpoint": "http://localhost:8010/quote",
+          "payload": {}
+        },
+        "fallbacks": []
+      }
+    ]
+  ],
+  "has_canvas": false,
+  "canvas_content": null,
+  "canvas_type": null,
+  "needs_canvas": false,
+  "timestamp": 1761581587.646302,
+  "title": "We Stock Price"
+}
