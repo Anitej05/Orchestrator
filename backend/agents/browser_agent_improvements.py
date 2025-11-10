@@ -116,10 +116,35 @@ Title: {page_content.get('title', '')[:50]}
 Elements ({len(relevant_elements)} relevant):
 {json.dumps(compact_elements, indent=1)}
 
-Recent:
-✅ Last success: {recent_actions.get('last_success', {}).get('action', 'none')}
-❌ Last fail: {recent_actions.get('last_failure', {}).get('action', 'none')}
+Recent Actions (with semantic context):
+{json.dumps(recent_actions.get('recent_history', []), indent=1)}
+{recent_actions.get('repeated_failure_warning', '')}
+
+Status:
 🔄 Stuck: {recent_actions.get('stuck', False)}
+
+CRITICAL ANALYSIS - LEARN FROM HISTORY:
+
+1. Analyze recent_history for semantic failures:
+   - Check result_title AND result_body_preview for errors ("404", "not found", "error", "forbidden")
+   - If error indicators present, the 'attempted' params were WRONG - don't repeat!
+   - If success=true but result shows error, it's a SEMANTIC FAILURE
+   
+2. Detect ineffective actions:
+   - If url_changed=false and title_changed=false, your action had NO EFFECT
+   - If element_count is very low (< 5 total), page might be broken or empty
+   - If same 'attempted' params used multiple times with no change, STOP and try different approach
+   
+3. Learn from what worked:
+   - If url_changed=true and no errors in result, navigation was successful
+   - If element_count increased, page loaded more content (good!)
+   - Compare 'reasoning' with 'result' - did you achieve what you intended?
+   
+4. Re-strategize intelligently:
+   - If attempted URL X → result shows "404" → URL X is INVALID, try different URL
+   - If click on text Y → url_changed=false → element not found or not clickable, try different selector
+   - If extract → element_count=0 → page is empty, navigate elsewhere first
+   - Look at duration - if action took >5s, page might be slow or stuck
 
 CRITICAL: Return ONLY valid JSON with this EXACT format:
 {{

@@ -1581,7 +1581,8 @@ async def execute_batch(state: State, config: RunnableConfig):
         logger.info(f"Task '{task_name}' completed with result preview: {result_preview}")
         completed_tasks_with_desc.append(CompletedTask(
             task_name=task_name,
-            result=res.get('result', {})
+            result=res.get('result', {}),
+            raw_response=res.get('raw_response', {})
         ))
 
     completed_tasks = state.get('completed_tasks', []) + completed_tasks_with_desc

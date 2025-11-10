@@ -1577,11 +1577,57 @@ IMPORTANT:
         # Get current subtask for focused context
         current_subtask = self._get_current_subtask()
         
-        # Build OPTIMIZED context (70% token reduction)
+        # Build RICH context with semantic information
+        recent_history = [
+            {
+                'step': a.get('step'),
+                'action': a.get('action'),
+                'reasoning': a.get('reasoning', '')[:100],  # Why we did it (truncated)
+                'attempted': a.get('params', {}),  # What we tried
+                'result_url': a.get('result_url', a.get('url')),
+                'result_title': a.get('result_title', ''),
+                'result_body_preview': a.get('result_body_preview', '')[:150],  # First 150 chars of page
+                'url_changed': a.get('url_changed', False),  # Did navigation happen?
+                'title_changed': a.get('title_changed', False),  # Did page change?
+                'element_count': a.get('result_element_count', {}),  # How many elements on result page?
+                'success': a.get('success', True),
+                'duration': f"{a.get('duration', 0):.1f}s"
+            }
+            for a in (self.actions_succeeded + self.actions_failed)[-3:]
+        ]
+        
+        # Detect repeated failures to same target
+        repeated_failure_warning = ""
+        if len(recent_history) >= 2:
+            # Check if last 2 actions tried the same thing
+            last_two = recent_history[-2:]
+            if len(last_two) == 2:
+                action1, action2 = last_two[0], last_two[1]
+                # Check if same action with same params
+                if (action1.get('action') == action2.get('action') and 
+                    action1.get('attempted') == action2.get('attempted')):
+                    # Check if both had error indicators (in title OR body)
+                    error_indicators = ['404', 'not found', 'error', 'forbidden', 'access denied']
+                    title1 = action1.get('result_title', '').lower()
+                    title2 = action2.get('result_title', '').lower()
+                    body1 = action1.get('result_body_preview', '').lower()
+                    body2 = action2.get('result_body_preview', '').lower()
+                    
+                    has_error1 = any(err in title1 or err in body1 for err in error_indicators)
+                    has_error2 = any(err in title2 or err in body2 for err in error_indicators)
+                    
+                    if has_error1 and has_error2:
+                        repeated_failure_warning = f"\n⚠️ WARNING: You tried '{action1.get('action')}' with params {action1.get('attempted')} TWICE and got errors both times! DO NOT REPEAT THIS. Try something DIFFERENT!"
+                    elif not action1.get('url_changed') and not action2.get('url_changed'):
+                        # Actions didn't cause any page change
+                        repeated_failure_warning = f"\n⚠️ WARNING: You tried '{action1.get('action')}' TWICE but the page didn't change either time. This action has NO EFFECT. Try something DIFFERENT!"
+        
         recent_actions = {
             'last_success': self.actions_succeeded[-1] if self.actions_succeeded else {},
             'last_failure': self.actions_failed[-1] if self.actions_failed else {},
-            'stuck': self.consecutive_same_actions >= 2
+            'stuck': self.consecutive_same_actions >= 2,
+            'recent_history': recent_history,
+            'repeated_failure_warning': repeated_failure_warning
         }
         
         # Use ContextOptimizer for compact prompt
@@ -2662,6 +2708,35 @@ CRITICAL FOR TYPE ACTION:
                 except Exception as e:
                     logger.debug(f"networkidle wait timed out (this is OK): {e}")
                     pass  # Continue even if network doesn't idle
+                
+                # SEMANTIC VALIDATION: Check if we actually got a valid page
+                try:
+                    page_title = await self.page.title()
+                    page_text = await self.page.inner_text('body')
+                    
+                    # Check for error indicators
+                    error_indicators = [
+                        'page not found',
+                        '404',
+                        'not found',
+                        'error',
+                        'access denied',
+                        'forbidden'
+                    ]
+                    
+                    title_lower = page_title.lower()
+                    text_lower = page_text[:500].lower()
+                    
+                    is_error_page = any(indicator in title_lower or indicator in text_lower 
+                                       for indicator in error_indicators)
+                    
+                    if is_error_page:
+                        logger.warning(f"⚠️  Navigation succeeded but landed on ERROR page: '{page_title}'")
+                        logger.warning(f"⚠️  This URL appears to be invalid: {url}")
+                        # Still return True but log the semantic failure
+                        # The LLM will see this in the page title and recent_history
+                except Exception as e:
+                    logger.debug(f"Could not validate page content: {e}")
                 
                 logger.info(f"✅ Successfully navigated to {url}")
                 return True  # Navigation succeeded
@@ -3953,12 +4028,13 @@ If you cannot find it, respond with {{"found": false}}"""
                     self.last_action_type = current_action
                     self.last_action_url = current_url
                 
-                # Record action
+                # Record action WITH SEMANTIC CONTEXT
                 self.actions_taken.append({
                     "step": step,
                     "action": action_plan.get("action"),
                     "reasoning": action_plan.get("reasoning"),
                     "url": page_content["url"],
+                    "page_title": page_content.get("title", ""),  # ← Add page title
                     "timestamp": datetime.now().isoformat()
                 })
                 
@@ -4000,12 +4076,32 @@ If you cannot find it, respond with {{"found": false}}"""
                 # is_done can be: True (success), False (failure), or None (extract/done action)
                 action_success = is_done if is_done is not None else True
                 
+                # Get page state AFTER action for semantic context
+                post_action_page = await self.get_page_content()
+                
+                # Extract key semantic indicators from page content
+                result_body_text = post_action_page.get('bodyText', '')[:500]  # First 500 chars
+                result_element_count = post_action_page.get('elementCount', {})
+                
                 action_result = {
                     'step': step,
                     'action': action_plan.get('action'),
+                    'reasoning': action_plan.get('reasoning', ''),  # ← WHY did we do this?
                     'success': action_success,
                     'duration': action_duration,
-                    'url': page_content.get('url')
+                    # BEFORE state
+                    'url': page_content.get('url'),
+                    'page_title': page_content.get('title', ''),
+                    # AFTER state  
+                    'result_url': post_action_page.get('url'),
+                    'result_title': post_action_page.get('title', ''),
+                    'result_body_preview': result_body_text,  # ← Can detect error messages!
+                    'result_element_count': result_element_count,  # ← How many interactive elements?
+                    # ATTEMPTED action
+                    'params': action_plan.get('params', {}),
+                    # OUTCOME indicators
+                    'url_changed': page_content.get('url') != post_action_page.get('url'),
+                    'title_changed': page_content.get('title') != post_action_page.get('title')
                 }
                 
                 if action_success:
@@ -4193,7 +4289,8 @@ If you cannot find it, respond with {{"found": false}}"""
         
         return {
             "success": True,
-            "summary": result_summary or "Completed all steps",
+            "task_summary": result_summary or "Completed all steps",
+            "summary": result_summary or "Completed all steps",  # Keep for backward compatibility
             "actions": self.actions_taken,
             "actions_planned": self.actions_planned,
             "actions_succeeded": self.actions_succeeded,
