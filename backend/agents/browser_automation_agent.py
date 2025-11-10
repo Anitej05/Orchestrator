@@ -503,6 +503,7 @@ class BrowserAgent:
     def __init__(self, task: str, max_steps: int = 10, headless: bool = False, enable_streaming: bool = True, thread_id: Optional[str] = None, backend_url: Optional[str] = None):
         self.task = task
         self.max_steps = max_steps
+        self.initial_max_steps = max_steps  # Store original for reference
         self.headless = headless
         self.enable_streaming = enable_streaming
         self.browser_pid = None  # Track the browser process ID
@@ -523,6 +524,10 @@ class BrowserAgent:
         self.task_id = str(uuid.uuid4())[:8]
         self.streaming_task: Optional[asyncio.Task] = None
         self.is_running = False
+        
+        # Dynamic step adjustment
+        self.steps_added = 0  # Track how many steps were added
+        self.steps_saved = 0  # Track how many steps were saved
         
         # Task planning and tracking
         self.task_plan: List[Dict[str, Any]] = []
@@ -930,6 +935,10 @@ Rules:
                 logger.info(f"📋 Created task plan with {len(plan)} subtasks")
                 for i, subtask in enumerate(plan, 1):
                     logger.info(f"   {i}. {subtask.get('subtask', 'Unknown')}")
+                
+                # Dynamically adjust max_steps based on plan complexity
+                self._adjust_steps_for_plan(plan)
+                
                 return plan
             else:
                 logger.warning("Could not parse task plan, using single-task mode")
@@ -938,6 +947,72 @@ Rules:
         except Exception as e:
             logger.error(f"Error creating task plan: {e}")
             return [{"subtask": self.task, "status": "pending"}]
+    
+    def _adjust_steps_for_plan(self, plan: List[Dict[str, Any]]):
+        """Dynamically adjust max_steps based on task plan complexity"""
+        subtask_count = len(plan)
+        
+        # Estimate steps per subtask (average: 5-8 steps per subtask)
+        estimated_steps_per_subtask = 6
+        estimated_total_steps = subtask_count * estimated_steps_per_subtask
+        
+        # Add buffer for retries and navigation (20%)
+        estimated_total_steps = int(estimated_total_steps * 1.2)
+        
+        # Adjust max_steps if needed
+        if estimated_total_steps > self.max_steps:
+            steps_to_add = estimated_total_steps - self.max_steps
+            self.max_steps = estimated_total_steps
+            self.steps_added = steps_to_add
+            logger.info(f"📈 Increased max_steps by {steps_to_add} → {self.max_steps} (based on {subtask_count} subtasks)")
+        elif estimated_total_steps < self.max_steps * 0.6:
+            # If estimated steps are much less than max, reduce to save time
+            steps_to_save = self.max_steps - estimated_total_steps
+            self.max_steps = estimated_total_steps
+            self.steps_saved = steps_to_save
+            logger.info(f"📉 Reduced max_steps by {steps_to_save} → {self.max_steps} (task simpler than expected)")
+        else:
+            logger.info(f"✅ max_steps ({self.max_steps}) appropriate for {subtask_count} subtasks")
+    
+    def _adjust_steps_runtime(self, current_step: int):
+        """Dynamically adjust max_steps during execution based on progress"""
+        completed_count = len([t for t in self.task_plan if t['status'] == 'completed'])
+        pending_count = len([t for t in self.task_plan if t['status'] == 'pending'])
+        
+        if pending_count == 0:
+            # All subtasks done - no adjustment needed
+            return
+        
+        # Calculate progress rate (subtasks per step)
+        if current_step > 0:
+            progress_rate = completed_count / current_step
+            
+            # Estimate remaining steps needed
+            estimated_remaining_steps = int(pending_count / progress_rate) if progress_rate > 0 else pending_count * 6
+            
+            # Add buffer (30%)
+            estimated_remaining_steps = int(estimated_remaining_steps * 1.3)
+            
+            # Check if we need more steps
+            steps_remaining = self.max_steps - current_step
+            
+            if estimated_remaining_steps > steps_remaining:
+                # Need more steps
+                steps_to_add = estimated_remaining_steps - steps_remaining
+                # Cap at reasonable limit (don't add more than 20 steps at once)
+                steps_to_add = min(steps_to_add, 20)
+                
+                self.max_steps += steps_to_add
+                self.steps_added += steps_to_add
+                logger.info(f"📈 Added {steps_to_add} more steps → {self.max_steps} ({pending_count} subtasks remaining, progress rate: {progress_rate:.2f})")
+            
+            elif estimated_remaining_steps < steps_remaining * 0.5 and steps_remaining > 10:
+                # Making great progress - can reduce steps
+                steps_to_remove = min(steps_remaining - estimated_remaining_steps, 10)
+                
+                self.max_steps -= steps_to_remove
+                self.steps_saved += steps_to_remove
+                logger.info(f"📉 Removed {steps_to_remove} steps → {self.max_steps} (ahead of schedule, {pending_count} subtasks remaining)")
     
     def _validate_extraction_quality(self, extracted_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -1747,24 +1822,36 @@ CRITICAL: This task requires IMAGE ANALYSIS!
             # Build adaptive context for stuck situations
             stuck_context = ""
             if self.consecutive_same_actions >= 2:
+                # Get last action params for feedback
+                last_params = self.actions_taken[-1].get('params', {}) if self.actions_taken else {}
+                last_coords = f"({last_params.get('x', 'N/A')}, {last_params.get('y', 'N/A')})"
+                
                 stuck_context = f"""
 
 ⚠️ ADAPTIVE REASONING REQUIRED - YOU ARE STUCK!
-Consecutive same actions: {self.consecutive_same_actions}/3
+Consecutive same actions: {self.consecutive_same_actions}/5 (circuit breaker at 5)
 Last action: {self.last_action_type}
+Last coordinates: {last_coords}
 Recent failures: {json.dumps([{'action': a.get('action'), 'url': a.get('url', '')[:50]} for a in self.actions_failed[-3:]], indent=2) if self.actions_failed else 'None'}
 
-CRITICAL THINKING:
-1. WHY did previous attempts fail? (wrong selector? element not visible? wrong approach?)
-2. What ALTERNATIVE methods can you try? (different selector? vision-based clicking? skip?)
-3. Is this action ESSENTIAL or OPTIONAL? (can you skip and still achieve the goal?)
-4. If stuck on sorting/filtering, can you extract unsorted data instead?
+🚨 CRITICAL: The element you clicked before did NOT work!
 
-ADAPTIVE STRATEGIES:
-- Try clicking at DIFFERENT coordinates
-- Use text-based clicking instead of coordinates
-- Skip optional steps and focus on core objective
-- If extraction is the goal, do it NOW without prerequisites
+You MUST try a DIFFERENT approach:
+1. Click a DIFFERENT element (not the same coordinates)
+2. Try a DIFFERENT method (navigate directly to URL instead of clicking)
+3. Use text search or keyboard shortcuts instead
+4. SKIP this step if it's blocking progress
+
+DO NOT:
+- Click the same element again
+- Use the same coordinates
+- Repeat the same failed action
+
+ALTERNATIVE STRATEGIES:
+- Navigate directly: Use "navigate" action with full URL
+- Try JavaScript: Some elements need JS interaction
+- Skip and continue: Mark subtask as impossible and move on
+- Use different selector: Try text-based or XPath selectors
 """
             
             prompt = f"""{image_analysis_instruction}
@@ -1825,7 +1912,7 @@ PLAN UPDATES:
 
 ACTIONS:
 - click: Click at (x, y) - buttons, checkboxes, links
-- type: Type text - provide x, y to click first, then text
+- type: Type text into input field - MUST include "text" parameter with what to type
 - drag: Drag from (x, y) to (x2, y2) - sliders, drag-drop
 - hover: Hover at (x, y) - dropdowns, tooltips
 - scroll_to: Scroll to (x, y)
@@ -1833,9 +1920,14 @@ ACTIONS:
 - navigate: Go to URL
 - done: Task complete
 
+CRITICAL FOR TYPE ACTION:
+- ALWAYS include "text" parameter with the actual text to type
+- Example: {{"action": "type", "params": {{"x": 100, "y": 200, "text": "gaming laptops"}}, ...}}
+- The "text" field is REQUIRED and must contain the search query or input text
+
 EXAMPLES:
 Cloudflare: {{"action": "click", "params": {{"x": 50, "y": 300}}, "next_step_needs_vision": false, "reasoning": "Click checkbox, next page will be normal"}}
-Search: {{"action": "type", "params": {{"x": 100, "y": 200, "text": "query"}}, "next_step_needs_vision": false}}
+Search: {{"action": "type", "params": {{"x": 100, "y": 200, "text": "gaming laptops"}}, "next_step_needs_vision": false, "reasoning": "Type search query"}}
 Slider: {{"action": "drag", "params": {{"x": 50, "y": 300, "x2": 200, "y2": 300}}, "next_step_needs_vision": false}}"""
 
             # Call Ollama vision API
@@ -1941,24 +2033,41 @@ CRITICAL: This task requires IMAGE ANALYSIS!
             # Build adaptive context for stuck situations
             stuck_context = ""
             if self.consecutive_same_actions >= 2:
+                # Get last action params for feedback
+                last_params = {}
+                if self.actions_taken:
+                    last_action_data = self.actions_taken[-1]
+                    # Try to get params from the action data
+                    if isinstance(last_action_data, dict):
+                        last_params = last_action_data.get('params', {})
+                
+                last_coords = f"({last_params.get('x', 'N/A')}, {last_params.get('y', 'N/A')})"
+                
                 stuck_context = f"""
 
 ⚠️ ADAPTIVE REASONING REQUIRED - YOU ARE STUCK!
-Consecutive same actions: {self.consecutive_same_actions}/3
+Consecutive same actions: {self.consecutive_same_actions}/5 (circuit breaker at 5)
 Last action: {self.last_action_type}
+Last coordinates: {last_coords}
 Recent failures: {json.dumps([{'action': a.get('action'), 'url': a.get('url', '')[:50]} for a in self.actions_failed[-3:]], indent=2) if self.actions_failed else 'None'}
 
-CRITICAL THINKING:
-1. WHY did previous attempts fail? (wrong coordinates? element not visible? wrong approach?)
-2. What ALTERNATIVE methods can you try? (different coordinates? text-based clicking? skip?)
-3. Is this action ESSENTIAL or OPTIONAL? (can you skip and still achieve the goal?)
-4. If stuck on sorting/filtering, can you extract unsorted data instead?
+🚨 CRITICAL: The element you clicked before did NOT work!
 
-ADAPTIVE STRATEGIES:
-- Try clicking at DIFFERENT coordinates
-- Use text-based clicking instead of coordinates
-- Skip optional steps and focus on core objective
-- If extraction is the goal, do it NOW without prerequisites
+You MUST try a DIFFERENT approach:
+1. Click a DIFFERENT element (not the same coordinates)
+2. Navigate directly to URL (e.g., https://www.bestbuy.com/site/searchpage.jsp?st=gaming+laptops)
+3. Try keyboard shortcuts or text input instead
+4. SKIP this step if it's blocking progress
+
+DO NOT:
+- Click the same element again
+- Use the same coordinates
+- Repeat the same failed action
+
+ALTERNATIVE STRATEGIES:
+- Navigate directly: Use "navigate" action with search URL
+- Try different element: Look for alternative buttons or links
+- Skip and continue: Mark subtask as impossible and move on
 """
             
             prompt = f"""{image_analysis_instruction}
@@ -2015,7 +2124,7 @@ MODALITY DECISION (next_step_needs_vision):
 
 ACTIONS:
 - click: Click at (x, y) - buttons, checkboxes, links
-- type: Type text - provide x, y to click first, then text
+- type: Type text into input - MUST include "text" parameter with what to type
 - drag: Drag from (x, y) to (x2, y2) - sliders, drag-drop
 - hover: Hover at (x, y) - dropdowns, tooltips
 - scroll_to: Scroll to (x, y)
@@ -2023,7 +2132,12 @@ ACTIONS:
 - analyze_images: Analyze images and describe them (put descriptions in reasoning)
 - save_images: Save images from page (put descriptions in reasoning)
 - navigate: Go to URL
-- done: Task complete"""
+- done: Task complete
+
+CRITICAL FOR TYPE ACTION:
+- ALWAYS include "text" parameter with the actual text to type
+- Example: {{"action": "type", "params": {{"x": 100, "y": 200, "text": "gaming laptops"}}, ...}}
+- The "text" field is REQUIRED - do not leave it empty!"""
 
             # Call NVIDIA vision API
             client = OpenAI(
@@ -2359,12 +2473,77 @@ ACTIONS:
         logger.error(f"❌ All click strategies failed")
         return False
     
+    def _infer_text_from_context(self) -> str:
+        """Smart fallback: Infer what text to type based on task and subtask context"""
+        # Get current subtask
+        current_subtask = None
+        for subtask in self.task_plan:
+            if subtask['status'] == 'pending':
+                current_subtask = subtask['subtask']
+                break
+        
+        # Common search patterns
+        search_patterns = [
+            # Pattern: "search for X"
+            (r'search for ["\']?([^"\']+)["\']?', 1),
+            (r'search ["\']?([^"\']+)["\']?', 1),
+            # Pattern: "find X"
+            (r'find ["\']?([^"\']+)["\']?', 1),
+            # Pattern: "look for X"
+            (r'look for ["\']?([^"\']+)["\']?', 1),
+            # Pattern: "type X"
+            (r'type ["\']?([^"\']+)["\']?', 1),
+            # Pattern: "enter X"
+            (r'enter ["\']?([^"\']+)["\']?', 1),
+            # Pattern: quoted text
+            (r'["\']([^"\']{3,})["\']', 1),
+        ]
+        
+        # Try to extract from current subtask first
+        if current_subtask:
+            for pattern, group in search_patterns:
+                match = re.search(pattern, current_subtask, re.IGNORECASE)
+                if match:
+                    text = match.group(group).strip()
+                    logger.info(f"📝 Extracted from subtask: '{text}'")
+                    return text
+        
+        # Try to extract from main task
+        for pattern, group in search_patterns:
+            match = re.search(pattern, self.task, re.IGNORECASE)
+            if match:
+                text = match.group(group).strip()
+                logger.info(f"📝 Extracted from main task: '{text}'")
+                return text
+        
+        # Check for common product/item names in task
+        product_keywords = ['laptop', 'phone', 'headphone', 'mouse', 'keyboard', 'monitor', 'tablet', 'camera']
+        for keyword in product_keywords:
+            # Look for "gaming laptops", "wireless headphones", etc.
+            pattern = rf'(\w+\s+{keyword}s?)'
+            match = re.search(pattern, self.task, re.IGNORECASE)
+            if match:
+                text = match.group(1).strip()
+                logger.info(f"📝 Extracted product search: '{text}'")
+                return text
+        
+        logger.warning("⚠️  Could not infer text from context")
+        return ""
+    
     async def _execute_type_robust(self, params: Dict[str, Any]) -> bool:
         """Execute typing with SOTA multi-strategy approach"""
-        text = params.get('input_text', '')
+        text = params.get('input_text', '') or params.get('text', '')
+        
+        # SMART FALLBACK: Infer text from task context if not provided
         if not text:
-            logger.error("❌ No text provided for typing")
-            return False
+            logger.warning("⚠️  No text provided in params - attempting to infer from task context")
+            text = self._infer_text_from_context()
+            
+            if text:
+                logger.info(f"✅ Inferred text from context: '{text}'")
+            else:
+                logger.error("❌ No text provided for typing and could not infer from context")
+                return False
         
         # Wait for page to be stable
         await self.page_stabilizer.wait_for_stable(self.page)
@@ -3740,6 +3919,35 @@ If you cannot find it, respond with {{"found": false}}"""
                 # Only count as stuck if same action on same URL
                 if current_action == self.last_action_type and current_url == getattr(self, 'last_action_url', None):
                     self.consecutive_same_actions += 1
+                    
+                    # CRITICAL FIX: Circuit breaker to prevent infinite loops
+                    if self.consecutive_same_actions >= 5:
+                        logger.error(f"🛑 CIRCUIT BREAKER: Same action '{current_action}' repeated {self.consecutive_same_actions} times on {current_url}")
+                        
+                        # Mark current subtask as failed
+                        for subtask in self.task_plan:
+                            if subtask['status'] == 'pending':
+                                subtask['status'] = 'failed'
+                                self.failed_subtasks.append({
+                                    "subtask": subtask['subtask'],
+                                    "reason": f"Stuck in loop - same action repeated {self.consecutive_same_actions} times"
+                                })
+                                logger.error(f"❌ Marking subtask as FAILED (circuit breaker): {subtask['subtask']}")
+                                break
+                        
+                        # Reset counter
+                        self.consecutive_same_actions = 0
+                        self.last_action_type = None
+                        self.last_action_url = None
+                        
+                        # Check if any subtasks remain
+                        if all(t['status'] != 'pending' for t in self.task_plan):
+                            logger.error("🛑 No more subtasks to try - exiting")
+                            break
+                        
+                        # Skip to next iteration to try next subtask
+                        logger.info("🔄 Circuit breaker triggered - moving to next subtask")
+                        continue
                 else:
                     self.consecutive_same_actions = 1
                     self.last_action_type = current_action
@@ -3803,6 +4011,39 @@ If you cannot find it, respond with {{"found": false}}"""
                 if action_success:
                     self.actions_succeeded.append(action_result)
                     logger.info(f"✅ Action succeeded in {action_duration:.2f}s")
+                    
+                    # CRITICAL FIX: Detect "successful action but no effect"
+                    if current_action in ['click', 'type']:
+                        # Wait for page to respond
+                        await asyncio.sleep(1.5)
+                        
+                        # Get new page state
+                        new_page_content = await self.get_page_content()
+                        new_url = new_page_content.get('url')
+                        new_hash = hash(new_page_content.get('bodyText', '')[:500])
+                        
+                        # Check if ANYTHING changed
+                        if new_url == current_url and new_hash == current_hash:
+                            logger.warning(f"⚠️  Action '{current_action}' succeeded but page didn't change!")
+                            
+                            # Initialize counter if needed
+                            if not hasattr(self, 'no_effect_count'):
+                                self.no_effect_count = 0
+                            self.no_effect_count += 1
+                            
+                            if self.no_effect_count >= 3:
+                                logger.error(f"🛑 Action has no effect after {self.no_effect_count} attempts - marking as failed")
+                                action_success = False
+                                self.no_effect_count = 0
+                                
+                                # Move this to failed actions
+                                self.actions_succeeded.pop()  # Remove from succeeded
+                                self.actions_failed.append(action_result)
+                        else:
+                            # Page changed - reset counter
+                            if hasattr(self, 'no_effect_count'):
+                                self.no_effect_count = 0
+                            logger.info(f"✅ Page changed after action - progress detected")
                 else:
                     self.actions_failed.append(action_result)
                     logger.error(f"❌ Action failed after {action_duration:.2f}s")
@@ -3810,12 +4051,21 @@ If you cannot find it, respond with {{"found": false}}"""
                     # CRITICAL FIX: Mark subtask as FAILED when action fails
                     for subtask in self.task_plan:
                         if subtask['status'] == 'pending':
-                            subtask['status'] = 'failed'
-                            self.failed_subtasks.append({
-                                "subtask": subtask['subtask'],
-                                "reason": f"Action '{action_plan.get('action')}' failed"
-                            })
-                            logger.error(f"❌ Subtask failed due to action failure: {subtask['subtask']}")
+                            # Track attempts per subtask
+                            if 'attempts' not in subtask:
+                                subtask['attempts'] = 0
+                            subtask['attempts'] += 1
+                            
+                            # Only mark as failed after multiple attempts
+                            if subtask['attempts'] >= 3:
+                                subtask['status'] = 'failed'
+                                self.failed_subtasks.append({
+                                    "subtask": subtask['subtask'],
+                                    "reason": f"Action '{action_plan.get('action')}' failed {subtask['attempts']} times"
+                                })
+                                logger.error(f"❌ Subtask failed after {subtask['attempts']} attempts: {subtask['subtask']}")
+                            else:
+                                logger.warning(f"⚠️  Subtask attempt {subtask['attempts']}/3 failed: {subtask['subtask']}")
                             break
                 
                 # CRITICAL FIX: Mark subtasks as completed AFTER action succeeds
@@ -3829,6 +4079,10 @@ If you cannot find it, respond with {{"found": false}}"""
                                 self.completed_subtasks.append(subtask['subtask'])
                                 logger.info(f"✅ Completed subtask: {subtask['subtask']}")
                                 self.consecutive_same_actions = 0
+                                
+                                # Dynamic step adjustment based on progress
+                                self._adjust_steps_runtime(step)
+                                
                                 break
                     # Otherwise, try to auto-match action to pending subtask INTELLIGENTLY
                     else:
