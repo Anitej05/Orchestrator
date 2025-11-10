@@ -1422,9 +1422,23 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
         if api_key := os.getenv(f"{agent_details.id.upper().replace('-', '_')}_API_KEY"):
             headers["Authorization"] = f"Bearer {api_key}"
 
+        # Wait for agent to be ready if it's still starting
+        agent_name = f"{agent_details.id}_agent"
+        from main import wait_for_agent_ready, agent_status, agent_status_lock
+        
+        async with agent_status_lock:
+            agent_info = agent_status.get(agent_name)
+        
+        if agent_info and agent_info['status'] == 'starting':
+            agent_ready = await wait_for_agent_ready(agent_name, agent_info['port'], timeout=30.0)
+            if not agent_ready:
+                error_msg = f"Agent '{agent_details.name}' failed to start or timed out"
+                logger.error(error_msg)
+                return {"task_name": planned_task.task_name, "result": error_msg, "status_code": 503}
+        
         async with httpx.AsyncClient() as client:
             try:
-                logger.info(f"Calling agent '{agent_details.name}' at '{endpoint_url}' (Attempt {attempt + 1})")
+                logger.info(f"Calling agent '{agent_details.name}' at {endpoint_url}")
                 
                 # Check if this is a browser agent - pass thread_id for push-based streaming
                 is_browser_agent = 'browser' in agent_details.id.lower() or 'browser' in agent_details.name.lower()
@@ -1497,10 +1511,25 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                     error_msg = f"Agent call failed with status {e.response.status_code}: {e.response.text}"
                     return {"task_name": planned_task.task_name, "result": error_msg, "raw_response": e.response.text, "status_code": e.response.status_code}
             except httpx.RequestError as e:
-                error_msg = f"Agent call failed with a network error: {type(e).__name__} - {str(e)}"
+                # Get detailed error information
+                error_details = str(e) if str(e) else repr(e)
+                error_type = type(e).__name__
+                
+                # Special handling for timeout errors
+                if isinstance(e, httpx.ReadTimeout):
+                    error_msg = f"Agent call timed out after {timeout_seconds}s. The agent at {endpoint_url} did not respond in time."
+                elif isinstance(e, httpx.ConnectTimeout):
+                    error_msg = f"Connection to agent timed out. Could not connect to {endpoint_url} within {timeout_seconds}s."
+                elif isinstance(e, httpx.ConnectError):
+                    error_msg = f"Connection failed. Could not reach agent at {endpoint_url}. Is the agent running?"
+                else:
+                    error_msg = f"Agent call failed with a network error: {error_type} - {error_details}"
+                
                 logger.error(f"Network error calling agent '{agent_details.name}': {error_msg}")
                 logger.error(f"Endpoint: {endpoint_url}, Payload: {payload}")
-                return {"task_name": planned_task.task_name, "result": error_msg, "raw_response": str(e), "status_code": 500}
+                logger.error(f"Error details: {error_type} - {error_details}")
+                
+                return {"task_name": planned_task.task_name, "result": error_msg, "raw_response": error_details, "status_code": 500}
     
     # This block is reached only if all semantic retries in the loop fail
     final_error_msg = f"Agent returned empty or unsatisfactory results for task '{planned_task.task_name}' after {len(failed_attempts)} attempts."

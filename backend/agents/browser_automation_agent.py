@@ -765,34 +765,35 @@ class BrowserAgent:
         except Exception as e:
             logger.warning(f"Failed to save download: {e}")
     
+    async def _capture_screenshot_robust(self, timeout_attempts=[15000, 5000, 3000]) -> Optional[bytes]:
+        """Capture screenshot with multiple timeout strategies"""
+        for timeout_val in timeout_attempts:
+            try:
+                return await self.page.screenshot(
+                    timeout=timeout_val,
+                    animations="disabled" if timeout_val > 5000 else None
+                )
+            except Exception as e:
+                if timeout_val == timeout_attempts[-1]:
+                    logger.warning(f"⚠️  Screenshot failed after {len(timeout_attempts)} attempts")
+                    return None
+                continue
+        return None
+    
     async def capture_screenshot(self, name: str = "screenshot") -> str:
         """Capture and save screenshot with robust error handling"""
         filename = f"{self.task_id}_{name}_{len(self.screenshots)}.png"
         filepath = STORAGE_DIR / filename
         
-        # Try multiple strategies to capture screenshot
-        strategies = [
-            # Strategy 1: Standard with animations disabled
-            {"full_page": False, "timeout": 15000, "animations": "disabled"},
-            # Strategy 2: Quick capture without waiting
-            {"full_page": False, "timeout": 5000},
-            # Strategy 3: Minimal capture
-            {"timeout": 3000}
-        ]
+        screenshot_bytes = await self._capture_screenshot_robust()
+        if screenshot_bytes:
+            with open(filepath, 'wb') as f:
+                f.write(screenshot_bytes)
+            self.screenshots.append(str(filepath))
+            logger.info(f"📸 Screenshot saved: {filename}")
+            return str(filepath)
         
-        for i, kwargs in enumerate(strategies):
-            try:
-                await self.page.screenshot(path=str(filepath), **kwargs)
-                self.screenshots.append(str(filepath))
-                logger.info(f"📸 Screenshot saved: {filename}")
-                return str(filepath)
-            except Exception as e:
-                if i == len(strategies) - 1:  # Last attempt
-                    logger.warning(f"⚠️  Screenshot failed after {len(strategies)} attempts, continuing without it")
-                    return ""
-                # Try next strategy
-                continue
-        
+        logger.warning(f"⚠️  Screenshot failed, continuing without it")
         return ""
     
     async def push_screenshot_to_backend(self, screenshot_base64: str):
@@ -1014,6 +1015,36 @@ Rules:
                 self.steps_saved += steps_to_remove
                 logger.info(f"📉 Removed {steps_to_remove} steps → {self.max_steps} (ahead of schedule, {pending_count} subtasks remaining)")
     
+    def _is_duplicate_extraction(self, extracted_data: Dict[str, Any]) -> bool:
+        """Check if extraction is duplicate using content hashing"""
+        import hashlib
+        
+        if not hasattr(self, 'extracted_data'):
+            self.extracted_data = []
+        
+        # Create content hash
+        content_for_hash = f"{extracted_data.get('url')}|{extracted_data.get('text_content', '')[:500]}|{extracted_data.get('vision_analysis', '')[:200]}"
+        content_hash = hashlib.md5(content_for_hash.encode()).hexdigest()
+        
+        # Check for duplicates
+        for existing in self.extracted_data:
+            existing_content = f"{existing.get('url')}|{existing.get('text_content', '')[:500]}|{existing.get('vision_analysis', '')[:200]}"
+            existing_hash = hashlib.md5(existing_content.encode()).hexdigest()
+            
+            if content_hash == existing_hash:
+                logger.info(f"⚠️  Skipping duplicate extraction (hash match) for {extracted_data.get('url')}")
+                return True
+            
+            # Check for near-duplicates (same URL and very similar content)
+            if existing.get('url') == extracted_data.get('url'):
+                existing_text = existing.get('text_content', '')[:200]
+                new_text = extracted_data.get('text_content', '')[:200]
+                if existing_text == new_text:
+                    logger.info(f"⚠️  Skipping near-duplicate extraction for {extracted_data.get('url')}")
+                    return True
+        
+        return False
+    
     def _validate_extraction_quality(self, extracted_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Validate if extracted data meets quality thresholds.
@@ -1032,33 +1063,22 @@ Rules:
         # Check for vision analysis (good quality for image tasks)
         if extracted_data.get('vision_analysis'):
             analysis_length = len(extracted_data['vision_analysis'])
-            if analysis_length >= 100:  # Meaningful analysis
+            if analysis_length >= 100:
                 return {'is_sufficient': True, 'reason': 'Vision analysis present'}
-            else:
-                return {'is_sufficient': False, 'reason': 'Vision analysis too brief'}
         
         # Check text content (minimum quality)
         text_content = extracted_data.get('text_content', '')
-        if len(text_content) >= 500:  # At least 500 chars of meaningful content
-            # Check if it's not just error messages or empty content
+        headings = extracted_data.get('headings', [])
+        
+        if len(text_content) >= 500 and len(headings) >= 3:
             error_indicators = ['error', 'not found', '404', 'access denied', 'forbidden']
             if not any(indicator in text_content.lower()[:200] for indicator in error_indicators):
-                return {'is_sufficient': True, 'reason': 'Sufficient text content'}
-        
-        # Check for meaningful headings
-        headings = extracted_data.get('headings', [])
-        if len(headings) >= 3:
-            return {'is_sufficient': True, 'reason': f'Found {len(headings)} headings'}
-        
-        # Check for links (indicates content-rich page)
-        links = extracted_data.get('links', [])
-        if len(links) >= 5:
-            return {'is_sufficient': True, 'reason': f'Found {len(links)} links'}
+                return {'is_sufficient': True, 'reason': 'Sufficient text content and headings'}
         
         # Insufficient data
         return {
             'is_sufficient': False,
-            'reason': f'Insufficient data: {len(text_content)} chars text, {len(headings)} headings, {len(links)} links'
+            'reason': f'Insufficient data: {len(text_content)} chars text, {len(headings)} headings'
         }
     
     async def _extract_with_vision_fallback(self, page_content: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -2264,219 +2284,7 @@ CRITICAL FOR TYPE ACTION:
             logger.error(f"❌ NVIDIA vision failed: {e}")
             raise  # Re-raise to trigger final fallback
     
-    async def map_bbox_to_dom_selector(self, bbox: Dict[str, Any]) -> Optional[str]:
-        """Map bounding box to DOM selector using coordinates"""
-        try:
-            x = bbox.get('x', 0) + bbox.get('width', 0) // 2  # Center of bbox
-            y = bbox.get('y', 0) + bbox.get('height', 0) // 2
-            
-            # Get element at bbox center and generate selector
-            selector_info = await self.page.evaluate(f"""
-                () => {{
-                    const element = document.elementFromPoint({x}, {y});
-                    if (!element) return null;
-                    
-                    // Generate unique selector
-                    let selector = '';
-                    
-                    // Try ID first (most specific)
-                    if (element.id) {{
-                        selector = '#' + element.id;
-                    }}
-                    // Try name attribute
-                    else if (element.name) {{
-                        selector = element.tagName.toLowerCase() + '[name="' + element.name + '"]';
-                    }}
-                    // Try aria-label
-                    else if (element.getAttribute('aria-label')) {{
-                        selector = element.tagName.toLowerCase() + '[aria-label="' + element.getAttribute('aria-label') + '"]';
-                    }}
-                    // Try class combination
-                    else if (element.className && typeof element.className === 'string') {{
-                        const classes = element.className.trim().split(/\\s+/).slice(0, 2).join('.');
-                        if (classes) {{
-                            selector = element.tagName.toLowerCase() + '.' + classes;
-                        }}
-                    }}
-                    // Fallback to tag + text
-                    else {{
-                        const text = element.textContent?.trim().substring(0, 30);
-                        if (text) {{
-                            selector = element.tagName.toLowerCase() + ':has-text("' + text + '")';
-                        }} else {{
-                            selector = element.tagName.toLowerCase();
-                        }}
-                    }}
-                    
-                    return {{
-                        selector: selector,
-                        tagName: element.tagName.toLowerCase(),
-                        text: element.textContent?.trim().substring(0, 50) || '',
-                        isClickable: element.tagName.toLowerCase() === 'button' || 
-                                    element.tagName.toLowerCase() === 'a' ||
-                                    element.tagName.toLowerCase() === 'input' ||
-                                    element.getAttribute('role') === 'button' ||
-                                    element.onclick !== null,
-                        isVisible: element.offsetParent !== null
-                    }};
-                }}
-            """)
-            
-            if selector_info and selector_info['selector'] and selector_info['isVisible']:
-                logger.info(f"✅ Mapped bbox to selector: {selector_info['selector']} ({selector_info['tagName']})")
-                return selector_info['selector']
-            
-            return None
-            
-        except Exception as e:
-            logger.warning(f"⚠️  Bbox to DOM mapping failed: {e}")
-            return None
-    
-    async def verify_coordinates(self, x: int, y: int, expected_element_type: str = None) -> Dict[str, Any]:
-        """Verify coordinates and return element info with confidence"""
-        try:
-            # First validate coordinates are within viewport
-            viewport_width = 1280
-            viewport_height = 800
-            
-            if x < 0 or x > viewport_width or y < 0 or y > viewport_height:
-                logger.error(f"❌ Coordinates ({x}, {y}) outside viewport bounds (0-{viewport_width}, 0-{viewport_height})")
-                return {'valid': False, 'confidence': 0.0, 'reason': 'coordinates_out_of_bounds'}
-            
-            # Get element at coordinates using JavaScript
-            element_info = await self.page.evaluate(f"""
-                () => {{
-                    const element = document.elementFromPoint({x}, {y});
-                    if (!element) return null;
-                    
-                    return {{
-                        tagName: element.tagName.toLowerCase(),
-                        type: element.type || '',
-                        role: element.getAttribute('role') || '',
-                        ariaLabel: element.getAttribute('aria-label') || '',
-                        text: element.textContent?.trim().substring(0, 50) || '',
-                        isClickable: element.tagName.toLowerCase() === 'button' || 
-                                    element.tagName.toLowerCase() === 'a' ||
-                                    element.tagName.toLowerCase() === 'input' ||
-                                    element.getAttribute('role') === 'button' ||
-                                    element.onclick !== null ||
-                                    window.getComputedStyle(element).cursor === 'pointer',
-                        isVisible: element.offsetParent !== null,
-                        rect: element.getBoundingClientRect()
-                    }};
-                }}
-            """)
-            
-            if not element_info:
-                logger.warning(f"⚠️  No element found at coordinates ({x}, {y})")
-                return {'valid': False, 'confidence': 0.0}
-            
-            # Calculate confidence score
-            confidence = 0.0
-            if element_info['isVisible']:
-                confidence += 0.4
-            if element_info['isClickable']:
-                confidence += 0.4
-            if element_info['text']:
-                confidence += 0.1
-            if element_info['ariaLabel'] or element_info['role']:
-                confidence += 0.1
-            
-            element_info['valid'] = element_info['isVisible'] and element_info['isClickable']
-            element_info['confidence'] = confidence
-            
-            if element_info['valid']:
-                logger.info(f"✅ Verified ({x}, {y}): {element_info['tagName']} - '{element_info['text']}' (confidence: {confidence:.2f})")
-            else:
-                logger.warning(f"⚠️  Invalid element at ({x}, {y}): visible={element_info['isVisible']}, clickable={element_info['isClickable']}")
-            
-            return element_info
-            
-        except Exception as e:
-            logger.warning(f"⚠️  Coordinate verification failed: {e}")
-            return {'valid': False, 'confidence': 0.0}
-    
-    async def verify_action_success(self, action: str, before_state: Dict[str, Any], after_state: Dict[str, Any]) -> Dict[str, Any]:
-        """Programmatically verify if action succeeded (no API calls)"""
-        try:
-            verification = {
-                'success': False,
-                'confidence': 0.0,
-                'changes_detected': [],
-                'reason': ''
-            }
-            
-            # 1. Visual change detection (screenshot hash)
-            if before_state.get('screenshot') and after_state.get('screenshot'):
-                import hashlib
-                before_hash = hashlib.md5(before_state['screenshot']).hexdigest()
-                after_hash = hashlib.md5(after_state['screenshot']).hexdigest()
-                
-                if before_hash != after_hash:
-                    verification['changes_detected'].append('visual_change')
-                    verification['confidence'] += 0.3
-            
-            # 2. URL change detection
-            if before_state.get('url') != after_state.get('url'):
-                verification['changes_detected'].append('url_change')
-                verification['confidence'] += 0.4
-                verification['success'] = True
-            
-            # 3. DOM change detection
-            if before_state.get('dom_hash') != after_state.get('dom_hash'):
-                verification['changes_detected'].append('dom_change')
-                verification['confidence'] += 0.2
-            
-            # 4. Page title change
-            if before_state.get('title') != after_state.get('title'):
-                verification['changes_detected'].append('title_change')
-                verification['confidence'] += 0.1
-            
-            # Determine success
-            if verification['confidence'] >= 0.3:
-                verification['success'] = True
-                verification['reason'] = f"Detected: {', '.join(verification['changes_detected'])}"
-            else:
-                verification['reason'] = "No significant changes detected"
-            
-            if verification['success']:
-                logger.info(f"✅ Action '{action}' verified: {verification['reason']} (confidence: {verification['confidence']:.2f})")
-            else:
-                logger.warning(f"⚠️  Action '{action}' may have failed: {verification['reason']}")
-            
-            return verification
-            
-        except Exception as e:
-            logger.warning(f"⚠️  Action verification failed: {e}")
-            return {'success': True, 'confidence': 0.5, 'changes_detected': [], 'reason': 'Verification error'}
-    
-    async def capture_page_state(self) -> Dict[str, Any]:
-        """Capture current page state for verification"""
-        try:
-            state = {
-                'url': self.page.url,
-                'title': await self.page.title(),
-            }
-            
-            # Capture screenshot
-            try:
-                state['screenshot'] = await self.page.screenshot(timeout=3000)
-            except:
-                state['screenshot'] = None
-            
-            # Capture DOM hash
-            try:
-                dom_text = await self.page.evaluate("() => document.body.innerText")
-                import hashlib
-                state['dom_hash'] = hashlib.md5(dom_text.encode()).hexdigest()
-            except:
-                state['dom_hash'] = None
-            
-            return state
-        except Exception as e:
-            logger.warning(f"⚠️  Failed to capture page state: {e}")
-            return {}
-    
+
     async def _execute_click_robust(self, params: Dict[str, Any]) -> bool:
         """Execute click with SOTA multi-strategy approach"""
         # Wait for page to be stable first
@@ -2745,189 +2553,6 @@ CRITICAL FOR TYPE ACTION:
                 # Use SOTA robust clicking
                 logger.info(f"🖱️  Executing SOTA robust click")
                 return await self._execute_click_robust(params)
-                
-                # OLD IMPLEMENTATION BELOW (kept as fallback)
-                text = params.get("text", "")
-                selector = params.get("selector")
-                x = params.get("x")
-                y = params.get("y")
-                bbox = params.get("bbox")  # Bounding box from vision
-                confidence = params.get("confidence", 0.5)
-                
-                # Multi-strategy retry - ORDERED BY RELIABILITY (most reliable first)
-                strategies = []
-                
-                # Strategy 1: Text-based (MOST RELIABLE - try first!)
-                if text:
-                    strategies.append(('text', None, None, None))
-                    logger.info(f"🎯 Strategy 1: Text-based (most reliable): '{text}'")
-                
-                # Strategy 2: Direct selector (if provided and valid)
-                if selector:
-                    # Validate selector exists before adding to strategies
-                    try:
-                        count = await self.page.locator(selector).count()
-                        if count > 0:
-                            strategies.append(('selector', selector, None, None))
-                            logger.info(f"🎯 Strategy 2: Direct selector: {selector} ({count} matches)")
-                        else:
-                            logger.warning(f"⚠️  Selector '{selector}' not found on page, skipping")
-                    except Exception as e:
-                        logger.warning(f"⚠️  Invalid selector '{selector}': {e}")
-                
-                # Strategy 3: Vision → DOM mapping (only if high confidence and validated)
-                if bbox and confidence >= 0.7:
-                    mapped_selector = await self.map_bbox_to_dom_selector(bbox)
-                    if mapped_selector:
-                        # Validate it's actually clickable
-                        try:
-                            element = self.page.locator(mapped_selector).first
-                            is_clickable = await element.evaluate("""
-                                el => {
-                                    const tag = el.tagName.toLowerCase();
-                                    return tag === 'button' || tag === 'a' || tag === 'input' ||
-                                           el.getAttribute('role') === 'button' ||
-                                           el.onclick !== null ||
-                                           window.getComputedStyle(el).cursor === 'pointer';
-                                }
-                            """)
-                            if is_clickable:
-                                strategies.append(('dom_from_vision', mapped_selector, None, None))
-                                logger.info(f"🎯 Strategy 3: Vision DOM mapping (validated clickable): {mapped_selector}")
-                            else:
-                                logger.warning(f"⚠️  Vision mapped to non-clickable element: {mapped_selector}, skipping")
-                        except Exception as e:
-                            logger.warning(f"⚠️  Could not validate vision mapping: {e}")
-                
-                # Strategy 4: Coordinates (LAST RESORT - only if validated)
-                if x is not None and y is not None:
-                    # Validate coordinates are in bounds
-                    validation = await self.verify_coordinates(x, y)
-                    if validation.get('valid'):
-                        strategies.append(('coordinates', None, x, y))
-                        logger.info(f"🎯 Strategy 4: Coordinates (validated): ({x}, {y})")
-                    else:
-                        logger.warning(f"⚠️  Coordinates ({x}, {y}) failed validation, skipping")
-                
-                # Try each strategy
-                for strategy_name, strat_selector, strat_x, strat_y in strategies:
-                    try:
-                        logger.info(f"🔄 Attempting click with strategy: {strategy_name}")
-                        
-                        # Capture before state
-                        before_state = await self.capture_page_state()
-                        
-                        # Execute click based on strategy
-                        if strategy_name in ['dom_from_vision', 'selector']:
-                            element = self.page.locator(strat_selector).first
-                            await element.wait_for(state="visible", timeout=3000)
-                            await element.scroll_into_view_if_needed()
-                            await self.page.wait_for_timeout(300)
-                            await element.click(timeout=3000)
-                            
-                        elif strategy_name == 'coordinates':
-                            # Verify coordinates first
-                            verification = await self.verify_coordinates(strat_x, strat_y)
-                            if verification['confidence'] < 0.5:
-                                logger.warning(f"⚠️  Low confidence ({verification['confidence']:.2f}), trying next strategy")
-                                continue
-                            await self.page.mouse.click(strat_x, strat_y)
-                            
-                        elif strategy_name == 'text':
-                            # Text-based click (existing logic)
-                            element = self.page.get_by_text(text, exact=False).first
-                            await element.wait_for(state="visible", timeout=3000)
-                            await element.click(timeout=3000)
-                        
-                        await self.page.wait_for_timeout(800)
-                        
-                        # Capture after state and verify
-                        after_state = await self.capture_page_state()
-                        verification = await self.verify_action_success('click', before_state, after_state)
-                        
-                        if verification['success'] or verification['confidence'] >= 0.3:
-                            logger.info(f"✅ Click succeeded with strategy: {strategy_name}")
-                            return True
-                        else:
-                            logger.warning(f"⚠️  Click with {strategy_name} didn't produce expected changes, trying next strategy")
-                            continue
-                            
-                    except Exception as e:
-                        logger.warning(f"⚠️  Strategy {strategy_name} failed: {e}, trying next")
-                        continue
-                
-                # All strategies failed - try vision as last resort
-                logger.error(f"❌ All click strategies failed for text='{text}', selector='{selector}'")
-                
-                # CRITICAL: Vision fallback for failed clicks
-                if VISION_ENABLED and (text or selector):
-                    logger.info("🎨 Attempting vision fallback for failed click...")
-                    try:
-                        # Capture screenshot
-                        screenshot_bytes = await self.page.screenshot(timeout=5000)
-                        screenshot_base64 = base64.b64encode(screenshot_bytes).decode('utf-8')
-                        
-                        # Ask vision to find the element
-                        vision_prompt = f"""Find and identify the clickable element on this page.
-Looking for: {text if text else f'element with selector {selector}'}
-
-Provide the bounding box coordinates:
-{{"x": center_x, "y": center_y, "found": true/false}}
-
-If you cannot find it, respond with {{"found": false}}"""
-
-                        client = OpenAI(api_key=OLLAMA_API_KEY, base_url="https://ollama.com/v1")
-                        response = client.chat.completions.create(
-                            model="qwen3-vl:235b-cloud",
-                            messages=[{
-                                "role": "user",
-                                "content": [
-                                    {"type": "text", "text": vision_prompt},
-                                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_base64}"}}
-                                ]
-                            }],
-                            temperature=0.1,
-                            max_tokens=200
-                        )
-                        
-                        content = response.choices[0].message.content
-                        json_match = re.search(r'\{.*\}', content, re.DOTALL)
-                        
-                        if json_match:
-                            vision_result = json.loads(json_match.group())
-                            if vision_result.get('found') and vision_result.get('x') and vision_result.get('y'):
-                                vision_x = vision_result['x']
-                                vision_y = vision_result['y']
-                                logger.info(f"🎨 Vision found element at ({vision_x}, {vision_y})")
-                                
-                                # Try clicking at vision coordinates
-                                await self.page.mouse.click(vision_x, vision_y)
-                                await self.page.wait_for_timeout(1000)
-                                logger.info("✅ Vision-based click succeeded")
-                                return True
-                            else:
-                                logger.warning("🎨 Vision could not find the element")
-                        
-                    except Exception as ve:
-                        logger.warning(f"⚠️  Vision fallback failed: {ve}")
-                
-                return False
-            
-            elif action == "double_click":
-                x = params.get("x")
-                y = params.get("y")
-                selector = params.get("selector")
-                
-                if x is not None and y is not None:
-                    logger.info(f"🖱️  Double-clicking at coordinates: ({x}, {y})")
-                    await self.page.mouse.dblclick(x, y)
-                    await self.page.wait_for_timeout(1000)
-                elif selector:
-                    logger.info(f"🖱️  Double-clicking selector: {selector}")
-                    element = self.page.locator(selector).first
-                    await element.wait_for(state="visible", timeout=5000)
-                    await element.dblclick()
-                    await self.page.wait_for_timeout(1000)
             
             elif action == "type":
                 # Use SOTA robust typing
@@ -2942,88 +2567,6 @@ If you cannot find it, respond with {{"found": false}}"""
                     except:
                         pass
                 return success
-                
-                # OLD IMPLEMENTATION BELOW (kept as fallback)
-                selector = params.get("selector")
-                input_text = params.get("input_text", "")
-                logger.info(f"⌨️  Typing: '{input_text}' into {selector or 'auto-detected field'}")
-                
-                # Enhanced input field detection with multiple strategies
-                if selector:
-                    try:
-                        element = self.page.locator(selector).first
-                        await element.wait_for(state="visible", timeout=3000)
-                        await element.click()  # Focus the element
-                        await self.page.wait_for_timeout(200)
-                        await element.fill(input_text)
-                        await self.page.wait_for_timeout(500)
-                        
-                        # ALWAYS press Enter after typing (most common use case)
-                        # This submits forms, triggers searches, etc.
-                        await element.press("Enter")
-                        logger.info(f"✅ Filled input and pressed Enter using provided selector")
-                        
-                        # Wait for navigation or response
-                        await self.page.wait_for_timeout(1000)
-                    except Exception as e:
-                        logger.warning(f"⚠️  Failed with provided selector: {e}")
-                        return False
-                else:
-                    # Try multiple strategies to find the input field
-                    selectors = [
-                        'textarea[name="q"]',  # Google search box (textarea)
-                        'input[name="q"]',     # Google search box (input)
-                        'input[name="search"]',
-                        'input[type="search"]',
-                        '[role="searchbox"]',  # ARIA searchbox
-                        '[role="textbox"]',    # ARIA textbox
-                        'input[aria-label*="Search" i]',
-                        'input[placeholder*="Search" i]',
-                        'textarea[aria-label*="Search" i]',
-                        'input[class*="search" i]',
-                        'input[id*="search" i]',
-                        'textarea[class*="search" i]',
-                        'input[type="text"]:visible',  # Any visible text input
-                        'textarea:visible'  # Any visible textarea
-                    ]
-                    
-                    filled = False
-                    for sel in selectors:
-                        try:
-                            element = self.page.locator(sel).first
-                            await element.wait_for(state="visible", timeout=2000)
-                            await element.wait_for(state="attached", timeout=2000)
-                            
-                            # Try to interact
-                            await element.scroll_into_view_if_needed()
-                            await self.page.wait_for_timeout(300)
-                            await element.click(timeout=3000)
-                            await self.page.wait_for_timeout(500)
-                            await element.fill(input_text, timeout=5000)
-                            await self.page.wait_for_timeout(500)
-                            await element.press("Enter")
-                            
-                            filled = True
-                            logger.info(f"✅ Filled input using selector: {sel}")
-                            break
-                        except Exception as e:
-                            logger.debug(f"Failed with selector {sel}: {str(e)[:100]}")
-                            continue
-                    
-                    if not filled:
-                        logger.warning(f"Could not find input field to type into after trying {len(selectors)} selectors")
-                        return False
-                
-                # Verify action succeeded by checking for page changes
-                await self.page.wait_for_timeout(2000)
-                
-                # Wait for any navigation or dynamic updates
-                try:
-                    await self.page.wait_for_load_state("networkidle", timeout=3000)
-                except:
-                    pass
-                
-                return True  # Type action succeeded
             
             elif action == "double_click":
                 x = params.get("x")
@@ -3436,35 +2979,11 @@ If you cannot find it, respond with {{"found": false}}"""
                     logger.warning(f"⚠️  Could not extract images: {e}")
                     extracted_data['images'] = []
                 
-                # CRITICAL FIX: Robust deduplication using content hashing
+                # Robust deduplication using content hashing
                 if not hasattr(self, 'extracted_data'):
                     self.extracted_data = []
                 
-                # Create a content hash for deduplication
-                import hashlib
-                content_for_hash = f"{extracted_data.get('url')}|{extracted_data.get('text_content', '')[:500]}|{extracted_data.get('vision_analysis', '')[:200]}"
-                content_hash = hashlib.md5(content_for_hash.encode()).hexdigest()
-                
-                # Check for duplicates using hash
-                is_duplicate = False
-                for existing in self.extracted_data:
-                    existing_content = f"{existing.get('url')}|{existing.get('text_content', '')[:500]}|{existing.get('vision_analysis', '')[:200]}"
-                    existing_hash = hashlib.md5(existing_content.encode()).hexdigest()
-                    
-                    if content_hash == existing_hash:
-                        is_duplicate = True
-                        logger.info(f"⚠️  Skipping duplicate extraction (hash match) for {extracted_data.get('url')}")
-                        break
-                    
-                    # Also check for near-duplicates (same URL and very similar content)
-                    if existing.get('url') == extracted_data.get('url'):
-                        # Check text similarity
-                        existing_text = existing.get('text_content', '')[:200]
-                        new_text = extracted_data.get('text_content', '')[:200]
-                        if existing_text == new_text:
-                            is_duplicate = True
-                            logger.info(f"⚠️  Skipping near-duplicate extraction for {extracted_data.get('url')}")
-                            break
+                is_duplicate = self._is_duplicate_extraction(extracted_data)
                 
                 if not is_duplicate:
                     # Validate extraction quality
@@ -3480,35 +2999,10 @@ If you cannot find it, respond with {{"found": false}}"""
                             logger.info(f"📊 Structured items: {len(extracted_data['structured_items'])} items")
                         logger.debug(f"📝 Text preview: {extracted_data['text_content'][:200]}...")
                     else:
-                        # Extraction quality is poor - try vision fallback if not already used
+                        # Extraction quality is poor - save what we have
                         logger.warning(f"⚠️  Extraction quality insufficient: {extraction_quality['reason']}")
-                        
-                        if VISION_ENABLED and not used_vision and extracted_data.get('extraction_type') != 'vision_pure':
-                            logger.info("🔄 Retrying extraction with vision fallback...")
-                            vision_retry_result = await self._extract_with_vision_fallback(page_content)
-                            
-                            if vision_retry_result:
-                                # Merge vision results with existing data
-                                extracted_data.update(vision_retry_result)
-                                logger.info(f"✅ Vision retry successful: {vision_retry_result.get('extraction_type')}")
-                                
-                                # Re-validate
-                                retry_quality = self._validate_extraction_quality(extracted_data)
-                                if retry_quality['is_sufficient']:
-                                    self.extracted_data.append(extracted_data)
-                                    logger.info("✅ Vision-enhanced extraction meets quality threshold")
-                                else:
-                                    # Even vision failed, but save what we have
-                                    self.extracted_data.append(extracted_data)
-                                    logger.warning(f"⚠️  Saving low-quality extraction: {retry_quality['reason']}")
-                            else:
-                                # Vision retry failed, save what we have
-                                self.extracted_data.append(extracted_data)
-                                logger.warning("⚠️  Vision retry failed - saving available data")
-                        else:
-                            # No vision available or already used, save what we have
-                            self.extracted_data.append(extracted_data)
-                            logger.warning("⚠️  Saving low-quality extraction (no vision fallback available)")
+                        self.extracted_data.append(extracted_data)
+                        logger.warning("⚠️  Saving low-quality extraction")
                 else:
                     logger.info(f"ℹ️  Data already extracted, skipping duplicate")
                 
@@ -3526,7 +3020,7 @@ If you cannot find it, respond with {{"found": false}}"""
                 if not hasattr(self, 'extracted_data'):
                     self.extracted_data = []
                 
-                # CRITICAL FIX: Robust deduplication for analyze_images
+                # Robust deduplication for analyze_images
                 analysis_data = {
                     'url': self.page.url,
                     'title': await self.page.title(),
@@ -3536,24 +3030,7 @@ If you cannot find it, respond with {{"found": false}}"""
                     'timestamp': datetime.now().isoformat()
                 }
                 
-                # Create content hash for deduplication
-                import hashlib
-                analysis_content = f"{analysis_data.get('url')}|{analysis_text[:200]}"
-                analysis_hash = hashlib.md5(analysis_content.encode()).hexdigest()
-                
-                # Check for duplicates using hash and similarity
-                is_duplicate = False
-                for existing in self.extracted_data:
-                    if existing.get('analysis_type') == 'image_analysis' and existing.get('url') == analysis_data.get('url'):
-                        # Check if analysis is similar (first 100 chars)
-                        existing_analysis = existing.get('vision_analysis', '')[:100]
-                        new_analysis = analysis_text[:100]
-                        
-                        # If first 100 chars are very similar, it's a duplicate
-                        if existing_analysis == new_analysis or len(set(existing_analysis.split()) & set(new_analysis.split())) > 10:
-                            is_duplicate = True
-                            logger.info(f"⚠️  Skipping duplicate/similar image analysis")
-                            break
+                is_duplicate = self._is_duplicate_extraction(analysis_data)
                 
                 if not is_duplicate:
                     self.extracted_data.append(analysis_data)
@@ -3749,66 +3226,7 @@ If you cannot find it, respond with {{"found": false}}"""
             })
             return False
     
-    async def detect_and_close_modal(self) -> bool:
-        """Detect and attempt to close modal/overlay that might be blocking interaction"""
-        logger.debug("🔍 Starting modal detection...")
-        try:
-            # First check if there's actually a modal
-            modal_indicators = await self.page.locator('[role="dialog"], .modal, .overlay, [class*="modal"]').count()
-            if modal_indicators == 0:
-                logger.debug("ℹ️  No modal indicators found on page")
-                return False
-            
-            logger.info(f"🔍 Found {modal_indicators} potential modal(s), attempting to close")
-            
-            # Common modal/overlay patterns
-            modal_selectors = [
-                'button[aria-label*="close" i]',
-                'button[aria-label*="dismiss" i]',
-                'button.close',
-                '[role="dialog"] button',
-                '.modal button.close',
-                '.overlay button.close',
-                'button[title*="close" i]',
-                '[class*="close"][class*="button"]',
-                'iframe + button',  # Close button next to iframe
-            ]
-            
-            for selector in modal_selectors:
-                try:
-                    elements = await self.page.locator(selector).all()
-                    if elements:
-                        logger.debug(f"🔍 Checking selector: {selector} ({len(elements)} matches)")
-                        # Try clicking the first visible one
-                        for element in elements[:2]:  # Try first 2 matches
-                            try:
-                                if await element.is_visible():
-                                    await element.click(timeout=2000)
-                                    await self.page.wait_for_timeout(500)
-                                    logger.info(f"✅ Successfully closed modal using: {selector}")
-                                    return True
-                            except Exception as e:
-                                logger.debug(f"Failed to click element: {e}")
-                                continue
-                except Exception as e:
-                    logger.debug(f"Selector {selector} failed: {e}")
-                    continue
-            
-            # Try pressing Escape as last resort
-            logger.debug("🔧 Trying Escape key as fallback")
-            try:
-                await self.page.keyboard.press("Escape")
-                await self.page.wait_for_timeout(500)
-                logger.info("✅ Pressed Escape key")
-                return True
-            except Exception as e:
-                logger.debug(f"Escape key failed: {e}")
-            
-            logger.warning("⚠️  Could not close modal - no working close method found")
-            return False
-        except Exception as e:
-            logger.debug(f"Modal detection error: {e}")
-            return False
+
     
     async def run(self) -> Dict[str, Any]:
         """Main execution loop with task planning and live streaming"""
@@ -3878,20 +3296,11 @@ If you cannot find it, respond with {{"found": false}}"""
                 if use_vision:
                     logger.info("🎨 Using VISION for next action planning")
                     # Capture screenshot for vision analysis with robust error handling
-                    screenshot_bytes = None
-                    for timeout_val in [15000, 5000, 3000]:
-                        try:
-                            screenshot_bytes = await self.page.screenshot(
-                                timeout=timeout_val,
-                                animations="disabled" if timeout_val > 5000 else None
-                            )
-                            break
-                        except Exception as e:
-                            if timeout_val == 3000:  # Last attempt
-                                logger.warning(f"⚠️  Vision screenshot failed, falling back to text-only")
-                                use_vision = False
-                                break
-                            continue
+                    screenshot_bytes = await self._capture_screenshot_robust()
+                    
+                    if not screenshot_bytes:
+                        logger.warning(f"⚠️  Vision screenshot failed, falling back to text-only")
+                        use_vision = False
                     
                     if screenshot_bytes:
                         screenshot_base64 = base64.b64encode(screenshot_bytes).decode('utf-8')

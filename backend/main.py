@@ -1664,44 +1664,191 @@ def health_check():
     """Simple health check endpoint."""
     return {"status": "ok"}
 
-# Global list to track agent processes
+@app.get("/api/agent-servers/status")
+async def get_agent_servers_status():
+    """Get the status of all agent servers"""
+    async with agent_status_lock:
+        status_copy = {
+            name: {
+                'port': info['port'],
+                'status': info['status'],
+                'pid': info['process'].pid if info['process'] else None
+            }
+            for name, info in agent_status.items()
+        }
+    return status_copy
+
+# Global list to track agent processes and their status
 agent_processes = []
+agent_status = {}  # {agent_name: {'port': int, 'process': subprocess.Popen, 'status': 'starting'|'ready'|'failed'}}
+agent_status_lock = asyncio.Lock()
 
 def cleanup_agents():
     """Stop all agent processes"""
     global agent_processes
-    logger.info("Stopping all agent processes...")
     for process in agent_processes:
         try:
             process.terminate()
             process.wait(timeout=5)
-            logger.info(f"Stopped agent process {process.pid}")
-        except Exception as e:
-            logger.warning(f"Error stopping agent process: {e}")
+        except:
             try:
                 process.kill()
             except:
                 pass
     agent_processes = []
+    agent_status.clear()
 
-def start_agents_with_reload():
-    """Start agents and register cleanup on exit"""
-    global agent_processes
+async def wait_for_agent_ready(agent_name: str, port: int, timeout: float = 30.0) -> bool:
+    """
+    Wait for a specific agent to be ready by checking its health endpoint.
+    Returns True if agent is ready, False if timeout or failed.
+    """
+    import httpx
+    import time
+    
+    start_time = time.time()
+    health_url = f"http://localhost:{port}/"
+    
+    while time.time() - start_time < timeout:
+        async with agent_status_lock:
+            status = agent_status.get(agent_name, {}).get('status')
+            if status == 'ready':
+                return True
+            elif status == 'failed':
+                return False
+        
+        # Try to connect to the agent
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                response = await client.get(health_url)
+                if response.status_code == 200:
+                    async with agent_status_lock:
+                        if agent_name in agent_status:
+                            agent_status[agent_name]['status'] = 'ready'
+                    return True
+        except:
+            pass
+        
+        await asyncio.sleep(0.5)
+    
+    async with agent_status_lock:
+        if agent_name in agent_status:
+            agent_status[agent_name]['status'] = 'failed'
+    return False
+
+async def check_agent_health_background():
+    """Background task to check agent health and update status"""
+    import httpx
+    
+    while True:
+        await asyncio.sleep(2)  # Check every 2 seconds
+        
+        async with agent_status_lock:
+            agents_to_check = list(agent_status.items())
+        
+        for agent_name, info in agents_to_check:
+            if info['status'] == 'starting':
+                port = info['port']
+                health_url = f"http://localhost:{port}/"
+                
+                try:
+                    async with httpx.AsyncClient(timeout=1.0) as client:
+                        response = await client.get(health_url)
+                        if response.status_code == 200:
+                            async with agent_status_lock:
+                                agent_status[agent_name]['status'] = 'ready'
+                except:
+                    pass
+
+def start_agents_async():
+    """Start agents asynchronously without blocking main.py startup"""
+    global agent_processes, agent_status
     
     # Clean up any existing agents first
     cleanup_agents()
     
-    # Start new agents
-    start_agent_servers()
+    # Use absolute path based on the project root directory
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    agents_dir = os.path.join(project_root, "agents")
+    
+    if not os.path.isdir(agents_dir):
+        logger.warning(f"'{agents_dir}' directory not found. Skipping agent server startup.")
+        return
+
+    logs_dir = "logs"
+    os.makedirs(logs_dir, exist_ok=True)
+
+    agent_files = [f for f in os.listdir(agents_dir) if f.endswith("_agent.py")]
+    logger.info(f"Starting {len(agent_files)} agent server(s)...")
+
+    for agent_file in agent_files:
+        agent_path = os.path.join(agents_dir, agent_file)
+        agent_name = agent_file.replace('.py', '')
+        port = None
+        
+        try:
+            # Extract port from agent file
+            with open(agent_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+                match = re.search(r'port\s*=\s*int\(os\.getenv\([^,]+,\s*(\d+)\)', content)
+                if not match:
+                    match = re.search(r"port\s*=\s*(\d+)", content)
+                if match:
+                    port = int(match.group(1))
+
+            if port is None:
+                continue
+
+            log_path = os.path.join(logs_dir, f"{agent_file}.log")
+
+            # Start the agent process
+            with open(log_path, 'w') as log_file:
+                if platform.system() == "Windows":
+                    process = subprocess.Popen(
+                        [sys.executable, agent_path],
+                        stdout=log_file,
+                        stderr=log_file,
+                        creationflags=subprocess.CREATE_NO_WINDOW
+                    )
+                else:
+                    process = subprocess.Popen(
+                        [sys.executable, agent_path],
+                        stdout=log_file,
+                        stderr=log_file,
+                        start_new_session=True
+                    )
+                
+                agent_processes.append(process)
+                agent_status[agent_name] = {
+                    'port': port,
+                    'process': process,
+                    'status': 'starting'
+                }
+        
+        except Exception as e:
+            agent_status[agent_name] = {
+                'port': port,
+                'process': None,
+                'status': 'failed'
+            }
     
     # Register cleanup handler
     import atexit
     atexit.register(cleanup_agents)
+    
+    logger.info(f"Agent servers started. Ready for requests.")
+
+@app.on_event("startup")
+async def startup_event():
+    """Start agents and background health checker on app startup"""
+    # Start agents in background
+    start_agents_async()
+    
+    # Start background health checker
+    asyncio.create_task(check_agent_health_background())
 
 if __name__ == "__main__":
-    # Start all agent servers
-    start_agents_with_reload()
-
+    # Agents will be started automatically via @app.on_event("startup")
     # Run the main FastAPI app
     import uvicorn
     # Use 0.0.0.0 to bind to all interfaces (fixes IPv4/IPv6 issues)

@@ -6,6 +6,8 @@
   "capabilities": [
     "web browsing",
     "browser automation",
+    "perform web search",
+    "web search and summarize",
     "take website screenshots",
     "capture webpage screenshots",
     "screenshot websites",
