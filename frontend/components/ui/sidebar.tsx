@@ -157,11 +157,15 @@ function Sidebar({
   collapsible = "offcanvas",
   className,
   children,
+  open,
+  onOpenChange,
   ...props
 }: React.ComponentProps<"div"> & {
   side?: "left" | "right"
   variant?: "sidebar" | "floating" | "inset"
   collapsible?: "offcanvas" | "icon" | "none"
+  open?: boolean
+  onOpenChange?: (open: boolean) => void
 }) {
   const { isMobile, state, openMobile, setOpenMobile } = useSidebar()
 
@@ -182,7 +186,7 @@ function Sidebar({
 
   if (isMobile) {
     return (
-      <Sheet open={openMobile} onOpenChange={setOpenMobile} {...props}>
+      <Sheet open={openMobile} onOpenChange={setOpenMobile}>
         <SheetContent
           data-sidebar="sidebar"
           data-slot="sidebar"

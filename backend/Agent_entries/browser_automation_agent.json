@@ -1,5 +1,5 @@
 {
-  "id": "browser_automation_agent",
+  "id": "custom_browser_agent",
   "owner_id": "orbimesh-vendor",
   "name": "Custom Browser Automation Agent",
   "description": "A powerful custom browser automation agent with multi-provider LLM fallback (Cerebras → Groq → NVIDIA), vision capabilities (Ollama → NVIDIA), and live screenshot streaming. Can navigate websites, interact with elements, extract information, save images from web pages, and stream real-time browser activity to the canvas.",

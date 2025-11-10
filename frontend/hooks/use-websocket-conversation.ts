@@ -233,7 +233,6 @@ export function useWebSocketManager({
             console.log('Live canvas update received:', eventData.data);
             const currentState = useConversationStore.getState();
             _setConversationState({
-              ...currentState,
               has_canvas: eventData.data.has_canvas,
               canvas_type: eventData.data.canvas_type,
               canvas_content: eventData.data.canvas_content,
@@ -242,6 +241,9 @@ export function useWebSocketManager({
               current_view: eventData.data.current_view,
               metadata: {
                 ...currentState.metadata,
+                currentStage: 'executing',
+                stageMessage: `Executing browser task... (Step ${eventData.data.screenshot_count || 0})`,
+                progress: 85,
                 browserScreenshotCount: eventData.data.screenshot_count
               }
             });

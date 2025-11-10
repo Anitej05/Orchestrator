@@ -2248,31 +2248,93 @@ def generate_text_answer(state: State):
         else:
             # If canvas is needed, generate a more concise text response that references the canvas
             if needs_canvas and canvas_type:
+                # Extract detailed information from raw_response if available
+                detailed_results = []
+                for task in completed_tasks:
+                    task_info = {
+                        'task_name': task.get('task_name'),
+                        'result': task.get('result'),
+                    }
+                    # Include raw_response data if available (contains extracted_data, actions, etc.)
+                    if 'raw_response' in task and task['raw_response']:
+                        raw = task['raw_response']
+                        task_info['extracted_data'] = raw.get('extracted_data')
+                        task_info['actions_taken'] = raw.get('actions_taken', [])
+                        task_info['task_summary'] = raw.get('task_summary')
+                        logger.info(f"📊 Task '{task.get('task_name')}' extracted_data: {raw.get('extracted_data')}")
+                    else:
+                        logger.warning(f"⚠️  Task '{task.get('task_name')}' has no raw_response data")
+                    detailed_results.append(task_info)
+                
+                logger.info(f"📋 Detailed results for LLM: {json.dumps(detailed_results, indent=2)[:500]}...")
+                
                 prompt = f'''
                 You are an expert project manager's assistant. Your job is to synthesize the results from a team of AI agents into a single, clean, and coherent final report for the user.
+                
+                **CRITICAL RULE: You MUST base your response ONLY on the actual results provided below. DO NOT invent, assume, or hallucinate any information that is not explicitly stated in the results.**
+                
                 The user's original request was:
                 "{state['original_prompt']}"
                 
-                The following tasks were completed, with these results:
+                The following tasks were completed, with these DETAILED results:
                 ---
-                {json.dumps([serialize_complex_object(task) for task in completed_tasks], indent=2)}
+                {json.dumps(detailed_results, indent=2)}
                 ---
                 
                 A {canvas_type} visualization has been prepared to display this information. 
                 Please generate a brief, human-readable summary that references the visualization 
                 and highlights the key findings without reproducing the raw data or code.
+                
+                **IMPORTANT:**
+                - If the results indicate something was NOT found or NOT present, clearly state that in your response
+                - Do NOT make up details that are not in the actual results
+                - Be factual and accurate based solely on the provided data
+                - Pay special attention to the 'extracted_data' field - if it's null or empty, that means NO data was found
+                - If actions_taken show the agent looked for something but didn't find it, report that accurately
                 '''
             else:
+                # Extract detailed information from raw_response if available
+                detailed_results = []
+                for task in completed_tasks:
+                    task_info = {
+                        'task_name': task.get('task_name'),
+                        'result': task.get('result'),
+                    }
+                    # Include raw_response data if available (contains extracted_data, actions, etc.)
+                    if 'raw_response' in task and task['raw_response']:
+                        raw = task['raw_response']
+                        task_info['extracted_data'] = raw.get('extracted_data')
+                        task_info['actions_taken'] = raw.get('actions_taken', [])
+                        task_info['task_summary'] = raw.get('task_summary')
+                        logger.info(f"📊 Task '{task.get('task_name')}' extracted_data: {raw.get('extracted_data')}")
+                    else:
+                        logger.warning(f"⚠️  Task '{task.get('task_name')}' has no raw_response data")
+                    detailed_results.append(task_info)
+                
+                logger.info(f"📋 Detailed results for LLM: {json.dumps(detailed_results, indent=2)[:500]}...")
+                
                 prompt = f'''
                 You are an expert project manager's assistant. Your job is to synthesize the results from a team of AI agents into a single, clean, and coherent final report for the user.
+                
+                **CRITICAL RULE: You MUST base your response ONLY on the actual results provided below. DO NOT invent, assume, or hallucinate any information that is not explicitly stated in the results.**
+                
                 The user's original request was:
                 "{state['original_prompt']}"
                 
-                The following tasks were completed, with these results:
+                The following tasks were completed, with these DETAILED results:
                 ---
-                {json.dumps([serialize_complex_object(task) for task in completed_tasks], indent=2)}
+                {json.dumps(detailed_results, indent=2)}
                 ---
+                
                 Please generate a final, human-readable response that directly answers the user's original request based on the collected results.
+                
+                **IMPORTANT:**
+                - If the results indicate something was NOT found or NOT present, clearly state that in your response
+                - Do NOT make up details that are not in the actual results
+                - Be factual and accurate based solely on the provided data
+                - Pay special attention to the 'extracted_data' field - if it's null or empty, that means NO data was found
+                - If actions_taken show the agent looked for something but didn't find it, report that accurately
+                - If the agent could not complete a task or found nothing, report that honestly
                 '''
             
             final_response = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, None).__str__()

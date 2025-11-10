@@ -368,51 +368,71 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                         <div className="h-full flex flex-col">
                             {/* Toggle buttons for browser/plan view */}
                             {!viewedCanvasContent && browserView && planView && (
-                                <div className="bg-gray-50 border-b border-gray-200 px-4 py-2 flex items-center justify-between">
-                                    <span className="text-sm font-medium text-gray-700">View:</span>
-                                    <div className="flex gap-2">
-                                        <button
-                                            onClick={() => setCanvasView('browser')}
-                                            className={cn(
-                                                "px-3 py-1 text-xs rounded-md transition-colors",
-                                                canvasView === 'browser'
-                                                    ? "bg-blue-500 text-white"
-                                                    : "bg-white text-gray-700 hover:bg-gray-100 border border-gray-300"
-                                            )}
-                                        >
-                                            🖥️ Browser View
-                                        </button>
-                                        <button
-                                            onClick={() => setCanvasView('plan')}
-                                            className={cn(
-                                                "px-3 py-1 text-xs rounded-md transition-colors",
-                                                canvasView === 'plan'
-                                                    ? "bg-blue-500 text-white"
-                                                    : "bg-white text-gray-700 hover:bg-gray-100 border border-gray-300"
-                                            )}
-                                        >
-                                            📋 Plan View
-                                        </button>
+                                <div className="bg-gradient-to-r from-purple-600 via-purple-500 to-indigo-600 px-6 py-4 shadow-lg">
+                                    <div className="flex items-center justify-between max-w-4xl mx-auto">
+                                        <div className="flex items-center gap-2">
+                                            <div className="w-2 h-2 bg-white rounded-full animate-pulse"></div>
+                                            <span className="text-sm font-semibold text-white/90 uppercase tracking-wide">Live View</span>
+                                        </div>
+                                        <div className="flex gap-3">
+                                            <button
+                                                onClick={() => setCanvasView('browser')}
+                                                className={cn(
+                                                    "px-5 py-2.5 text-sm font-medium rounded-lg transition-all duration-200 transform hover:scale-105 active:scale-95 shadow-md",
+                                                    canvasView === 'browser'
+                                                        ? "bg-white text-purple-700 shadow-xl ring-2 ring-white/50"
+                                                        : "bg-white/10 text-white hover:bg-white/20 backdrop-blur-sm border border-white/20"
+                                                )}
+                                            >
+                                                <span className="flex items-center gap-2">
+                                                    <span className="text-base">🖥️</span>
+                                                    <span>Browser</span>
+                                                </span>
+                                            </button>
+                                            <button
+                                                onClick={() => setCanvasView('plan')}
+                                                className={cn(
+                                                    "px-5 py-2.5 text-sm font-medium rounded-lg transition-all duration-200 transform hover:scale-105 active:scale-95 shadow-md",
+                                                    canvasView === 'plan'
+                                                        ? "bg-white text-purple-700 shadow-xl ring-2 ring-white/50"
+                                                        : "bg-white/10 text-white hover:bg-white/20 backdrop-blur-sm border border-white/20"
+                                                )}
+                                            >
+                                                <span className="flex items-center gap-2">
+                                                    <span className="text-base">📋</span>
+                                                    <span>Plan</span>
+                                                </span>
+                                            </button>
+                                        </div>
                                     </div>
                                 </div>
                             )}
                             {viewedCanvasContent && (
-                                <div className="bg-blue-50 border-b border-blue-200 px-4 py-2 text-sm text-blue-800">
-                                    Viewing canvas from a previous message
-                                    <button 
-                                        onClick={() => {
-                                            setViewedCanvasContent(undefined);
-                                            setViewedCanvasType(undefined);
-                                        }}
-                                        className="ml-2 text-blue-600 hover:text-blue-800 underline"
-                                    >
-                                        Return to latest
-                                    </button>
+                                <div className="bg-gradient-to-r from-blue-500 to-indigo-600 px-6 py-3 shadow-md">
+                                    <div className="flex items-center justify-between max-w-4xl mx-auto">
+                                        <div className="flex items-center gap-3">
+                                            <span className="text-2xl">📌</span>
+                                            <div>
+                                                <div className="text-sm font-semibold text-white">Viewing Previous Canvas</div>
+                                                <div className="text-xs text-white/80">From an earlier message in the conversation</div>
+                                            </div>
+                                        </div>
+                                        <button 
+                                            onClick={() => {
+                                                setViewedCanvasContent(undefined);
+                                                setViewedCanvasType(undefined);
+                                            }}
+                                            className="px-4 py-2 text-sm font-medium text-white bg-white/20 hover:bg-white/30 rounded-lg transition-all duration-200 backdrop-blur-sm border border-white/30 hover:scale-105 active:scale-95"
+                                        >
+                                            ← Return to Latest
+                                        </button>
+                                    </div>
                                 </div>
                             )}
                             <div className="flex-1 overflow-auto">
                                 {displayCanvasType === 'html' ? (
                                     <iframe
+                                        key={displayCanvasContent?.substring(0, 100)}
                                         srcDoc={displayCanvasContent}
                                         className="w-full h-full min-h-[300px] border-0"
                                         title="Canvas HTML Content"

@@ -907,16 +907,55 @@ async def update_canvas(update_data: Dict[str, Any] = Body(...)):
         '''
         
         # Create plan view HTML with task progress
-        plan_view_html = '<div style="padding: 20px; font-family: system-ui, -apple-system, sans-serif;">'
-        plan_view_html += f'<h3 style="margin-bottom: 20px; color: #333;">📋 Task Plan - Step {step}</h3>'
+        # Calculate progress
+        completed_count = sum(1 for t in task_plan if t.get('status') == 'completed')
+        total_count = len(task_plan)
+        progress_percent = (completed_count / total_count * 100) if total_count > 0 else 0
+        
+        plan_view_html = '''
+        <div style="padding: 24px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh;">
+            <div style="max-width: 800px; margin: 0 auto;">
+                <!-- Header -->
+                <div style="background: white; border-radius: 12px; padding: 20px 24px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+                        <h2 style="margin: 0; color: #1a202c; font-size: 24px; font-weight: 600;">📋 Task Execution Plan</h2>
+                        <div style="background: #667eea; color: white; padding: 6px 12px; border-radius: 20px; font-size: 14px; font-weight: 600;">
+                            Step ''' + str(step) + '''
+                        </div>
+                    </div>
+                    <div style="color: #4a5568; font-size: 14px; line-height: 1.5;">''' + task[:150] + ('...' if len(task) > 150 else '') + '''</div>
+                </div>
+        '''
         
         if task_plan:
-            plan_view_html += '<div style="background: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 20px;">'
-            plan_view_html += f'<div style="color: #666; font-size: 14px; margin-bottom: 10px;"><strong>Current Task:</strong> {task[:100]}</div>'
-            if current_action:
-                plan_view_html += f'<div style="color: #0066cc; font-size: 14px;"><strong>▶️ Current Action:</strong> {current_action}</div>'
-            plan_view_html += '</div>'
+            # Progress bar
+            plan_view_html += f'''
+                <div style="background: white; border-radius: 12px; padding: 20px 24px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                        <span style="font-size: 14px; font-weight: 600; color: #4a5568;">Progress</span>
+                        <span style="font-size: 14px; font-weight: 600; color: #667eea;">{completed_count}/{total_count} completed</span>
+                    </div>
+                    <div style="background: #e2e8f0; border-radius: 10px; height: 8px; overflow: hidden;">
+                        <div style="background: linear-gradient(90deg, #667eea 0%, #764ba2 100%); height: 100%; width: {progress_percent}%; transition: width 0.3s ease;"></div>
+                    </div>
+                </div>
+            '''
             
+            # Current action
+            if current_action:
+                plan_view_html += f'''
+                <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 12px; padding: 16px 20px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); color: white;">
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <span style="font-size: 20px;">▶️</span>
+                        <div>
+                            <div style="font-size: 12px; opacity: 0.9; margin-bottom: 4px;">CURRENT ACTION</div>
+                            <div style="font-size: 15px; font-weight: 500;">{current_action}</div>
+                        </div>
+                    </div>
+                </div>
+                '''
+            
+            # Task list
             plan_view_html += '<div style="display: flex; flex-direction: column; gap: 12px;">'
             for i, subtask in enumerate(task_plan, 1):
                 status = subtask.get('status', 'pending')
@@ -924,33 +963,48 @@ async def update_canvas(update_data: Dict[str, Any] = Body(...)):
                 
                 if status == 'completed':
                     icon = '✅'
-                    color = '#28a745'
-                    bg_color = '#d4edda'
+                    color = '#10b981'
+                    bg_gradient = 'linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%)'
+                    border_color = '#10b981'
+                    status_text = 'COMPLETED'
                 elif status == 'failed':
                     icon = '❌'
-                    color = '#dc3545'
-                    bg_color = '#f8d7da'
+                    color = '#ef4444'
+                    bg_gradient = 'linear-gradient(135deg, #fee2e2 0%, #fecaca 100%)'
+                    border_color = '#ef4444'
+                    status_text = 'FAILED'
                 else:  # pending
                     icon = '⏳'
-                    color = '#6c757d'
-                    bg_color = '#e9ecef'
+                    color = '#6b7280'
+                    bg_gradient = 'linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%)'
+                    border_color = '#d1d5db'
+                    status_text = 'PENDING'
                 
                 plan_view_html += f'''
-                <div style="background: {bg_color}; padding: 12px 16px; border-radius: 6px; border-left: 4px solid {color};">
-                    <div style="display: flex; align-items: center; gap: 10px;">
-                        <span style="font-size: 20px;">{icon}</span>
-                        <div style="flex: 1;">
-                            <div style="font-weight: 500; color: {color};">{i}. {subtask_text}</div>
-                            <div style="font-size: 12px; color: #666; margin-top: 4px;">Status: {status.upper()}</div>
+                <div style="background: white; border-radius: 12px; padding: 16px 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); border-left: 4px solid {border_color}; transition: transform 0.2s ease, box-shadow 0.2s ease;">
+                    <div style="display: flex; align-items: start; gap: 14px;">
+                        <div style="background: {bg_gradient}; width: 40px; height: 40px; border-radius: 10px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-size: 20px;">
+                            {icon}
+                        </div>
+                        <div style="flex: 1; min-width: 0;">
+                            <div style="font-weight: 600; color: #1a202c; font-size: 15px; margin-bottom: 6px; line-height: 1.4;">{i}. {subtask_text}</div>
+                            <div style="display: inline-block; background: {bg_gradient}; color: {color}; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 600; letter-spacing: 0.5px;">
+                                {status_text}
+                            </div>
                         </div>
                     </div>
                 </div>
                 '''
             plan_view_html += '</div>'
         else:
-            plan_view_html += '<div style="color: #999; text-align: center; padding: 40px;">No task plan available</div>'
+            plan_view_html += '''
+            <div style="background: white; border-radius: 12px; padding: 60px 24px; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+                <div style="font-size: 48px; margin-bottom: 16px;">📋</div>
+                <div style="color: #9ca3af; font-size: 16px;">No task plan available</div>
+            </div>
+            '''
         
-        plan_view_html += '</div>'
+        plan_view_html += '</div></div>'
         
         # Store both views in global canvas updates
         with canvas_lock:
@@ -1317,6 +1371,9 @@ async def websocket_chat(websocket: WebSocket):
                                             "has_canvas": live_update.get('has_canvas', True),
                                             "canvas_type": live_update.get('canvas_type', 'html'),
                                             "canvas_content": live_update.get('canvas_content', ''),
+                                            "browser_view": live_update.get('browser_view', ''),
+                                            "plan_view": live_update.get('plan_view', ''),
+                                            "current_view": live_update.get('current_view', 'browser'),
                                             "screenshot_count": live_update.get('step', 0)
                                         },
                                         "timestamp": time.time()
@@ -1500,31 +1557,49 @@ def search_agents(
 ):
     """
     Finds active agents that match ANY of the specified capabilities using vector search.
+    Falls back to text search if vector search fails.
     """
     if not capabilities:
         return []
 
-    conditions = []
-    for task_name in capabilities:
-        query_vector = model.encode(task_name)
-        # Subquery to find agent_ids for this one task
-        subquery = select(AgentCapability.agent_id).where(
-            AgentCapability.embedding.cosine_distance(query_vector) < similarity_threshold
-        )
-        conditions.append(Agent.id.in_(subquery))
+    try:
+        conditions = []
+        for task_name in capabilities:
+            query_vector = model.encode(task_name)
+            # Subquery to find agent_ids for this one task
+            subquery = select(AgentCapability.agent_id).where(
+                AgentCapability.embedding.cosine_distance(query_vector) < similarity_threshold
+            )
+            conditions.append(Agent.id.in_(subquery))
 
-    # Combine conditions with OR logic
-    query = db.query(Agent).options(
-        joinedload(Agent.endpoints).joinedload(AgentEndpoint.parameters) # Eager load parameters
-    ).filter(Agent.status == 'active').filter(or_(*conditions))
+        # Combine conditions with OR logic
+        query = db.query(Agent).options(
+            joinedload(Agent.endpoints).joinedload(AgentEndpoint.parameters) # Eager load parameters
+        ).filter(Agent.status == 'active').filter(or_(*conditions))
 
-    # Apply optional price and rating filters
-    if max_price is not None:
-        query = query.filter(Agent.price_per_call_usd <= max_price)
-    if min_rating is not None:
-        query = query.filter(Agent.rating >= min_rating)
+        # Apply optional price and rating filters
+        if max_price is not None:
+            query = query.filter(Agent.price_per_call_usd <= max_price)
+        if min_rating is not None:
+            query = query.filter(Agent.rating >= min_rating)
 
-    return query.all()
+        return query.all()
+    
+    except Exception as e:
+        logger.warning(f"Vector search failed, falling back to text search: {e}")
+        # Fallback: text-based search on capabilities
+        query = db.query(Agent).options(
+            joinedload(Agent.endpoints).joinedload(AgentEndpoint.parameters)
+        ).filter(Agent.status == 'active')
+        
+        # Apply optional filters
+        if max_price is not None:
+            query = query.filter(Agent.price_per_call_usd <= max_price)
+        if min_rating is not None:
+            query = query.filter(Agent.rating >= min_rating)
+        
+        # Return all active agents as fallback
+        return query.all()
 
 @app.get("/api/agents/all", response_model=List[AgentCard])
 def get_all_agents(db: Session = Depends(get_db)):
