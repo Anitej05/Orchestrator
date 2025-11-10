@@ -1,0 +1,31 @@
+# Unit Test Requirements for Browser Automation Agent
+
+# Core testing framework
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+pytest-mock>=3.11.0
+
+# HTTP testing
+httpx>=0.24.0
+
+# FastAPI testing
+fastapi>=0.100.0
+starlette>=0.27.0
+
+# Mocking and fixtures
+unittest-mock>=1.5.0
+
+# Code coverage
+coverage>=7.2.0
+
+# Test reporting
+pytest-html>=3.2.0
+pytest-json-report>=1.5.0
+
+# Async support
+asyncio>=3.4.3
+
+# Additional utilities
+pydantic>=2.0.0
+python-dotenv>=1.0.0

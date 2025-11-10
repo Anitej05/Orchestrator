@@ -1440,9 +1440,9 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                     
                     logger.info(f"📡 Sending browser task with thread_id: {thread_id}")
                     
-                    # Start browser task
+                    # Start browser task with longer timeout for vision-heavy tasks
                     browser_task = asyncio.create_task(
-                        client.post(endpoint_with_thread, json=payload, headers=headers, timeout=300.0)
+                        client.post(endpoint_with_thread, json=payload, headers=headers, timeout=600.0)
                     )
                     
                     # Wait for task to complete (browser agent will push updates directly)
@@ -1814,12 +1814,41 @@ def evaluate_agent_response(state: State):
                         '''
                     
                     logger.info(f"Setting canvas with {len(screenshot_files)} screenshot(s)")
+                    
+                    # Create plan view showing task plan and progress
+                    task_plan = state.get('task_plan', [])
+                    plan_html = '<div style="padding: 20px; font-family: system-ui;">'
+                    plan_html += '<h2 style="margin-bottom: 20px;">📋 Task Plan</h2>'
+                    
+                    if task_plan:
+                        for i, task in enumerate(task_plan, 1):
+                            status = task.get('status', 'pending')
+                            status_icon = '✅' if status == 'completed' else '⏳' if status == 'pending' else '❌'
+                            status_color = '#10b981' if status == 'completed' else '#6b7280' if status == 'pending' else '#ef4444'
+                            
+                            plan_html += f'''
+                            <div style="margin-bottom: 15px; padding: 15px; border-left: 4px solid {status_color}; background: #f9fafb; border-radius: 4px;">
+                                <div style="font-weight: 600; margin-bottom: 5px;">
+                                    {status_icon} Task {i}: {task.get('subtask', 'Unknown')}
+                                </div>
+                                <div style="font-size: 0.875rem; color: #6b7280;">
+                                    Status: <span style="color: {status_color}; font-weight: 500;">{status}</span>
+                                </div>
+                            </div>
+                            '''
+                    else:
+                        plan_html += '<p style="color: #6b7280;">No task plan available</p>'
+                    
+                    plan_html += '</div>'
+                    
                     return {
                         "pending_user_input": False,
                         "question_for_user": None,
                         "has_canvas": True,
                         "canvas_type": "html",
-                        "canvas_content": canvas_html
+                        "canvas_content": canvas_html,
+                        "browser_view": canvas_html,
+                        "plan_view": plan_html
                     }
     except Exception as e:
         print(f"!!! EVALUATE: Evaluation failed with error: {e} !!!")

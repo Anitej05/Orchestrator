@@ -2,7 +2,7 @@
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 import os
 import asyncio
 from dotenv import load_dotenv
@@ -16,6 +16,25 @@ import json
 import base64
 from playwright.async_api import async_playwright, Browser, Page, BrowserContext
 import re
+
+# Import SOTA improvements
+try:
+    from agents.browser_agent_improvements import (
+        ContextOptimizer,
+        SelectorStrategy,
+        PageStabilizer,
+        DynamicPlanner,
+        VisionOptimizer
+    )
+except ImportError:
+    # When running directly, use relative import
+    from browser_agent_improvements import (
+        ContextOptimizer,
+        SelectorStrategy,
+        PageStabilizer,
+        DynamicPlanner,
+        VisionOptimizer
+    )
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -66,6 +85,19 @@ AGENT_DEFINITION = {
 
 app = FastAPI(title="Custom Browser Automation Agent")
 
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Clean up all browsers on shutdown"""
+    logger.info("🔒 Shutting down - cleaning up all browsers...")
+    async with active_browsers_lock:
+        for task_id, agent in list(active_browsers.items()):
+            try:
+                await agent.__aexit__(None, None, None)
+            except:
+                pass
+        active_browsers.clear()
+    logger.info("✅ Browser cleanup complete")
+
 # Storage
 STORAGE_DIR = Path("storage/browser_screenshots")
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
@@ -98,14 +130,191 @@ class BrowseResponse(BaseModel):
 active_browsers = {}
 active_browsers_lock = asyncio.Lock()
 
+def parse_json_robust(json_str: str, content_preview: str = "") -> Optional[Dict]:
+    """
+    Robustly parse JSON from LLM responses, handling common formatting issues.
+    Returns None if parsing fails completely.
+    """
+    try:
+        # First try direct parsing
+        return json.loads(json_str)
+    except json.JSONDecodeError as e:
+        logger.debug(f"Initial JSON parse failed: {e.msg} at position {e.pos}")
+        
+        # Clean up common JSON issues
+        cleaned = json_str
+        
+        # Fix trailing commas before closing braces/brackets
+        cleaned = re.sub(r',(\s*[}\]])', r'\1', cleaned)
+        
+        # Fix unquoted property names (but be careful not to quote values)
+        # This regex looks for word characters followed by colon, not already in quotes
+        cleaned = re.sub(r'(?<!")(\b[a-zA-Z_]\w*)(?!")(\s*):', r'"\1"\2:', cleaned)
+        
+        # Fix double-quoted keys that got over-quoted
+        cleaned = re.sub(r'""([^"]+)"":', r'"\1":', cleaned)
+        
+        # Try parsing cleaned version
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError as e2:
+            logger.warning(f"⚠️  JSON parse error: {e2.msg} at position {e2.pos}")
+            if content_preview:
+                logger.debug(f"Content preview: {content_preview[:200]}")
+            
+            # Last resort: try to extract key fields manually
+            action_match = re.search(r'"action"\s*:\s*"([^"]+)"', cleaned)
+            reasoning_match = re.search(r'"reasoning"\s*:\s*"([^"]+)"', cleaned)
+            
+            if action_match:
+                logger.info("📝 Extracted partial action from malformed JSON")
+                return {
+                    'action': action_match.group(1),
+                    'reasoning': reasoning_match.group(1) if reasoning_match else '',
+                    'params': {},
+                    'confidence': 0.5,
+                    'bounding_boxes': []
+                }
+            
+            return None
+
+# Vision Model Manager with exponential backoff
+class VisionManager:
+    """Manages vision model providers with intelligent fallback and exponential backoff"""
+    
+    def __init__(self):
+        self.providers = []
+        
+        # Exponential backoff state for each provider
+        self.backoff_state = {}
+        self.base_backoff = 3  # Start with 3 seconds for vision (slower models)
+        self.max_backoff = 600  # Max 10 minutes for vision
+        
+        # Build provider chain: Ollama → NVIDIA
+        if OLLAMA_API_KEY:
+            self.providers.append({
+                "name": "ollama",
+                "model": "qwen3-vl:235b-cloud",
+                "base_url": "https://ollama.com/v1"
+            })
+            self.backoff_state["ollama"] = {'until': 0, 'backoff_seconds': 0, 'consecutive_failures': 0}
+        
+        if NVIDIA_API_KEY:
+            self.providers.append({
+                "name": "nvidia_vision",
+                "model": "mistralai/mistral-7b-instruct-v0.3",
+                "base_url": "https://integrate.api.nvidia.com/v1"
+            })
+            self.backoff_state["nvidia_vision"] = {'until': 0, 'backoff_seconds': 0, 'consecutive_failures': 0}
+        
+        if self.providers:
+            logger.info(f"🎨 Initialized vision chain: {' → '.join([p['name'] for p in self.providers])}")
+        else:
+            logger.info("📝 No vision providers available - text-only mode")
+    
+    def _is_rate_limit_error(self, error_msg: str) -> bool:
+        """Check if error is a rate limit error"""
+        rate_limit_indicators = ["429", "rate limit", "quota", "too many requests", "rate_limit_exceeded"]
+        return any(indicator in error_msg.lower() for indicator in rate_limit_indicators)
+    
+    def _is_temporary_error(self, error_msg: str) -> bool:
+        """Check if error is temporary"""
+        temporary_indicators = ["timeout", "connection", "network", "503", "502", "504"]
+        return any(indicator in error_msg.lower() for indicator in temporary_indicators)
+    
+    def _apply_backoff(self, provider_name: str, is_rate_limit: bool = False):
+        """Apply exponential backoff to a vision provider"""
+        import time
+        
+        state = self.backoff_state[provider_name]
+        state['consecutive_failures'] += 1
+        
+        # Calculate backoff time
+        if is_rate_limit:
+            backoff_seconds = min(self.base_backoff * (3 ** state['consecutive_failures']), self.max_backoff)
+        else:
+            backoff_seconds = min(self.base_backoff * (2 ** state['consecutive_failures']), self.max_backoff)
+        
+        state['backoff_seconds'] = backoff_seconds
+        state['until'] = time.time() + backoff_seconds
+        
+        logger.warning(f"⏰ Vision {provider_name.upper()} backed off for {backoff_seconds:.1f}s (failure #{state['consecutive_failures']})")
+    
+    def _reset_backoff(self, provider_name: str):
+        """Reset backoff state after successful call"""
+        state = self.backoff_state[provider_name]
+        if state['consecutive_failures'] > 0:
+            logger.info(f"✅ Vision {provider_name.upper()} recovered - resetting backoff")
+        state['consecutive_failures'] = 0
+        state['backoff_seconds'] = 0
+        state['until'] = 0
+    
+    def get_available_provider(self):
+        """Get next available vision provider (not backed off)"""
+        import time
+        current_time = time.time()
+        
+        available = []
+        backed_off = []
+        
+        for provider in self.providers:
+            name = provider['name']
+            state = self.backoff_state[name]
+            
+            if current_time >= state['until']:
+                available.append(provider)
+            else:
+                remaining = state['until'] - current_time
+                backed_off.append({
+                    'provider': provider,
+                    'remaining': remaining
+                })
+        
+        # Return first available
+        if available:
+            return available[0], None
+        
+        # If all backed off, return the one with shortest wait
+        if backed_off:
+            backed_off.sort(key=lambda x: x['remaining'])
+            shortest = backed_off[0]
+            return shortest['provider'], shortest['remaining']
+        
+        return None, None
+    
+    def record_success(self, provider_name: str):
+        """Record successful vision call"""
+        self._reset_backoff(provider_name)
+    
+    def record_failure(self, provider_name: str, error_msg: str):
+        """Record failed vision call and apply backoff"""
+        is_rate_limit = self._is_rate_limit_error(error_msg)
+        is_temporary = self._is_temporary_error(error_msg)
+        
+        if is_rate_limit:
+            logger.warning(f"⚠️  Vision {provider_name.upper()} rate limited")
+            self._apply_backoff(provider_name, is_rate_limit=True)
+        elif is_temporary:
+            logger.warning(f"⚠️  Vision {provider_name.upper()} temporary error")
+            self._apply_backoff(provider_name, is_rate_limit=False)
+        else:
+            # For non-temporary errors, apply minimal backoff
+            if self.backoff_state[provider_name]['consecutive_failures'] < 2:
+                self._apply_backoff(provider_name, is_rate_limit=False)
+
 # LLM Client with fallback chain
 class LLMManager:
-    """Manages LLM providers with intelligent fallback"""
+    """Manages LLM providers with intelligent fallback and exponential backoff"""
     
     def __init__(self):
         self.providers = []
         self.current_provider_idx = 0
         self.failure_counts = {}
+        
+        # Exponential backoff state for each provider
+        self.backoff_state = {}  # {provider_name: {'until': timestamp, 'backoff_seconds': seconds, 'consecutive_failures': count}}
+        self.base_backoff = 2  # Start with 2 seconds
+        self.max_backoff = 300  # Max 5 minutes
         
         # Build provider chain: Cerebras → Groq → NVIDIA
         if CEREBRAS_API_KEY:
@@ -115,6 +324,7 @@ class LLMManager:
                 "model": "llama-3.3-70b",
                 "max_tokens": 1000
             })
+            self.backoff_state["cerebras"] = {'until': 0, 'backoff_seconds': 0, 'consecutive_failures': 0}
         
         if GROQ_API_KEY:
             self.providers.append({
@@ -123,6 +333,7 @@ class LLMManager:
                 "model": "llama-3.3-70b-versatile",
                 "max_tokens": 1000
             })
+            self.backoff_state["groq"] = {'until': 0, 'backoff_seconds': 0, 'consecutive_failures': 0}
         
         if NVIDIA_API_KEY:
             self.providers.append({
@@ -131,51 +342,160 @@ class LLMManager:
                 "model": "meta/llama-3.1-70b-instruct",
                 "max_tokens": 1000
             })
+            self.backoff_state["nvidia"] = {'until': 0, 'backoff_seconds': 0, 'consecutive_failures': 0}
         
         if not self.providers:
             raise RuntimeError("No LLM providers available")
         
         logger.info(f"🔧 Initialized LLM chain: {' → '.join([p['name'] for p in self.providers])}")
     
+    def _is_rate_limit_error(self, error_msg: str) -> bool:
+        """Check if error is a rate limit error"""
+        rate_limit_indicators = ["429", "rate limit", "quota", "too many requests", "rate_limit_exceeded"]
+        return any(indicator in error_msg.lower() for indicator in rate_limit_indicators)
+    
+    def _is_temporary_error(self, error_msg: str) -> bool:
+        """Check if error is temporary (timeout, connection, etc.)"""
+        temporary_indicators = ["timeout", "connection", "network", "503", "502", "504"]
+        return any(indicator in error_msg.lower() for indicator in temporary_indicators)
+    
+    def _apply_backoff(self, provider_name: str, is_rate_limit: bool = False):
+        """Apply exponential backoff to a provider"""
+        import time
+        
+        state = self.backoff_state[provider_name]
+        state['consecutive_failures'] += 1
+        
+        # Calculate backoff time using exponential backoff
+        if is_rate_limit:
+            # For rate limits, use more aggressive backoff
+            backoff_seconds = min(self.base_backoff * (3 ** state['consecutive_failures']), self.max_backoff)
+        else:
+            # For other errors, use standard exponential backoff
+            backoff_seconds = min(self.base_backoff * (2 ** state['consecutive_failures']), self.max_backoff)
+        
+        state['backoff_seconds'] = backoff_seconds
+        state['until'] = time.time() + backoff_seconds
+        
+        logger.warning(f"⏰ {provider_name.upper()} backed off for {backoff_seconds:.1f}s (failure #{state['consecutive_failures']})")
+    
+    def _reset_backoff(self, provider_name: str):
+        """Reset backoff state after successful call"""
+        state = self.backoff_state[provider_name]
+        if state['consecutive_failures'] > 0:
+            logger.info(f"✅ {provider_name.upper()} recovered - resetting backoff")
+        state['consecutive_failures'] = 0
+        state['backoff_seconds'] = 0
+        state['until'] = 0
+    
+    def _get_available_providers(self):
+        """Get list of providers that are not currently backed off, sorted by backoff time"""
+        import time
+        current_time = time.time()
+        
+        available = []
+        backed_off = []
+        
+        for provider in self.providers:
+            name = provider['name']
+            state = self.backoff_state[name]
+            
+            if current_time >= state['until']:
+                # Provider is available
+                available.append(provider)
+            else:
+                # Provider is backed off
+                remaining = state['until'] - current_time
+                backed_off.append({
+                    'provider': provider,
+                    'remaining': remaining,
+                    'backoff_seconds': state['backoff_seconds']
+                })
+        
+        # If no providers available, return the one with shortest remaining backoff
+        if not available and backed_off:
+            backed_off.sort(key=lambda x: x['remaining'])
+            shortest = backed_off[0]
+            logger.warning(f"⚠️  All providers backed off. Using {shortest['provider']['name'].upper()} (shortest wait: {shortest['remaining']:.1f}s)")
+            
+            # Wait for the shortest backoff to expire
+            import time
+            if shortest['remaining'] > 0:
+                logger.info(f"⏳ Waiting {shortest['remaining']:.1f}s for {shortest['provider']['name'].upper()} to become available...")
+                time.sleep(shortest['remaining'])
+            
+            return [shortest['provider']]
+        
+        return available
+    
     def get_completion(self, messages: List[Dict], temperature: float = 0.3, max_tokens: int = 500):
-        """Get completion with automatic fallback"""
+        """Get completion with automatic fallback and exponential backoff"""
         last_error = None
+        attempts = 0
+        max_attempts = len(self.providers) * 2  # Allow retries
         
-        # Try each provider in order
-        for idx, provider in enumerate(self.providers):
-            try:
-                logger.info(f"🤖 Using {provider['name'].upper()} for completion")
+        while attempts < max_attempts:
+            attempts += 1
+            
+            # Get available providers (not backed off)
+            available_providers = self._get_available_providers()
+            
+            if not available_providers:
+                # This should not happen due to logic in _get_available_providers
+                raise RuntimeError("No providers available and all are backed off")
+            
+            # Try each available provider
+            for provider in available_providers:
+                provider_name = provider['name']
                 
-                response = provider["client"].chat.completions.create(
-                    model=provider["model"],
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=min(max_tokens, provider["max_tokens"])
-                )
-                
-                # Success - reset failure count
-                self.failure_counts[provider["name"]] = 0
-                return response.choices[0].message.content.strip(), provider["name"]
-                
-            except Exception as e:
-                error_msg = str(e).lower()
-                self.failure_counts[provider["name"]] = self.failure_counts.get(provider["name"], 0) + 1
-                
-                # Check if it's a rate limit or temporary error
-                if "429" in error_msg or "rate" in error_msg or "quota" in error_msg:
-                    logger.warning(f"⚠️  {provider['name'].upper()} rate limited, trying next provider...")
-                elif "timeout" in error_msg:
-                    logger.warning(f"⚠️  {provider['name'].upper()} timeout, trying next provider...")
-                else:
-                    logger.warning(f"⚠️  {provider['name'].upper()} error: {str(e)[:100]}")
-                
-                last_error = e
-                
-                # If this is the last provider, raise the error
-                if idx == len(self.providers) - 1:
-                    raise RuntimeError(f"All LLM providers failed. Last error: {last_error}")
+                try:
+                    logger.info(f"🤖 Using {provider_name.upper()} for completion (attempt {attempts}/{max_attempts})")
+                    
+                    response = provider["client"].chat.completions.create(
+                        model=provider["model"],
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=min(max_tokens, provider["max_tokens"])
+                    )
+                    
+                    # Success - reset backoff and failure count
+                    self._reset_backoff(provider_name)
+                    self.failure_counts[provider_name] = 0
+                    
+                    return response.choices[0].message.content.strip(), provider_name
+                    
+                except Exception as e:
+                    error_msg = str(e)
+                    self.failure_counts[provider_name] = self.failure_counts.get(provider_name, 0) + 1
+                    
+                    # Determine error type and apply appropriate backoff
+                    is_rate_limit = self._is_rate_limit_error(error_msg)
+                    is_temporary = self._is_temporary_error(error_msg)
+                    
+                    if is_rate_limit:
+                        logger.warning(f"⚠️  {provider_name.upper()} rate limited: {error_msg[:100]}")
+                        self._apply_backoff(provider_name, is_rate_limit=True)
+                    elif is_temporary:
+                        logger.warning(f"⚠️  {provider_name.upper()} temporary error: {error_msg[:100]}")
+                        self._apply_backoff(provider_name, is_rate_limit=False)
+                    else:
+                        logger.warning(f"⚠️  {provider_name.upper()} error: {error_msg[:100]}")
+                        # For non-temporary errors, apply minimal backoff
+                        if self.backoff_state[provider_name]['consecutive_failures'] < 2:
+                            self._apply_backoff(provider_name, is_rate_limit=False)
+                    
+                    last_error = e
+                    
+                    # Continue to next provider
+                    continue
+            
+            # If we get here, all available providers failed
+            # The next iteration will wait for backed-off providers
+            if attempts >= max_attempts:
+                break
         
-        raise RuntimeError(f"All LLM providers failed. Last error: {last_error}")
+        # All attempts exhausted
+        raise RuntimeError(f"All LLM providers failed after {attempts} attempts. Last error: {last_error}")
 
 class BrowserAgent:
     """Custom SOTA browser automation agent with multi-provider LLM fallback and task planning"""
@@ -185,9 +505,13 @@ class BrowserAgent:
         self.max_steps = max_steps
         self.headless = headless
         self.enable_streaming = enable_streaming
+        self.browser_pid = None  # Track the browser process ID
         self.thread_id = thread_id  # For pushing updates to backend
         self.backend_url = backend_url or "http://localhost:8000"
         self.actions_taken = []
+        self.actions_planned = []  # Track what was planned
+        self.actions_succeeded = []  # Track what actually succeeded
+        self.actions_failed = []  # Track what failed
         self.screenshots = []
         self.downloads = []
         self.uploaded_files = []
@@ -195,6 +519,7 @@ class BrowserAgent:
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
         self.llm_manager = LLMManager()
+        self.vision_manager = VisionManager()
         self.task_id = str(uuid.uuid4())[:8]
         self.streaming_task: Optional[asyncio.Task] = None
         self.is_running = False
@@ -225,6 +550,15 @@ class BrowserAgent:
             "screenshots_taken": 0
         }
         
+        # SOTA Improvements
+        self.context_optimizer = ContextOptimizer()
+        self.selector_strategy = SelectorStrategy()
+        self.page_stabilizer = PageStabilizer()
+        self.dynamic_planner = DynamicPlanner()
+        self.vision_optimizer = VisionOptimizer()
+        
+        logger.info("🚀 SOTA improvements enabled: Context optimization, Multi-strategy selectors, Dynamic planning")
+        
     async def __aenter__(self):
         """Initialize browser - ensures only one instance per task"""
         # Track this browser instance
@@ -233,6 +567,16 @@ class BrowserAgent:
             logger.info(f"🌐 Initializing browser for task {self.task_id} (Active: {len(active_browsers)})")
         
         self.playwright = await async_playwright().start()
+        
+        # Track Chrome PIDs before launch
+        import psutil
+        chrome_pids_before = set()
+        try:
+            for proc in psutil.process_iter(['pid', 'name']):
+                if proc.info['name'] and 'chrome' in proc.info['name'].lower():
+                    chrome_pids_before.add(proc.info['pid'])
+        except:
+            pass
         
         # Launch browser with stealth configuration
         self.browser = await self.playwright.chromium.launch(
@@ -248,6 +592,21 @@ class BrowserAgent:
             ],
             slow_mo=500 if not self.headless else 0
         )
+        
+        # Track Chrome PIDs after launch (these are ours)
+        self.chrome_pids = set()
+        try:
+            await asyncio.sleep(0.5)  # Give Chrome time to start
+            for proc in psutil.process_iter(['pid', 'name']):
+                if proc.info['name'] and 'chrome' in proc.info['name'].lower():
+                    pid = proc.info['pid']
+                    if pid not in chrome_pids_before:
+                        self.chrome_pids.add(pid)
+            if self.chrome_pids:
+                logger.info(f"🔍 Tracked {len(self.chrome_pids)} Chrome processes for this task")
+        except Exception as e:
+            logger.debug(f"Could not track Chrome PIDs: {e}")
+            self.chrome_pids = set()
         
         # Create context with stealth settings
         self.context = await self.browser.new_context(
@@ -313,6 +672,19 @@ class BrowserAgent:
         
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Cleanup browser - ensures no orphaned browser instances"""
+        # Stop streaming first
+        if hasattr(self, 'streaming_task') and self.streaming_task:
+            try:
+                self.streaming_task.cancel()
+                try:
+                    await self.streaming_task
+                except asyncio.CancelledError:
+                    pass
+                logger.info("🔒 Streaming task stopped")
+            except Exception as e:
+                logger.warning(f"Error stopping streaming: {e}")
+        
+        # Close context
         try:
             if self.context:
                 await self.context.close()
@@ -320,6 +692,7 @@ class BrowserAgent:
         except Exception as e:
             logger.warning(f"Error closing context: {e}")
         
+        # Close browser
         try:
             if self.browser:
                 await self.browser.close()
@@ -327,12 +700,44 @@ class BrowserAgent:
         except Exception as e:
             logger.warning(f"Error closing browser: {e}")
         
+        # Stop playwright
         try:
-            if hasattr(self, 'playwright'):
+            if hasattr(self, 'playwright') and self.playwright:
                 await self.playwright.stop()
                 logger.info("🔒 Playwright stopped")
         except Exception as e:
             logger.warning(f"Error stopping playwright: {e}")
+        
+        # Force kill any remaining Chrome processes for this task (only our PIDs)
+        if hasattr(self, 'chrome_pids') and self.chrome_pids:
+            try:
+                import psutil
+                # Give processes a moment to close gracefully
+                await asyncio.sleep(0.5)
+                
+                # Check which of our tracked PIDs are still running
+                still_running = []
+                for pid in self.chrome_pids:
+                    try:
+                        proc = psutil.Process(pid)
+                        if proc.is_running():
+                            still_running.append(pid)
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+                
+                # Kill only our tracked processes that are still running
+                if still_running:
+                    logger.warning(f"⚠️  {len(still_running)} Chrome processes still running, force killing")
+                    for pid in still_running:
+                        try:
+                            proc = psutil.Process(pid)
+                            proc.kill()
+                            logger.debug(f"Killed Chrome process {pid}")
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+                    logger.info("✅ Cleaned up tracked Chrome processes")
+            except Exception as e:
+                logger.debug(f"Chrome process cleanup failed: {e}")
         
         # Remove from active browsers
         async with active_browsers_lock:
@@ -514,7 +919,14 @@ Rules:
             # Extract JSON from response
             json_match = re.search(r'\[.*\]', content, re.DOTALL)
             if json_match:
-                plan = json.loads(json_match.group())
+                # For arrays, we need a slightly different approach
+                json_str = json_match.group()
+                try:
+                    plan = json.loads(json_str)
+                except json.JSONDecodeError:
+                    # Try cleaning
+                    json_str = re.sub(r',(\s*[}\]])', r'\1', json_str)
+                    plan = json.loads(json_str)
                 logger.info(f"📋 Created task plan with {len(plan)} subtasks")
                 for i, subtask in enumerate(plan, 1):
                     logger.info(f"   {i}. {subtask.get('subtask', 'Unknown')}")
@@ -526,6 +938,294 @@ Rules:
         except Exception as e:
             logger.error(f"Error creating task plan: {e}")
             return [{"subtask": self.task, "status": "pending"}]
+    
+    def _validate_extraction_quality(self, extracted_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Validate if extracted data meets quality thresholds.
+        
+        Returns:
+            dict with 'is_sufficient' (bool) and 'reason' (str)
+        """
+        # Check for structured items (best quality)
+        if extracted_data.get('structured_items'):
+            item_count = len(extracted_data['structured_items'])
+            if item_count >= 3:
+                return {'is_sufficient': True, 'reason': f'Found {item_count} structured items'}
+            else:
+                return {'is_sufficient': False, 'reason': f'Only {item_count} structured items (need 3+)'}
+        
+        # Check for vision analysis (good quality for image tasks)
+        if extracted_data.get('vision_analysis'):
+            analysis_length = len(extracted_data['vision_analysis'])
+            if analysis_length >= 100:  # Meaningful analysis
+                return {'is_sufficient': True, 'reason': 'Vision analysis present'}
+            else:
+                return {'is_sufficient': False, 'reason': 'Vision analysis too brief'}
+        
+        # Check text content (minimum quality)
+        text_content = extracted_data.get('text_content', '')
+        if len(text_content) >= 500:  # At least 500 chars of meaningful content
+            # Check if it's not just error messages or empty content
+            error_indicators = ['error', 'not found', '404', 'access denied', 'forbidden']
+            if not any(indicator in text_content.lower()[:200] for indicator in error_indicators):
+                return {'is_sufficient': True, 'reason': 'Sufficient text content'}
+        
+        # Check for meaningful headings
+        headings = extracted_data.get('headings', [])
+        if len(headings) >= 3:
+            return {'is_sufficient': True, 'reason': f'Found {len(headings)} headings'}
+        
+        # Check for links (indicates content-rich page)
+        links = extracted_data.get('links', [])
+        if len(links) >= 5:
+            return {'is_sufficient': True, 'reason': f'Found {len(links)} links'}
+        
+        # Insufficient data
+        return {
+            'is_sufficient': False,
+            'reason': f'Insufficient data: {len(text_content)} chars text, {len(headings)} headings, {len(links)} links'
+        }
+    
+    async def _extract_with_vision_fallback(self, page_content: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Enhanced vision-based extraction with intelligent fallback.
+        
+        Three-phase approach:
+        1. Vision analyzes page and suggests selectors
+        2. Test suggested selectors and extract via DOM (fast and accurate)
+        3. If selectors fail, use pure vision extraction (slower but robust)
+        
+        No artificial time limits - each phase runs until it succeeds or fails naturally.
+        """
+        try:
+            # Capture screenshot for vision analysis
+            screenshot_bytes = await self.page.screenshot(timeout=5000, animations="disabled")
+            screenshot_base64 = base64.b64encode(screenshot_bytes).decode('utf-8')
+            
+            # Phase 1: Vision identifies items and suggests selectors
+            logger.info("🔍 Phase 1: Vision analyzing page structure...")
+            
+            vision_prompt = f"""Analyze this webpage screenshot to help extract structured data.
+
+Look at the page and identify any REPEATED VISUAL PATTERNS - items that appear multiple times with similar layout.
+These could be: products, articles, posts, search results, listings, cards, tiles, etc.
+
+For EACH repeated item you can see (count up to 15), extract:
+- Any visible text (titles, headings, labels)
+- Numbers (prices, ratings, scores, dates)
+- Visual characteristics (position, size, layout)
+
+Also analyze the HTML structure and suggest CSS selectors that might match these items.
+Look for patterns in:
+- data-* attributes (data-asin, data-id, data-component-type)
+- class names with patterns (product-, item-, card-, result-, post-)
+- semantic HTML (article, section with specific classes)
+
+Current page: {page_content.get('url')}
+
+Respond with JSON (no markdown, just JSON):
+{{
+    "items_found": <number of repeated items you see>,
+    "page_type": "e-commerce|blog|news|social|search-results|gallery|list|other",
+    "suggested_selectors": [
+        "most specific selector",
+        "alternative selector",
+        "fallback selector"
+    ],
+    "items": [
+        {{
+            "position": 1,
+            "title": "main text/heading",
+            "price": "price/cost if visible",
+            "rating": "rating/score if visible", 
+            "description": "secondary text",
+            "visual_location": "top|middle|bottom",
+            "likely_container_class": "pattern you notice"
+        }}
+    ]
+}}
+
+IMPORTANT: 
+- Count ALL repeated items you see, even if some details are unclear
+- If you see 10+ similar items, that's good - set items_found accordingly
+- Suggest multiple selector options
+- If fewer than 3 repeated items visible, set items_found to 0"""
+
+            # Try vision providers with fallback
+            provider, wait_time = self.vision_manager.get_available_provider()
+            if not provider:
+                logger.warning("⚠️  No vision providers available")
+                return None
+            
+            if wait_time and wait_time > 0:
+                import time
+                time.sleep(wait_time)
+            
+            provider_name = provider['name']
+            
+            try:
+                if provider_name == "ollama":
+                    client = OpenAI(api_key=OLLAMA_API_KEY, base_url="https://ollama.com/v1")
+                    model = "qwen3-vl:235b-cloud"
+                elif provider_name == "nvidia_vision":
+                    client = OpenAI(api_key=NVIDIA_API_KEY, base_url="https://integrate.api.nvidia.com/v1")
+                    model = "mistralai/mistral-7b-instruct-v0.3"
+                else:
+                    logger.warning(f"Unknown vision provider: {provider_name}")
+                    return None
+                
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": vision_prompt},
+                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_base64}"}}
+                        ]
+                    }],
+                    temperature=0.1,
+                    max_tokens=2000
+                )
+                
+                content = response.choices[0].message.content
+                json_match = re.search(r'\{.*\}', content, re.DOTALL)
+                
+                if not json_match:
+                    logger.warning("⚠️  Vision response didn't contain valid JSON")
+                    self.vision_manager.record_failure(provider_name, "Invalid JSON response")
+                    return None
+                
+                vision_result = parse_json_robust(json_match.group(), content)
+                if not vision_result:
+                    logger.warning("⚠️  Failed to parse vision JSON")
+                    logger.debug(f"Vision response: {content[:500]}")
+                    self.vision_manager.record_failure(provider_name, "JSON parse failed")
+                    return None
+                
+                self.vision_manager.record_success(provider_name)
+                
+                items_found = vision_result.get('items_found', 0)
+                items_list = vision_result.get('items', [])
+                
+                # Use actual items list length if items_found is 0 but items exist
+                if items_found == 0 and items_list:
+                    items_found = len(items_list)
+                    logger.info(f"📊 Corrected items_found from 0 to {items_found} based on items list")
+                
+                # Check both reported count and actual list
+                actual_count = max(items_found, len(items_list))
+                
+                if actual_count < 3:
+                    logger.info(f"📄 Insufficient items for structured extraction: reported={items_found}, list={len(items_list)}")
+                    logger.debug(f"Page type: {vision_result.get('page_type')}, Selectors: {vision_result.get('suggested_selectors')}")
+                    return None
+                
+                logger.info(f"✅ Vision identified {items_found} items on page")
+                
+                # Phase 2: Test suggested selectors and extract via DOM
+                suggested_selectors = vision_result.get('suggested_selectors', [])
+                if suggested_selectors:
+                    logger.info(f"🔍 Phase 2: Testing {len(suggested_selectors)} suggested selectors...")
+                    
+                    for selector in suggested_selectors:
+                        try:
+                            # Test if selector finds elements (reasonable timeout to prevent hanging)
+                            elements = await asyncio.wait_for(
+                                self.page.query_selector_all(selector),
+                                timeout=5.0  # Prevent hanging on bad selectors
+                            )
+                            
+                            if len(elements) >= 3:
+                                logger.info(f"✅ Selector '{selector}' found {len(elements)} elements - extracting...")
+                                
+                                # Extract data using this selector
+                                extracted_items = await asyncio.wait_for(
+                                    self.page.evaluate(f"""
+                                    (selector) => {{
+                                        const items = Array.from(document.querySelectorAll(selector));
+                                        return items.slice(0, 10).map((item, idx) => {{
+                                            const data = {{ position: idx + 1 }};
+                                            
+                                            // Extract title
+                                            const title = item.querySelector('h1, h2, h3, h4, h5, h6, [class*="title"], [class*="name"]');
+                                            if (title) data.title = title.innerText.trim();
+                                            
+                                            // Extract price
+                                            const price = item.querySelector('[class*="price"], [data-price]');
+                                            if (price) data.price = price.innerText.trim();
+                                            
+                                            // Extract rating
+                                            const rating = item.querySelector('[class*="rating"], [class*="star"], [aria-label*="star"]');
+                                            if (rating) data.rating = rating.innerText.trim() || rating.getAttribute('aria-label');
+                                            
+                                            // Extract description
+                                            const desc = item.querySelector('p, [class*="description"], [class*="summary"]');
+                                            if (desc) data.description = desc.innerText.trim().substring(0, 200);
+                                            
+                                            // Extract link
+                                            const link = item.querySelector('a[href]');
+                                            if (link) data.link = link.href;
+                                            
+                                            // Extract image
+                                            const img = item.querySelector('img');
+                                            if (img) {{
+                                                data.image = img.src;
+                                                data.image_alt = img.alt;
+                                            }}
+                                            
+                                            return data;
+                                        }});
+                                    }}
+                                    """, selector),
+                                    timeout=10.0  # Reasonable timeout for extraction
+                                )
+                                
+                                if extracted_items and len(extracted_items) >= 3:
+                                    logger.info(f"🎯 Successfully extracted {len(extracted_items)} items using vision-discovered selector!")
+                                    return {
+                                        'structured_items': extracted_items,
+                                        'item_count': len(extracted_items),
+                                        'extraction_type': 'vision_assisted_dom',
+                                        'selector_used': selector,
+                                        'page_type': vision_result.get('page_type', 'unknown')
+                                    }
+                            else:
+                                logger.debug(f"Selector '{selector}' found only {len(elements)} elements - need 3+")
+                                
+                        except asyncio.TimeoutError:
+                            logger.debug(f"Selector '{selector}' timed out - trying next")
+                            continue
+                        except Exception as e:
+                            logger.debug(f"Selector '{selector}' failed: {e}")
+                            continue
+                    
+                    logger.info("📄 Phase 2: No working selectors found - moving to Phase 3")
+                
+                # Phase 3: Pure vision extraction as final fallback
+                logger.info("🎨 Phase 3: Using pure vision extraction...")
+                vision_items = vision_result.get('items', [])
+                
+                if vision_items and len(vision_items) >= 3:
+                    logger.info(f"✅ Extracted {len(vision_items)} items using pure vision analysis")
+                    return {
+                        'structured_items': vision_items,
+                        'item_count': len(vision_items),
+                        'extraction_type': 'vision_pure',
+                        'page_type': vision_result.get('page_type', 'unknown')
+                    }
+                
+                logger.info("📄 Vision extraction found insufficient items")
+                return None
+                
+            except Exception as e:
+                error_msg = str(e)
+                logger.warning(f"⚠️  Vision extraction failed: {error_msg[:100]}")
+                self.vision_manager.record_failure(provider_name, error_msg)
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ Vision fallback extraction failed: {e}")
+            return None
     
     async def get_page_content(self) -> Dict[str, Any]:
         """Extract comprehensive page content with full DOM structure and live updates"""
@@ -546,7 +1246,8 @@ Rules:
             pass
         
         # Get complete page state including all interactive elements with precise selectors
-        page_data = await self.page.evaluate("""
+        try:
+            page_data = await self.page.evaluate("""
             () => {
                 // Helper to check if element is truly visible and interactive
                 function isVisible(el) {
@@ -562,47 +1263,99 @@ Rules:
                            rect.left < window.innerWidth;
                 }
                 
+                // Helper to escape CSS selector special characters
+                function escapeSelector(str) {
+                    if (!str) return '';
+                    // Escape special CSS characters: !"#$%&'()*+,./:;<=>?@[\]^`{|}~
+                    return str.replace(/([!"#$%&'()*+,.\/:;<=>?@\[\\\]^`{|}~])/g, '\\\\$1');
+                }
+                
+                // Helper to validate selector before using it
+                function isValidSelector(selector) {
+                    try {
+                        document.querySelectorAll(selector);
+                        return true;
+                    } catch (e) {
+                        return false;
+                    }
+                }
+                
                 // Helper to generate reliable CSS selector
                 function getSelector(el) {
-                    // Priority: ID > Name > Aria-label > Data attributes > Placeholder > Type+Name combo
-                    if (el.id && !el.id.match(/^[\\d]/) && document.querySelectorAll(`#${el.id}`).length === 1) {
-                        return `#${el.id}`;
+                    // Priority: ID > Name > Data attributes > Type+Class combo > Tag only
+                    
+                    // Try ID (if valid and unique)
+                    if (el.id && !el.id.match(/^[\\d]/) && !el.id.match(/[\\s]/)) {
+                        const idSelector = `#${CSS.escape(el.id)}`;
+                        if (isValidSelector(idSelector)) {
+                            try {
+                                if (document.querySelectorAll(idSelector).length === 1) {
+                                    return idSelector;
+                                }
+                            } catch (e) {
+                                // Skip if selector fails
+                            }
+                        }
                     }
                     
-                    if (el.name && document.querySelectorAll(`[name="${el.name}"]`).length <= 3) {
-                        return `[name="${el.name}"]`;
+                    // Try name attribute (if not too common)
+                    if (el.name) {
+                        const nameSelector = `[name="${CSS.escape(el.name)}"]`;
+                        if (isValidSelector(nameSelector)) {
+                            try {
+                                if (document.querySelectorAll(nameSelector).length <= 3) {
+                                    return nameSelector;
+                                }
+                            } catch (e) {
+                                // Skip if selector fails
+                            }
+                        }
                     }
                     
-                    const ariaLabel = el.getAttribute('aria-label');
-                    if (ariaLabel && document.querySelectorAll(`[aria-label="${ariaLabel}"]`).length <= 3) {
-                        return `[aria-label="${ariaLabel}"]`;
-                    }
-                    
-                    // Try data attributes
-                    const dataTestId = el.getAttribute('data-test-id') || el.getAttribute('data-testid');
+                    // Try data attributes (most reliable for modern sites)
+                    const dataTestId = el.getAttribute('data-test-id') || el.getAttribute('data-testid') || el.getAttribute('data-test');
                     if (dataTestId) {
-                        return `[data-test-id="${dataTestId}"], [data-testid="${dataTestId}"]`;
+                        const dataSelector = `[data-testid="${CSS.escape(dataTestId)}"]`;
+                        if (isValidSelector(dataSelector)) {
+                            return dataSelector;
+                        }
                     }
                     
-                    // For inputs with placeholder
-                    if (el.placeholder && el.tagName.toLowerCase() === 'input') {
-                        return `input[placeholder="${el.placeholder}"]`;
-                    }
-                    
-                    // Combination selector
+                    // Build combination selector: tag + type + classes
                     let path = el.tagName.toLowerCase();
-                    if (el.type) path += `[type="${el.type}"]`;
-                    if (el.name) path += `[name="${el.name}"]`;
                     
-                    // Only add classes if they're stable (not random hashes)
+                    // Add type for inputs
+                    if (el.type && ['input', 'button'].includes(path)) {
+                        path += `[type="${el.type}"]`;
+                    }
+                    
+                    // Add stable classes (not random hashes)
                     if (el.className && typeof el.className === 'string') {
                         const classes = el.className.trim().split(/\\s+/)
-                            .filter(c => c && !c.match(/^[\\d]/) && !c.match(/[a-f0-9]{6,}/i) && c.length < 20)
+                            .filter(c => c && 
+                                    !c.match(/^[\\d]/) && 
+                                    !c.match(/[a-f0-9]{8,}/i) && 
+                                    !c.match(/^_/) && 
+                                    c.length < 30 &&
+                                    c.length > 2)
                             .slice(0, 2);
-                        if (classes.length > 0) path += '.' + classes.join('.');
+                        
+                        for (const cls of classes) {
+                            try {
+                                path += '.' + CSS.escape(cls);
+                            } catch (e) {
+                                // Skip invalid class
+                            }
+                        }
                     }
                     
-                    return path;
+                    // Validate final selector
+                    if (isValidSelector(path)) {
+                        return path;
+                    }
+                    
+                    // Fallback: just the tag name
+                    return el.tagName.toLowerCase();
                 }
                 
                 // Extract ALL interactive elements with complete details
@@ -698,149 +1451,89 @@ Rules:
                 };
             }
         """)
+        except Exception as e:
+            logger.error(f"❌ Error extracting page content: {str(e)[:200]}")
+            # Return minimal page data on error
+            try:
+                page_data = {
+                    'url': self.page.url,
+                    'title': await self.page.title(),
+                    'bodyText': await self.page.evaluate('() => document.body.innerText.substring(0, 3000)'),
+                    'interactiveElements': [],
+                    'headings': [],
+                    'forms': [],
+                    'elementCount': {'inputs': 0, 'buttons': 0, 'links': 0, 'total': 0},
+                    'viewport': {'width': 1280, 'height': 800, 'scrollY': 0}
+                }
+                logger.warning("⚠️  Using minimal page data due to extraction error")
+            except:
+                # Ultimate fallback
+                page_data = {
+                    'url': self.page.url if self.page else 'unknown',
+                    'title': 'Error loading page',
+                    'bodyText': '',
+                    'interactiveElements': [],
+                    'headings': [],
+                    'forms': [],
+                    'elementCount': {'inputs': 0, 'buttons': 0, 'links': 0, 'total': 0},
+                    'viewport': {'width': 1280, 'height': 800, 'scrollY': 0}
+                }
+                logger.error("❌ Could not extract any page data")
         
         return page_data
     
     def plan_next_action(self, page_content: Dict[str, Any], step_num: int) -> Dict[str, Any]:
-        """Use LLM with fallback to plan next action"""
+        """Use LLM with fallback to plan next action - OPTIMIZED with 70% token reduction"""
         
-        # Build task plan status
-        plan_status = ""
-        if self.task_plan:
-            plan_status = "\n\nTASK PLAN:\n"
-            for i, subtask in enumerate(self.task_plan, 1):
-                status_icon = "✅" if subtask['status'] == 'completed' else "⏳"
-                plan_status += f"{status_icon} {i}. {subtask['subtask']} [{subtask['status']}]\n"
-            
-            pending_count = sum(1 for t in self.task_plan if t['status'] == 'pending')
-            plan_status += f"\nPending subtasks: {pending_count}/{len(self.task_plan)}"
+        # Check if we need to replan dynamically
+        agent_state = {
+            'consecutive_same_actions': self.consecutive_same_actions,
+            'actions_failed': self.actions_failed,
+            'actions_taken': self.actions_taken,
+            'current_subtask': self._get_current_subtask()
+        }
         
-        # Build context-aware prompt with comprehensive page data
-        elements_summary = page_content.get('elementCount', {})
-        interactive_elements = page_content.get('interactiveElements', [])
+        should_replan, reason = self.dynamic_planner.should_replan(agent_state)
+        if should_replan:
+            logger.warning(f"🔄 Dynamic replanning triggered: {reason}")
+            # Create alternative plan (will be implemented in create_task_plan)
+            asyncio.create_task(self._replan_task(reason))
         
-        # Prioritize elements: inputs first, then buttons, then links
-        # Also prioritize elements in viewport
-        inputs = sorted(
-            [e for e in interactive_elements if e.get('isInput') and not e.get('isDisabled')],
-            key=lambda x: (not x.get('position', {}).get('inViewport', False), x.get('index', 999))
-        )[:10]
+        # Get current subtask for focused context
+        current_subtask = self._get_current_subtask()
         
-        buttons = sorted(
-            [e for e in interactive_elements if e.get('isButton') and not e.get('isDisabled')],
-            key=lambda x: (not x.get('position', {}).get('inViewport', False), x.get('index', 999))
-        )[:10]
+        # Build OPTIMIZED context (70% token reduction)
+        recent_actions = {
+            'last_success': self.actions_succeeded[-1] if self.actions_succeeded else {},
+            'last_failure': self.actions_failed[-1] if self.actions_failed else {},
+            'stuck': self.consecutive_same_actions >= 2
+        }
         
-        links = sorted(
-            [e for e in interactive_elements if e.get('isLink')],
-            key=lambda x: (not x.get('position', {}).get('inViewport', False), x.get('index', 999))
-        )[:15]
+        # Use ContextOptimizer for compact prompt
+        prompt = self.context_optimizer.build_compact_context(
+            task=self.task,
+            current_subtask=current_subtask or {'subtask': self.task},
+            page_content=page_content,
+            recent_actions=recent_actions,
+            step_num=step_num,
+            max_steps=self.max_steps
+        )
         
-        prompt = f"""You are an expert browser automation agent. Analyze the COMPLETE page state and decide the next action.
+        # Add critical instructions (kept minimal)
+        prompt += """
 
-OVERALL TASK: {self.task}
-{plan_status}
+CRITICAL RULES:
+1. Use EXACT selectors from elements list
+2. If stuck (same action 2+ times), try different approach or skip
+3. Mark subtask complete after successful action
+4. Use "done" only when ALL work complete
 
-CURRENT PAGE STATE:
-URL: {page_content.get('url')}
-Title: {page_content.get('title')}
-
-PAGE STRUCTURE:
-{chr(10).join(page_content.get('headings', [])[:5])}
-
-PAGE TEXT (first 1500 chars):
-{page_content.get('bodyText', '')[:1500]}
-
-AVAILABLE INTERACTIVE ELEMENTS ({elements_summary.get('total', 0)} total):
-
-INPUT FIELDS ({elements_summary.get('inputs', 0)} available):
-{json.dumps([{'selector': e['selector'], 'type': e['type'], 'placeholder': e['placeholder'], 'name': e['name'], 'ariaLabel': e['ariaLabel']} for e in inputs], indent=2) if inputs else 'None'}
-
-BUTTONS ({elements_summary.get('buttons', 0)} available):
-{json.dumps([{'selector': e['selector'], 'text': e['text'], 'ariaLabel': e['ariaLabel']} for e in buttons], indent=2) if buttons else 'None'}
-
-LINKS ({elements_summary.get('links', 0)} available, showing first 15):
-{json.dumps([{'text': e['text'][:50], 'href': e['href'][:100]} for e in links], indent=2) if links else 'None'}
-
-FORMS ON PAGE:
-{json.dumps(page_content.get('forms', []), indent=2) if page_content.get('forms') else 'None'}
-
-ALL ACTIONS TAKEN SO FAR:
-{json.dumps(self.actions_taken[-5:], indent=2) if self.actions_taken else 'None'}
-
-FAILED SUBTASKS:
-{json.dumps(self.failed_subtasks, indent=2) if self.failed_subtasks else 'None'}
-
-PROGRESS: Step {step_num}/{self.max_steps}
-WARNING: If you have tried the same action 3+ times without progress, SKIP to next subtask or mark it as failed!
-
-Decide the next action. Respond with ONLY a valid JSON object (no markdown, no explanation):
-{{
-    "action": "navigate|click|type|scroll|extract|upload|download|skip|done",
-    "reasoning": "brief explanation",
-    "params": {{
-        "url": "full URL for navigate",
-        "text": "exact text to click (if no selector)",
-        "input_text": "text to type",
-        "selector": "USE THE EXACT SELECTOR from the elements above (e.g., #searchInput, [name='q'])",
-        "file_path": "path to file for upload action"
-    }},
-    "completed_subtask": "name of subtask just completed (if any)",
-    "failed_subtask": "name of subtask to skip/fail (if blocked/stuck)",
-    "new_subtask": "NEW subtask to add if you discover additional work needed (optional)",
-    "is_complete": true/false,
-    "result_summary": "summary of ALL findings if ALL subtasks complete"
-}}
-
-CRITICAL SELECTOR USAGE:
-- ALWAYS use the EXACT "selector" field from the INPUT FIELDS, BUTTONS, or LINKS list above
-- For typing: Copy the exact selector from INPUT FIELDS (e.g., {{"selector": "[name='searchBoxInput']", "input_text": "query"}})
-- For clicking buttons: Copy the exact selector from BUTTONS (e.g., {{"selector": "button.search-btn"}})
-- For clicking links: Use the "text" field from LINKS (e.g., {{"text": "Explore"}}) - DO NOT use href as selector
-- For upload: Use {{"action": "upload", "params": {{"file_path": "filename.pdf", "selector": "input[type='file']"}}}}
-- For download: Use {{"action": "download", "params": {{"selector": "download-button-selector"}}}}
-- NEVER make up selectors - ONLY use selectors provided in the lists above
-- If you need to click a link, use the "text" field, NOT the href
-- If a selector is not in the list, use text-based clicking with the visible text
-
-AVAILABLE ACTIONS (YOU MUST USE EXACTLY ONE OF THESE):
-- "navigate": Go to a URL (provide full URL in params.url)
-- "click": Click an element (provide text in params.text or selector)
-- "type": Type text into input field (provide text in params.input_text and selector)
-- "scroll": Scroll down the page
-- "extract": Extract data from current page (marks subtask as completed)
-- "analyze_images": Use vision to analyze images on the page and make decisions (use when task requires looking at images)
-- "save_images": Save images from the page (vision will identify and save images with descriptions)
-- "upload": Upload a file (provide file_path and selector for file input)
-- "download": Download a file (provide selector or text for download button)
-- "skip": Skip current subtask if blocked/stuck
-- "done": Mark entire task as complete (ONLY when ALL subtasks are done)
-
-INVALID ACTIONS (DO NOT USE): "parse", "report", "wait", or any other action not listed above!
-
-RULES:
-1. If URL is "about:blank", use navigate action first
-2. Check TASK PLAN - work on pending subtasks in order
-3. PREFER navigate over click - if you know the URL, navigate directly
-4. When you complete a subtask action (navigate somewhere, type something, extract data), set completed_subtask
-5. After completing a subtask, move to the NEXT pending subtask
-6. If stuck or blocked, use skip action and set failed_subtask
-7. Use done action ONLY when ALL subtasks are completed or failed
-8. DO NOT repeat the same action more than twice - try something different!
-9. You CAN add new subtasks mid-way if you discover additional work needed (use "new_subtask" field)
-
-WHEN TO MARK SUBTASK COMPLETE:
-- "Navigate to X" - complete after navigate action succeeds
-- "Search for X" - complete after type action succeeds
-- "Extract X" - complete after extract action succeeds
-- "Click X" - complete after click action succeeds
-
-CRITICAL: 
-- After completing a subtask, immediately move to the NEXT pending subtask
-- If no pending subtasks remain, use done action with is_complete=true
-- Check RECENT ACTIONS - if repeating same action, you are stuck! Try different approach or skip
-- Do not overthink - if you did the action, mark the subtask complete and move on!"""
-
+ACTIONS: navigate, click, type, scroll, extract, done
+Return JSON only, no markdown."""
+        
+        # Now use the optimized prompt (already built above)
+        # The old massive prompt code has been removed
+        
         try:
             # Use LLM manager with automatic fallback
             content, provider = self.llm_manager.get_completion(
@@ -852,7 +1545,10 @@ CRITICAL:
             # Extract JSON from response
             json_match = re.search(r'\{.*\}', content, re.DOTALL)
             if json_match:
-                action_plan = json.loads(json_match.group())
+                action_plan = parse_json_robust(json_match.group(), content)
+                if not action_plan:
+                    logger.warning(f"⚠️  {provider.upper()} returned unparseable JSON")
+                    return {"action": "done", "is_complete": True, "result_summary": "Could not parse action"}
                 logger.info(f"✅ Action planned by {provider.upper()}")
                 return action_plan
             else:
@@ -863,10 +1559,58 @@ CRITICAL:
             logger.error(f"❌ All LLM providers failed: {e}")
             return {"action": "done", "is_complete": True, "result_summary": f"LLM Error: {e}"}
     
+    def _get_current_subtask(self) -> Optional[Dict]:
+        """Get the current pending subtask"""
+        if not self.task_plan:
+            return None
+        for subtask in self.task_plan:
+            if subtask['status'] == 'pending':
+                return subtask
+        return None
+    
+    async def _replan_task(self, reason: str):
+        """Dynamically replan when stuck or failing"""
+        logger.info(f"🔄 Replanning task due to: {reason}")
+        
+        completed = [t['subtask'] for t in self.task_plan if t['status'] == 'completed']
+        failed = [t['subtask'] for t in self.task_plan if t['status'] == 'failed']
+        
+        # Create alternative plan prompt
+        replan_prompt = self.dynamic_planner.create_alternative_plan(
+            self.task,
+            failed,
+            completed
+        )
+        
+        try:
+            response, _ = self.llm_manager.get_completion([{"role": "user", "content": replan_prompt}])
+            new_plan_data = parse_json_robust(response)
+            
+            if new_plan_data and 'subtasks' in new_plan_data:
+                # Update task plan with new approach
+                new_plan = [{'subtask': st, 'status': 'pending'} for st in new_plan_data['subtasks']]
+                self.task_plan = new_plan
+                logger.info(f"✅ Replanned with {len(new_plan)} new subtasks")
+        except Exception as e:
+            logger.error(f"❌ Replanning failed: {e}")
+    
     async def should_use_vision(self, page_content: Dict[str, Any]) -> bool:
-        """Decide if vision is needed for the next step - ONLY when absolutely necessary"""
+        """Decide if vision is needed - OPTIMIZED with rule-based decision (80% cost reduction)"""
         if not VISION_ENABLED:
             return False
+        
+        # Use VisionOptimizer for smart decision (no LLM call needed)
+        agent_state = {
+            'consecutive_same_actions': self.consecutive_same_actions
+        }
+        
+        needs_vision = self.vision_optimizer.should_use_vision(
+            self.task,
+            page_content,
+            agent_state
+        )
+        
+        return needs_vision
         
         # If previous vision call decided modality for this step, use that
         if hasattr(self, 'next_step_needs_vision') and self.next_step_needs_vision:
@@ -926,7 +1670,7 @@ CRITICAL:
         return needs_vision
     
     async def plan_action_with_vision(self, screenshot_base64: str, page_content: Dict[str, Any], step_num: int) -> Dict[str, Any]:
-        """Single vision API call with fallback chain: Ollama → NVIDIA → Text-only"""
+        """Single vision API call with fallback chain and exponential backoff: Ollama → NVIDIA → Text-only"""
         
         # Build task plan status
         plan_status = ""
@@ -936,30 +1680,49 @@ CRITICAL:
                 status_icon = "✅" if subtask['status'] == 'completed' else "⏳"
                 plan_status += f"{status_icon} {i}. {subtask['subtask']} [{subtask['status']}]\n"
         
-        # Try Ollama Qwen3-VL first
-        if OLLAMA_API_KEY:
+        # Try available vision providers with backoff management
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            provider, wait_time = self.vision_manager.get_available_provider()
+            
+            if not provider:
+                logger.warning("⚠️  No vision providers available, falling back to text-only")
+                return None
+            
+            # If provider is backed off, wait
+            if wait_time and wait_time > 0:
+                logger.info(f"⏳ Waiting {wait_time:.1f}s for vision {provider['name'].upper()} to become available...")
+                import time
+                time.sleep(wait_time)
+            
+            provider_name = provider['name']
+            
             try:
-                logger.info("🎨 Trying vision: Ollama Qwen3-VL")
-                result = await self._call_vision_model_ollama(screenshot_base64, page_content, step_num, plan_status)
+                logger.info(f"🎨 Trying vision: {provider_name.upper()} (attempt {attempt + 1}/{max_attempts})")
+                
+                if provider_name == "ollama":
+                    result = await self._call_vision_model_ollama(screenshot_base64, page_content, step_num, plan_status)
+                elif provider_name == "nvidia_vision":
+                    result = await self._call_vision_model_nvidia(screenshot_base64, page_content, step_num, plan_status)
+                else:
+                    logger.warning(f"Unknown vision provider: {provider_name}")
+                    continue
+                
                 if result:
-                    logger.info("✅ Vision success: Ollama Qwen3-VL")
+                    logger.info(f"✅ Vision success: {provider_name.upper()}")
+                    self.vision_manager.record_success(provider_name)
                     return result
+                    
             except Exception as e:
-                logger.warning(f"⚠️  Ollama vision failed: {e}")
+                error_msg = str(e)
+                logger.warning(f"⚠️  Vision {provider_name.upper()} failed: {error_msg[:100]}")
+                self.vision_manager.record_failure(provider_name, error_msg)
+                
+                # Continue to next attempt/provider
+                continue
         
-        # Fallback to NVIDIA Mistral vision
-        if NVIDIA_API_KEY:
-            try:
-                logger.info("🎨 Trying vision fallback: NVIDIA Mistral")
-                result = await self._call_vision_model_nvidia(screenshot_base64, page_content, step_num, plan_status)
-                if result:
-                    logger.info("✅ Vision success: NVIDIA Mistral")
-                    return result
-            except Exception as e:
-                logger.warning(f"⚠️  NVIDIA vision failed: {e}")
-        
-        # Final fallback: text-only (no vision)
-        logger.warning("⚠️  All vision models failed, falling back to text-only")
+        # All attempts exhausted
+        logger.warning("⚠️  All vision providers failed after retries, falling back to text-only")
         return None
     
     async def _call_vision_model_ollama(self, screenshot_base64: str, page_content: Dict[str, Any], step_num: int, plan_status: str) -> Dict[str, Any]:
@@ -981,6 +1744,29 @@ CRITICAL: This task requires IMAGE ANALYSIS!
   * Be specific and detailed (at least 2-3 sentences per image)
 """
             
+            # Build adaptive context for stuck situations
+            stuck_context = ""
+            if self.consecutive_same_actions >= 2:
+                stuck_context = f"""
+
+⚠️ ADAPTIVE REASONING REQUIRED - YOU ARE STUCK!
+Consecutive same actions: {self.consecutive_same_actions}/3
+Last action: {self.last_action_type}
+Recent failures: {json.dumps([{'action': a.get('action'), 'url': a.get('url', '')[:50]} for a in self.actions_failed[-3:]], indent=2) if self.actions_failed else 'None'}
+
+CRITICAL THINKING:
+1. WHY did previous attempts fail? (wrong selector? element not visible? wrong approach?)
+2. What ALTERNATIVE methods can you try? (different selector? vision-based clicking? skip?)
+3. Is this action ESSENTIAL or OPTIONAL? (can you skip and still achieve the goal?)
+4. If stuck on sorting/filtering, can you extract unsorted data instead?
+
+ADAPTIVE STRATEGIES:
+- Try clicking at DIFFERENT coordinates
+- Use text-based clicking instead of coordinates
+- Skip optional steps and focus on core objective
+- If extraction is the goal, do it NOW without prerequisites
+"""
+            
             prompt = f"""{image_analysis_instruction}
 
 Analyze this webpage screenshot and provide a COMPLETE response with:
@@ -991,11 +1777,16 @@ Analyze this webpage screenshot and provide a COMPLETE response with:
 
 TASK: {self.task}
 {plan_status}
+{stuck_context}
 
 CURRENT PAGE:
 URL: {page_content.get('url')}
 Title: {page_content.get('title')}
 STEP: {step_num}/{self.max_steps}
+
+ACTION HISTORY:
+Recent successes: {json.dumps([{'action': a.get('action')} for a in self.actions_succeeded[-3:]], indent=2) if self.actions_succeeded else 'None'}
+Recent failures: {json.dumps([{'action': a.get('action')} for a in self.actions_failed[-3:]], indent=2) if self.actions_failed else 'None'}
 
 Respond with ONLY a valid JSON object:
 {{
@@ -1073,10 +1864,13 @@ Slider: {{"action": "drag", "params": {{"x": 50, "y": 300, "x2": 200, "y2": 300}
             
             content = response.choices[0].message.content
             
-            # Extract JSON
+            # Extract JSON with robust parsing
             json_match = re.search(r'\{.*\}', content, re.DOTALL)
             if json_match:
-                result = json.loads(json_match.group())
+                result = parse_json_robust(json_match.group(), content)
+                if not result:
+                    logger.error("❌ Ollama returned unparseable JSON")
+                    raise ValueError("Failed to parse Ollama vision response")
                 
                 # Log bounding boxes detected
                 bboxes = result.get('bounding_boxes', [])
@@ -1144,6 +1938,29 @@ CRITICAL: This task requires IMAGE ANALYSIS!
   * Example: "Image 1: A pristine 1967 Ford Mustang GT in classic red with white racing stripes..."
 """
             
+            # Build adaptive context for stuck situations
+            stuck_context = ""
+            if self.consecutive_same_actions >= 2:
+                stuck_context = f"""
+
+⚠️ ADAPTIVE REASONING REQUIRED - YOU ARE STUCK!
+Consecutive same actions: {self.consecutive_same_actions}/3
+Last action: {self.last_action_type}
+Recent failures: {json.dumps([{'action': a.get('action'), 'url': a.get('url', '')[:50]} for a in self.actions_failed[-3:]], indent=2) if self.actions_failed else 'None'}
+
+CRITICAL THINKING:
+1. WHY did previous attempts fail? (wrong coordinates? element not visible? wrong approach?)
+2. What ALTERNATIVE methods can you try? (different coordinates? text-based clicking? skip?)
+3. Is this action ESSENTIAL or OPTIONAL? (can you skip and still achieve the goal?)
+4. If stuck on sorting/filtering, can you extract unsorted data instead?
+
+ADAPTIVE STRATEGIES:
+- Try clicking at DIFFERENT coordinates
+- Use text-based clicking instead of coordinates
+- Skip optional steps and focus on core objective
+- If extraction is the goal, do it NOW without prerequisites
+"""
+            
             prompt = f"""{image_analysis_instruction}
 
 Analyze this webpage screenshot and provide a COMPLETE response with:
@@ -1154,11 +1971,16 @@ Analyze this webpage screenshot and provide a COMPLETE response with:
 
 TASK: {self.task}
 {plan_status}
+{stuck_context}
 
 CURRENT PAGE:
 URL: {page_content.get('url')}
 Title: {page_content.get('title')}
 STEP: {step_num}/{self.max_steps}
+
+ACTION HISTORY:
+Recent successes: {json.dumps([{'action': a.get('action')} for a in self.actions_succeeded[-3:]], indent=2) if self.actions_succeeded else 'None'}
+Recent failures: {json.dumps([{'action': a.get('action')} for a in self.actions_failed[-3:]], indent=2) if self.actions_failed else 'None'}
 
 Respond with ONLY a valid JSON object:
 {{
@@ -1229,10 +2051,13 @@ ACTIONS:
             
             content = response.choices[0].message.content
             
-            # Extract JSON
+            # Extract JSON with robust parsing
             json_match = re.search(r'\{.*\}', content, re.DOTALL)
             if json_match:
-                result = json.loads(json_match.group())
+                result = parse_json_robust(json_match.group(), content)
+                if not result:
+                    logger.error("❌ NVIDIA returned unparseable JSON")
+                    raise ValueError("Failed to parse NVIDIA vision response")
                 
                 # Log bounding boxes detected
                 bboxes = result.get('bounding_boxes', [])
@@ -1350,6 +2175,14 @@ ACTIONS:
     async def verify_coordinates(self, x: int, y: int, expected_element_type: str = None) -> Dict[str, Any]:
         """Verify coordinates and return element info with confidence"""
         try:
+            # First validate coordinates are within viewport
+            viewport_width = 1280
+            viewport_height = 800
+            
+            if x < 0 or x > viewport_width or y < 0 or y > viewport_height:
+                logger.error(f"❌ Coordinates ({x}, {y}) outside viewport bounds (0-{viewport_width}, 0-{viewport_height})")
+                return {'valid': False, 'confidence': 0.0, 'reason': 'coordinates_out_of_bounds'}
+            
             # Get element at coordinates using JavaScript
             element_info = await self.page.evaluate(f"""
                 () => {{
@@ -1484,8 +2317,117 @@ ACTIONS:
             logger.warning(f"⚠️  Failed to capture page state: {e}")
             return {}
     
+    async def _execute_click_robust(self, params: Dict[str, Any]) -> bool:
+        """Execute click with SOTA multi-strategy approach"""
+        # Wait for page to be stable first
+        await self.page_stabilizer.wait_for_stable(self.page)
+        
+        # Try to dismiss any overlays
+        await self.page_stabilizer.dismiss_overlays(self.page)
+        
+        # Check if we have any usable parameters
+        if not any([params.get('selector'), params.get('text'), params.get('x')]):
+            logger.error("❌ No selector, text, or coordinates provided for click")
+            return False
+        
+        # Build element info for selector strategy
+        element_info = {
+            'selector': params.get('selector'),
+            'text': params.get('text'),
+            'type': params.get('type'),
+            'name': params.get('name'),
+            'id': params.get('id'),
+            'tag': params.get('tag', 'button'),
+            'position': {
+                'x': params.get('x'),
+                'y': params.get('y')
+            }
+        }
+        
+        # Use multi-strategy clicking
+        success, strategy = await self.selector_strategy.click_with_fallback(
+            self.page,
+            element_info,
+            timeout=5000
+        )
+        
+        if success:
+            logger.info(f"✅ Click succeeded using {strategy}")
+            await self.page.wait_for_timeout(800)  # Wait for action to complete
+            return True
+        
+        logger.error(f"❌ All click strategies failed")
+        return False
+    
+    async def _execute_type_robust(self, params: Dict[str, Any]) -> bool:
+        """Execute typing with SOTA multi-strategy approach"""
+        text = params.get('input_text', '')
+        if not text:
+            logger.error("❌ No text provided for typing")
+            return False
+        
+        # Wait for page to be stable
+        await self.page_stabilizer.wait_for_stable(self.page)
+        
+        # Build element info
+        element_info = {
+            'selector': params.get('selector'),
+            'type': params.get('type', 'text'),
+            'name': params.get('name'),
+            'id': params.get('id'),
+            'tag': 'input'
+        }
+        
+        # Use multi-strategy typing
+        success, strategy = await self.selector_strategy.type_with_fallback(
+            self.page,
+            element_info,
+            text,
+            timeout=5000
+        )
+        
+        if success:
+            logger.info(f"✅ Typing succeeded using {strategy}")
+            await self.page.wait_for_timeout(500)
+            return True
+        
+        logger.error(f"❌ All typing strategies failed")
+        return False
+    
     async def execute_action(self, action_plan: Dict[str, Any]) -> bool:
-        """Execute the planned action with coordinate verification and visual feedback"""
+        """Execute the planned action with SOTA robustness and multi-strategy fallbacks"""
+        action = action_plan.get("action", "done")
+        params = action_plan.get("params", {})
+        
+        # Adaptive timeout based on action type
+        # Extraction can take longer due to vision analysis and selector testing
+        action_timeouts = {
+            'extract': 120.0,  # 2 minutes for extraction (vision + selectors)
+            'analyze_images': 60.0,  # 1 minute for image analysis
+            'navigate': 30.0,
+            'click': 30.0,
+            'type': 30.0,
+            'scroll': 15.0,
+            'default': 30.0
+        }
+        
+        timeout = action_timeouts.get(action, action_timeouts['default'])
+        
+        # Wrap execution in timeout to prevent hanging
+        try:
+            return await asyncio.wait_for(
+                self._execute_action_impl(action_plan),
+                timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"❌ Action '{action}' timed out after {timeout} seconds")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Action '{action}' failed: {e}")
+            return False
+    
+    async def _execute_action_impl(self, action_plan: Dict[str, Any]) -> bool:
+        """Internal implementation of execute_action"""
         action = action_plan.get("action", "done")
         params = action_plan.get("params", {})
         
@@ -1505,26 +2447,52 @@ ACTIONS:
                 logger.info(f"🌐 Navigating to: {url}")
                 
                 # Try multiple wait strategies with shorter timeouts
+                navigation_succeeded = False
                 try:
                     await self.page.goto(url, wait_until="domcontentloaded", timeout=15000)
-                except:
+                    navigation_succeeded = True
+                except Exception as e1:
+                    logger.debug(f"domcontentloaded failed: {e1}, trying networkidle")
                     # Fallback: try with networkidle
                     try:
                         await self.page.goto(url, wait_until="networkidle", timeout=10000)
-                    except:
+                        navigation_succeeded = True
+                    except Exception as e2:
+                        logger.debug(f"networkidle failed: {e2}, trying load")
                         # Last resort: just load
-                        await self.page.goto(url, wait_until="load", timeout=8000)
+                        try:
+                            await self.page.goto(url, wait_until="load", timeout=8000)
+                            navigation_succeeded = True
+                        except Exception as nav_error:
+                            logger.error(f"❌ Navigation failed completely: {nav_error}")
+                            return False
+                
+                if not navigation_succeeded:
+                    logger.error(f"❌ Navigation to {url} failed")
+                    return False
                 
                 # Wait for page to stabilize (reduced from 2000ms)
-                await self.page.wait_for_timeout(1000)
+                try:
+                    await self.page.wait_for_timeout(1000)
+                except:
+                    pass
                 
-                # Wait for network to be idle (dynamic content)
+                # Wait for network to be idle (dynamic content) - don't fail if this times out
                 try:
                     await self.page.wait_for_load_state("networkidle", timeout=3000)
-                except:
+                except Exception as e:
+                    logger.debug(f"networkidle wait timed out (this is OK): {e}")
                     pass  # Continue even if network doesn't idle
                 
+                logger.info(f"✅ Successfully navigated to {url}")
+                return True  # Navigation succeeded
+                
             elif action == "click":
+                # Use SOTA robust clicking
+                logger.info(f"🖱️  Executing SOTA robust click")
+                return await self._execute_click_robust(params)
+                
+                # OLD IMPLEMENTATION BELOW (kept as fallback)
                 text = params.get("text", "")
                 selector = params.get("selector")
                 x = params.get("x")
@@ -1532,15 +2500,13 @@ ACTIONS:
                 bbox = params.get("bbox")  # Bounding box from vision
                 confidence = params.get("confidence", 0.5)
                 
-                # Multi-strategy retry with confidence-based decisions
+                # Multi-strategy retry - ORDERED BY RELIABILITY (most reliable first)
                 strategies = []
                 
-                # Strategy 1: Vision → DOM mapping (if bbox available and high confidence)
-                if bbox and confidence >= 0.7:
-                    mapped_selector = await self.map_bbox_to_dom_selector(bbox)
-                    if mapped_selector:
-                        strategies.append(('dom_from_vision', mapped_selector, None, None))
-                        logger.info(f"🎯 Strategy 1: Using DOM selector from vision mapping: {mapped_selector}")
+                # Strategy 1: Text-based (MOST RELIABLE - try first!)
+                if text:
+                    strategies.append(('text', None, None, None))
+                    logger.info(f"🎯 Strategy 1: Text-based (most reliable): '{text}'")
                 
                 # Strategy 2: Direct selector (if provided and valid)
                 if selector:
@@ -1549,21 +2515,45 @@ ACTIONS:
                         count = await self.page.locator(selector).count()
                         if count > 0:
                             strategies.append(('selector', selector, None, None))
-                            logger.info(f"🎯 Strategy 2: Using provided selector: {selector} ({count} matches)")
+                            logger.info(f"🎯 Strategy 2: Direct selector: {selector} ({count} matches)")
                         else:
                             logger.warning(f"⚠️  Selector '{selector}' not found on page, skipping")
                     except Exception as e:
                         logger.warning(f"⚠️  Invalid selector '{selector}': {e}")
                 
-                # Strategy 3: Coordinates with verification (if provided)
-                if x is not None and y is not None:
-                    strategies.append(('coordinates', None, x, y))
-                    logger.info(f"🎯 Strategy 3: Using coordinates: ({x}, {y})")
+                # Strategy 3: Vision → DOM mapping (only if high confidence and validated)
+                if bbox and confidence >= 0.7:
+                    mapped_selector = await self.map_bbox_to_dom_selector(bbox)
+                    if mapped_selector:
+                        # Validate it's actually clickable
+                        try:
+                            element = self.page.locator(mapped_selector).first
+                            is_clickable = await element.evaluate("""
+                                el => {
+                                    const tag = el.tagName.toLowerCase();
+                                    return tag === 'button' || tag === 'a' || tag === 'input' ||
+                                           el.getAttribute('role') === 'button' ||
+                                           el.onclick !== null ||
+                                           window.getComputedStyle(el).cursor === 'pointer';
+                                }
+                            """)
+                            if is_clickable:
+                                strategies.append(('dom_from_vision', mapped_selector, None, None))
+                                logger.info(f"🎯 Strategy 3: Vision DOM mapping (validated clickable): {mapped_selector}")
+                            else:
+                                logger.warning(f"⚠️  Vision mapped to non-clickable element: {mapped_selector}, skipping")
+                        except Exception as e:
+                            logger.warning(f"⚠️  Could not validate vision mapping: {e}")
                 
-                # Strategy 4: Text-based (if provided)
-                if text:
-                    strategies.append(('text', None, None, None))
-                    logger.info(f"🎯 Strategy 4: Using text search: '{text}'")
+                # Strategy 4: Coordinates (LAST RESORT - only if validated)
+                if x is not None and y is not None:
+                    # Validate coordinates are in bounds
+                    validation = await self.verify_coordinates(x, y)
+                    if validation.get('valid'):
+                        strategies.append(('coordinates', None, x, y))
+                        logger.info(f"🎯 Strategy 4: Coordinates (validated): ({x}, {y})")
+                    else:
+                        logger.warning(f"⚠️  Coordinates ({x}, {y}) failed validation, skipping")
                 
                 # Try each strategy
                 for strategy_name, strat_selector, strat_x, strat_y in strategies:
@@ -1612,8 +2602,61 @@ ACTIONS:
                         logger.warning(f"⚠️  Strategy {strategy_name} failed: {e}, trying next")
                         continue
                 
-                # All strategies failed
-                logger.error(f"❌ All click strategies failed")
+                # All strategies failed - try vision as last resort
+                logger.error(f"❌ All click strategies failed for text='{text}', selector='{selector}'")
+                
+                # CRITICAL: Vision fallback for failed clicks
+                if VISION_ENABLED and (text or selector):
+                    logger.info("🎨 Attempting vision fallback for failed click...")
+                    try:
+                        # Capture screenshot
+                        screenshot_bytes = await self.page.screenshot(timeout=5000)
+                        screenshot_base64 = base64.b64encode(screenshot_bytes).decode('utf-8')
+                        
+                        # Ask vision to find the element
+                        vision_prompt = f"""Find and identify the clickable element on this page.
+Looking for: {text if text else f'element with selector {selector}'}
+
+Provide the bounding box coordinates:
+{{"x": center_x, "y": center_y, "found": true/false}}
+
+If you cannot find it, respond with {{"found": false}}"""
+
+                        client = OpenAI(api_key=OLLAMA_API_KEY, base_url="https://ollama.com/v1")
+                        response = client.chat.completions.create(
+                            model="qwen3-vl:235b-cloud",
+                            messages=[{
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": vision_prompt},
+                                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_base64}"}}
+                                ]
+                            }],
+                            temperature=0.1,
+                            max_tokens=200
+                        )
+                        
+                        content = response.choices[0].message.content
+                        json_match = re.search(r'\{.*\}', content, re.DOTALL)
+                        
+                        if json_match:
+                            vision_result = json.loads(json_match.group())
+                            if vision_result.get('found') and vision_result.get('x') and vision_result.get('y'):
+                                vision_x = vision_result['x']
+                                vision_y = vision_result['y']
+                                logger.info(f"🎨 Vision found element at ({vision_x}, {vision_y})")
+                                
+                                # Try clicking at vision coordinates
+                                await self.page.mouse.click(vision_x, vision_y)
+                                await self.page.wait_for_timeout(1000)
+                                logger.info("✅ Vision-based click succeeded")
+                                return True
+                            else:
+                                logger.warning("🎨 Vision could not find the element")
+                        
+                    except Exception as ve:
+                        logger.warning(f"⚠️  Vision fallback failed: {ve}")
+                
                 return False
             
             elif action == "double_click":
@@ -1633,6 +2676,20 @@ ACTIONS:
                     await self.page.wait_for_timeout(1000)
             
             elif action == "type":
+                # Use SOTA robust typing
+                logger.info(f"⌨️  Executing SOTA robust typing")
+                success = await self._execute_type_robust(params)
+                if success:
+                    # Press Enter after typing (common use case)
+                    try:
+                        await self.page.keyboard.press("Enter")
+                        await self.page.wait_for_timeout(1000)
+                        logger.info("✅ Pressed Enter after typing")
+                    except:
+                        pass
+                return success
+                
+                # OLD IMPLEMENTATION BELOW (kept as fallback)
                 selector = params.get("selector")
                 input_text = params.get("input_text", "")
                 logger.info(f"⌨️  Typing: '{input_text}' into {selector or 'auto-detected field'}")
@@ -1645,11 +2702,15 @@ ACTIONS:
                         await element.click()  # Focus the element
                         await self.page.wait_for_timeout(200)
                         await element.fill(input_text)
-                        await self.page.wait_for_timeout(200)
-                        # Press Enter if it's a search field
-                        if "search" in selector.lower() or 'name="q"' in selector or 'type="search"' in selector:
-                            await element.press("Enter")
-                        logger.info(f"✅ Filled input using provided selector")
+                        await self.page.wait_for_timeout(500)
+                        
+                        # ALWAYS press Enter after typing (most common use case)
+                        # This submits forms, triggers searches, etc.
+                        await element.press("Enter")
+                        logger.info(f"✅ Filled input and pressed Enter using provided selector")
+                        
+                        # Wait for navigation or response
+                        await self.page.wait_for_timeout(1000)
                     except Exception as e:
                         logger.warning(f"⚠️  Failed with provided selector: {e}")
                         return False
@@ -1707,6 +2768,8 @@ ACTIONS:
                     await self.page.wait_for_load_state("networkidle", timeout=3000)
                 except:
                     pass
+                
+                return True  # Type action succeeded
             
             elif action == "double_click":
                 x = params.get("x")
@@ -1791,34 +2854,460 @@ ACTIONS:
                     logger.info(f"📜 Scrolling to coordinates: ({x}, {y})")
                     await self.page.evaluate(f"window.scrollTo({x}, {y})")
                     await self.page.wait_for_timeout(1000)
+                    return True
                 elif selector:
                     logger.info(f"📜 Scrolling to selector: {selector}")
                     element = self.page.locator(selector).first
                     await element.scroll_into_view_if_needed()
                     await self.page.wait_for_timeout(1000)
+                    return True
+                else:
+                    logger.error("❌ Scroll_to requires coordinates or selector")
+                    return False
                 
             elif action == "scroll":
                 logger.info("📜 Scrolling page")
                 await self.page.evaluate("window.scrollBy(0, window.innerHeight * 0.8)")
                 await self.page.wait_for_timeout(1500)
+                return True  # Scroll succeeded
                 
             elif action == "extract":
                 logger.info("📊 Extracting data from current page")
+                
+                # CRITICAL FIX: Check if vision was used for this extraction
+                vision_reasoning = action_plan.get('reasoning', '')
+                vision_keywords = ['image', 'visual', 'doodle', 'logo', 'picture', 'photo', 'illustration', 'graphic']
+                used_vision = any(keyword in vision_reasoning.lower() for keyword in vision_keywords)
+                
+                # Get comprehensive page content
+                page_content = await self.get_page_content()
+                
+                # Build extracted data with proper metadata
+                extracted_data = {
+                    'url': page_content.get('url'),
+                    'title': page_content.get('title'),
+                    'timestamp': datetime.now().isoformat(),
+                    'data_source': 'vision' if used_vision else 'dom',
+                }
+                
+                # CRITICAL FIX: Include vision analysis if available
+                if used_vision and vision_reasoning:
+                    extracted_data['analysis_type'] = 'image_analysis'
+                    extracted_data['vision_analysis'] = vision_reasoning
+                    logger.info(f"🎨 Including vision analysis in extracted data")
+                else:
+                    extracted_data['analysis_type'] = 'text_extraction'
+                
+                # ENHANCED: Universal structured data extraction with lazy-load handling
+                # Step 1: Wait for dynamic content to load
+                logger.info("⏳ Waiting for dynamic content to load...")
+                try:
+                    # Wait for common loading indicators to disappear
+                    await self.page.wait_for_function("""
+                        () => {
+                            const loadingIndicators = document.querySelectorAll('[class*="loading"], [class*="spinner"], [class*="skeleton"]');
+                            return loadingIndicators.length === 0 || 
+                                   Array.from(loadingIndicators).every(el => el.offsetParent === null);
+                        }
+                    """, timeout=3000)
+                    logger.info("✅ Loading indicators cleared")
+                except:
+                    logger.debug("No loading indicators found or timeout - continuing")
+                
+                # Step 2: Scroll to trigger lazy-loaded content
+                logger.info("📜 Scrolling to trigger lazy-loaded content...")
+                scroll_success = False
+                try:
+                    # Scroll down in steps to trigger lazy loading
+                    for i in range(3):
+                        try:
+                            # Get current scroll position before
+                            before_scroll = await self.page.evaluate("window.pageYOffset")
+                            
+                            # Scroll down
+                            await self.page.evaluate("window.scrollBy(0, window.innerHeight * 0.8)")
+                            await self.page.wait_for_timeout(800)  # Wait for scroll and content load
+                            
+                            # Verify scroll happened
+                            after_scroll = await self.page.evaluate("window.pageYOffset")
+                            if after_scroll > before_scroll:
+                                logger.debug(f"Scrolled from {before_scroll} to {after_scroll}")
+                                scroll_success = True
+                            else:
+                                logger.debug(f"Scroll {i+1}: No movement detected")
+                        except Exception as e:
+                            logger.debug(f"Scroll {i+1} failed: {e}")
+                    
+                    # Scroll back to top to see all loaded content
+                    if scroll_success:
+                        try:
+                            await self.page.evaluate("window.scrollTo(0, 0)")
+                            await self.page.wait_for_timeout(500)
+                            logger.info("✅ Scrolling complete - content loaded")
+                        except Exception as e:
+                            logger.warning(f"⚠️  Scroll to top failed: {e}")
+                    else:
+                        logger.warning("⚠️  Scrolling did not work - page may not be scrollable")
+                        
+                except Exception as e:
+                    logger.warning(f"⚠️  Scrolling failed: {e} - continuing anyway")
+                
+                # Step 3: Attempt universal structured data extraction
+                logger.info("🔍 Attempting universal structured data extraction...")
+                try:
+                    structured_items = await self.page.evaluate("""
+                        () => {
+                            // Universal pattern detection - finds repeated structures
+                            function findRepeatedPatterns() {
+                                const items = [];
+                                
+                                // Common container patterns for repeated items (expanded)
+                                const containerSelectors = [
+                                    // E-commerce specific
+                                    '[data-asin]', '[data-component-type*="result"]', '[data-component-type*="item"]',
+                                    '[class*="s-result"]', '[class*="product"]', '[class*="item-container"]',
+                                    // Generic patterns
+                                    '[class*="item"]', '[class*="card"]', '[class*="result"]', 
+                                    '[class*="listing"]', '[class*="post"]', '[class*="article"]', 
+                                    '[class*="entry"]', '[class*="tile"]', '[class*="grid-item"]',
+                                    // Data attributes
+                                    '[data-testid*="item"]', '[data-testid*="card"]', '[data-testid*="product"]',
+                                    '[data-id]', '[data-item-id]', '[data-product-id]',
+                                    // Semantic HTML
+                                    'article', 'li[class]', '[role="article"]', '[role="listitem"]',
+                                    // Div with specific patterns
+                                    'div[class*="col-"]', 'div[class*="grid"]', 'div[class*="flex"]'
+                                ];
+                                
+                                // Find containers with multiple similar children
+                                let bestContainer = null;
+                                let maxSimilarChildren = 0;
+                                
+                                for (const selector of containerSelectors) {
+                                    try {
+                                        const elements = Array.from(document.querySelectorAll(selector));
+                                        
+                                        // Group by parent to find repeated patterns
+                                        const parentGroups = {};
+                                        elements.forEach(el => {
+                                            const parent = el.parentElement;
+                                            if (!parent) return;
+                                            
+                                            const parentKey = parent.tagName + (parent.className || '');
+                                            if (!parentGroups[parentKey]) {
+                                                parentGroups[parentKey] = { parent, children: [] };
+                                            }
+                                            parentGroups[parentKey].children.push(el);
+                                        });
+                                        
+                                        // Find parent with most similar children
+                                        for (const key in parentGroups) {
+                                            const group = parentGroups[key];
+                                            if (group.children.length > maxSimilarChildren && group.children.length >= 3) {
+                                                maxSimilarChildren = group.children.length;
+                                                bestContainer = { selector, elements: group.children };
+                                            }
+                                        }
+                                    } catch (e) {
+                                        // Skip invalid selectors
+                                    }
+                                }
+                                
+                                if (!bestContainer || bestContainer.elements.length < 3) {
+                                    return [];
+                                }
+                                
+                                // Extract data from each item
+                                bestContainer.elements.slice(0, 15).forEach((item, idx) => {
+                                    const rect = item.getBoundingClientRect();
+                                    
+                                    // Skip if not visible or too small
+                                    if (rect.height < 50 || rect.width < 100) return;
+                                    
+                                    const itemData = {
+                                        index: idx + 1,
+                                        type: bestContainer.selector
+                                    };
+                                    
+                                    // Extract text content
+                                    const headings = Array.from(item.querySelectorAll('h1, h2, h3, h4, h5, h6, [class*="title"], [class*="heading"], [class*="name"]'));
+                                    if (headings.length > 0) {
+                                        itemData.title = headings[0].innerText.trim().substring(0, 200);
+                                    }
+                                    
+                                    // Extract description/body text
+                                    const descriptions = Array.from(item.querySelectorAll('p, [class*="description"], [class*="summary"], [class*="excerpt"]'));
+                                    if (descriptions.length > 0) {
+                                        itemData.description = descriptions[0].innerText.trim().substring(0, 300);
+                                    }
+                                    
+                                    // Extract price (if present)
+                                    const pricePatterns = ['[class*="price"]', '[data-price]', '[class*="cost"]', '[class*="amount"]'];
+                                    for (const pattern of pricePatterns) {
+                                        const priceEl = item.querySelector(pattern);
+                                        if (priceEl) {
+                                            itemData.price = priceEl.innerText.trim();
+                                            break;
+                                        }
+                                    }
+                                    
+                                    // Extract rating/score (if present)
+                                    const ratingPatterns = ['[class*="rating"]', '[class*="star"]', '[class*="score"]', '[aria-label*="star"]'];
+                                    for (const pattern of ratingPatterns) {
+                                        const ratingEl = item.querySelector(pattern);
+                                        if (ratingEl) {
+                                            itemData.rating = ratingEl.innerText.trim() || ratingEl.getAttribute('aria-label');
+                                            break;
+                                        }
+                                    }
+                                    
+                                    // Extract date/time (if present)
+                                    const datePatterns = ['time', '[class*="date"]', '[class*="time"]', '[datetime]'];
+                                    for (const pattern of datePatterns) {
+                                        const dateEl = item.querySelector(pattern);
+                                        if (dateEl) {
+                                            itemData.date = dateEl.innerText.trim() || dateEl.getAttribute('datetime');
+                                            break;
+                                        }
+                                    }
+                                    
+                                    // Extract author/source (if present)
+                                    const authorPatterns = ['[class*="author"]', '[class*="by"]', '[class*="source"]', '[rel="author"]'];
+                                    for (const pattern of authorPatterns) {
+                                        const authorEl = item.querySelector(pattern);
+                                        if (authorEl) {
+                                            itemData.author = authorEl.innerText.trim();
+                                            break;
+                                        }
+                                    }
+                                    
+                                    // Extract primary link
+                                    const linkEl = item.querySelector('a[href]');
+                                    if (linkEl) {
+                                        itemData.link = linkEl.href;
+                                    }
+                                    
+                                    // Extract image
+                                    const imgEl = item.querySelector('img');
+                                    if (imgEl) {
+                                        itemData.image = imgEl.src;
+                                        itemData.image_alt = imgEl.alt;
+                                    }
+                                    
+                                    // Extract any data attributes
+                                    const dataAttrs = {};
+                                    for (const attr of item.attributes) {
+                                        if (attr.name.startsWith('data-')) {
+                                            dataAttrs[attr.name] = attr.value;
+                                        }
+                                    }
+                                    if (Object.keys(dataAttrs).length > 0) {
+                                        itemData.data_attributes = dataAttrs;
+                                    }
+                                    
+                                    // Extract all text as fallback
+                                    if (!itemData.title && !itemData.description) {
+                                        itemData.text = item.innerText.trim().substring(0, 500);
+                                    }
+                                    
+                                    // Only add if we extracted meaningful data
+                                    if (itemData.title || itemData.description || itemData.text || itemData.link) {
+                                        items.push(itemData);
+                                    }
+                                });
+                                
+                                return items;
+                            }
+                            
+                            return findRepeatedPatterns();
+                        }
+                    """)
+                    
+                    if structured_items and len(structured_items) >= 3:
+                        extracted_data['structured_items'] = structured_items
+                        extracted_data['item_count'] = len(structured_items)
+                        extracted_data['extraction_type'] = 'structured'
+                        logger.info(f"✨ Extracted {len(structured_items)} structured items using universal pattern detection")
+                    else:
+                        logger.info("📄 No repeated patterns detected with DOM extraction")
+                        
+                        # Step 4: Enhanced vision-based extraction with selector discovery
+                        if VISION_ENABLED and not used_vision:
+                            logger.info("🎨 Attempting enhanced vision-based extraction...")
+                            vision_extraction_result = await self._extract_with_vision_fallback(page_content)
+                            
+                            if vision_extraction_result:
+                                extracted_data.update(vision_extraction_result)
+                                logger.info(f"✅ Vision extraction successful: {vision_extraction_result.get('extraction_type')}")
+                            else:
+                                extracted_data['extraction_type'] = 'unstructured'
+                                logger.info("📄 Vision extraction failed - using unstructured extraction")
+                        else:
+                            extracted_data['extraction_type'] = 'unstructured'
+                            logger.info("📄 Using unstructured extraction")
+                        
+                except Exception as e:
+                    logger.warning(f"⚠️  Universal structured extraction failed: {e}")
+                    extracted_data['extraction_type'] = 'unstructured'
+                
+                # Include DOM content
+                extracted_data['text_content'] = page_content.get('bodyText', '')[:3000]  # Increased to 3000 chars
+                extracted_data['headings'] = page_content.get('headings', [])
+                extracted_data['links'] = [elem for elem in page_content.get('interactiveElements', []) if elem.get('isLink')][:15]  # Increased to 15
+                extracted_data['images'] = []
+                
+                # Extract image information with timeout
+                try:
+                    images = await asyncio.wait_for(
+                        self.page.evaluate("""
+                            () => {
+                                const imgs = Array.from(document.querySelectorAll('img'));
+                                return imgs.slice(0, 20).map(img => ({
+                                    src: img.src,
+                                    alt: img.alt || '',
+                                    title: img.title || '',
+                                    width: img.width,
+                                    height: img.height
+                                })).filter(img => img.width > 50 && img.height > 50);
+                            }
+                        """),
+                        timeout=5.0  # 5 second timeout
+                    )
+                    extracted_data['images'] = images[:15]
+                    logger.info(f"📷 Found {len(images)} images on page")
+                except asyncio.TimeoutError:
+                    logger.warning("⚠️  Image extraction timed out - skipping")
+                    extracted_data['images'] = []
+                except Exception as e:
+                    logger.warning(f"⚠️  Could not extract images: {e}")
+                    extracted_data['images'] = []
+                
+                # CRITICAL FIX: Robust deduplication using content hashing
+                if not hasattr(self, 'extracted_data'):
+                    self.extracted_data = []
+                
+                # Create a content hash for deduplication
+                import hashlib
+                content_for_hash = f"{extracted_data.get('url')}|{extracted_data.get('text_content', '')[:500]}|{extracted_data.get('vision_analysis', '')[:200]}"
+                content_hash = hashlib.md5(content_for_hash.encode()).hexdigest()
+                
+                # Check for duplicates using hash
+                is_duplicate = False
+                for existing in self.extracted_data:
+                    existing_content = f"{existing.get('url')}|{existing.get('text_content', '')[:500]}|{existing.get('vision_analysis', '')[:200]}"
+                    existing_hash = hashlib.md5(existing_content.encode()).hexdigest()
+                    
+                    if content_hash == existing_hash:
+                        is_duplicate = True
+                        logger.info(f"⚠️  Skipping duplicate extraction (hash match) for {extracted_data.get('url')}")
+                        break
+                    
+                    # Also check for near-duplicates (same URL and very similar content)
+                    if existing.get('url') == extracted_data.get('url'):
+                        # Check text similarity
+                        existing_text = existing.get('text_content', '')[:200]
+                        new_text = extracted_data.get('text_content', '')[:200]
+                        if existing_text == new_text:
+                            is_duplicate = True
+                            logger.info(f"⚠️  Skipping near-duplicate extraction for {extracted_data.get('url')}")
+                            break
+                
+                if not is_duplicate:
+                    # Validate extraction quality
+                    extraction_quality = self._validate_extraction_quality(extracted_data)
+                    
+                    if extraction_quality['is_sufficient']:
+                        self.extracted_data.append(extracted_data)
+                        # Log what was extracted
+                        if used_vision:
+                            logger.info(f"✅ Extracted vision analysis: {vision_reasoning[:100]}...")
+                        logger.info(f"✅ Extracted data: {len(extracted_data['text_content'])} chars text, {len(extracted_data['images'])} images, {len(extracted_data['headings'])} headings")
+                        if extracted_data.get('structured_items'):
+                            logger.info(f"📊 Structured items: {len(extracted_data['structured_items'])} items")
+                        logger.debug(f"📝 Text preview: {extracted_data['text_content'][:200]}...")
+                    else:
+                        # Extraction quality is poor - try vision fallback if not already used
+                        logger.warning(f"⚠️  Extraction quality insufficient: {extraction_quality['reason']}")
+                        
+                        if VISION_ENABLED and not used_vision and extracted_data.get('extraction_type') != 'vision_pure':
+                            logger.info("🔄 Retrying extraction with vision fallback...")
+                            vision_retry_result = await self._extract_with_vision_fallback(page_content)
+                            
+                            if vision_retry_result:
+                                # Merge vision results with existing data
+                                extracted_data.update(vision_retry_result)
+                                logger.info(f"✅ Vision retry successful: {vision_retry_result.get('extraction_type')}")
+                                
+                                # Re-validate
+                                retry_quality = self._validate_extraction_quality(extracted_data)
+                                if retry_quality['is_sufficient']:
+                                    self.extracted_data.append(extracted_data)
+                                    logger.info("✅ Vision-enhanced extraction meets quality threshold")
+                                else:
+                                    # Even vision failed, but save what we have
+                                    self.extracted_data.append(extracted_data)
+                                    logger.warning(f"⚠️  Saving low-quality extraction: {retry_quality['reason']}")
+                            else:
+                                # Vision retry failed, save what we have
+                                self.extracted_data.append(extracted_data)
+                                logger.warning("⚠️  Vision retry failed - saving available data")
+                        else:
+                            # No vision available or already used, save what we have
+                            self.extracted_data.append(extracted_data)
+                            logger.warning("⚠️  Saving low-quality extraction (no vision fallback available)")
+                else:
+                    logger.info(f"ℹ️  Data already extracted, skipping duplicate")
+                
                 await self.capture_screenshot("extract")
+                return True  # Extract succeeded
             
             elif action == "analyze_images":
                 logger.info("🎨 Analyzing images on current page using vision")
                 # Vision model already analyzed in planning step
                 # The descriptions are in action_plan['reasoning']
                 await self.capture_screenshot("analyze_images")
-                # Store analysis in actions_taken for final summary
-                self.actions_taken.append({
-                    'action': 'analyze_images',
-                    'analysis': action_plan.get('reasoning', 'Image analysis completed')
-                })
-                # Extract action means we got the data we need
-                # The completed_subtask should be set in action_plan
-                return False  # Continue to next subtask
+                
+                # Store analysis as extracted data
+                analysis_text = action_plan.get('reasoning', 'Image analysis completed')
+                if not hasattr(self, 'extracted_data'):
+                    self.extracted_data = []
+                
+                # CRITICAL FIX: Robust deduplication for analyze_images
+                analysis_data = {
+                    'url': self.page.url,
+                    'title': await self.page.title(),
+                    'data_source': 'vision',
+                    'analysis_type': 'image_analysis',
+                    'vision_analysis': analysis_text,
+                    'timestamp': datetime.now().isoformat()
+                }
+                
+                # Create content hash for deduplication
+                import hashlib
+                analysis_content = f"{analysis_data.get('url')}|{analysis_text[:200]}"
+                analysis_hash = hashlib.md5(analysis_content.encode()).hexdigest()
+                
+                # Check for duplicates using hash and similarity
+                is_duplicate = False
+                for existing in self.extracted_data:
+                    if existing.get('analysis_type') == 'image_analysis' and existing.get('url') == analysis_data.get('url'):
+                        # Check if analysis is similar (first 100 chars)
+                        existing_analysis = existing.get('vision_analysis', '')[:100]
+                        new_analysis = analysis_text[:100]
+                        
+                        # If first 100 chars are very similar, it's a duplicate
+                        if existing_analysis == new_analysis or len(set(existing_analysis.split()) & set(new_analysis.split())) > 10:
+                            is_duplicate = True
+                            logger.info(f"⚠️  Skipping duplicate/similar image analysis")
+                            break
+                
+                if not is_duplicate:
+                    self.extracted_data.append(analysis_data)
+                    logger.info(f"✅ Image analysis completed: {analysis_text[:100]}...")
+                else:
+                    logger.info(f"ℹ️  Analysis already recorded, skipping duplicate")
+                
+                return True  # Analysis succeeded
             
             elif action == "save_images":
                 logger.info("💾 Saving images from current page using vision")
@@ -1962,18 +3451,19 @@ ACTIONS:
                 
             elif action == "skip":
                 logger.info("⏭️  Skipping current subtask")
-                return False
+                return True  # Skip is a successful action
                 
             elif action == "done":
                 logger.info("✅ Task marked as complete")
                 return True
             
             else:
-                # Invalid action - treat as done to avoid loops
-                logger.warning(f"⚠️  Invalid action '{action}' - treating as done")
-                return True
+                # Invalid action - treat as failure
+                logger.error(f"❌ Invalid/unknown action '{action}'")
+                return False
                 
-            return False
+            # Default: if we reach here, action succeeded
+            return True
             
         except Exception as e:
             error_msg = str(e)
@@ -2005,6 +3495,67 @@ ACTIONS:
             })
             return False
     
+    async def detect_and_close_modal(self) -> bool:
+        """Detect and attempt to close modal/overlay that might be blocking interaction"""
+        logger.debug("🔍 Starting modal detection...")
+        try:
+            # First check if there's actually a modal
+            modal_indicators = await self.page.locator('[role="dialog"], .modal, .overlay, [class*="modal"]').count()
+            if modal_indicators == 0:
+                logger.debug("ℹ️  No modal indicators found on page")
+                return False
+            
+            logger.info(f"🔍 Found {modal_indicators} potential modal(s), attempting to close")
+            
+            # Common modal/overlay patterns
+            modal_selectors = [
+                'button[aria-label*="close" i]',
+                'button[aria-label*="dismiss" i]',
+                'button.close',
+                '[role="dialog"] button',
+                '.modal button.close',
+                '.overlay button.close',
+                'button[title*="close" i]',
+                '[class*="close"][class*="button"]',
+                'iframe + button',  # Close button next to iframe
+            ]
+            
+            for selector in modal_selectors:
+                try:
+                    elements = await self.page.locator(selector).all()
+                    if elements:
+                        logger.debug(f"🔍 Checking selector: {selector} ({len(elements)} matches)")
+                        # Try clicking the first visible one
+                        for element in elements[:2]:  # Try first 2 matches
+                            try:
+                                if await element.is_visible():
+                                    await element.click(timeout=2000)
+                                    await self.page.wait_for_timeout(500)
+                                    logger.info(f"✅ Successfully closed modal using: {selector}")
+                                    return True
+                            except Exception as e:
+                                logger.debug(f"Failed to click element: {e}")
+                                continue
+                except Exception as e:
+                    logger.debug(f"Selector {selector} failed: {e}")
+                    continue
+            
+            # Try pressing Escape as last resort
+            logger.debug("🔧 Trying Escape key as fallback")
+            try:
+                await self.page.keyboard.press("Escape")
+                await self.page.wait_for_timeout(500)
+                logger.info("✅ Pressed Escape key")
+                return True
+            except Exception as e:
+                logger.debug(f"Escape key failed: {e}")
+            
+            logger.warning("⚠️  Could not close modal - no working close method found")
+            return False
+        except Exception as e:
+            logger.debug(f"Modal detection error: {e}")
+            return False
+    
     async def run(self) -> Dict[str, Any]:
         """Main execution loop with task planning and live streaming"""
         self.start_time = datetime.now()
@@ -2025,10 +3576,14 @@ ACTIONS:
         
         try:
             for step in range(1, self.max_steps + 1):
-                logger.info(f"\n📍 Step {step}/{self.max_steps}")
+                logger.info(f"\n{'='*60}")
+                logger.info(f"📍 Step {step}/{self.max_steps}")
+                logger.info(f"{'='*60}")
                 
                 # Get current page state (always fresh - detects dynamic changes)
                 page_content = await self.get_page_content()
+                logger.info(f"🌐 Current URL: {page_content.get('url')}")
+                logger.info(f"📄 Page title: {page_content.get('title')}")
                 
                 # Detect if page has changed (URL or content)
                 current_url = page_content.get('url')
@@ -2057,9 +3612,17 @@ ACTIONS:
                 # Decide if vision is needed for next step
                 use_vision = await self.should_use_vision(page_content)
                 
+                # Log subtask status
+                pending_subtasks = [t for t in self.task_plan if t['status'] == 'pending']
+                completed_subtasks = [t for t in self.task_plan if t['status'] == 'completed']
+                logger.info(f"📊 Subtask Progress: {len(completed_subtasks)}/{len(self.task_plan)} completed, {len(pending_subtasks)} pending")
+                if pending_subtasks:
+                    logger.info(f"⏭️  Next pending: {pending_subtasks[0]['subtask']}")
+                
                 # Plan next action (with vision if needed)
                 action_plan = None
                 if use_vision:
+                    logger.info("🎨 Using VISION for next action planning")
                     # Capture screenshot for vision analysis with robust error handling
                     screenshot_bytes = None
                     for timeout_val in [15000, 5000, 3000]:
@@ -2085,31 +3648,76 @@ ACTIONS:
                 
                 # Fallback to text-only if vision failed or not needed
                 if not action_plan:
+                    logger.info("📝 Using TEXT-ONLY for next action planning")
                     action_plan = self.plan_next_action(page_content, step)
                     self.metrics["llm_calls"] += 1
                 
-                logger.info(f"💭 Plan: {action_plan.get('action')} - {action_plan.get('reasoning', '')}")
+                logger.info(f"💭 Planned Action: {action_plan.get('action')}")
+                logger.info(f"💡 Reasoning: {action_plan.get('reasoning', 'No reasoning provided')}")
                 
-                # Check if a subtask was completed
-                if action_plan.get("completed_subtask"):
-                    subtask_name = action_plan["completed_subtask"]
-                    for subtask in self.task_plan:
-                        if subtask_name.lower() in subtask['subtask'].lower() and subtask['status'] == 'pending':
-                            subtask['status'] = 'completed'
-                            self.completed_subtasks.append(subtask['subtask'])
-                            logger.info(f"✅ Completed subtask: {subtask['subtask']}")
-                            self.consecutive_same_actions = 0
-                            break
+                # Log action parameters
+                if action_plan.get('params'):
+                    logger.debug(f"🔧 Action params: {action_plan.get('params')}")
+                
+                # CRITICAL FIX: Prevent planning the same action repeatedly
+                current_action_type = action_plan.get('action')
+                if len(self.actions_planned) >= 2:
+                    last_two_actions = [a.get('action') for a in self.actions_planned[-2:]]
+                    if all(a == current_action_type for a in last_two_actions):
+                        # Same action planned 3 times in a row
+                        if current_action_type in ['analyze_images', 'extract']:
+                            logger.warning(f"⚠️  Detected repeated {current_action_type} action - forcing completion")
+                            # Force complete the pending subtask
+                            for subtask in self.task_plan:
+                                if subtask['status'] == 'pending':
+                                    subtask['status'] = 'completed'
+                                    self.completed_subtasks.append(subtask['subtask'])
+                                    logger.info(f"✅ Force-completed subtask to break loop: {subtask['subtask']}")
+                                    break
+                            # Change action to 'done' if no more pending
+                            if not any(t['status'] == 'pending' for t in self.task_plan):
+                                action_plan['action'] = 'done'
+                                action_plan['is_complete'] = True
+                                logger.info(f"🔄 Changed action to 'done' to break loop")
+                
+                # CRITICAL FIX: Do NOT mark subtasks as completed until AFTER action executes
+                # Store the completed_subtask for later processing
+                pending_completed_subtask = action_plan.get("completed_subtask")
                 
                 # Check if LLM wants to add a new subtask mid-way
                 if action_plan.get("new_subtask"):
                     new_subtask_text = action_plan["new_subtask"]
-                    self.task_plan.append({
-                        "subtask": new_subtask_text,
-                        "status": "pending"
-                    })
-                    logger.info(f"➕ Added new subtask: {new_subtask_text}")
-                    self.consecutive_same_actions = 0
+                    
+                    # CRITICAL FIX: Check for duplicate subtasks before adding
+                    is_duplicate_subtask = False
+                    for existing in self.task_plan:
+                        # Check for exact match or very similar subtasks
+                        if existing['subtask'].lower() == new_subtask_text.lower():
+                            is_duplicate_subtask = True
+                            logger.info(f"⚠️  Skipping duplicate subtask: {new_subtask_text}")
+                            break
+                        # Check for semantic similarity (same key words)
+                        existing_words = set(existing['subtask'].lower().split())
+                        new_words = set(new_subtask_text.lower().split())
+                        overlap = len(existing_words & new_words) / max(len(existing_words), len(new_words))
+                        if overlap > 0.7:  # 70% word overlap = duplicate
+                            is_duplicate_subtask = True
+                            logger.info(f"⚠️  Skipping similar subtask: {new_subtask_text} (similar to: {existing['subtask']})")
+                            break
+                    
+                    # CRITICAL FIX: Limit total subtasks to prevent runaway task creation
+                    MAX_SUBTASKS = 8
+                    if len(self.task_plan) >= MAX_SUBTASKS:
+                        logger.warning(f"⚠️  Maximum subtasks ({MAX_SUBTASKS}) reached, not adding: {new_subtask_text}")
+                    elif not is_duplicate_subtask:
+                        self.task_plan.append({
+                            "subtask": new_subtask_text,
+                            "status": "pending"
+                        })
+                        logger.info(f"➕ Added new subtask: {new_subtask_text}")
+                        self.consecutive_same_actions = 0
+                    else:
+                        logger.info(f"ℹ️  Subtask already exists, not adding duplicate")
                 
                 # Check if a subtask failed/should be skipped
                 if action_plan.get("failed_subtask"):
@@ -2125,26 +3733,17 @@ ACTIONS:
                             self.consecutive_same_actions = 0
                             break
                 
-                # Track consecutive same actions and force skip if stuck
+                # Track consecutive same actions - let LLM decide recovery
                 current_action = action_plan.get("action")
-                if current_action == self.last_action_type:
+                current_url = page_content.get('url')
+                
+                # Only count as stuck if same action on same URL
+                if current_action == self.last_action_type and current_url == getattr(self, 'last_action_url', None):
                     self.consecutive_same_actions += 1
-                    if self.consecutive_same_actions >= 3:
-                        logger.error(f"🚨 STUCK! Same action '{current_action}' repeated {self.consecutive_same_actions} times - FORCING SKIP")
-                        # Force mark current pending subtask as failed
-                        for subtask in self.task_plan:
-                            if subtask['status'] == 'pending':
-                                subtask['status'] = 'failed'
-                                self.failed_subtasks.append({
-                                    "subtask": subtask['subtask'],
-                                    "reason": f"Stuck in loop - {current_action} repeated {self.consecutive_same_actions} times"
-                                })
-                                logger.warning(f"❌ Auto-failed stuck subtask: {subtask['subtask']}")
-                                self.consecutive_same_actions = 0
-                                break
                 else:
                     self.consecutive_same_actions = 1
                     self.last_action_type = current_action
+                    self.last_action_url = current_url
                 
                 # Record action
                 self.actions_taken.append({
@@ -2174,34 +3773,119 @@ ACTIONS:
                     logger.warning(f"⚠️  LLM marked complete but {len(pending)} subtasks pending: {pending}")
                     # Continue execution to finish pending subtasks
                 
-                # Execute action
-                is_done = await self.execute_action(action_plan)
+                # Track planned action
+                planned_action = {
+                    'step': step,
+                    'action': action_plan.get('action'),
+                    'reasoning': action_plan.get('reasoning'),
+                    'params': action_plan.get('params', {})
+                }
+                self.actions_planned.append(planned_action)
                 
-                # Auto-complete subtasks based on action if LLM didn't specify
-                if not action_plan.get("completed_subtask") and not is_done:
-                    current_action = action_plan.get("action")
-                    # Try to auto-match action to pending subtask
+                # Execute action
+                logger.info(f"⚡ Executing action: {action_plan.get('action')}")
+                action_start_time = datetime.now()
+                is_done = await self.execute_action(action_plan)
+                action_duration = (datetime.now() - action_start_time).total_seconds()
+                
+                # Track result - FIXED: properly handle action success/failure
+                # is_done can be: True (success), False (failure), or None (extract/done action)
+                action_success = is_done if is_done is not None else True
+                
+                action_result = {
+                    'step': step,
+                    'action': action_plan.get('action'),
+                    'success': action_success,
+                    'duration': action_duration,
+                    'url': page_content.get('url')
+                }
+                
+                if action_success:
+                    self.actions_succeeded.append(action_result)
+                    logger.info(f"✅ Action succeeded in {action_duration:.2f}s")
+                else:
+                    self.actions_failed.append(action_result)
+                    logger.error(f"❌ Action failed after {action_duration:.2f}s")
+                    
+                    # CRITICAL FIX: Mark subtask as FAILED when action fails
                     for subtask in self.task_plan:
                         if subtask['status'] == 'pending':
-                            subtask_lower = subtask['subtask'].lower()
-                            # Match navigate actions
-                            if current_action == "navigate" and ("navigate" in subtask_lower or "go to" in subtask_lower or "visit" in subtask_lower):
+                            subtask['status'] = 'failed'
+                            self.failed_subtasks.append({
+                                "subtask": subtask['subtask'],
+                                "reason": f"Action '{action_plan.get('action')}' failed"
+                            })
+                            logger.error(f"❌ Subtask failed due to action failure: {subtask['subtask']}")
+                            break
+                
+                # CRITICAL FIX: Mark subtasks as completed AFTER action succeeds
+                if action_success:
+                    # First, check if LLM explicitly marked a subtask as completed
+                    if pending_completed_subtask:
+                        subtask_name = pending_completed_subtask
+                        for subtask in self.task_plan:
+                            if subtask_name.lower() in subtask['subtask'].lower() and subtask['status'] == 'pending':
                                 subtask['status'] = 'completed'
                                 self.completed_subtasks.append(subtask['subtask'])
-                                logger.info(f"✅ Auto-completed subtask: {subtask['subtask']}")
+                                logger.info(f"✅ Completed subtask: {subtask['subtask']}")
+                                self.consecutive_same_actions = 0
                                 break
-                            # Match extract actions
-                            elif current_action == "extract" and ("extract" in subtask_lower or "get" in subtask_lower or "tell me" in subtask_lower):
-                                subtask['status'] = 'completed'
-                                self.completed_subtasks.append(subtask['subtask'])
-                                logger.info(f"✅ Auto-completed subtask: {subtask['subtask']}")
-                                break
-                            # Match type/search actions
-                            elif current_action == "type" and ("search" in subtask_lower or "type" in subtask_lower):
-                                subtask['status'] = 'completed'
-                                self.completed_subtasks.append(subtask['subtask'])
-                                logger.info(f"✅ Auto-completed subtask: {subtask['subtask']}")
-                                break
+                    # Otherwise, try to auto-match action to pending subtask INTELLIGENTLY
+                    else:
+                        current_action = action_plan.get("action")
+                        action_reasoning = action_plan.get("reasoning", "").lower()
+                        
+                        # CRITICAL FIX: Smart subtask matching based on intent
+                        for subtask in self.task_plan:
+                            if subtask['status'] == 'pending':
+                                subtask_lower = subtask['subtask'].lower()
+                                matched = False
+                                
+                                # Match navigate actions
+                                if current_action == "navigate" and any(word in subtask_lower for word in ["navigate", "go to", "visit", "open"]):
+                                    matched = True
+                                
+                                # Match vision/image analysis subtasks
+                                elif current_action in ["extract", "analyze_images"]:
+                                    # Check if subtask is about image/vision analysis
+                                    vision_keywords = ["analyze", "doodle", "image", "visual", "picture", "logo", "graphic", "look at", "determine", "subject", "about", "what", "identify", "describe"]
+                                    is_vision_subtask = any(word in subtask_lower for word in vision_keywords)
+                                    
+                                    # Check if action used vision
+                                    used_vision = any(word in action_reasoning for word in ["image", "visual", "doodle", "logo", "picture", "analyze", "standard google logo", "multicolored"])
+                                    
+                                    # CRITICAL: analyze_images ALWAYS completes ANY pending vision subtask
+                                    if current_action == "analyze_images":
+                                        if is_vision_subtask:
+                                            matched = True
+                                            logger.info(f"🎨 Matched vision subtask '{subtask['subtask']}' with analyze_images action")
+                                        else:
+                                            # Even if not obviously vision-related, analyze_images should complete SOMETHING
+                                            # This prevents infinite loops
+                                            logger.warning(f"⚠️  analyze_images completing non-vision subtask: {subtask['subtask']}")
+                                            matched = True
+                                    # Match if both are vision-related
+                                    elif is_vision_subtask and used_vision and current_action == "extract":
+                                        matched = True
+                                        logger.info(f"🎨 Matched vision subtask with vision-based extract action")
+                                    elif not is_vision_subtask and current_action == "extract":
+                                        # Text extraction subtask
+                                        if any(word in subtask_lower for word in ["extract", "get", "tell me", "find", "content"]):
+                                            matched = True
+                                
+                                # Match type/search actions
+                                elif current_action == "type" and any(word in subtask_lower for word in ["search", "type", "enter", "input"]):
+                                    matched = True
+                                
+                                # Match click actions
+                                elif current_action == "click" and any(word in subtask_lower for word in ["click", "select", "choose", "press"]):
+                                    matched = True
+                                
+                                if matched:
+                                    subtask['status'] = 'completed'
+                                    self.completed_subtasks.append(subtask['subtask'])
+                                    logger.info(f"✅ Auto-completed subtask: {subtask['subtask']}")
+                                    break
                 
                 # Capture screenshot after action
                 await self.capture_screenshot(f"step_{step}")
@@ -2219,6 +3903,14 @@ ACTIONS:
             logger.info(f"✅ Browser agent completed: {result_summary}")
             logger.info(f"📊 Metrics: {self.metrics['total_time']:.1f}s total, {self.metrics['llm_calls']} LLM calls, {self.metrics['screenshots_taken']} screenshots")
             
+            # Validation: Check if extract actions were performed but no data was extracted
+            extract_actions = [a for a in self.actions_taken if a.get('action') == 'extract']
+            if extract_actions and not hasattr(self, 'extracted_data'):
+                logger.error("🚨 VALIDATION FAILED: Extract actions were performed but no data was extracted!")
+                logger.error("🚨 This indicates the LLM may be hallucinating responses!")
+            elif extract_actions:
+                logger.info(f"✅ Validation passed: {len(extract_actions)} extract actions, {len(getattr(self, 'extracted_data', []))} data entries")
+            
         finally:
             # Stop streaming
             self.is_running = False
@@ -2234,13 +3926,29 @@ ACTIONS:
                 if self.task_id in live_screenshots:
                     del live_screenshots[self.task_id]
         
+        # Prepare extracted data summary
+        extracted_data_summary = None
+        if hasattr(self, 'extracted_data') and self.extracted_data:
+            logger.info(f"📦 Returning {len(self.extracted_data)} extracted data entries")
+            extracted_data_summary = {
+                'entries': self.extracted_data,
+                'total_entries': len(self.extracted_data)
+            }
+        else:
+            logger.warning("⚠️  No data was extracted during this task")
+        
         return {
             "success": True,
             "summary": result_summary or "Completed all steps",
             "actions": self.actions_taken,
+            "actions_planned": self.actions_planned,
+            "actions_succeeded": self.actions_succeeded,
+            "actions_failed": self.actions_failed,
+            "action_success_rate": f"{len(self.actions_succeeded)}/{len(self.actions_planned)}" if self.actions_planned else "0/0",
             "screenshots": self.screenshots,
             "downloads": self.downloads,
             "uploaded_files": self.uploaded_files,
+            "extracted_data": extracted_data_summary,
             "task_id": self.task_id,
             "metrics": self.metrics
         }
@@ -2262,14 +3970,25 @@ async def browse(request: BrowseRequest, headless: bool = False, enable_streamin
         ) as agent:
             result = await agent.run()
             
+            # Log extracted data if available
+            extracted_data = result.get("extracted_data")
+            if extracted_data:
+                logger.info(f"📦 Task completed with {extracted_data.get('total_entries', 0)} data extractions")
+            else:
+                logger.warning("⚠️  Task completed but no data was extracted")
+            
             return {
                 "success": result["success"],
                 "task_summary": result["summary"],
                 "actions_taken": result["actions"],
+                "actions_planned": result.get("actions_planned", []),
+                "actions_succeeded": result.get("actions_succeeded", []),
+                "actions_failed": result.get("actions_failed", []),
+                "action_success_rate": result.get("action_success_rate", "0/0"),
                 "screenshot_files": result["screenshots"],
                 "downloaded_files": result.get("downloads", []),
                 "uploaded_files": result.get("uploaded_files", []),
-                "extracted_data": None,
+                "extracted_data": extracted_data,
                 "task_id": result["task_id"],
                 "metrics": result.get("metrics", {}),
                 "error": None

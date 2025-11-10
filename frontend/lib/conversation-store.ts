@@ -62,6 +62,9 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
   canvas_content: undefined,
   canvas_type: undefined,
   has_canvas: false,
+  browser_view: undefined,
+  plan_view: undefined,
+  current_view: 'browser',
   // Plan approval fields
   approval_required: false,
   estimated_cost: 0,
@@ -84,6 +87,9 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
         canvas_content: undefined,
         canvas_type: undefined,
         has_canvas: false,
+        browser_view: undefined,
+        plan_view: undefined,
+        current_view: 'browser',
       });
       
       try {
