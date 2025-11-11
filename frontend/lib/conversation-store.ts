@@ -116,43 +116,69 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
           uploaded_files: uploadedFiles,
         });
 
-        // Send message to WebSocket with connection wait
+        // Send message to WebSocket with connection wait and enhanced error handling
         const sendMessageToWebSocket = async () => {
           const maxAttempts = 30; // Increased from 10 to 30 attempts
           const delayMs = 500; // Increased from 200ms to 500ms
+          const maxWaitTime = (maxAttempts * delayMs); // ~15 seconds total
           
           for (let attempt = 0; attempt < maxAttempts; attempt++) {
-            const ws = (window as any).__websocket;
-            if (ws && ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({
-                thread_id: get().thread_id,
-                prompt: input,
-                planning_mode: planningMode,
-                owner: owner,
-                files: uploadedFiles.map(file => ({
-                  file_name: file.file_name,
-                  file_path: file.file_path,
-                  file_type: file.file_type
-                }))
-              }));
-              console.debug(`WebSocket message sent successfully on attempt ${attempt + 1}`);
-              return; // Successfully sent
+            try {
+              const ws = (window as any).__websocket;
+              
+              // Check if WebSocket exists and is open
+              if (!ws) {
+                if (attempt === 0) {
+                  console.debug('WebSocket not yet initialized, waiting for connection...');
+                }
+              } else if (ws.readyState === WebSocket.OPEN) {
+                // Successfully connected, send the message
+                try {
+                  ws.send(JSON.stringify({
+                    thread_id: get().thread_id,
+                    prompt: input,
+                    planning_mode: planningMode,
+                    owner: owner,
+                    files: uploadedFiles.map(file => ({
+                      file_name: file.file_name,
+                      file_path: file.file_path,
+                      file_type: file.file_type
+                    }))
+                  }));
+                  console.debug(`WebSocket message sent successfully on attempt ${attempt + 1}`);
+                  return; // Successfully sent
+                } catch (sendErr) {
+                  console.error(`Failed to serialize/send message: ${sendErr instanceof Error ? sendErr.message : String(sendErr)}`);
+                  throw new Error('Failed to send message to server');
+                }
+              } else if (ws.readyState === WebSocket.CONNECTING) {
+                console.debug(`WebSocket connecting (attempt ${attempt + 1}/${maxAttempts})...`);
+              } else if (ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) {
+                console.warn(`WebSocket in ${ws.readyState === WebSocket.CLOSING ? 'closing' : 'closed'} state`);
+              }
+              
+              // Wait before retrying
+              if (attempt < maxAttempts - 1) {
+                console.debug(`Waiting ${delayMs}ms before retry (attempt ${attempt + 1}/${maxAttempts})...`);
+                await new Promise(resolve => setTimeout(resolve, delayMs));
+              }
+            } catch (retryErr) {
+              console.error(`Error during send attempt ${attempt + 1}: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`);
+              if (attempt < maxAttempts - 1) {
+                await new Promise(resolve => setTimeout(resolve, delayMs));
+              }
             }
-            
-            console.debug(`WebSocket not ready, attempt ${attempt + 1}/${maxAttempts}, waiting ${delayMs}ms...`);
-            // Wait before retrying
-            await new Promise(resolve => setTimeout(resolve, delayMs));
           }
           
           // If we've exhausted all attempts, show an error
-          console.error('WebSocket not connected after multiple attempts');
+          console.error(`WebSocket not connected after ${maxAttempts} attempts (~${maxWaitTime}ms)`);
           set({ status: 'error', isLoading: false });
           
-          // Add error message to chat
+          // Add detailed error message to chat
           const errorSystemMessage: Message = {
             id: Date.now().toString(),
             type: 'system',
-            content: 'Error: WebSocket connection failed. Please check if the backend server is running on localhost:8000.',
+            content: `Error: Failed to establish connection after ${Math.round(maxWaitTime / 1000)} seconds. Please check if the backend server is running at ${new URL((window as any).__websocket?.url || 'ws://localhost:8000/ws/chat').origin} and refresh the page to try again.`,
             timestamp: new Date()
           };
           set((state: ConversationStore) => ({ messages: [...state.messages, errorSystemMessage] }));
@@ -164,9 +190,11 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
         // The backend will send __end__ or __error__ events to complete the request
         
       } catch (error: any) {
-        const errorMessage = error.message || 'An unknown error occurred';
+        const errorMessage = error instanceof Error ? error.message : (error?.message || 'An unknown error occurred');
+        console.error('Error in continueConversation:', errorMessage, error);
         set({ status: 'error', isLoading: false });
-        // Optionally, add an error message to the chat
+        
+        // Add error message to the chat
         const errorSystemMessage: Message = {
           id: Date.now().toString(),
           type: 'system',
@@ -263,9 +291,15 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
               console.debug('  input:', input);
               console.debug('  planning_mode:', planningMode);
               console.debug('  full message:', messageData);
-              ws.send(JSON.stringify(messageData));
-              console.debug(`WebSocket message sent successfully on attempt ${attempt + 1}`);
-              return; // Successfully sent
+              
+              try {
+                ws.send(JSON.stringify(messageData));
+                console.debug(`WebSocket message sent successfully on attempt ${attempt + 1}`);
+                return; // Successfully sent
+              } catch (sendErr) {
+                console.error(`Failed to send message: ${sendErr instanceof Error ? sendErr.message : String(sendErr)}`);
+                throw new Error('Failed to send message to server');
+              }
             }
             
             console.debug(`WebSocket not ready, attempt ${attempt + 1}/${maxAttempts}, waiting ${delayMs}ms...`);
@@ -274,14 +308,15 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
           }
           
           // If we've exhausted all attempts, show an error
-          console.error('WebSocket not connected after multiple attempts');
+          const maxWaitTime = maxAttempts * delayMs;
+          console.error(`WebSocket not connected after ${maxAttempts} attempts (~${maxWaitTime}ms)`);
           set({ status: 'error', isLoading: false });
           
-          // Add error message to chat
+          // Add detailed error message to chat
           const errorSystemMessage: Message = {
             id: Date.now().toString(),
             type: 'system',
-            content: 'Error: WebSocket connection failed. Please check if the backend server is running on localhost:8000.',
+            content: `Error: Failed to send response after ${Math.round(maxWaitTime / 1000)} seconds. Connection may have been lost. Please refresh the page and try again.`,
             timestamp: new Date()
           };
           set((state: ConversationStore) => ({ messages: [...state.messages, errorSystemMessage] }));

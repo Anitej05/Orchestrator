@@ -2,6 +2,7 @@
 import uuid
 import logging
 import json
+import asyncio
 import time
 from typing import List, Optional, Dict, Any, Literal
 from pydantic import BaseModel
@@ -1356,6 +1357,7 @@ async def websocket_chat(websocket: WebSocket):
     WebSocket endpoint for streaming agent orchestration updates.
     Uses the unified orchestration service with streaming enabled.
     Now supports interactive workflows with user input.
+    Enhanced with comprehensive error handling and logging.
     """
     await websocket.accept()
     thread_id = None  # Initialize thread_id to None
@@ -1365,19 +1367,26 @@ async def websocket_chat(websocket: WebSocket):
             # Wait for message from client
             try:
                 data = await websocket.receive_json()
+            except json.JSONDecodeError as je:
+                # Invalid JSON from client
+                logger.error(f"Invalid JSON received from WebSocket client: {je}")
+                try:
+                    await websocket.send_json({
+                        "node": "__error__",
+                        "error": "Invalid message format. Expected valid JSON.",
+                        "error_type": "JSONDecodeError",
+                        "timestamp": time.time()
+                    })
+                except Exception as send_err:
+                    logger.error(f"Failed to send JSON error response: {send_err}")
+                continue  # Wait for next message
             except Exception as e:
-                # Connection closed or error receiving - just break the loop
-                logger.info(f"WebSocket receive error (connection likely closed): {e}")
+                # Connection closed or other receive error
+                error_type = type(e).__name__
+                # WebSocketDisconnect and RuntimeError(websocket.client_state) are expected on close
+                if "closed" not in str(e).lower() and error_type != "WebSocketDisconnect":
+                    logger.warning(f"WebSocket receive error ({error_type}): {e}")
                 break  # Exit the loop, connection is closed
-
-            # Get thread_id from client, or generate a new one if not provided
-            thread_id = data.get("thread_id") or str(uuid.uuid4())
-            prompt = data.get("prompt")
-            user_response = data.get("user_response")  # For continuing conversations
-            files_data = data.get("files", [])  # Get files from WebSocket message
-            # Pass through owner info if frontend sends Clerk-verified identity
-            owner = data.get("owner")  # Expected shape: { user_id, email }
-            planning_mode = data.get("planning_mode", False)  # Get planning mode flag
 
             # Get thread_id from client, or generate a new one if not provided
             thread_id = data.get("thread_id") or str(uuid.uuid4())
@@ -1400,6 +1409,7 @@ async def websocket_chat(websocket: WebSocket):
                 await websocket.send_json({
                     "node": "__error__",
                     "error": "Owner information is required for new conversations",
+                    "error_type": "ValidationError",
                     "thread_id": thread_id,
                     "timestamp": time.time()
                 })
@@ -1421,13 +1431,15 @@ async def websocket_chat(websocket: WebSocket):
                             logger.warning(f"No user-thread relationship found for thread {thread_id}")
                     finally:
                         db.close()
-                except Exception as e:
-                    logger.error(f"Failed to retrieve owner for thread {thread_id}: {e}")
+                except Exception as db_err:
+                    logger.error(f"Failed to retrieve owner for thread {thread_id}: {db_err}")
+                    # Continue anyway - proceed without owner for existing thread
 
             if not prompt and not user_response:
                 await websocket.send_json({
                     "node": "__error__",
                     "error": "Missing 'prompt' field for new conversation or 'user_response' for continuing",
+                    "error_type": "ValidationError",
                     "thread_id": thread_id,
                     "timestamp": time.time()
                 })
@@ -1523,37 +1535,82 @@ async def websocket_chat(websocket: WebSocket):
                                 "description": f"Node {node_name} processed with warning"
                             },
                             "thread_id": thread_id,
+                            "error_type": "DataProcessingWarning",
                             "timestamp": time.time()
                         })
                     except Exception as send_error:
                         logger.error(f"Failed to send fallback message for node '{node_name}': {send_error}")
 
-            # Convert files data to FileObject instances
+            # Convert files data to FileObject instances with enhanced error handling
             file_objects = []
             if files_data:
                 logger.info(f"Processing {len(files_data)} files from WebSocket message")
-                for file_data in files_data:
-                    if isinstance(file_data, dict) and 'file_name' in file_data:
-                        try:
+                for idx, file_data in enumerate(files_data):
+                    try:
+                        if isinstance(file_data, dict) and 'file_name' in file_data:
+                            # Validate required fields
+                            required_fields = ['file_name', 'file_path', 'file_type']
+                            missing_fields = [f for f in required_fields if f not in file_data]
+                            if missing_fields:
+                                logger.warning(f"File {idx} missing fields: {missing_fields}. Skipping.")
+                                continue
+                            
                             file_objects.append(FileObject(
                                 file_name=file_data['file_name'],
                                 file_path=file_data['file_path'],
                                 file_type=file_data['file_type']
                             ))
-                            logger.info(f"Added file: {file_data['file_name']} at {file_data['file_path']}")
-                        except Exception as e:
-                            logger.error(f"Failed to create FileObject from {file_data}: {e}")
+                            logger.info(f"Added file {idx}: {file_data['file_name']} at {file_data['file_path']}")
+                        else:
+                            logger.warning(f"File {idx} not a dict or missing 'file_name' field. Type: {type(file_data)}")
+                    except Exception as file_err:
+                        logger.error(f"Failed to create FileObject from file {idx} ({file_data.get('file_name', 'unknown')}): {file_err}")
+                        # Continue processing other files
             
-            # Use unified orchestration service with streaming
-            final_state = await execute_orchestration(
-                prompt=prompt,
-                thread_id=thread_id,
-                user_response=user_response,
-                files=file_objects if file_objects else None,
-                stream_callback=stream_callback,
-                owner=owner,
-                planning_mode=planning_mode
-            )
+            # Use unified orchestration service with streaming and enhanced error handling
+            try:
+                final_state = await execute_orchestration(
+                    prompt=prompt,
+                    thread_id=thread_id,
+                    user_response=user_response,
+                    files=file_objects if file_objects else None,
+                    stream_callback=stream_callback,
+                    owner=owner,
+                    planning_mode=planning_mode
+                )
+            except asyncio.TimeoutError as timeout_err:
+                logger.error(f"Orchestration execution timed out for thread_id {thread_id}")
+                await websocket.send_json({
+                    "node": "__error__",
+                    "thread_id": thread_id,
+                    "error": "Request processing timed out. Please try with a simpler request.",
+                    "error_type": "TimeoutError",
+                    "message": "An error occurred during orchestration: Request processing timed out",
+                    "status": "error",
+                    "timestamp": time.time()
+                })
+                continue
+            except Exception as orch_err:
+                logger.error(f"Error executing orchestration for thread_id {thread_id}: {orch_err}", exc_info=True)
+                error_type = type(orch_err).__name__
+                user_friendly_message = "An unexpected error occurred during orchestration"
+                if "permission" in str(orch_err).lower():
+                    user_friendly_message = "Permission denied. Please check your authentication."
+                elif "not found" in str(orch_err).lower():
+                    user_friendly_message = "Required resource not found."
+                elif "invalid" in str(orch_err).lower():
+                    user_friendly_message = "Invalid request parameters."
+                
+                await websocket.send_json({
+                    "node": "__error__",
+                    "thread_id": thread_id,
+                    "error": str(orch_err)[:200],  # Limit error message length
+                    "error_type": error_type,
+                    "message": f"An error occurred during orchestration: {user_friendly_message}",
+                    "status": "error",
+                    "timestamp": time.time()
+                })
+                continue
 
             # Check if workflow is paused for user input
             if final_state.get("pending_user_input"):
@@ -1592,28 +1649,41 @@ async def websocket_chat(websocket: WebSocket):
                 logger.info(f"WebSocket workflow paused for user input in thread_id {thread_id}, needs_approval: {needs_approval}")
                 continue  # Continue waiting for user response message
 
-            # Save conversation history with owner enforcement
-            from orchestrator.graph import save_conversation_history
-
+            # Save conversation history with owner enforcement and error handling
             owner_id = None
-            if owner:
-                if isinstance(owner, str):
-                    owner_id = owner
+            try:
+                if owner:
+                    if isinstance(owner, str):
+                        owner_id = owner
+                    else:
+                        owner_id = owner.get("user_id") or owner.get("sub") or owner.get("id")
+                if not owner_id:
+                    logger.error(f"Missing owner_id for thread {thread_id}. Conversation will NOT be saved.")
+                    # Don't raise error - allow workflow to continue, just log the issue
                 else:
-                    owner_id = owner.get("user_id") or owner.get("sub") or owner.get("id")
-            if not owner_id:
-                logger.error(f"Missing owner_id for thread {thread_id}. Conversation will NOT be saved.")
-                raise ValueError("Owner is required for saving conversation history.")
-
-            owner_obj = {"user_id": owner_id}
-            final_state["owner"] = owner_obj
-            save_conversation_history(final_state, {"configurable": {"thread_id": thread_id, "owner": owner_obj}})
+                    from orchestrator.graph import save_conversation_history
+                    
+                    owner_obj = {"user_id": owner_id}
+                    final_state["owner"] = owner_obj
+                    save_conversation_history(final_state, {"configurable": {"thread_id": thread_id, "owner": owner_obj}})
+                    logger.info(f"Conversation history saved for thread_id {thread_id} with owner_id {owner_id}")
+            except Exception as save_err:
+                logger.error(f"Failed to save conversation history for thread {thread_id}: {save_err}")
+                # Continue anyway - don't fail the request if history saving fails
             
-            # --- **NEW**: Send the complete, standardized state object ---
-            # This ensures the frontend has all information needed to update the UI,
-            # including plan, metadata, and attachments, without needing a separate API call.
-            from orchestrator.graph import get_serializable_state
-            serializable_state = get_serializable_state(final_state, thread_id)
+            # Get serializable state with error handling
+            try:
+                from orchestrator.graph import get_serializable_state
+                serializable_state = get_serializable_state(final_state, thread_id)
+            except Exception as serialize_err:
+                logger.warning(f"Failed to serialize complete state for thread {thread_id}: {serialize_err}")
+                # Fallback: send a minimal but valid response
+                serializable_state = {
+                    "status": "completed",
+                    "thread_id": thread_id,
+                    "message": "Orchestration completed successfully",
+                    "warning": f"Some data could not be processed: {str(serialize_err)[:100]}"
+                }
 
             await websocket.send_json({
                 "node": "__end__",
@@ -1632,20 +1702,54 @@ async def websocket_chat(websocket: WebSocket):
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected for thread_id {thread_id}")
     except Exception as e:
-        logger.error(f"Error in WebSocket stream for thread_id {thread_id}: {e}", exc_info=True)
+        # Enhanced error handling with categorization and logging
+        error_type = type(e).__name__
+        error_message = str(e)
+        
+        # Categorize error for better logging
+        error_category = "unknown"
+        if "database" in error_message.lower() or "db" in error_message.lower():
+            error_category = "database"
+        elif "permission" in error_message.lower() or "unauthorized" in error_message.lower():
+            error_category = "authorization"
+        elif "timeout" in error_message.lower():
+            error_category = "timeout"
+        elif "resource" in error_message.lower() or "not found" in error_message.lower():
+            error_category = "resource_not_found"
+        elif "invalid" in error_message.lower():
+            error_category = "validation"
+        
+        logger.error(f"WebSocket error for thread_id {thread_id} [Category: {error_category}]: {error_type} - {error_message}", exc_info=True)
+        
+        # Prepare user-friendly error message
+        user_message = "An error occurred during orchestration"
+        if error_category == "database":
+            user_message = "Database connection error. Please try again later."
+        elif error_category == "authorization":
+            user_message = "You do not have permission to perform this action."
+        elif error_category == "timeout":
+            user_message = "Request took too long. Please try with a simpler request."
+        elif error_category == "resource_not_found":
+            user_message = "A required resource was not found."
+        
+        # Truncate error details for security
+        error_details = error_message[:150] if len(error_message) > 150 else error_message
+        
         try:
             await websocket.send_json({
                 "node": "__error__",
-                "thread_id": thread_id,
-                "error": str(e),
-                "error_type": type(e).__name__,
-                "message": f"An error occurred during orchestration: {str(e)}",
+                "thread_id": thread_id or "unknown",
+                "error": error_details,
+                "error_type": error_type,
+                "error_category": error_category,
+                "message": user_message,
                 "status": "error",
                 "timestamp": time.time()
             })
-        except:
+            logger.info(f"Error response sent to client for thread_id {thread_id}")
+        except Exception as send_err:
             # If we can't send the error, the connection is likely already closed
-            logger.error(f"Could not send error message to WebSocket for thread_id {thread_id}")
+            logger.error(f"Could not send error message to WebSocket for thread_id {thread_id}: {send_err}")
 
 @app.post("/api/agents/register", response_model=AgentCard)
 def register_or_update_agent(agent_data: AgentCard, response: Response, db: Session = Depends(get_db)):

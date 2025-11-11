@@ -9,6 +9,10 @@ interface WebSocketEventData {
   data?: any;
   message?: string;
   error?: string;
+  error_type?: string;
+  error_category?: string;
+  status?: string;
+  timestamp?: number;
   // ... other potential fields
 }
 
@@ -35,10 +39,11 @@ export function useWebSocketManager({
     }
 
     try {
+      console.debug(`Initiating WebSocket connection to ${url}`);
       ws.current = new WebSocket(url);
 
       ws.current.onopen = () => {
-        console.debug('WebSocket connected');
+        console.debug('WebSocket connected successfully');
         setIsConnected(true);
 
         // Expose WebSocket to window for conversation store to use
@@ -404,13 +409,47 @@ export function useWebSocketManager({
             useConversationStore.setState({ isLoading: false });
           }
           else if (eventData.node === '__error__') {
-            const errorMessage = eventData.error || 'An unknown WebSocket error occurred';
+            const errorType = eventData.error_type || 'UnknownError';
+            const errorCategory = eventData.error_category || 'unknown';
+            const errorMessage = eventData.error || eventData.message || 'An unknown error occurred';
+            
+            // Log error for debugging
+            console.error('WebSocket error received:', {
+              thread_id: eventData.thread_id,
+              type: errorType,
+              category: errorCategory,
+              message: errorMessage
+            });
+            
+            // Create user-friendly error message based on category
+            let displayMessage = errorMessage;
+            switch (errorCategory) {
+              case 'validation':
+                displayMessage = `Input validation error: ${errorMessage}`;
+                break;
+              case 'authorization':
+                displayMessage = `Permission denied: ${errorMessage}`;
+                break;
+              case 'timeout':
+                displayMessage = `Request timed out. Your request took too long. Please try with a simpler request.`;
+                break;
+              case 'database':
+                displayMessage = `Database error: Unable to process your request at this time. Please try again later.`;
+                break;
+              case 'resource_not_found':
+                displayMessage = `A required resource was not found: ${errorMessage}`;
+                break;
+              default:
+                displayMessage = `Error: ${errorMessage}`;
+            }
+            
             const errorSystemMessage: Message = {
               id: Date.now().toString(),
               type: 'system',
-              content: `Error: ${errorMessage}`,
+              content: displayMessage,
               timestamp: new Date()
             };
+            
             // Add error message to the existing messages in the store
             const currentMessages = useConversationStore.getState().messages;
             _setConversationState({
@@ -419,8 +458,14 @@ export function useWebSocketManager({
               metadata: {
                 ...useConversationStore.getState().metadata,
                 currentStage: 'error',
-                stageMessage: 'An error occurred during orchestration',
-                progress: 0
+                stageMessage: `Error (${errorType}): An error occurred during orchestration`,
+                progress: 0,
+                lastError: {
+                  type: errorType,
+                  category: errorCategory,
+                  message: errorMessage,
+                  timestamp: new Date()
+                }
               }
             });
             // Set isLoading to false when there's an error
@@ -488,43 +533,122 @@ export function useWebSocketManager({
           }
 
         } catch (parseError) {
-          console.error('Failed to parse WebSocket message:', parseError);
-          console.error('Raw event data:', event.data);
+          // Enhanced error handling for parse failures
+          const errorMessage = parseError instanceof Error ? parseError.message : String(parseError);
+          console.error('Failed to parse WebSocket message:', {
+            error: errorMessage,
+            rawData: event.data ? event.data.substring(0, 200) : 'empty',
+            isJSON: typeof event.data === 'string'
+          });
+          
+          // Only add error message if parsing error (not invalid data from server)
+          if (event.data && event.data.length > 0) {
+            const errorSystemMessage: Message = {
+              id: Date.now().toString(),
+              type: 'system',
+              content: `Communication Error: Failed to process server response. This may indicate a server issue.`,
+              timestamp: new Date()
+            };
+            const currentMessages = useConversationStore.getState().messages;
+            _setConversationState({
+              messages: [...currentMessages, errorSystemMessage],
+              status: 'error'
+            });
+          }
+          
           // Set isLoading to false on parse error
           useConversationStore.setState({ isLoading: false, status: 'error' });
         }
       };
 
       ws.current.onclose = (event) => {
-        console.log('WebSocket disconnected:', event.code, event.reason);
+        const closeMessage = `WebSocket closed with code ${event.code}${event.reason ? `: ${event.reason}` : ''}`;
+        console.log(closeMessage, { code: event.code, reason: event.reason, cleanClose: event.wasClean });
         setIsConnected(false);
+        
         // If the store is still in a processing state, mark it as an error
         if (useConversationStore.getState().status === 'processing') {
           console.error('WebSocket disconnected while processing, marking as error');
-          _setConversationState({ status: 'error' });
-          // Set isLoading to false when connection closes during processing
+          
+          let disconnectReason = 'Connection closed unexpectedly.';
+          // Categorize disconnect reason based on close code
+          if (event.code === 1000) {
+            disconnectReason = 'Connection closed normally.';
+          } else if (event.code === 1001) {
+            disconnectReason = 'Server is shutting down. Please try again later.';
+          } else if (event.code === 1002 || event.code === 1003) {
+            disconnectReason = 'Protocol error. Please refresh the page and try again.';
+          } else if (event.code === 1006) {
+            disconnectReason = 'Connection lost. Please check your network and try again.';
+          } else if (event.code === 1011) {
+            disconnectReason = 'Server error. Please try again later.';
+          }
+          
+          // Add disconnection message to chat
+          const disconnectMessage: Message = {
+            id: `disconnect_${Date.now()}`,
+            type: 'system',
+            content: `Connection Error: ${disconnectReason}`,
+            timestamp: new Date()
+          };
+          const currentMessages = useConversationStore.getState().messages;
+          _setConversationState({ 
+            status: 'error',
+            messages: [...currentMessages, disconnectMessage]
+          });
           useConversationStore.setState({ isLoading: false });
         }
-        // Optional: Implement a reconnect strategy
-        // For now, let's try to reconnect automatically
-        setTimeout(() => {
-          console.log('Attempting to reconnect WebSocket...');
-          connect();
-        }, 2000);
+        
+        // Attempt automatic reconnection with backoff
+        if (!event.wasClean && event.code !== 1000) {
+          console.log('Attempting automatic reconnection in 2 seconds...');
+          setTimeout(() => {
+            if (!ws.current || ws.current.readyState === WebSocket.CLOSED) {
+              connect();
+            }
+          }, 2000);
+        }
       };
 
       ws.current.onerror = (error) => {
-        console.error('WebSocket error:', error);
+        console.error('WebSocket connection error:', error);
         setIsConnected(false);
+        
         if (useConversationStore.getState().status === 'processing') {
-          _setConversationState({ status: 'error' });
-          // Set isLoading to false when there's a connection error during processing
+          // Add error message to chat
+          const errorMessage: Message = {
+            id: `error_${Date.now()}`,
+            type: 'system',
+            content: 'Connection Error: An error occurred with the WebSocket connection. Please try refreshing the page.',
+            timestamp: new Date()
+          };
+          const currentMessages = useConversationStore.getState().messages;
+          _setConversationState({ 
+            status: 'error',
+            messages: [...currentMessages, errorMessage]
+          });
           useConversationStore.setState({ isLoading: false });
         }
       };
 
     } catch (error) {
-      console.error('Failed to initialize WebSocket:', error);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error('Failed to initialize WebSocket:', {
+        url,
+        error: errorMessage,
+        type: error instanceof Error ? error.constructor.name : typeof error
+      });
+      
+      // Update store with connection error
+      setIsConnected(false);
+      _setConversationState({
+        status: 'error',
+        metadata: {
+          ...useConversationStore.getState().metadata,
+          currentStage: 'connection_failed',
+          stageMessage: 'Failed to establish WebSocket connection'
+        }
+      });
     }
   }, [url, _setConversationState]);
 
