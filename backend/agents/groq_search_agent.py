@@ -130,4 +130,4 @@ async def get_search_summary(req: SearchRequest):
         raise HTTPException(status_code=500, detail=f"An error occurred while processing the search: {e}")
 
 if __name__ == "__main__":
-    uvicorn.run("groq_search_agent:app", host="127.0.0.1", port=8050, reload=True)
+    uvicorn.run("groq_search_agent:app", host="0.0.0.0", port=8050, reload=False)

@@ -423,4 +423,5 @@ def get_recommendations(ticker: str):
 if __name__ == "__main__":
     import uvicorn
     # For local dev only. In production, run using your process manager / container and don't use reload=True.
-    uvicorn.run("finance_agent:app", host="127.0.0.1", port=8010, reload=True)
+    # Use 0.0.0.0 to bind to all interfaces for better compatibility
+    uvicorn.run("finance_agent:app", host="0.0.0.0", port=8010, reload=False)

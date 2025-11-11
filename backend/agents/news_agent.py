@@ -154,4 +154,4 @@ def get_top_headlines(
     return data
 
 if __name__ == "__main__":
-    uvicorn.run("news_agent:app", host="127.0.0.1", port=8020, reload=True)
+    uvicorn.run("news_agent:app", host="0.0.0.0", port=8020, reload=False)

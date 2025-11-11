@@ -36,6 +36,7 @@ class CompletedTask(TypedDict):
     """A dictionary to hold the result of a completed task."""
     task_name: str
     result: Any
+    raw_response: Any  # Store full agent response including extracted_data
 
 class State(TypedDict):
     """

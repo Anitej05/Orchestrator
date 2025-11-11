@@ -176,4 +176,4 @@ def get_wikipedia_images(title: str):
     }
 
 if __name__ == "__main__":
-    uvicorn.run("wiki_agent:app", host="127.0.0.1", port=8030, reload=True)
+    uvicorn.run("wiki_agent:app", host="0.0.0.0", port=8030, reload=False)

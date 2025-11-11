@@ -137,4 +137,4 @@ if __name__ == "__main__":
     port = int(os.getenv("DOCUMENT_AGENT_PORT", 8070))
     logger.info(f"Starting Document Analysis Agent on port {port}")
     # reload=False for faster startup - use reload=True only during development
-    uvicorn.run("document_analysis_agent:app", host="127.0.0.1", port=port, reload=False)
+    uvicorn.run("document_analysis_agent:app", host="0.0.0.0", port=port, reload=False)

@@ -4,116 +4,17 @@ import logging
 import json
 import asyncio
 import time
-from typing import List, Optional, Dict, Any, Literal
+import asyncio
+from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
 from pydantic.networks import HttpUrl
 from langchain_core.messages import HumanMessage
 import shutil
-from pathlib import Path
-from fastapi import UploadFile, File, Request
+from fastapi import UploadFile, File
 from aiofiles import open as aio_open
-
-logger = logging.getLogger("orbimesh")
-logger.setLevel(logging.INFO)
-
-
-def extract_user_id(owner: Any) -> Optional[str]:
-    if isinstance(owner, str):
-        return owner
-    if isinstance(owner, dict):
-        return owner.get("user_id") or owner.get("sub") or owner.get("id")
-    return None
-
-
-def persist_conversation_file(path: str, conversation: dict, http_request: Request | None = None, user_id: str | None = None) -> None:
-    """
-    TIER 1 FIX: Persist conversation JSON to disk with mandatory owner validation.
-    
-    Args:
-        path: File path to save to (e.g., conversation_history/{thread_id}.json)
-        conversation: Conversation data dict
-        http_request: Optional Request object for authentication context
-        user_id: Optional user_id - if provided with http_request, will validate they match
-    
-    Security guarantees:
-    - Owner must be explicitly provided or extracted from request
-    - Owner is stored in conversation["owner"]
-    - Atomic file write (writes to temp file, then renames)
-    - Raises ValueError if owner cannot be determined
-    
-    Raises:
-        ValueError: If owner cannot be determined or validated
-        PermissionError: If user_id doesn't match authenticated user
-    """
-    thread_id = conversation.get("thread_id", "unknown")
-    temp_path = path + ".tmp"
-    
-    try:
-        # Step 1: Determine owner (user_id must come from either parameter or http_request)
-        owner = None
-        
-        if http_request is not None:
-            try:
-                auth_user = get_user_from_request(http_request)
-                auth_user_id = auth_user.get("sub") or auth_user.get("user_id") or auth_user.get("id")
-                
-                # If user_id provided, verify it matches authenticated user
-                if user_id:
-                    if auth_user_id != user_id:
-                        logger.error(f"User mismatch for {thread_id}: authenticated={auth_user_id}, provided={user_id}")
-                        raise PermissionError(f"User {user_id} cannot save as authenticated user {auth_user_id}")
-                
-                owner = auth_user_id
-                logger.info(f"✓ Authenticated user {owner} saving conversation {thread_id}")
-                
-            except HTTPException as e:
-                logger.error(f"✗ Authentication failed for {thread_id}: {e}")
-                raise
-            except Exception as e:
-                logger.error(f"✗ Failed to extract user from request for {thread_id}: {e}")
-                raise
-        
-        elif user_id:
-            owner = user_id
-            logger.info(f"✓ Using provided user_id {owner} for conversation {thread_id}")
-        
-        # Step 2: Validate owner was determined
-        if not owner:
-            logger.error(f"✗ Cannot save conversation {thread_id}: no owner could be determined")
-            raise ValueError(f"Owner is required for conversation {thread_id}. Provide either http_request or user_id parameter.")
-        
-        # Step 3: Add owner to conversation
-        conversation["owner"] = owner
-        conversation["saved_at"] = time.time()  # Add timestamp
-        
-        # Step 4: Atomic write - write to temp file first, then rename
-        # This prevents corruption if process crashes during write
-        try:
-            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-            
-            with open(temp_path, "w", encoding="utf-8") as fh:
-                json.dump(conversation, fh, ensure_ascii=False, indent=2)
-            
-            # Atomic rename on both Windows and Unix
-            os.replace(temp_path, path)
-            logger.info(f"✓ Successfully persisted conversation {thread_id} for owner={owner} to {path}")
-            
-        except OSError as e:
-            logger.error(f"✗ File write error for {thread_id}: {e}")
-            # Clean up temp file if it exists
-            try:
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
-            except:
-                pass
-            raise
-        
-    except (ValueError, PermissionError) as e:
-        logger.error(f"✗ Validation error for {thread_id}: {e}")
-        raise
-    except Exception as e:
-        logger.exception(f"✗ Error persisting conversation {thread_id} to {path}")
-        raise
+from typing import List
+from pydantic import BaseModel
+from typing import Literal
 
 # # --- Add parent directory to path ---
 # sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -125,25 +26,20 @@ import socket
 import re
 
 # --- Third-party Imports ---
-from fastapi import FastAPI, HTTPException, Depends, status, Query, Response, WebSocket, WebSocketDisconnect, Body, Request
+from fastapi import FastAPI, HTTPException, Depends, status, Query, Response, WebSocket, WebSocketDisconnect, Body
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_, cast, String, select
-from sqlalchemy.exc import IntegrityError
 from sentence_transformers import SentenceTransformer
 
 # --- Local Application Imports ---
-CONVERSATION_HISTORY_DIR = Path("conversation_history")
-CONVERSATION_HISTORY_DIR.mkdir(exist_ok=True)  # Ensure directory exists
+CONVERSATION_HISTORY_DIR = "conversation_history"
 from database import SessionLocal
-from models import Agent, StatusEnum, AgentCapability, AgentEndpoint, EndpointParameter, UserThread
+from models import Agent, StatusEnum, AgentCapability, AgentEndpoint, EndpointParameter
 from schemas import AgentCard, ProcessRequest, ProcessResponse, PlanResponse, FileObject
 from orchestrator.graph import ForceJsonSerializer, graph, create_graph_with_checkpointer, create_execution_subgraph, messages_from_dict, messages_to_dict, serialize_complex_object
 from orchestrator.state import State
 from langgraph.checkpoint.memory import MemorySaver
-from utils.title_generator import generate_title, generate_improved_title
-from utils.file_loader import load_files, build_file_context, ensure_storage_dirs
-from auth import get_user_from_request
 
 # --- App Initialization and Configuration ---
 app = FastAPI(
@@ -206,13 +102,31 @@ conversation_store: Dict[str, Dict[str, Any]] = {}
 from threading import Lock
 store_lock = Lock()
 
+# Global store for live canvas updates during browser execution
+live_canvas_updates: Dict[str, Dict[str, Any]] = {}
+canvas_lock = Lock()
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Allow all origins
     allow_credentials=True,
     allow_methods=["*"], # Allow all methods
     allow_headers=["*"],  # Allow all headers
+    expose_headers=["*"],  # Expose all headers
 )
+
+# --- Static Files for Screenshots ---
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
+
+# Create storage directory if it doesn't exist
+storage_path = Path("storage").absolute()
+storage_path.mkdir(exist_ok=True)
+(storage_path / "images").mkdir(exist_ok=True)
+
+# Mount storage directory for serving screenshots
+app.mount("/storage", StaticFiles(directory=str(storage_path)), name="storage")
+logger.info(f"Mounted /storage for serving screenshot files from {storage_path}")
 
 # --- Sentence Transformer Model Loading ---
 model = SentenceTransformer('all-mpnet-base-v2')
@@ -264,6 +178,8 @@ def start_agent_servers():
     Finds and starts agent servers, with enhanced logging and better error handling
     to track which agents start successfully and which fail.
     """
+    global agent_processes
+    
     # Use absolute path based on the project root directory
     project_root = os.path.dirname(os.path.abspath(__file__))  # This gets the backend directory
     agents_dir = os.path.join(project_root, "agents")
@@ -320,6 +236,7 @@ def start_agent_servers():
             log_path = os.path.join(logs_dir, f"{agent_file}.log")
 
             # Create the subprocess differently based on the OS
+            process = None
             if platform.system() == "Windows":
                 # For Windows, use subprocess.Popen with proper parameters to run in background
                 try:
@@ -328,8 +245,10 @@ def start_agent_servers():
                             [sys.executable, agent_path],
                             stdout=log_file,
                             stderr=log_file,
-                            creationflags=subprocess.CREATE_NEW_CONSOLE if os.environ.get('DEBUG_AGENT_STARTUP') else subprocess.CREATE_NEW_PROCESS_GROUP
+                            creationflags=subprocess.CREATE_NO_WINDOW  # Run without console window
                         )
+                        # Track the process globally
+                        agent_processes.append(process)
                 except Exception as e:
                     logger.error(f"Failed to start {agent_file} using Popen: {e}")
                     # Fallback to the start command
@@ -343,6 +262,8 @@ def start_agent_servers():
                         stdout=log_file,
                         stderr=log_file
                     )
+                    # Track the process globally
+                    agent_processes.append(process)
 
             # Wait for the port to be in use with a timeout
             # With lazy imports and reload=False, agents should start quickly
@@ -474,7 +395,6 @@ async def execute_orchestration(
     user_response: Optional[str] = None,
     files: Optional[List[FileObject]] = None,
     stream_callback=None,
-    owner: Optional[Dict[str, Any]] = None,
     planning_mode: bool = False
 ):
     """
@@ -497,28 +417,12 @@ async def execute_orchestration(
         # The checkpoint structure is { "values": State, "next": List[str], "config": RunnableConfig }
         current_conversation = current_checkpoint.get("values", {}) if current_checkpoint else {}
 
-    snapshot_state: Dict[str, Any] = {}
-    if current_conversation:
-        try:
-            snapshot_state = dict(current_conversation)
-        except Exception:
-            snapshot_state = {}
-
-    owner_id = extract_user_id(owner) or extract_user_id(snapshot_state.get("owner"))
-    if owner_id:
-        config["configurable"]["owner"] = owner_id
-    elif not current_conversation:
-        logger.error(f"Missing owner information for new conversation thread_id: {thread_id}")
-        raise ValueError("Owner is required to start a new conversation")
-
     # --- State Initialization ---
     if user_response:
         # Continuing an interactive workflow where the user answered a question
         logger.info(f"Resuming conversation for thread_id: {thread_id} with user response.")
         logger.info(f"USER RESPONSE BRANCH: user_response='{user_response}', planning_mode={planning_mode}")
         initial_state = dict(current_conversation)  # Convert to dict if it's a State object
-        if owner_id:
-            initial_state["owner"] = owner_id
         initial_state["user_response"] = user_response
         initial_state["pending_user_input"] = False
         initial_state["question_for_user"] = None
@@ -610,11 +514,6 @@ async def execute_orchestration(
             "parse_retry_count": 0,
             "needs_complex_processing": None,  # Let analyze_request determine this
             "analysis_reasoning": None,
-            "orchestration_paused": False,
-            "waiting_for_continue": False,
-            "pause_reason": None,
-            # Owner info
-            "owner": owner_id or extract_user_id(snapshot_state.get("owner")),
             "planning_mode": planning_mode,  # Set planning mode from parameter
             "plan_approved": False,  # Reset plan_approved for new request
         }
@@ -622,10 +521,6 @@ async def execute_orchestration(
     elif current_conversation:
         # Resuming without a new prompt or user response (e.g., status check)
         initial_state = dict(current_conversation) # Convert to dict if it's a State object
-        if owner_id:
-            initial_state["owner"] = owner_id
-        elif "owner" in initial_state:
-            initial_state["owner"] = extract_user_id(initial_state.get("owner"))
         logger.info(f"Checking status for thread_id: {thread_id}")
 
     else:
@@ -666,7 +561,6 @@ async def execute_orchestration(
             "needs_complex_processing": None,  # Let analyze_request determine this
             "analysis_reasoning": None,
             "planning_mode": planning_mode,  # Set planning mode from parameter
-            "owner": owner_id,
         }
 
     # --- File Merging Logic ---
@@ -730,20 +624,12 @@ async def execute_orchestration(
         with store_lock:
             conversation_store[thread_id] = final_state.copy()
             
-        # Ensure owner field is set in final_state before saving
-        if owner_id:
-            final_state["owner"] = owner_id
-        else:
-            final_state["owner"] = extract_user_id(final_state.get("owner"))
-            owner_id = extract_user_id(final_state.get("owner"))
-
-        if not owner_id:
-            logger.error(f"Missing owner_id for thread {thread_id}. Conversation will NOT be saved.")
-            raise ValueError("Owner is required for saving conversation history.")
-
-        from orchestrator.graph import save_conversation_history
-
-        save_conversation_history(final_state, {"configurable": {"thread_id": thread_id, "owner": owner_id}})
+        # Save conversation history using orchestrator's save routine
+        try:
+            from orchestrator.graph import save_conversation_history
+            save_conversation_history(final_state, {"configurable": {"thread_id": thread_id}})
+        except Exception as e:
+            logger.error(f"Failed to save conversation history for {thread_id}: {e}")
 
         # Ensure a plan file is saved for every conversation
         try:
@@ -851,7 +737,7 @@ def process_node_data(node_name: str, node_output, progress: float, node_count: 
 
 # --- API Endpoints ---
 @app.post("/api/chat", response_model=ProcessResponse)
-async def find_agents(request: ProcessRequest, http_request: Request):
+async def find_agents(request: ProcessRequest):
     """
     Receives a prompt, runs it through the agent-finding graph,
     and returns the selected primary and fallback agents for each task.
@@ -861,43 +747,11 @@ async def find_agents(request: ProcessRequest, http_request: Request):
     logger.info(f"Starting agent search with thread_id: {thread_id}")
 
     try:
-        owner_payload = get_user_from_request(http_request)
-        owner_id = extract_user_id(owner_payload)
-        if not owner_id:
-            raise HTTPException(status_code=401, detail="Unable to determine authenticated user")
-        logger.info(f"User authenticated for /api/chat: user_id={owner_id}, thread_id={thread_id}")
-
-        db = SessionLocal()
-        try:
-            existing_thread = db.query(UserThread).filter(UserThread.thread_id == thread_id).first()
-            if existing_thread:
-                if existing_thread.user_id != owner_id:
-                    logger.error(f"Thread {thread_id} already belongs to user {existing_thread.user_id}")
-                    raise HTTPException(status_code=403, detail="Thread already assigned to another user")
-                logger.info(f"User-thread relationship already exists: user_id={owner_id}, thread_id={thread_id}")
-            else:
-                user_thread = UserThread(user_id=owner_id, thread_id=thread_id)
-                db.add(user_thread)
-                db.commit()
-                logger.info(f"Stored user-thread relationship: user_id={owner_id}, thread_id={thread_id}")
-        except HTTPException:
-            db.rollback()
-            raise
-        except IntegrityError:
-            db.rollback()
-            logger.info(f"User-thread relationship already persisted for thread_id={thread_id}")
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Failed to store user-thread relationship: {e}")
-        finally:
-            db.close()
-
         final_state = await execute_orchestration(
             prompt=request.prompt,
             thread_id=thread_id,
             files=request.files,  # Pass the files to the orchestrator
-            stream_callback=None,
-            owner=owner_payload,
+            stream_callback=None
         )
 
         # Check if workflow is paused for user input
@@ -925,13 +779,26 @@ async def find_agents(request: ProcessRequest, http_request: Request):
 
         logger.info(f"Successfully processed request for thread_id: {thread_id}")
 
+        # Check if there's canvas data from browser agent
+        canvas_data = {}
+        with canvas_lock:
+            if thread_id in live_canvas_updates:
+                canvas_data = live_canvas_updates[thread_id]
+                logger.info(f"📊 Including canvas data in response for thread {thread_id}")
+
         return ProcessResponse(
             message="Successfully processed the request.",
             thread_id=thread_id,
             task_agent_pairs=task_agent_pairs,
             final_response=final_response_str,
             pending_user_input=False,
-            question_for_user=None
+            question_for_user=None,
+            has_canvas=canvas_data.get('has_canvas', False),
+            canvas_content=canvas_data.get('canvas_content'),
+            canvas_type=canvas_data.get('canvas_type'),
+            browser_view=canvas_data.get('browser_view'),
+            plan_view=canvas_data.get('plan_view'),
+            current_view=canvas_data.get('current_view', 'browser')
         )
 
     except HTTPException as http_exc:
@@ -942,7 +809,7 @@ async def find_agents(request: ProcessRequest, http_request: Request):
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {e}")
 
 @app.post("/api/chat/continue", response_model=ProcessResponse)
-async def continue_conversation(user_response: UserResponse, http_request: Request):
+async def continue_conversation(user_response: UserResponse):
     """
     Continue a paused conversation by providing user response to a question.
     """
@@ -959,24 +826,12 @@ async def continue_conversation(user_response: UserResponse, http_request: Reque
     logger.info(f"Found existing conversation for thread_id: {user_response.thread_id}, pending_input: {existing_conversation.get('pending_user_input', False)}")
 
     try:
-        owner_payload = get_user_from_request(http_request)
-        owner_id = extract_user_id(owner_payload)
-        if not owner_id:
-            raise HTTPException(status_code=401, detail="Unable to determine authenticated user")
-        logger.info(f"User authenticated for /api/chat/continue: user_id={owner_id}, thread_id={user_response.thread_id}")
-
-        conv_owner_raw = existing_conversation.get("owner") if isinstance(existing_conversation, dict) else None
-        conv_owner_id = extract_user_id(conv_owner_raw)
-        if conv_owner_id and conv_owner_id != owner_id:
-            raise HTTPException(status_code=403, detail="You do not have access to this conversation")
-
         final_state = await execute_orchestration(
             prompt=None, # No new prompt needed
             thread_id=user_response.thread_id,
             user_response=user_response.response,
             files=user_response.files,  # Pass files if provided
-            stream_callback=None,
-            owner=owner_payload,
+            stream_callback=None
         )
 
         # Check if workflow is paused again for more user input
@@ -996,21 +851,219 @@ async def continue_conversation(user_response: UserResponse, http_request: Reque
 
         logger.info(f"Successfully continued conversation for thread_id: {user_response.thread_id}")
 
+        # Check if there's canvas data from browser agent
+        canvas_data = {}
+        with canvas_lock:
+            if user_response.thread_id in live_canvas_updates:
+                canvas_data = live_canvas_updates[user_response.thread_id]
+                logger.info(f"📊 Including canvas data in continue response for thread {user_response.thread_id}")
+
         return ProcessResponse(
             message="Successfully processed the continued conversation.",
             thread_id=user_response.thread_id,
             task_agent_pairs=task_agent_pairs,
             final_response=final_response_str,
             pending_user_input=False,
-            question_for_user=None
+            question_for_user=None,
+            has_canvas=canvas_data.get('has_canvas', False),
+            canvas_content=canvas_data.get('canvas_content'),
+            canvas_type=canvas_data.get('canvas_type'),
+            browser_view=canvas_data.get('browser_view'),
+            plan_view=canvas_data.get('plan_view'),
+            current_view=canvas_data.get('current_view', 'browser')
         )
 
     except Exception as e:
         logger.error(f"An unexpected error occurred during conversation continuation for thread_id {user_response.thread_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {e}")
 
+@app.post("/api/canvas/update")
+async def update_canvas(update_data: Dict[str, Any] = Body(...)):
+    """
+    Receive canvas updates from browser agent and store for WebSocket streaming
+    Supports both browser view (screenshots) and plan view (task plan)
+    """
+    try:
+        thread_id = update_data.get("thread_id")
+        if not thread_id:
+            return {"status": "error", "message": "thread_id required"}
+        
+        logger.info(f"📥 Received canvas update for thread {thread_id} (step {update_data.get('step', 0)})")
+        
+        screenshot_data = update_data.get("screenshot_data", "")
+        url = update_data.get("url", "")
+        step = update_data.get("step", 0)
+        task = update_data.get("task", "")
+        task_plan = update_data.get("task_plan", [])  # New: task plan for plan view
+        current_action = update_data.get("current_action", "")  # New: current action
+        
+        # Create browser view HTML with embedded base64 image
+        browser_view_html = f'''
+        <div style="text-align: center;">
+            <img src="data:image/png;base64,{screenshot_data}" alt="Browser live view" style="width: 100%; max-width: 1200px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);" />
+            <div style="margin-top: 10px; color: #666; font-size: 14px;">
+                <strong>🔴 Live Browser View</strong> | Step {step} | {url[:60] if url else 'Loading...'}
+            </div>
+        </div>
+        '''
+        
+        # Create plan view HTML with task progress
+        # Calculate progress
+        completed_count = sum(1 for t in task_plan if t.get('status') == 'completed')
+        total_count = len(task_plan)
+        progress_percent = (completed_count / total_count * 100) if total_count > 0 else 0
+        
+        plan_view_html = '''
+        <div style="padding: 24px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh;">
+            <div style="max-width: 800px; margin: 0 auto;">
+                <!-- Header -->
+                <div style="background: white; border-radius: 12px; padding: 20px 24px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+                        <h2 style="margin: 0; color: #1a202c; font-size: 24px; font-weight: 600;">📋 Task Execution Plan</h2>
+                        <div style="background: #667eea; color: white; padding: 6px 12px; border-radius: 20px; font-size: 14px; font-weight: 600;">
+                            Step ''' + str(step) + '''
+                        </div>
+                    </div>
+                    <div style="color: #4a5568; font-size: 14px; line-height: 1.5;">''' + task[:150] + ('...' if len(task) > 150 else '') + '''</div>
+                </div>
+        '''
+        
+        if task_plan:
+            # Progress bar
+            plan_view_html += f'''
+                <div style="background: white; border-radius: 12px; padding: 20px 24px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                        <span style="font-size: 14px; font-weight: 600; color: #4a5568;">Progress</span>
+                        <span style="font-size: 14px; font-weight: 600; color: #667eea;">{completed_count}/{total_count} completed</span>
+                    </div>
+                    <div style="background: #e2e8f0; border-radius: 10px; height: 8px; overflow: hidden;">
+                        <div style="background: linear-gradient(90deg, #667eea 0%, #764ba2 100%); height: 100%; width: {progress_percent}%; transition: width 0.3s ease;"></div>
+                    </div>
+                </div>
+            '''
+            
+            # Current action
+            if current_action:
+                plan_view_html += f'''
+                <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 12px; padding: 16px 20px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); color: white;">
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <span style="font-size: 20px;">▶️</span>
+                        <div>
+                            <div style="font-size: 12px; opacity: 0.9; margin-bottom: 4px;">CURRENT ACTION</div>
+                            <div style="font-size: 15px; font-weight: 500;">{current_action}</div>
+                        </div>
+                    </div>
+                </div>
+                '''
+            
+            # Task list
+            plan_view_html += '<div style="display: flex; flex-direction: column; gap: 12px;">'
+            for i, subtask in enumerate(task_plan, 1):
+                status = subtask.get('status', 'pending')
+                subtask_text = subtask.get('subtask', 'Unknown')
+                
+                if status == 'completed':
+                    icon = '✅'
+                    color = '#10b981'
+                    bg_gradient = 'linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%)'
+                    border_color = '#10b981'
+                    status_text = 'COMPLETED'
+                elif status == 'failed':
+                    icon = '❌'
+                    color = '#ef4444'
+                    bg_gradient = 'linear-gradient(135deg, #fee2e2 0%, #fecaca 100%)'
+                    border_color = '#ef4444'
+                    status_text = 'FAILED'
+                else:  # pending
+                    icon = '⏳'
+                    color = '#6b7280'
+                    bg_gradient = 'linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%)'
+                    border_color = '#d1d5db'
+                    status_text = 'PENDING'
+                
+                plan_view_html += f'''
+                <div style="background: white; border-radius: 12px; padding: 16px 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); border-left: 4px solid {border_color}; transition: transform 0.2s ease, box-shadow 0.2s ease;">
+                    <div style="display: flex; align-items: start; gap: 14px;">
+                        <div style="background: {bg_gradient}; width: 40px; height: 40px; border-radius: 10px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-size: 20px;">
+                            {icon}
+                        </div>
+                        <div style="flex: 1; min-width: 0;">
+                            <div style="font-weight: 600; color: #1a202c; font-size: 15px; margin-bottom: 6px; line-height: 1.4;">{i}. {subtask_text}</div>
+                            <div style="display: inline-block; background: {bg_gradient}; color: {color}; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 600; letter-spacing: 0.5px;">
+                                {status_text}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                '''
+            plan_view_html += '</div>'
+        else:
+            plan_view_html += '''
+            <div style="background: white; border-radius: 12px; padding: 60px 24px; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+                <div style="font-size: 48px; margin-bottom: 16px;">📋</div>
+                <div style="color: #9ca3af; font-size: 16px;">No task plan available</div>
+            </div>
+            '''
+        
+        plan_view_html += '</div></div>'
+        
+        # Store both views in global canvas updates
+        with canvas_lock:
+            live_canvas_updates[thread_id] = {
+                'has_canvas': True,
+                'canvas_type': 'html',
+                'canvas_content': browser_view_html,  # Default to browser view
+                'browser_view': browser_view_html,
+                'plan_view': plan_view_html,
+                'timestamp': time.time(),
+                'url': url,
+                'step': step,
+                'task_plan': task_plan,
+                'current_action': current_action
+            }
+        
+        return {"status": "success"}
+        
+    except Exception as e:
+        logger.error(f"Error updating canvas: {e}")
+        return {"status": "error", "message": str(e)}
+
+@app.post("/api/canvas/toggle-view")
+async def toggle_canvas_view(data: Dict[str, Any] = Body(...)):
+    """
+    Toggle between browser view and plan view for a thread
+    """
+    try:
+        thread_id = data.get("thread_id")
+        view_type = data.get("view_type", "browser")  # "browser" or "plan"
+        
+        if not thread_id:
+            return {"status": "error", "message": "thread_id required"}
+        
+        with canvas_lock:
+            if thread_id in live_canvas_updates:
+                canvas_data = live_canvas_updates[thread_id]
+                
+                # Switch the canvas_content based on view_type
+                if view_type == "plan" and 'plan_view' in canvas_data:
+                    canvas_data['canvas_content'] = canvas_data['plan_view']
+                    canvas_data['current_view'] = 'plan'
+                elif view_type == "browser" and 'browser_view' in canvas_data:
+                    canvas_data['canvas_content'] = canvas_data['browser_view']
+                    canvas_data['current_view'] = 'browser'
+                
+                canvas_data['timestamp'] = time.time()  # Update timestamp to trigger refresh
+                
+                return {"status": "success", "view_type": view_type}
+        
+        return {"status": "error", "message": "No canvas data found for thread"}
+        
+    except Exception as e:
+        logger.error(f"Error toggling canvas view: {e}")
+        return {"status": "error", "message": str(e)}
+
 @app.get("/api/chat/status/{thread_id}", response_model=ConversationStatus)
-async def get_conversation_status(thread_id: str, http_request: Request):
+async def get_conversation_status(thread_id: str):
     """
     Get the current status of a conversation thread.
     """
@@ -1018,16 +1071,6 @@ async def get_conversation_status(thread_id: str, http_request: Request):
         # Get conversation from our store
         with store_lock:
             state_data = conversation_store.get(thread_id)
-
-        # Enforce ownership if the state has owner info
-        if state_data and state_data.get("owner"):
-            owner_payload = get_user_from_request(http_request)
-            request_owner_id = extract_user_id(owner_payload)
-            state_owner_id = extract_user_id(state_data.get("owner"))
-            if not request_owner_id:
-                raise HTTPException(status_code=401, detail="Unable to determine authenticated user")
-            if state_owner_id and state_owner_id != request_owner_id:
-                raise HTTPException(status_code=403, detail="You do not have access to this conversation")
 
         if not state_data:
             raise HTTPException(status_code=404, detail="Conversation thread not found")
@@ -1054,7 +1097,7 @@ async def get_conversation_status(thread_id: str, http_request: Request):
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {e}")
 
 @app.get("/api/chat/history/{thread_id}")
-async def get_conversation_history(thread_id: str, http_request: Request):
+async def get_conversation_history(thread_id: str):
     """
     Load the full conversation history from the saved JSON file.
     Returns all messages, metadata, plan, and uploaded files.
@@ -1073,18 +1116,6 @@ async def get_conversation_history(thread_id: str, http_request: Request):
         
         with open(history_path, 'r', encoding='utf-8') as f:
             conversation_data = json.load(f)
-
-        # Enforce ownership using Clerk token
-        owner_payload = get_user_from_request(http_request)
-        request_owner_id = extract_user_id(owner_payload)
-        if not request_owner_id:
-            raise HTTPException(status_code=401, detail="Unable to determine authenticated user")
-        
-        file_owner = (conversation_data or {}).get("owner")
-        file_owner_id = extract_user_id(file_owner)
-        
-        if file_owner_id and file_owner_id != request_owner_id:
-            raise HTTPException(status_code=403, detail="You do not have access to this conversation")
         
         logger.info(f"Successfully loaded conversation history for thread_id: {thread_id}")
         return conversation_data
@@ -1138,186 +1169,44 @@ async def debug_conversations():
         logger.error(f"Error getting debug conversations: {e}")
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {e}")
 
-@app.get("/api/conversations")
-async def get_all_conversations(http_request: Request):
+@app.get("/api/conversations", response_model=List[str])
+async def get_all_conversations():
     """
-    Retrieves a list of all conversations with metadata for the authenticated user from the database.
+    Retrieves a list of all conversation thread_ids that have history.
     """
-    # Extract user
-    owner = get_user_from_request(http_request)
-    user_id = owner.get("sub") or owner.get("user_id") or owner.get("id")
-    logger.info(f"Fetching conversations for user_id={user_id}")
-
-    db = SessionLocal()
-    try:
-        # Get all UserThread entries for this user, ordered by most recent first
-        user_threads = db.query(UserThread).filter(
-            UserThread.user_id == user_id
-        ).order_by(UserThread.created_at.desc()).all()
-        
-        logger.info(f"Found {len(user_threads)} conversation records in database for user_id={user_id}")
-        
-        conversations = []
-        for ut in user_threads:
-            # Check if conversation file exists
-            file_path = CONVERSATION_HISTORY_DIR / f"{ut.thread_id}.json"
-            
-            if not file_path.exists():
-                logger.warning(f"⚠ Conversation file missing for thread {ut.thread_id}, skipping")
-                continue
-            
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                
-                # Get the last message preview
-                last_message = ""
-                if data.get("messages"):
-                    last_msg = data["messages"][-1]
-                    last_message = last_msg.get("content", "")[:100]
-                
-                conversations.append({
-                    "id": ut.thread_id,
-                    "title": ut.title or "Untitled Conversation",
-                    "created_at": ut.created_at.isoformat(),
-                    "updated_at": ut.updated_at.isoformat() if ut.updated_at else ut.created_at.isoformat(),
-                    "message_count": len(data.get("messages", [])),
-                    "last_message": last_message,
-                    "status": data.get("status", "unknown")
-                })
-                
-            except Exception as e:
-                logger.error(f"✗ Error loading conversation {ut.thread_id}: {e}")
-                continue
-        
-        logger.info(f"Returning {len(conversations)} valid conversations out of {len(user_threads)} database records")
-        return conversations
-        
-    finally:
-        db.close()
-
-@app.get("/api/chat/status/{thread_id}")
-async def get_chat_status(thread_id: str, http_request: Request):
-    """Return a minimal conversation status to satisfy client polling and avoid 404s.
-    Reads the conversation history JSON if present and extracts a few useful fields.
-    """
-    # Ensure user is authenticated (but we don't strictly restrict to owner here for now)
-    _ = get_user_from_request(http_request)
-
-    try:
-        history_path = CONVERSATION_HISTORY_DIR / f"{thread_id}.json"
-        if not history_path.exists():
-            return JSONResponse(status_code=404, content={
-                "thread_id": thread_id,
-                "status": "not_found"
-            })
-
-        with open(history_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        # Best-effort extraction
-        status = data.get("status") or ("complete" if data.get("final_response") else "in_progress")
-        question_for_user = data.get("question_for_user")
-        final_response = data.get("final_response")
-        task_agent_pairs = data.get("task_agent_pairs") or []
-
-        return {
-            "thread_id": thread_id,
-            "status": status,
-            "question_for_user": question_for_user,
-            "final_response": final_response,
-            "task_agent_pairs": task_agent_pairs,
-        }
-    except Exception as e:
-        logger.exception(f"Error reading status for thread {thread_id}: {e}")
-        return JSONResponse(status_code=500, content={
-            "thread_id": thread_id,
-            "status": "error",
-            "error": str(e)
-        })
-@app.get("/api/conversations/{thread_id}")
-async def get_conversation_history(thread_id: str, http_request: Request):
-    """
-    TIER 1 FIX: Retrieve conversation with mandatory permission checks.
+    if not os.path.isdir(CONVERSATION_HISTORY_DIR):
+        return []
     
-    Security:
-    - Verifies authenticated user owns the thread in database
-    - Validates file owner matches authenticated user
-    - Returns 403 if user doesn't own conversation
-    - Returns 404 if conversation not found or orphaned
+    files = os.listdir(CONVERSATION_HISTORY_DIR)
+    # Return filenames without the .json extension, sorted by modification time (newest first)
+    files_with_path = [os.path.join(CONVERSATION_HISTORY_DIR, f) for f in files if f.endswith(".json")]
+    files_with_path.sort(key=os.path.getmtime, reverse=True)
+    return [os.path.splitext(os.path.basename(f))[0] for f in files_with_path]
+
+@app.get("/api/conversations/{thread_id}")
+async def get_conversation_history(thread_id: str):
     """
+    Retrieves the full, standardized conversation state from its JSON file.
+    This is the single source of truth for a conversation's history.
+    """
+    history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
+    
+    if not os.path.exists(history_path):
+        raise HTTPException(status_code=404, detail="Conversation history not found.")
+        
     try:
-        logger.info(f"Fetching conversation {thread_id}")
+        with open(history_path, "r", encoding="utf-8") as f:
+            # The file already contains the standardized, serializable state.
+            # No further processing is needed.
+            history_data = json.load(f)
+        return history_data
         
-        # Step 1: Get authenticated user
-        user = get_user_from_request(http_request)
-        user_id = user.get("sub") or user.get("user_id") or user.get("id")
-        
-        if not user_id:
-            raise HTTPException(status_code=401, detail="User not authenticated")
-        
-        logger.info(f"User {user_id} requesting conversation {thread_id}")
-        
-        # Step 2: Verify user owns this thread in database
-        db = SessionLocal()
-        try:
-            user_thread = db.query(UserThread).filter(
-                UserThread.user_id == user_id,
-                UserThread.thread_id == thread_id
-            ).first()
-            
-            if not user_thread:
-                logger.warning(f"✗ Permission denied: user {user_id} does not own thread {thread_id}")
-                raise HTTPException(status_code=403, detail="You do not have permission to access this conversation")
-            
-            logger.info(f"✓ Database permission check passed for user {user_id}")
-        finally:
-            db.close()
-        
-        # Step 3: Load conversation file
-        history_path = CONVERSATION_HISTORY_DIR / f"{thread_id}.json"
-        
-        if not history_path.exists():
-            logger.error(f"✗ Conversation file missing: {history_path}")
-            raise HTTPException(status_code=404, detail="Conversation file not found (orphaned)")
-        
-        try:
-            with open(history_path, "r", encoding="utf-8") as f:
-                conversation = json.load(f)
-            logger.info(f"✓ Loaded conversation file: {history_path}")
-        except json.JSONDecodeError as e:
-            logger.error(f"✗ Corrupted JSON in conversation file {history_path}: {e}")
-            raise HTTPException(status_code=500, detail="Conversation file is corrupted")
-        except OSError as e:
-            logger.error(f"✗ File read error for {history_path}: {e}")
-            raise HTTPException(status_code=500, detail="Failed to read conversation file")
-        
-        # Step 4: Verify file owner matches authenticated user
-        file_owner = conversation.get("owner")
-        
-        # Extract user_id if owner is a dict (handle old format)
-        if isinstance(file_owner, dict):
-            file_owner = file_owner.get("user_id")
-        
-        if not file_owner:
-            logger.warning(f"⚠️ Conversation {thread_id} missing owner field in file")
-            # Still allow load if DB ownership verified (file might be pre-fix)
-            logger.info(f"Allowing load for {thread_id} - DB owned by {user_id}, file has no owner field")
-        elif file_owner != user_id:
-            logger.error(f"✗ Owner mismatch for {thread_id}: file owner={file_owner}, user={user_id}")
-            raise HTTPException(status_code=403, detail="File owner mismatch - permission denied")
-        else:
-            logger.info(f"✓ File owner verified: {file_owner}")
-        
-        # Step 5: Return conversation
-        return conversation
-        
-    except HTTPException:
-        raise
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse conversation history for {thread_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to parse conversation history file.")
     except Exception as e:
-        logger.error(f"✗ Error loading conversation {thread_id}: {e}")
-        logger.exception("Full error details:")
-        raise HTTPException(status_code=500, detail="Failed to fetch conversation")
+        logger.error(f"Error loading conversation history for {thread_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred while loading the conversation: {str(e)}")
 
 @app.get("/api/plan/{thread_id}", response_model=PlanResponse)
 async def get_agent_plan(thread_id: str):
@@ -1359,7 +1248,13 @@ async def websocket_chat(websocket: WebSocket):
     Now supports interactive workflows with user input.
     Enhanced with comprehensive error handling and logging.
     """
-    await websocket.accept()
+    try:
+        await websocket.accept()
+        logger.info(f"WebSocket connection accepted from {websocket.client}")
+    except Exception as e:
+        logger.error(f"Failed to accept WebSocket connection: {e}")
+        return
+    
     thread_id = None  # Initialize thread_id to None
     
     try:
@@ -1445,50 +1340,6 @@ async def websocket_chat(websocket: WebSocket):
                 })
                 continue  # Continue waiting for messages
 
-            # If this is a new thread (generated, not provided), save user-thread relationship immediately
-            if is_new_thread:
-                try:
-                    from database import SessionLocal
-                    from models import UserThread
-                    
-                    owner_id = owner if isinstance(owner, str) else owner.get("user_id") or owner.get("sub") or owner.get("id")
-                    if owner_id:
-                        db = SessionLocal()
-                        try:
-                            # Check if relationship already exists
-                            existing = db.query(UserThread).filter_by(user_id=owner_id, thread_id=thread_id).first()
-                            if not existing:
-                                user_thread = UserThread(user_id=owner_id, thread_id=thread_id)
-                                db.add(user_thread)
-                                db.commit()
-                                logger.info(f"Created user-thread relationship: user_id={owner_id}, thread_id={thread_id}")
-                                
-                                # Generate conversation title from the first prompt
-                                if prompt:
-                                    try:
-                                        logger.info(f"Generating title for conversation {thread_id}")
-                                        title = generate_improved_title(prompt)  # Not async
-                                        
-                                        if title and title.strip():
-                                            # Update the database with the generated title
-                                            user_thread.title = title
-                                            db.commit()
-                                            logger.info(f"✓ Title saved: '{title}' for thread {thread_id}")
-                                        else:
-                                            logger.warning(f"✗ Generated title was empty for thread {thread_id}")
-                                    except Exception as title_error:
-                                        logger.error(f"✗ Failed to generate title for thread {thread_id}: {title_error}")
-                                        import traceback
-                                        logger.error(traceback.format_exc())
-                            else:
-                                logger.info(f"User-thread relationship already exists: user_id={owner_id}, thread_id={thread_id}")
-                        finally:
-                            db.close()
-                    else:
-                        logger.error(f"Could not extract owner_id from owner: {owner}")
-                except Exception as e:
-                    logger.error(f"Failed to save user-thread relationship for thread {thread_id}: {e}")
-
             logger.info(f"Received {'prompt' if prompt else 'user response'} for thread_id {thread_id}")
 
             # Send acknowledgment
@@ -1567,17 +1418,59 @@ async def websocket_chat(websocket: WebSocket):
                         logger.error(f"Failed to create FileObject from file {idx} ({file_data.get('file_name', 'unknown')}): {file_err}")
                         # Continue processing other files
             
-            # Use unified orchestration service with streaming and enhanced error handling
+            # Start background task to poll for live canvas updates
+            polling_active = True
+            async def poll_live_canvas():
+                last_update_time = 0
+                while polling_active:
+                    await asyncio.sleep(0.5)  # Poll every 500ms
+                    try:
+                        # Check if there's a live canvas update from browser agent
+                        with canvas_lock:
+                            if thread_id in live_canvas_updates:
+                                live_update = live_canvas_updates[thread_id]
+                                if live_update.get('timestamp', 0) > last_update_time:
+                                    # New canvas update available
+                                    await websocket.send_json({
+                                        "node": "__live_canvas__",
+                                        "thread_id": thread_id,
+                                        "data": {
+                                            "has_canvas": live_update.get('has_canvas', True),
+                                            "canvas_type": live_update.get('canvas_type', 'html'),
+                                            "canvas_content": live_update.get('canvas_content', ''),
+                                            "browser_view": live_update.get('browser_view', ''),
+                                            "plan_view": live_update.get('plan_view', ''),
+                                            "current_view": live_update.get('current_view', 'browser'),
+                                            "screenshot_count": live_update.get('step', 0)
+                                        },
+                                        "timestamp": time.time()
+                                    })
+                                    last_update_time = live_update['timestamp']
+                                    logger.info(f"📡 Sent live canvas update for thread {thread_id} (step {live_update.get('step', 0)})")
+                    except Exception as e:
+                        logger.debug(f"Error polling live canvas: {e}")
+            
+            # Start polling task
+            polling_task = asyncio.create_task(poll_live_canvas())
+            
             try:
-                final_state = await execute_orchestration(
-                    prompt=prompt,
-                    thread_id=thread_id,
-                    user_response=user_response,
-                    files=file_objects if file_objects else None,
-                    stream_callback=stream_callback,
-                    owner=owner,
-                    planning_mode=planning_mode
-                )
+                # Use unified orchestration service with streaming and enhanced error handling
+            try:
+                    final_state = await execute_orchestration(
+                        prompt=prompt,
+                        thread_id=thread_id,
+                        user_response=user_response,
+                        files=file_objects if file_objects else None,
+                        stream_callback=stream_callback,
+                            planning_mode=planning_mode
+                    )
+            finally:
+                # Stop polling
+                polling_active = False
+                try:
+                    await polling_task
+                except:
+                    pass
             except asyncio.TimeoutError as timeout_err:
                 logger.error(f"Orchestration execution timed out for thread_id {thread_id}")
                 await websocket.send_json({
@@ -1829,31 +1722,49 @@ def search_agents(
 ):
     """
     Finds active agents that match ANY of the specified capabilities using vector search.
+    Falls back to text search if vector search fails.
     """
     if not capabilities:
         return []
 
-    conditions = []
-    for task_name in capabilities:
-        query_vector = model.encode(task_name)
-        # Subquery to find agent_ids for this one task
-        subquery = select(AgentCapability.agent_id).where(
-            AgentCapability.embedding.cosine_distance(query_vector) < similarity_threshold
-        )
-        conditions.append(Agent.id.in_(subquery))
+    try:
+        conditions = []
+        for task_name in capabilities:
+            query_vector = model.encode(task_name)
+            # Subquery to find agent_ids for this one task
+            subquery = select(AgentCapability.agent_id).where(
+                AgentCapability.embedding.cosine_distance(query_vector) < similarity_threshold
+            )
+            conditions.append(Agent.id.in_(subquery))
 
-    # Combine conditions with OR logic
-    query = db.query(Agent).options(
-        joinedload(Agent.endpoints).joinedload(AgentEndpoint.parameters) # Eager load parameters
-    ).filter(Agent.status == 'active').filter(or_(*conditions))
+        # Combine conditions with OR logic
+        query = db.query(Agent).options(
+            joinedload(Agent.endpoints).joinedload(AgentEndpoint.parameters) # Eager load parameters
+        ).filter(Agent.status == 'active').filter(or_(*conditions))
 
-    # Apply optional price and rating filters
-    if max_price is not None:
-        query = query.filter(Agent.price_per_call_usd <= max_price)
-    if min_rating is not None:
-        query = query.filter(Agent.rating >= min_rating)
+        # Apply optional price and rating filters
+        if max_price is not None:
+            query = query.filter(Agent.price_per_call_usd <= max_price)
+        if min_rating is not None:
+            query = query.filter(Agent.rating >= min_rating)
 
-    return query.all()
+        return query.all()
+    
+    except Exception as e:
+        logger.warning(f"Vector search failed, falling back to text search: {e}")
+        # Fallback: text-based search on capabilities
+        query = db.query(Agent).options(
+            joinedload(Agent.endpoints).joinedload(AgentEndpoint.parameters)
+        ).filter(Agent.status == 'active')
+        
+        # Apply optional filters
+        if max_price is not None:
+            query = query.filter(Agent.price_per_call_usd <= max_price)
+        if min_rating is not None:
+            query = query.filter(Agent.rating >= min_rating)
+        
+        # Return all active agents as fallback
+        return query.all()
 
 @app.get("/api/agents/all", response_model=List[AgentCard])
 def get_all_agents(db: Session = Depends(get_db)):
@@ -1918,12 +1829,202 @@ def health_check():
     """Simple health check endpoint."""
     return {"status": "ok"}
 
+@app.get("/api/agent-servers/status")
+async def get_agent_servers_status():
+    """Get the status of all agent servers"""
+    async with agent_status_lock:
+        status_copy = {
+            name: {
+                'port': info['port'],
+                'status': info['status'],
+                'pid': info['process'].pid if info['process'] else None
+            }
+            for name, info in agent_status.items()
+        }
+    return status_copy
 
+# Global list to track agent processes and their status
+agent_processes = []
+agent_status = {}  # {agent_name: {'port': int, 'process': subprocess.Popen, 'status': 'starting'|'ready'|'failed'}}
+agent_status_lock = asyncio.Lock()
+
+def cleanup_agents():
+    """Stop all agent processes"""
+    global agent_processes
+    for process in agent_processes:
+        try:
+            process.terminate()
+            process.wait(timeout=5)
+        except:
+            try:
+                process.kill()
+            except:
+                pass
+    agent_processes = []
+    agent_status.clear()
+
+async def wait_for_agent_ready(agent_name: str, port: int, timeout: float = 30.0) -> bool:
+    """
+    Wait for a specific agent to be ready by checking its health endpoint.
+    Returns True if agent is ready, False if timeout or failed.
+    """
+    import httpx
+    import time
+    
+    start_time = time.time()
+    health_url = f"http://localhost:{port}/"
+    
+    while time.time() - start_time < timeout:
+        async with agent_status_lock:
+            status = agent_status.get(agent_name, {}).get('status')
+            if status == 'ready':
+                return True
+            elif status == 'failed':
+                return False
+        
+        # Try to connect to the agent
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                response = await client.get(health_url)
+                if response.status_code == 200:
+                    async with agent_status_lock:
+                        if agent_name in agent_status:
+                            agent_status[agent_name]['status'] = 'ready'
+                    return True
+        except:
+            pass
+        
+        await asyncio.sleep(0.5)
+    
+    async with agent_status_lock:
+        if agent_name in agent_status:
+            agent_status[agent_name]['status'] = 'failed'
+    return False
+
+async def check_agent_health_background():
+    """Background task to check agent health and update status"""
+    import httpx
+    
+    while True:
+        await asyncio.sleep(2)  # Check every 2 seconds
+        
+        async with agent_status_lock:
+            agents_to_check = list(agent_status.items())
+        
+        for agent_name, info in agents_to_check:
+            if info['status'] == 'starting':
+                port = info['port']
+                health_url = f"http://localhost:{port}/"
+                
+                try:
+                    async with httpx.AsyncClient(timeout=1.0) as client:
+                        response = await client.get(health_url)
+                        if response.status_code == 200:
+                            async with agent_status_lock:
+                                agent_status[agent_name]['status'] = 'ready'
+                except:
+                    pass
+
+def start_agents_async():
+    """Start agents asynchronously without blocking main.py startup"""
+    global agent_processes, agent_status
+    
+    # Clean up any existing agents first
+    cleanup_agents()
+    
+    # Use absolute path based on the project root directory
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    agents_dir = os.path.join(project_root, "agents")
+    
+    if not os.path.isdir(agents_dir):
+        logger.warning(f"'{agents_dir}' directory not found. Skipping agent server startup.")
+        return
+
+    logs_dir = "logs"
+    os.makedirs(logs_dir, exist_ok=True)
+
+    agent_files = [f for f in os.listdir(agents_dir) if f.endswith("_agent.py")]
+    logger.info(f"Starting {len(agent_files)} agent server(s)...")
+
+    for agent_file in agent_files:
+        agent_path = os.path.join(agents_dir, agent_file)
+        agent_name = agent_file.replace('.py', '')
+        port = None
+        
+        try:
+            # Extract port from agent file
+            with open(agent_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+                match = re.search(r'port\s*=\s*int\(os\.getenv\([^,]+,\s*(\d+)\)', content)
+                if not match:
+                    match = re.search(r"port\s*=\s*(\d+)", content)
+                if match:
+                    port = int(match.group(1))
+
+            if port is None:
+                continue
+
+            log_path = os.path.join(logs_dir, f"{agent_file}.log")
+
+            # Start the agent process
+            with open(log_path, 'w') as log_file:
+                if platform.system() == "Windows":
+                    process = subprocess.Popen(
+                        [sys.executable, agent_path],
+                        stdout=log_file,
+                        stderr=log_file,
+                        creationflags=subprocess.CREATE_NO_WINDOW
+                    )
+                else:
+                    process = subprocess.Popen(
+                        [sys.executable, agent_path],
+                        stdout=log_file,
+                        stderr=log_file,
+                        start_new_session=True
+                    )
+                
+                agent_processes.append(process)
+                agent_status[agent_name] = {
+                    'port': port,
+                    'process': process,
+                    'status': 'starting'
+                }
+        
+        except Exception as e:
+            agent_status[agent_name] = {
+                'port': port,
+                'process': None,
+                'status': 'failed'
+            }
+    
+    # Register cleanup handler
+    import atexit
+    atexit.register(cleanup_agents)
+    
+    logger.info(f"Agent servers started. Ready for requests.")
+
+@app.on_event("startup")
+async def startup_event():
+    """Start agents and background health checker on app startup"""
+    # Start agents in background
+    start_agents_async()
+    
+    # Start background health checker
+    asyncio.create_task(check_agent_health_background())
 
 if __name__ == "__main__":
-    # Start all agent servers in separate terminals
-    start_agent_servers()
-
+    # Agents will be started automatically via @app.on_event("startup")
     # Run the main FastAPI app
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    # Use 0.0.0.0 to bind to all interfaces (fixes IPv4/IPv6 issues)
+    # Add ws_ping_interval and ws_ping_timeout for better WebSocket stability
+    uvicorn.run(
+        "main:app", 
+        host="0.0.0.0",  # Changed from 127.0.0.1 to support both IPv4 and IPv6
+        port=8000, 
+        reload=True,
+        reload_includes=["*.py"],  # Watch all Python files including agents
+        ws_ping_interval=20,  # Send ping every 20 seconds
+        ws_ping_timeout=20,   # Wait 20 seconds for pong
+        log_level="info"
+    )

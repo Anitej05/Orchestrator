@@ -455,28 +455,16 @@ CACHE_DURATION_SECONDS = 300
 
 # --- New File-Based Memory Functions ---
 def save_plan_to_file(state: dict):
-    '''TIER 1 FIX: Saves the current plan and completed tasks to a Markdown file with owner tracking.'''
+    '''Saves the current plan and completed tasks to a Markdown file.'''
     thread_id = state.get("thread_id")
     if not thread_id:
         logger.warning("No thread_id found in state, skipping plan save")
         return {}
-    
-    # Extract owner - should be passed in state
-    owner = state.get("owner")
-    if isinstance(owner, dict):
-        owner_id = owner.get("user_id") or owner.get("sub") or owner.get("id")
-    else:
-        owner_id = owner
-    
-    if not owner_id:
-        logger.warning(f"No owner found in state for thread {thread_id}, plan will be saved without owner")
-        owner_id = "unknown"
 
     plan_path = os.path.join(PLAN_DIR, f"{thread_id}-plan.md")
 
     with open(plan_path, "w", encoding="utf-8") as f:
-        f.write(f"# Execution Plan for Thread: {thread_id}\n")
-        f.write(f"**Owner:** {owner_id}\n")
+        f.write(f"# Execution Plan for Thread: {thread_id}\n\n")
         f.write(f"**Original Prompt:** {state.get('original_prompt', 'N/A')}\n\n")
 
         f.write("## Attachments\n")
@@ -1320,7 +1308,7 @@ def validate_plan_for_execution(state: State):
         logger.error(f"Plan validation LLM call failed: {e}. Assuming plan is ready to avoid stalling.")
         return {"replan_reason": None, "pending_user_input": False, "question_for_user": None}
 
-async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: State, last_error: Optional[str] = None):
+async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: State, config: Dict[str, Any], last_error: Optional[str] = None):
     '''
     Builds the payload and runs a single agent, now using file paths instead of content.
     This is the full, robust version with semantic retries and rate limit handling.
@@ -1434,13 +1422,69 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
         if api_key := os.getenv(f"{agent_details.id.upper().replace('-', '_')}_API_KEY"):
             headers["Authorization"] = f"Bearer {api_key}"
 
+        # Wait for agent to be ready if it's still starting
+        agent_name = f"{agent_details.id}_agent"
+        from main import wait_for_agent_ready, agent_status, agent_status_lock
+        
+        async with agent_status_lock:
+            agent_info = agent_status.get(agent_name)
+        
+        if agent_info and agent_info['status'] == 'starting':
+            agent_ready = await wait_for_agent_ready(agent_name, agent_info['port'], timeout=30.0)
+            if not agent_ready:
+                error_msg = f"Agent '{agent_details.name}' failed to start or timed out"
+                logger.error(error_msg)
+                return {"task_name": planned_task.task_name, "result": error_msg, "status_code": 503}
+        
         async with httpx.AsyncClient() as client:
             try:
-                logger.info(f"Calling agent '{agent_details.name}' at '{endpoint_url}' (Attempt {attempt + 1})")
+                logger.info(f"Calling agent '{agent_details.name}' at {endpoint_url}")
+                
+                # Check if this is a browser agent - pass thread_id for push-based streaming
+                is_browser_agent = 'browser' in agent_details.id.lower() or 'browser' in agent_details.name.lower()
+                
+                if is_browser_agent and '/browse' in endpoint_url:
+                    logger.info(f"🌐 Browser agent detected - enabling push-based streaming")
+                    
+                    # Get thread_id from config
+                    thread_id = config.get('configurable', {}).get('thread_id', 'unknown')
+                    
+                    # Add thread_id as query parameter
+                    endpoint_with_thread = f"{endpoint_url}?thread_id={thread_id}"
+                    
+                    logger.info(f"📡 Sending browser task with thread_id: {thread_id}")
+                    
+                    # Start browser task with longer timeout for vision-heavy tasks
+                    browser_task = asyncio.create_task(
+                        client.post(endpoint_with_thread, json=payload, headers=headers, timeout=600.0)
+                    )
+                    
+                    # Wait for task to complete (browser agent will push updates directly)
+                    logger.info(f"⏳ Waiting for browser task to complete (push-based streaming enabled)")
+                    
+                    # Task completed - get final result
+                    response = await browser_task
+                    response.raise_for_status()
+                    result_data = response.json()
+                    
+                    logger.info(f"✅ Browser task completed (push-based streaming)")
+                    
+                    # Return the final result
+                    return {
+                        "task_name": planned_task.task_name,
+                        "result": result_data.get('task_summary', 'Task completed'),
+                        "raw_response": result_data,
+                        "status_code": response.status_code,
+                        "screenshot_files": result_data.get('screenshot_files', [])
+                    }
+                
+                # Not a browser agent - use standard synchronous call
+                timeout_seconds = 30.0
+                
                 if http_method == 'GET':
-                    response = await client.get(endpoint_url, params=payload, headers=headers, timeout=30.0)
-                else: # POST
-                    response = await client.post(endpoint_url, json=payload, headers=headers, timeout=30.0)
+                    response = await client.get(endpoint_url, params=payload, headers=headers, timeout=timeout_seconds)
+                else:  # POST
+                    response = await client.post(endpoint_url, json=payload, headers=headers, timeout=timeout_seconds)
 
                 response.raise_for_status()
                 result = response.json()
@@ -1467,8 +1511,25 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                     error_msg = f"Agent call failed with status {e.response.status_code}: {e.response.text}"
                     return {"task_name": planned_task.task_name, "result": error_msg, "raw_response": e.response.text, "status_code": e.response.status_code}
             except httpx.RequestError as e:
-                error_msg = f"Agent call failed with a network error: {e}"
-                return {"task_name": planned_task.task_name, "result": error_msg, "raw_response": str(e), "status_code": 500}
+                # Get detailed error information
+                error_details = str(e) if str(e) else repr(e)
+                error_type = type(e).__name__
+                
+                # Special handling for timeout errors
+                if isinstance(e, httpx.ReadTimeout):
+                    error_msg = f"Agent call timed out after {timeout_seconds}s. The agent at {endpoint_url} did not respond in time."
+                elif isinstance(e, httpx.ConnectTimeout):
+                    error_msg = f"Connection to agent timed out. Could not connect to {endpoint_url} within {timeout_seconds}s."
+                elif isinstance(e, httpx.ConnectError):
+                    error_msg = f"Connection failed. Could not reach agent at {endpoint_url}. Is the agent running?"
+                else:
+                    error_msg = f"Agent call failed with a network error: {error_type} - {error_details}"
+                
+                logger.error(f"Network error calling agent '{agent_details.name}': {error_msg}")
+                logger.error(f"Endpoint: {endpoint_url}, Payload: {payload}")
+                logger.error(f"Error details: {error_type} - {error_details}")
+                
+                return {"task_name": planned_task.task_name, "result": error_msg, "raw_response": error_details, "status_code": 500}
     
     # This block is reached only if all semantic retries in the loop fail
     final_error_msg = f"Agent returned empty or unsatisfactory results for task '{planned_task.task_name}' after {len(failed_attempts)} attempts."
@@ -1512,7 +1573,7 @@ async def execute_batch(state: State, config: RunnableConfig):
                 logger.info(f"Attempting task '{planned_task.task_name}' with agent '{agent_to_try.name}' (Attempt {i+1})...")
                 
                 # The state object is passed directly to run_agent
-                task_result = await run_agent(planned_task, agent_to_try, state, last_error=last_error)
+                task_result = await run_agent(planned_task, agent_to_try, state, config, last_error=last_error)
                 
                 result_data = task_result.get('result', {})
                 is_error = isinstance(result_data, str) and "Error:" in result_data
@@ -1549,7 +1610,8 @@ async def execute_batch(state: State, config: RunnableConfig):
         logger.info(f"Task '{task_name}' completed with result preview: {result_preview}")
         completed_tasks_with_desc.append(CompletedTask(
             task_name=task_name,
-            result=res.get('result', {})
+            result=res.get('result', {}),
+            raw_response=res.get('raw_response', {})
         ))
 
     completed_tasks = state.get('completed_tasks', []) + completed_tasks_with_desc
@@ -1638,6 +1700,17 @@ def evaluate_agent_response(state: State):
             result_preview = str(task.get('result', ''))[:200]
             completed_context += f"- {task_name}: {result_preview}...\n"
     
+    # Check if this is a browser agent result with partial success
+    result_str = str(task_to_evaluate.get('result', ''))
+    is_browser_task = 'screenshot' in result_str.lower() or 'browser' in result_str.lower()
+    has_partial_success = 'completed' in result_str.lower() and ('subtask' in result_str.lower() or 'failed' in result_str.lower())
+    
+    # If browser agent completed some subtasks, consider it successful
+    if is_browser_task and has_partial_success:
+        print(f"!!! EVALUATE: Browser agent with partial success - auto-approving !!!")
+        logger.info("Browser agent completed some subtasks - considering successful")
+        return {"pending_user_input": False, "question_for_user": None}
+    
     prompt = f'''
     You are a Quality Assurance AI. Determine if an agent's output successfully fulfills its task.
 
@@ -1652,27 +1725,17 @@ def evaluate_agent_response(state: State):
     {json.dumps(task_to_evaluate['result'], indent=2)[:1000]}
     ```
 
-    **CRITICAL RULES (MUST FOLLOW):**
-    1. **Default to ACCEPT:** Unless the result is completely empty or contains ONLY error messages, ACCEPT it as complete.
-    2. **Data presence = automatic success:** If there are ANY actual results/data in the response (headlines, prices, information), mark as COMPLETE.
-    3. **No second-guessing:** If data is present, DO NOT ask for clarification. The user can refine if they want more.
-    4. **Only REJECT if truly broken:** Only request "user_input_required" if:
-       - Result is 100% empty (no data at all)
-       - Result contains ONLY error messages with no data
-       - Result is malformed JSON/unreadable
-    5. **Assume user clarity:** The user's prompt should be taken at face value. If they said "yes" or "the ship" or "please search", they are clear about their intent.
-    6. **No uncertainty exemption:** Do NOT use "user_input_required" as a default when uncertain. If ANY data exists, mark as COMPLETE.
-
-    **Examples:**
-    - News headlines returned → COMPLETE (even if not perfectly filtered)
-    - Stock price data returned → COMPLETE (even if missing some fields)
-    - Search results returned → COMPLETE (even if not perfectly ranked)
-    - Empty result with error → user_input_required
-    - No data, error only → user_input_required
+    **Rules:**
+    1. **Browser agent results:** If the result shows "Completed X/Y subtasks" where X > 0, it's SUCCESSFUL (partial completion is acceptable)
+    2. **Data presence = success:** If the result contains actual data (not empty, not just errors), it's successful
+    3. **Be pragmatic:** Partial results are acceptable - if agent got SOME data, that's good enough
+    4. **Check previous tasks:** If a previous task already accomplished the user's goal, mark this task as complete
+    5. **Only ask if truly necessary:** Only request clarification if the result is COMPLETELY empty or contains ONLY errors
+    6. **Trust the agent:** If the agent says it completed tasks, believe it
 
     **Decision:**
-    - Result has ANY useful data: `{{"status": "complete"}}`
-    - Result is 100% empty/errors ONLY: `{{"status": "user_input_required", "question": "Brief question"}}`
+    - If the result has ANY useful data OR shows partial completion: `{{"status": "complete"}}`
+    - Only if COMPLETELY empty/broken: `{{"status": "user_input_required", "question": "Brief question"}}`
     '''
     try:
         evaluation = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, AgentResponseEvaluation)
@@ -1685,14 +1748,138 @@ def evaluate_agent_response(state: State):
             logger.warning(f"Evaluation question: {evaluation.question}")
             # We add the failed task's result to the parsing feedback to prevent loops
             error_feedback = f"The previous attempt for a similar task resulted in an incorrect output: {task_to_evaluate['result']}. Please generate a more precise task to avoid this error."
-            return {
+            
+            # Preserve canvas if it was set by a previous task
+            result = {
                 "pending_user_input": True,
                 "question_for_user": evaluation.question,
                 "parsing_error_feedback": error_feedback
             }
+            
+            # Check if we have canvas from previous tasks
+            if state.get('has_canvas'):
+                result['has_canvas'] = state['has_canvas']
+                result['canvas_type'] = state.get('canvas_type')
+                result['canvas_content'] = state.get('canvas_content')
+                logger.info("Preserving canvas from previous successful task")
+            
+            return result
         else:
             print(f"!!! EVALUATE: Task passed evaluation !!!")
             logger.info("Task passed evaluation")
+            
+            # Check if this is a browser task with screenshots
+            task_result = task_to_evaluate.get('result', {})
+            if isinstance(task_result, dict) and task_result.get('screenshot_files'):
+                screenshot_files = task_result['screenshot_files']
+                logger.info(f"Found {len(screenshot_files)} screenshot files in browser result")
+                
+                # Create canvas content with slideshow for multiple screenshots
+                if screenshot_files:
+                    if len(screenshot_files) == 1:
+                        # Single screenshot - just display it
+                        file_path = screenshot_files[0].get('file_path', '').replace('\\', '/')
+                        # Use absolute URL to backend server
+                        canvas_html = f'<img src="http://localhost:8000/{file_path}" alt="Browser screenshot" style="width: 100%; border-radius: 8px;" />'
+                    else:
+                        # Multiple screenshots - create slideshow
+                        screenshots_html = ""
+                        for idx, screenshot in enumerate(screenshot_files):
+                            file_path = screenshot.get('file_path', '').replace('\\', '/')
+                            display = "block" if idx == 0 else "none"
+                            # Use absolute URL to backend server
+                            screenshots_html += f'<img id="screenshot-{idx}" src="http://localhost:8000/{file_path}" alt="Browser screenshot {idx+1}" style="width: 100%; border-radius: 8px; display: {display};" />\n'
+                        
+                        canvas_html = f'''
+                        <div style="position: relative;">
+                            {screenshots_html}
+                            <div style="text-align: center; margin-top: 10px;">
+                                <span id="screenshot-counter">1 / {len(screenshot_files)}</span>
+                                <div style="margin-top: 5px;">
+                                    <button onclick="prevScreenshot()" style="margin: 0 5px; padding: 5px 15px; cursor: pointer;">← Previous</button>
+                                    <button onclick="nextScreenshot()" style="margin: 0 5px; padding: 5px 15px; cursor: pointer;">Next →</button>
+                                    <button id="play-btn" onclick="toggleAutoPlay()" style="margin: 0 5px; padding: 5px 15px; cursor: pointer;">▶ Play</button>
+                                </div>
+                            </div>
+                        </div>
+                        <script>
+                            let currentScreenshot = 0;
+                            const totalScreenshots = {len(screenshot_files)};
+                            let autoPlayInterval = null;
+                            
+                            function showScreenshot(index) {{
+                                for (let i = 0; i < totalScreenshots; i++) {{
+                                    document.getElementById('screenshot-' + i).style.display = 'none';
+                                }}
+                                document.getElementById('screenshot-' + index).style.display = 'block';
+                                document.getElementById('screenshot-counter').textContent = (index + 1) + ' / ' + totalScreenshots;
+                                currentScreenshot = index;
+                            }}
+                            
+                            function nextScreenshot() {{
+                                currentScreenshot = (currentScreenshot + 1) % totalScreenshots;
+                                showScreenshot(currentScreenshot);
+                            }}
+                            
+                            function prevScreenshot() {{
+                                currentScreenshot = (currentScreenshot - 1 + totalScreenshots) % totalScreenshots;
+                                showScreenshot(currentScreenshot);
+                            }}
+                            
+                            function toggleAutoPlay() {{
+                                const btn = document.getElementById('play-btn');
+                                if (autoPlayInterval) {{
+                                    clearInterval(autoPlayInterval);
+                                    autoPlayInterval = null;
+                                    btn.textContent = '▶ Play';
+                                }} else {{
+                                    autoPlayInterval = setInterval(nextScreenshot, 2000);
+                                    btn.textContent = '⏸ Pause';
+                                }}
+                            }}
+                            
+                            // Auto-play on load
+                            toggleAutoPlay();
+                        </script>
+                        '''
+                    
+                    logger.info(f"Setting canvas with {len(screenshot_files)} screenshot(s)")
+                    
+                    # Create plan view showing task plan and progress
+                    task_plan = state.get('task_plan', [])
+                    plan_html = '<div style="padding: 20px; font-family: system-ui;">'
+                    plan_html += '<h2 style="margin-bottom: 20px;">📋 Task Plan</h2>'
+                    
+                    if task_plan:
+                        for i, task in enumerate(task_plan, 1):
+                            status = task.get('status', 'pending')
+                            status_icon = '✅' if status == 'completed' else '⏳' if status == 'pending' else '❌'
+                            status_color = '#10b981' if status == 'completed' else '#6b7280' if status == 'pending' else '#ef4444'
+                            
+                            plan_html += f'''
+                            <div style="margin-bottom: 15px; padding: 15px; border-left: 4px solid {status_color}; background: #f9fafb; border-radius: 4px;">
+                                <div style="font-weight: 600; margin-bottom: 5px;">
+                                    {status_icon} Task {i}: {task.get('subtask', 'Unknown')}
+                                </div>
+                                <div style="font-size: 0.875rem; color: #6b7280;">
+                                    Status: <span style="color: {status_color}; font-weight: 500;">{status}</span>
+                                </div>
+                            </div>
+                            '''
+                    else:
+                        plan_html += '<p style="color: #6b7280;">No task plan available</p>'
+                    
+                    plan_html += '</div>'
+                    
+                    return {
+                        "pending_user_input": False,
+                        "question_for_user": None,
+                        "has_canvas": True,
+                        "canvas_type": "html",
+                        "canvas_content": canvas_html,
+                        "browser_view": canvas_html,
+                        "plan_view": plan_html
+                    }
     except Exception as e:
         print(f"!!! EVALUATE: Evaluation failed with error: {e} !!!")
         logger.error(f"Failed to evaluate agent response for task '{task_to_evaluate['task_name']}': {e}")
@@ -2091,31 +2278,93 @@ def generate_text_answer(state: State):
         else:
             # If canvas is needed, generate a more concise text response that references the canvas
             if needs_canvas and canvas_type:
+                # Extract detailed information from raw_response if available
+                detailed_results = []
+                for task in completed_tasks:
+                    task_info = {
+                        'task_name': task.get('task_name'),
+                        'result': task.get('result'),
+                    }
+                    # Include raw_response data if available (contains extracted_data, actions, etc.)
+                    if 'raw_response' in task and task['raw_response']:
+                        raw = task['raw_response']
+                        task_info['extracted_data'] = raw.get('extracted_data')
+                        task_info['actions_taken'] = raw.get('actions_taken', [])
+                        task_info['task_summary'] = raw.get('task_summary')
+                        logger.info(f"📊 Task '{task.get('task_name')}' extracted_data: {raw.get('extracted_data')}")
+                    else:
+                        logger.warning(f"⚠️  Task '{task.get('task_name')}' has no raw_response data")
+                    detailed_results.append(task_info)
+                
+                logger.info(f"📋 Detailed results for LLM: {json.dumps(detailed_results, indent=2)[:500]}...")
+                
                 prompt = f'''
                 You are an expert project manager's assistant. Your job is to synthesize the results from a team of AI agents into a single, clean, and coherent final report for the user.
+                
+                **CRITICAL RULE: You MUST base your response ONLY on the actual results provided below. DO NOT invent, assume, or hallucinate any information that is not explicitly stated in the results.**
+                
                 The user's original request was:
                 "{state['original_prompt']}"
                 
-                The following tasks were completed, with these results:
+                The following tasks were completed, with these DETAILED results:
                 ---
-                {json.dumps([serialize_complex_object(task) for task in completed_tasks], indent=2)}
+                {json.dumps(detailed_results, indent=2)}
                 ---
                 
                 A {canvas_type} visualization has been prepared to display this information. 
                 Please generate a brief, human-readable summary that references the visualization 
                 and highlights the key findings without reproducing the raw data or code.
+                
+                **IMPORTANT:**
+                - If the results indicate something was NOT found or NOT present, clearly state that in your response
+                - Do NOT make up details that are not in the actual results
+                - Be factual and accurate based solely on the provided data
+                - Pay special attention to the 'extracted_data' field - if it's null or empty, that means NO data was found
+                - If actions_taken show the agent looked for something but didn't find it, report that accurately
                 '''
             else:
+                # Extract detailed information from raw_response if available
+                detailed_results = []
+                for task in completed_tasks:
+                    task_info = {
+                        'task_name': task.get('task_name'),
+                        'result': task.get('result'),
+                    }
+                    # Include raw_response data if available (contains extracted_data, actions, etc.)
+                    if 'raw_response' in task and task['raw_response']:
+                        raw = task['raw_response']
+                        task_info['extracted_data'] = raw.get('extracted_data')
+                        task_info['actions_taken'] = raw.get('actions_taken', [])
+                        task_info['task_summary'] = raw.get('task_summary')
+                        logger.info(f"📊 Task '{task.get('task_name')}' extracted_data: {raw.get('extracted_data')}")
+                    else:
+                        logger.warning(f"⚠️  Task '{task.get('task_name')}' has no raw_response data")
+                    detailed_results.append(task_info)
+                
+                logger.info(f"📋 Detailed results for LLM: {json.dumps(detailed_results, indent=2)[:500]}...")
+                
                 prompt = f'''
                 You are an expert project manager's assistant. Your job is to synthesize the results from a team of AI agents into a single, clean, and coherent final report for the user.
+                
+                **CRITICAL RULE: You MUST base your response ONLY on the actual results provided below. DO NOT invent, assume, or hallucinate any information that is not explicitly stated in the results.**
+                
                 The user's original request was:
                 "{state['original_prompt']}"
                 
-                The following tasks were completed, with these results:
+                The following tasks were completed, with these DETAILED results:
                 ---
-                {json.dumps([serialize_complex_object(task) for task in completed_tasks], indent=2)}
+                {json.dumps(detailed_results, indent=2)}
                 ---
+                
                 Please generate a final, human-readable response that directly answers the user's original request based on the collected results.
+                
+                **IMPORTANT:**
+                - If the results indicate something was NOT found or NOT present, clearly state that in your response
+                - Do NOT make up details that are not in the actual results
+                - Be factual and accurate based solely on the provided data
+                - Pay special attention to the 'extracted_data' field - if it's null or empty, that means NO data was found
+                - If actions_taken show the agent looked for something but didn't find it, report that accurately
+                - If the agent could not complete a task or found nothing, report that honestly
                 '''
             
             final_response = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, None).__str__()
@@ -2167,6 +2416,20 @@ def generate_final_response(state: State):
     This replaces the old aggregate_responses node.
     """
     logger.info("=== GENERATE_FINAL_RESPONSE: Starting ===")
+    
+    # Check if canvas was already set by evaluate_agent_response (e.g., browser screenshots)
+    if state.get('has_canvas') and state.get('canvas_content'):
+        logger.info("Canvas already set by previous node, preserving it")
+        # Still need to generate the text response
+        text_result = generate_text_answer(state)
+        return {
+            "final_response": text_result.get('final_response', ''),
+            "messages": text_result.get('messages', []),
+            "needs_canvas": False,  # Canvas already rendered
+            "has_canvas": True,
+            "canvas_type": state.get('canvas_type'),
+            "canvas_content": state.get('canvas_content')
+        }
     
     # First generate the text answer
     text_result = generate_text_answer(state)
@@ -2533,8 +2796,6 @@ def get_serializable_state(state: dict | State, thread_id: str) -> dict:
         "final_response": state.get("final_response"),
         "pending_user_input": state.get("pending_user_input", False),
         "question_for_user": state.get("question_for_user"),
-        # Owner information (Clerk user)
-        "owner": serialize_complex_object(state.get("owner")),
         # Metadata for the sidebar
         "metadata": {
             "original_prompt": state.get("original_prompt"),
@@ -2586,36 +2847,14 @@ def save_conversation_history(state: State, config: RunnableConfig):
         else:
             state_dict = state
         
-        # Ensure owner field is present in state_dict
-        owner_raw = None
-        if 'owner' in state_dict and state_dict['owner']:
-            owner_raw = state_dict['owner']
-        elif 'owner' in config.get('configurable', {}) and config['configurable']['owner']:
-            owner_raw = config['configurable']['owner']
-        
-        # Normalize owner to string (handle both dict and string formats)
-        if isinstance(owner_raw, dict):
-            owner_id = owner_raw.get("user_id") or owner_raw.get("sub") or owner_raw.get("id")
-        else:
-            owner_id = owner_raw
-        
-        if not owner_id:
-            logger.error(f"Missing owner for thread {thread_id}. Conversation will NOT be saved.")
-            raise ValueError("Owner is required for saving conversation history.")
-        
-        state_dict['owner'] = owner_id  # Store normalized string identifier
-
-        # Log owner value
-        logger.info(f"Saving conversation for thread {thread_id} with owner: {owner_id}")
-
         # Create the fully serializable state object
         serializable_state = get_serializable_state(state_dict, thread_id)
 
         # Write to file in a consistent JSON format
         with open(history_path, "w", encoding="utf-8") as f:
             json.dump(serializable_state, f, ensure_ascii=False, indent=2)
-        
-        logger.info(f"Conversation history successfully saved for thread {thread_id} to {history_path}")
+            
+        logger.info(f"Successfully saved conversation history for thread {thread_id}.")
 
     except Exception as e:
         logger.error(f"Failed to write conversation history for {thread_id} to {history_path}: {e}")

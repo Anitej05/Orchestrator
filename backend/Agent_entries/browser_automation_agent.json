@@ -1,0 +1,74 @@
+{
+  "id": "custom_browser_agent",
+  "owner_id": "orbimesh-vendor",
+  "name": "Custom Browser Automation Agent",
+  "description": "A powerful custom browser automation agent with multi-provider LLM fallback (Cerebras → Groq → NVIDIA), vision capabilities (Ollama → NVIDIA), and live screenshot streaming. Can navigate websites, interact with elements, extract information, save images from web pages, and stream real-time browser activity to the canvas.",
+  "capabilities": [
+    "web browsing",
+    "browser automation",
+    "perform web search",
+    "web search and summarize",
+    "take website screenshots",
+    "capture webpage screenshots",
+    "screenshot websites",
+    "live browser streaming",
+    "real-time browser view",
+    "automate web browsing",
+    "extract web data",
+    "scrape website content",
+    "interact with web pages",
+    "navigate websites",
+    "visit urls",
+    "click web elements",
+    "fill web forms",
+    "search websites",
+    "analyze web pages",
+    "describe website content",
+    "check website information",
+    "browse the web",
+    "open websites",
+    "view web pages",
+    "see web pages",
+    "web page interaction",
+    "form filling",
+    "data extraction",
+    "save images from web pages",
+    "download images from websites",
+    "scrape images from websites",
+    "extract images from web pages",
+    "look at images on websites",
+    "analyze images on web pages",
+    "pick images from websites",
+    "select images from web pages"
+  ],
+  "price_per_call_usd": 0.01,
+  "status": "active",
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA3FcU8hPhmFLgez6qPf801aQahasAlG5S4MPb16nWJPA=\n-----END PUBLIC KEY-----",
+  "endpoints": [
+    {
+      "endpoint": "http://localhost:8070/browse",
+      "http_method": "POST",
+      "description": "Execute browser automation task with live streaming. Supports real-time screenshot streaming to canvas.",
+      "parameters": [
+        {
+          "name": "task",
+          "param_type": "string",
+          "required": true,
+          "description": "The task description for the browser agent (e.g., 'Go to leetcode.com/contest and find upcoming contests')."
+        },
+        {
+          "name": "max_steps",
+          "param_type": "integer",
+          "required": false,
+          "description": "Maximum number of steps to execute (default: 10)."
+        },
+        {
+          "name": "extract_data",
+          "param_type": "boolean",
+          "required": false,
+          "description": "Whether to extract structured data from the page (default: False)."
+        }
+      ]
+    }
+  ]
+}

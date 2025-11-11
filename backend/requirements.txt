@@ -1,6 +1,9 @@
-fastapi
-uvicorn
-pydantic
+fastapi>=0.115.0
+uvicorn[standard]
+websockets
+pydantic>=2.0
+anyio>=4.0.0
+cryptography>=43.0.1
 sqlalchemy
 alembic
 httpx
@@ -9,7 +12,7 @@ pytest
 cryptography
 langgraph
 langchain
-langchain-core
+langchain-core>=1.0.0
 langchain-groq
 python-dotenv
 typing-extensions
@@ -28,4 +31,12 @@ langchain-cerebras
 pypdf
 docx2txt
 wikipedia
-python-jose[cryptography]
+browser-use>=0.9.5
+langchain-openai>=1.0.0
+playwright>=1.40.0
+yfinance
+pandas
+Pillow
+groq
+requests
+aiofiles

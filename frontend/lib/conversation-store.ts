@@ -62,6 +62,9 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
   canvas_content: undefined,
   canvas_type: undefined,
   has_canvas: false,
+  browser_view: undefined,
+  plan_view: undefined,
+  current_view: 'browser',
   // Plan approval fields
   approval_required: false,
   estimated_cost: 0,
@@ -84,6 +87,9 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
         canvas_content: undefined,
         canvas_type: undefined,
         has_canvas: false,
+        browser_view: undefined,
+        plan_view: undefined,
+        current_view: 'browser',
       });
       
       try {
@@ -614,6 +620,10 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
           canvas_content: newState.canvas_content !== undefined ? newState.canvas_content : state.canvas_content,
           canvas_type: newState.canvas_type !== undefined ? newState.canvas_type : state.canvas_type,
           has_canvas: newState.has_canvas !== undefined ? newState.has_canvas : state.has_canvas,
+          // Handle browser and plan views
+          browser_view: (newState as any).browser_view !== undefined ? (newState as any).browser_view : (state as any).browser_view,
+          plan_view: (newState as any).plan_view !== undefined ? (newState as any).plan_view : (state as any).plan_view,
+          current_view: (newState as any).current_view !== undefined ? (newState as any).current_view : (state as any).current_view,
         };
       });
       // Persist the thread_id to localStorage

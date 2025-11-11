@@ -116,6 +116,13 @@ class ProcessResponse(BaseModel):
     final_response: Optional[str] = None
     pending_user_input: bool = False
     question_for_user: Optional[str] = None
+    # Canvas fields
+    has_canvas: bool = False
+    canvas_content: Optional[str] = None
+    canvas_type: Optional[str] = None
+    browser_view: Optional[str] = None
+    plan_view: Optional[str] = None
+    current_view: Optional[str] = None
     
 class PlanResponse(BaseModel):
     """The schema for the GET /api/plan/{thread_id} endpoint response."""

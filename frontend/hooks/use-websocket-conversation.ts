@@ -75,7 +75,32 @@ export function useWebSocketManager({
               metadata: {
                 ...useConversationStore.getState().metadata,
                 currentStage: 'initializing',
-                stageMessage: 'Starting agent orchestration...'
+                stageMessage: 'Starting agent orchestration...',
+                progress: 0
+              }
+            });
+          }
+          else if (eventData.node === 'load_history') {
+            const currentMessages = useConversationStore.getState().messages;
+            _setConversationState({
+              messages: currentMessages,
+              metadata: {
+                ...useConversationStore.getState().metadata,
+                currentStage: 'initializing',
+                stageMessage: 'Loading conversation history...',
+                progress: 5
+              }
+            });
+          }
+          else if (eventData.node === 'analyze_request') {
+            const currentMessages = useConversationStore.getState().messages;
+            _setConversationState({
+              messages: currentMessages,
+              metadata: {
+                ...useConversationStore.getState().metadata,
+                currentStage: 'parsing',
+                stageMessage: 'Analyzing your request...',
+                progress: 15
               }
             });
           }
@@ -167,6 +192,64 @@ export function useWebSocketManager({
                 currentStage: 'aggregating',
                 stageMessage: 'Aggregating results...',
                 progress: 95
+              }
+            });
+          }
+          else if (eventData.node === 'evaluate_agent_response') {
+            const currentMessages = useConversationStore.getState().messages;
+            _setConversationState({
+              messages: currentMessages,
+              metadata: {
+                ...useConversationStore.getState().metadata,
+                currentStage: 'evaluating',
+                stageMessage: 'Evaluating agent responses...',
+                progress: 90
+              }
+            });
+          }
+          else if (eventData.node === 'ask_user' || eventData.node === '__user_input_required__') {
+            const currentMessages = useConversationStore.getState().messages;
+            _setConversationState({
+              messages: currentMessages,
+              status: 'waiting_for_user',
+              isWaitingForUser: true,
+              metadata: {
+                ...useConversationStore.getState().metadata,
+                currentStage: 'waiting',
+                stageMessage: 'Waiting for your input...',
+                progress: 100
+              }
+            });
+          }
+          else if (eventData.node === 'save_history') {
+            const currentMessages = useConversationStore.getState().messages;
+            _setConversationState({
+              messages: currentMessages,
+              metadata: {
+                ...useConversationStore.getState().metadata,
+                currentStage: 'saving',
+                stageMessage: 'Saving conversation...',
+                progress: 98
+              }
+            });
+          }
+          else if (eventData.node === '__live_canvas__') {
+            // Live canvas update during browser execution
+            console.log('Live canvas update received:', eventData.data);
+            const currentState = useConversationStore.getState();
+            _setConversationState({
+              has_canvas: eventData.data.has_canvas,
+              canvas_type: eventData.data.canvas_type,
+              canvas_content: eventData.data.canvas_content,
+              browser_view: eventData.data.browser_view,
+              plan_view: eventData.data.plan_view,
+              current_view: eventData.data.current_view,
+              metadata: {
+                ...currentState.metadata,
+                currentStage: 'executing',
+                stageMessage: `Executing browser task... (Step ${eventData.data.screenshot_count || 0})`,
+                progress: 85,
+                browserScreenshotCount: eventData.data.screenshot_count
               }
             });
           }
@@ -333,7 +416,10 @@ export function useWebSocketManager({
               // Handle canvas data
               canvas_content: finalState.canvas_content !== undefined ? finalState.canvas_content : currentState.canvas_content,
               canvas_type: finalState.canvas_type !== undefined ? finalState.canvas_type : currentState.canvas_type,
-              has_canvas: finalState.has_canvas !== undefined ? finalState.has_canvas : currentState.has_canvas
+              has_canvas: finalState.has_canvas !== undefined ? finalState.has_canvas : currentState.has_canvas,
+              browser_view: (finalState as any).browser_view !== undefined ? (finalState as any).browser_view : (currentState as any).browser_view,
+              plan_view: (finalState as any).plan_view !== undefined ? (finalState as any).plan_view : (currentState as any).plan_view,
+              current_view: (finalState as any).current_view !== undefined ? (finalState as any).current_view : (currentState as any).current_view
             });
             // Explicitly set isLoading to false in the store
             console.debug('Setting isLoading to false after __end__ event');
