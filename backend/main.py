@@ -26,7 +26,7 @@ import socket
 import re
 
 # --- Third-party Imports ---
-from fastapi import FastAPI, HTTPException, Depends, status, Query, Response, WebSocket, WebSocketDisconnect, Body
+from fastapi import FastAPI, HTTPException, Depends, status, Query, Response, WebSocket, WebSocketDisconnect, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_, cast, String, select
@@ -1169,43 +1169,116 @@ async def debug_conversations():
         logger.error(f"Error getting debug conversations: {e}")
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {e}")
 
-@app.get("/api/conversations", response_model=List[str])
-async def get_all_conversations():
+@app.get("/api/conversations")
+async def get_all_conversations(request: Request, db: Session = Depends(get_db)):
     """
-    Retrieves a list of all conversation thread_ids that have history.
+    Retrieves a list of conversations for the authenticated user.
+    Returns conversation objects with metadata (id, title, created_at, last_message).
     """
-    if not os.path.isdir(CONVERSATION_HISTORY_DIR):
-        return []
-    
-    files = os.listdir(CONVERSATION_HISTORY_DIR)
-    # Return filenames without the .json extension, sorted by modification time (newest first)
-    files_with_path = [os.path.join(CONVERSATION_HISTORY_DIR, f) for f in files if f.endswith(".json")]
-    files_with_path.sort(key=os.path.getmtime, reverse=True)
-    return [os.path.splitext(os.path.basename(f))[0] for f in files_with_path]
+    try:
+        # Get authenticated user
+        from auth import get_user_from_request
+        user = get_user_from_request(request)
+        user_id = user.get("sub") or user.get("user_id") or user.get("id")
+        
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Unable to determine user identity")
+        
+        logger.info(f"Fetching conversations for user: {user_id}")
+        
+        # Query user_threads table for this user's conversations
+        from models import UserThread
+        user_threads = db.query(UserThread).filter_by(user_id=user_id).order_by(
+            UserThread.updated_at.desc()
+        ).all()
+        
+        logger.info(f"Found {len(user_threads)} conversations for user {user_id}")
+        
+        # Build response with conversation metadata
+        conversations = []
+        for ut in user_threads:
+            # Get last message from conversation history file if it exists
+            history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{ut.thread_id}.json")
+            last_message = None
+            
+            if os.path.exists(history_path):
+                try:
+                    with open(history_path, "r", encoding="utf-8") as f:
+                        history_data = json.load(f)
+                        # Extract last message from messages array
+                        messages = history_data.get("messages", [])
+                        if messages and len(messages) > 0:
+                            last_msg = messages[-1]
+                            if isinstance(last_msg, dict):
+                                last_message = last_msg.get("content", "")[:100]  # First 100 chars
+                except Exception as e:
+                    logger.warning(f"Failed to read history for {ut.thread_id}: {e}")
+            
+            conversations.append({
+                "id": ut.thread_id,
+                "thread_id": ut.thread_id,
+                "title": ut.title or "Untitled Conversation",
+                "created_at": ut.created_at.isoformat() if ut.created_at else None,
+                "updated_at": ut.updated_at.isoformat() if ut.updated_at else None,
+                "last_message": last_message
+            })
+        
+        return conversations
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching conversations: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to fetch conversations")
 
 @app.get("/api/conversations/{thread_id}")
-async def get_conversation_history(thread_id: str):
+async def get_conversation_history(thread_id: str, request: Request, db: Session = Depends(get_db)):
     """
     Retrieves the full, standardized conversation state from its JSON file.
     This is the single source of truth for a conversation's history.
+    Ensures user can only access their own conversations.
     """
-    history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
-    
-    if not os.path.exists(history_path):
-        raise HTTPException(status_code=404, detail="Conversation history not found.")
-        
     try:
+        # Get authenticated user
+        from auth import get_user_from_request
+        user = get_user_from_request(request)
+        user_id = user.get("sub") or user.get("user_id") or user.get("id")
+        
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Unable to determine user identity")
+        
+        # Verify ownership - check if this thread belongs to this user
+        from models import UserThread
+        user_thread = db.query(UserThread).filter_by(
+            thread_id=thread_id,
+            user_id=user_id
+        ).first()
+        
+        if not user_thread:
+            logger.warning(f"User {user_id} attempted to access thread {thread_id} they don't own")
+            raise HTTPException(status_code=403, detail="You don't have permission to access this conversation")
+        
+        # Load the conversation history
+        history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
+        
+        if not os.path.exists(history_path):
+            raise HTTPException(status_code=404, detail="Conversation history not found.")
+            
         with open(history_path, "r", encoding="utf-8") as f:
             # The file already contains the standardized, serializable state.
             # No further processing is needed.
             history_data = json.load(f)
+        
+        logger.info(f"User {user_id} successfully accessed conversation {thread_id}")
         return history_data
         
+    except HTTPException:
+        raise
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse conversation history for {thread_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to parse conversation history file.")
     except Exception as e:
-        logger.error(f"Error loading conversation history for {thread_id}: {e}")
+        logger.error(f"Error loading conversation history for {thread_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred while loading the conversation: {str(e)}")
 
 @app.get("/api/plan/{thread_id}", response_model=PlanResponse)
@@ -1455,55 +1528,55 @@ async def websocket_chat(websocket: WebSocket):
             
             try:
                 # Use unified orchestration service with streaming and enhanced error handling
-            try:
+                try:
                     final_state = await execute_orchestration(
                         prompt=prompt,
                         thread_id=thread_id,
                         user_response=user_response,
                         files=file_objects if file_objects else None,
                         stream_callback=stream_callback,
-                            planning_mode=planning_mode
+                        planning_mode=planning_mode
                     )
+                except asyncio.TimeoutError as timeout_err:
+                    logger.error(f"Orchestration execution timed out for thread_id {thread_id}")
+                    await websocket.send_json({
+                        "node": "__error__",
+                        "thread_id": thread_id,
+                        "error": "Request processing timed out. Please try with a simpler request.",
+                        "error_type": "TimeoutError",
+                        "message": "An error occurred during orchestration: Request processing timed out",
+                        "status": "error",
+                        "timestamp": time.time()
+                    })
+                    continue
+                except Exception as orch_err:
+                    logger.error(f"Error executing orchestration for thread_id {thread_id}: {orch_err}", exc_info=True)
+                    error_type = type(orch_err).__name__
+                    user_friendly_message = "An unexpected error occurred during orchestration"
+                    if "permission" in str(orch_err).lower():
+                        user_friendly_message = "Permission denied. Please check your authentication."
+                    elif "not found" in str(orch_err).lower():
+                        user_friendly_message = "Required resource not found."
+                    elif "invalid" in str(orch_err).lower():
+                        user_friendly_message = "Invalid request parameters."
+                    
+                    await websocket.send_json({
+                        "node": "__error__",
+                        "thread_id": thread_id,
+                        "error": str(orch_err)[:200],  # Limit error message length
+                        "error_type": error_type,
+                        "message": f"An error occurred during orchestration: {user_friendly_message}",
+                        "status": "error",
+                        "timestamp": time.time()
+                    })
+                    continue
             finally:
-                # Stop polling
+                # Stop polling - always cleanup regardless of success/failure
                 polling_active = False
                 try:
                     await polling_task
                 except:
                     pass
-            except asyncio.TimeoutError as timeout_err:
-                logger.error(f"Orchestration execution timed out for thread_id {thread_id}")
-                await websocket.send_json({
-                    "node": "__error__",
-                    "thread_id": thread_id,
-                    "error": "Request processing timed out. Please try with a simpler request.",
-                    "error_type": "TimeoutError",
-                    "message": "An error occurred during orchestration: Request processing timed out",
-                    "status": "error",
-                    "timestamp": time.time()
-                })
-                continue
-            except Exception as orch_err:
-                logger.error(f"Error executing orchestration for thread_id {thread_id}: {orch_err}", exc_info=True)
-                error_type = type(orch_err).__name__
-                user_friendly_message = "An unexpected error occurred during orchestration"
-                if "permission" in str(orch_err).lower():
-                    user_friendly_message = "Permission denied. Please check your authentication."
-                elif "not found" in str(orch_err).lower():
-                    user_friendly_message = "Required resource not found."
-                elif "invalid" in str(orch_err).lower():
-                    user_friendly_message = "Invalid request parameters."
-                
-                await websocket.send_json({
-                    "node": "__error__",
-                    "thread_id": thread_id,
-                    "error": str(orch_err)[:200],  # Limit error message length
-                    "error_type": error_type,
-                    "message": f"An error occurred during orchestration: {user_friendly_message}",
-                    "status": "error",
-                    "timestamp": time.time()
-                })
-                continue
 
             # Check if workflow is paused for user input
             if final_state.get("pending_user_input"):

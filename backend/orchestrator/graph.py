@@ -2821,6 +2821,7 @@ def save_conversation_history(state: State, config: RunnableConfig):
     """
     Saves the full, serializable state of the conversation to a JSON file.
     This is the single source of truth for conversation history.
+    Also registers the conversation in user_threads table for ownership tracking.
     """
     thread_id = config.get("configurable", {}).get("thread_id")
     if not thread_id:
@@ -2836,7 +2837,8 @@ def save_conversation_history(state: State, config: RunnableConfig):
             # Handle the case where state might be a State object (TypedDict)
             for key in ['messages', 'task_agent_pairs', 'final_response', 'pending_user_input', 
                        'question_for_user', 'original_prompt', 'completed_tasks', 'parsed_tasks',
-                       'uploaded_files', 'task_plan', 'canvas_content', 'canvas_type', 'has_canvas']:
+                       'uploaded_files', 'task_plan', 'canvas_content', 'canvas_type', 'has_canvas',
+                       'owner']:
                 if hasattr(state, key):
                     state_dict[key] = getattr(state, key)
                 # Also try to get from __getitem__ if it's a dict-like object
@@ -2855,6 +2857,57 @@ def save_conversation_history(state: State, config: RunnableConfig):
             json.dump(serializable_state, f, ensure_ascii=False, indent=2)
             
         logger.info(f"Successfully saved conversation history for thread {thread_id}.")
+
+        # Register in user_threads table for ownership tracking
+        try:
+            owner = state_dict.get("owner") or config.get("configurable", {}).get("owner")
+            if owner:
+                user_id = None
+                if isinstance(owner, str):
+                    user_id = owner
+                elif isinstance(owner, dict):
+                    user_id = owner.get("user_id") or owner.get("sub") or owner.get("id")
+                
+                if user_id:
+                    from database import SessionLocal
+                    from models import UserThread
+                    
+                    db = SessionLocal()
+                    try:
+                        # Check if already exists
+                        existing = db.query(UserThread).filter_by(thread_id=thread_id).first()
+                        
+                        if not existing:
+                            # Create new entry
+                            # Generate title from original prompt (first 50 chars)
+                            original_prompt = state_dict.get("original_prompt", "")
+                            title = original_prompt[:50] + "..." if len(original_prompt) > 50 else original_prompt
+                            if not title:
+                                title = "Untitled Conversation"
+                            
+                            user_thread = UserThread(
+                                user_id=user_id,
+                                thread_id=thread_id,
+                                title=title
+                            )
+                            db.add(user_thread)
+                            db.commit()
+                            logger.info(f"Registered conversation {thread_id} for user {user_id}")
+                        else:
+                            # Update timestamp
+                            from datetime import datetime
+                            existing.updated_at = datetime.utcnow()
+                            db.commit()
+                            logger.info(f"Updated conversation {thread_id} timestamp")
+                    finally:
+                        db.close()
+                else:
+                    logger.warning(f"Could not extract user_id from owner: {owner}")
+            else:
+                logger.warning(f"No owner information for thread {thread_id}, skipping user_threads registration")
+        except Exception as db_err:
+            logger.error(f"Failed to register conversation in user_threads: {db_err}", exc_info=True)
+            # Don't fail the entire save operation if DB registration fails
 
     except Exception as e:
         logger.error(f"Failed to write conversation history for {thread_id} to {history_path}: {e}")

@@ -43,13 +43,15 @@ export default function ConversationsDropdown({
         
         console.log('Loaded conversations:', conversationsData.length);
         
-        // Map to the expected format
-        const conversationDetails: ConversationItem[] = conversationsData.map((conv: any) => ({
-          thread_id: conv.id,
-          created_at: conv.created_at,
-          title: conv.title,
-          preview: conv.last_message || conv.title
-        }));
+        // Map to the expected format and filter out invalid entries
+        const conversationDetails: ConversationItem[] = conversationsData
+          .filter((conv: any) => conv && (conv.id || conv.thread_id)) // Only include conversations with valid IDs
+          .map((conv: any) => ({
+            thread_id: conv.id || conv.thread_id || '',
+            created_at: conv.created_at,
+            title: conv.title || 'Untitled',
+            preview: conv.last_message || conv.title || 'No preview available'
+          }));
 
         // Sort by created_at (newest first)
         conversationDetails.sort((a, b) => 
@@ -110,25 +112,27 @@ export default function ConversationsDropdown({
         ) : conversations.length === 0 ? (
           <div className="text-sm text-gray-500 px-3 py-2">No conversations yet</div>
         ) : (
-          conversations.map((conversation) => (
-            <Button
-              key={conversation.thread_id}
-              variant={currentThreadId === conversation.thread_id ? "secondary" : "ghost"}
-              size="sm"
-              className="w-full justify-start text-left h-auto py-2"
-              onClick={() => handleConversationClick(conversation.thread_id)}
-              title={conversation.preview}
-            >
-              <div className="truncate w-full">
-                <div className="font-medium text-sm truncate">
-                  {conversation.title}
+          conversations
+            .filter((conversation) => conversation.thread_id) // Filter out invalid conversations
+            .map((conversation) => (
+              <Button
+                key={conversation.thread_id}
+                variant={currentThreadId === conversation.thread_id ? "secondary" : "ghost"}
+                size="sm"
+                className="w-full justify-start text-left h-auto py-2"
+                onClick={() => handleConversationClick(conversation.thread_id)}
+                title={conversation.preview || conversation.title || 'Untitled conversation'}
+              >
+                <div className="truncate w-full">
+                  <div className="font-medium text-sm truncate">
+                    {conversation.title || 'Untitled'}
+                  </div>
+                  <div className="text-xs text-gray-500 truncate mt-0.5">
+                    {conversation.thread_id?.substring(0, 12) || 'N/A'}...
+                  </div>
                 </div>
-                <div className="text-xs text-gray-500 truncate mt-0.5">
-                  {conversation.thread_id.substring(0, 12)}...
-                </div>
-              </div>
-            </Button>
-          ))
+              </Button>
+            ))
         )}
       </CollapsibleContent>
     </Collapsible>
