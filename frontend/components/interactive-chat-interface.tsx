@@ -120,6 +120,27 @@ export function InteractiveChatInterface({
     };
   }, [attachedFiles]);
 
+  // Listen for auto-execute workflow events from URL parameters
+  useEffect(() => {
+    const handleAutoExecute = (event: CustomEvent) => {
+      const { prompt } = event.detail;
+      if (prompt && !state.thread_id) {
+        console.log('Auto-executing workflow with prompt:', prompt);
+        setInputValue(prompt);
+        // Auto-submit after a short delay to ensure state is ready
+        setTimeout(() => {
+          startConversation(prompt, [], planningMode, owner);
+        }, 100);
+      }
+    };
+
+    window.addEventListener('autoExecuteWorkflow' as any, handleAutoExecute as any);
+    
+    return () => {
+      window.removeEventListener('autoExecuteWorkflow' as any, handleAutoExecute as any);
+    };
+  }, [state.thread_id, startConversation, planningMode, owner]);
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
       const fileList = e.target.files;

@@ -50,16 +50,46 @@ export default function SavedWorkflowsPage() {
     }
   };
 
-  const handleExecuteWorkflow = async (workflowId: string) => {
-    // TODO: Implement workflow execution
-    console.log('Execute workflow:', workflowId);
+  const handleExecuteWorkflow = async (workflowId: string, e: React.MouseEvent) => {
+    e.stopPropagation(); // Prevent card click navigation
+    
+    try {
+      const { authFetch } = await import('@/lib/auth-fetch');
+      const { toast } = await import('sonner');
+      
+      // Load the workflow to get the original prompt
+      const response = await authFetch(`http://localhost:8000/api/workflows/${workflowId}`);
+      
+      if (!response.ok) {
+        throw new Error('Failed to load workflow');
+      }
+      
+      const workflow = await response.json();
+      const originalPrompt = workflow.conversation_history?.messages?.[0]?.content || 
+                           workflow.conversation_history?.original_prompt ||
+                           "Execute saved workflow";
+      
+      toast.success('Redirecting to execute workflow...');
+      
+      // Navigate to home page with prompt to execute
+      router.push(`/?prompt=${encodeURIComponent(originalPrompt)}&executeNow=true`);
+      
+    } catch (err) {
+      console.error('Failed to execute workflow:', err);
+      const { toast } = await import('sonner');
+      toast.error('Failed to start workflow');
+    }
   };
 
-  const handleDeleteWorkflow = async (workflowId: string) => {
+  const handleDeleteWorkflow = async (workflowId: string, e: React.MouseEvent) => {
+    e.stopPropagation(); // Prevent card click navigation
     if (!confirm('Are you sure you want to delete this workflow?')) return;
     
     try {
       const { authFetch } = await import('@/lib/auth-fetch');
+      const { toast } = await import('sonner');
+      
+      toast.info('Deleting workflow...');
       const response = await authFetch(`http://localhost:8000/api/workflows/${workflowId}`, {
         method: 'DELETE'
       });
@@ -68,17 +98,23 @@ export default function SavedWorkflowsPage() {
         throw new Error('Failed to delete workflow');
       }
       
-      // Reload workflows
+      toast.success('Workflow deleted successfully');
       loadWorkflows();
     } catch (err) {
       console.error('Failed to delete workflow:', err);
-      alert('Failed to delete workflow');
+      const { toast } = await import('sonner');
+      toast.error('Failed to delete workflow');
     }
   };
 
-  const handleCloneWorkflow = async (workflowId: string) => {
+  const handleCloneWorkflow = async (workflowId: string, e: React.MouseEvent) => {
+    e.stopPropagation(); // Prevent card click navigation
+    
     try {
       const { authFetch } = await import('@/lib/auth-fetch');
+      const { toast } = await import('sonner');
+      
+      toast.info('Cloning workflow...');
       const response = await authFetch(`http://localhost:8000/api/workflows/${workflowId}/clone`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -89,11 +125,12 @@ export default function SavedWorkflowsPage() {
         throw new Error('Failed to clone workflow');
       }
       
-      // Reload workflows
+      toast.success('Workflow cloned successfully');
       loadWorkflows();
     } catch (err) {
       console.error('Failed to clone workflow:', err);
-      alert('Failed to clone workflow');
+      const { toast } = await import('sonner');
+      toast.error('Failed to clone workflow');
     }
   };
 
@@ -145,10 +182,13 @@ export default function SavedWorkflowsPage() {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {workflows.map((workflow) => (
             <Card key={workflow.workflow_id} className="flex flex-col">
-              <CardHeader>
+              <CardHeader 
+                className="cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+                onClick={() => router.push(`/saved-workflows/${workflow.workflow_id}`)}
+              >
                 <div className="flex items-start justify-between">
                   <div className="flex-1">
-                    <CardTitle className="text-lg mb-1">{workflow.workflow_name}</CardTitle>
+                    <CardTitle className="text-lg mb-1">{workflow.workflow_name || 'Untitled Workflow'}</CardTitle>
                     <CardDescription className="line-clamp-2">
                       {workflow.workflow_description || 'No description'}
                     </CardDescription>
@@ -183,7 +223,7 @@ export default function SavedWorkflowsPage() {
                   <Button 
                     size="sm" 
                     className="flex-1"
-                    onClick={() => handleExecuteWorkflow(workflow.workflow_id)}
+                    onClick={(e) => handleExecuteWorkflow(workflow.workflow_id, e)}
                   >
                     <Play className="w-4 h-4 mr-1" />
                     Run
@@ -192,7 +232,7 @@ export default function SavedWorkflowsPage() {
                   <Button 
                     size="sm" 
                     variant="outline"
-                    onClick={() => handleCloneWorkflow(workflow.workflow_id)}
+                    onClick={(e) => handleCloneWorkflow(workflow.workflow_id, e)}
                   >
                     <Copy className="w-4 h-4" />
                   </Button>
@@ -200,7 +240,7 @@ export default function SavedWorkflowsPage() {
                   <Button 
                     size="sm" 
                     variant="destructive"
-                    onClick={() => handleDeleteWorkflow(workflow.workflow_id)}
+                    onClick={(e) => handleDeleteWorkflow(workflow.workflow_id, e)}
                   >
                     <Trash2 className="w-4 h-4" />
                   </Button>

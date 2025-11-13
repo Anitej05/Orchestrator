@@ -117,6 +117,30 @@ function HomeContent() {
     }
   }, [conversationState.status, conversationState.final_response, conversationState.thread_id, isRestoring]);
 
+  // Handle URL parameters for auto-executing saved workflows
+  useEffect(() => {
+    if (typeof window === 'undefined' || !clerkLoaded) return;
+    
+    const params = new URLSearchParams(window.location.search);
+    const promptParam = params.get('prompt');
+    const executeNow = params.get('executeNow');
+    
+    if (promptParam && executeNow === 'true') {
+      // Clear the URL parameters
+      window.history.replaceState({}, '', window.location.pathname);
+      
+      // Trigger the chat with the saved workflow prompt
+      console.log('Auto-executing saved workflow with prompt:', promptParam);
+      
+      // Find the TaskBuilder component and set the input
+      // This will be handled by passing the prompt to TaskBuilder
+      const event = new CustomEvent('autoExecuteWorkflow', { 
+        detail: { prompt: promptParam } 
+      });
+      window.dispatchEvent(event);
+    }
+  }, [clerkLoaded]);
+
   const handleInteractiveWorkflowComplete = (result: ProcessResponse) => {
     setApiResponseData(result as ApiResponse);
     setTaskAgentPairs(result.task_agent_pairs);
