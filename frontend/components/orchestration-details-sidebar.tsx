@@ -80,11 +80,12 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
 
     // Process plan data from conversation store
     useEffect(() => {
-        // Always update the plan when planData or metadata changes
+        // ONLY use planData for the workflow structure
+        // Real-time status comes from task_statuses, NOT from completed_tasks
+        // This prevents duplicates in the graph
         const pendingTasks: Plan['pendingTasks'] = [];
-        const completedTasks: Plan['completedTasks'] = [];
         
-        // Process pending tasks from planData
+        // Process pending tasks from planData (the original plan structure)
         if (planData && planData.length > 0) {
             planData.forEach((batch: any) => {
                 if (Array.isArray(batch)) {
@@ -101,25 +102,13 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
             });
         }
         
-        // Process completed tasks from conversationState.metadata
-        const completedTasksData = conversationState.metadata?.completed_tasks || [];
-        if (completedTasksData && completedTasksData.length > 0) {
-            completedTasksData.forEach((task: any) => {
-                if (task && typeof task === 'object') {
-                    completedTasks.push({
-                        task: task.task_name || 'Unknown Task',
-                        result: typeof task.result === 'string' ? task.result : JSON.stringify(task.result, null, 2)
-                    });
-                }
-            });
-        }
-        
+        // Don't use completedTasks - status updates come from task_statuses instead
         setPlan({ 
             pendingTasks: pendingTasks, 
-            completedTasks: completedTasks 
+            completedTasks: [] // Always empty - we use task_statuses for real-time updates
         });
         setIsLoadingPlan(false);
-    }, [planData, conversationState.metadata]);
+    }, [planData]);
 
     // Auto-switch to Plan tab when plan is created (validate_plan_for_execution starts)
     useEffect(() => {

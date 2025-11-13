@@ -155,10 +155,18 @@ export default function PlanGraph({ planData, taskStatuses = {} }: PlanGraphProp
 
     useEffect(() => {
         const { pendingTasks, completedTasks } = planData;
-        const allTasks = [
-            ...completedTasks.map(t => ({...t, status: 'completed' as const})),
-            ...pendingTasks.map(t => ({...t, status: 'pending' as const})),
-        ];
+        
+        // ONLY use pendingTasks as the source of truth for the plan structure
+        // Real-time status updates come from taskStatuses prop
+        // This prevents duplicates (tasks appearing in both pending and completed)
+        const allTasks = pendingTasks.map(t => ({...t, status: 'pending' as const}));
+
+        console.log('PlanGraph update:', {
+            pendingTasksCount: pendingTasks.length,
+            completedTasksCount: completedTasks.length,
+            taskStatusesCount: Object.keys(taskStatuses).length,
+            taskStatuses
+        });
 
         if (allTasks.length === 0) {
             setNodes([]);
