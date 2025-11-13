@@ -13,6 +13,13 @@ interface WebSocketEventData {
   error_category?: string;
   status?: string;
   timestamp?: number;
+  // Task status tracking fields
+  task_name?: string;
+  task_description?: string;
+  agent_name?: string;
+  execution_time?: number;
+  cost?: number;
+  result?: any;
   // ... other potential fields
 }
 
@@ -146,15 +153,30 @@ export function useWebSocketManager({
           else if (eventData.node === 'plan_execution') {
             // Preserve existing messages when updating state
             const currentMessages = useConversationStore.getState().messages;
-            _setConversationState({
+            const currentState = useConversationStore.getState();
+            
+            // Update plan if provided in event data
+            const updates: any = {
               messages: currentMessages,
               metadata: {
-                ...useConversationStore.getState().metadata,
+                ...currentState.metadata,
                 currentStage: 'planning',
                 stageMessage: 'Creating execution plan...',
                 progress: 55
               }
-            });
+            };
+            
+            // Set plan and task_plan if available
+            if (eventData.data?.task_plan) {
+              updates.plan = eventData.data.task_plan;
+              updates.task_plan = eventData.data.task_plan;
+            }
+            if (eventData.data?.task_agent_pairs) {
+              updates.task_agent_pairs = eventData.data.task_agent_pairs;
+            }
+            
+            _setConversationState(updates);
+            console.log('Plan created with', updates.plan?.length || 0, 'batches');
           }
           else if (eventData.node === 'validate_plan_for_execution') {
             // Preserve existing messages when updating state
@@ -181,6 +203,98 @@ export function useWebSocketManager({
                 progress: 85
               }
             });
+          }
+          else if (eventData.node === 'task_started') {
+            // Real-time task execution tracking - task started
+            const taskName = eventData.data?.task_name || eventData.task_name;
+            const agentName = eventData.data?.agent_name || eventData.agent_name;
+            
+            if (taskName) {
+              const currentState = useConversationStore.getState();
+              const updatedTaskStatuses = {
+                ...currentState.task_statuses,
+                [taskName]: {
+                  status: 'running' as const,
+                  taskName,
+                  agentName,
+                  taskDescription: eventData.data?.task_description || eventData.task_description,
+                  startedAt: new Date(),
+                }
+              };
+              
+              _setConversationState({
+                task_statuses: updatedTaskStatuses,
+                current_executing_task: taskName,
+              });
+              
+              console.debug('Task started:', { taskName, agentName });
+            }
+          }
+          else if (eventData.node === 'task_completed') {
+            // Real-time task execution tracking - task completed
+            const taskName = eventData.data?.task_name || eventData.task_name;
+            const executionTime = eventData.data?.execution_time || eventData.execution_time;
+            const agentName = eventData.data?.agent_name || eventData.agent_name;
+            const result = eventData.data?.result || eventData.result;
+            const cost = eventData.data?.cost || eventData.cost;
+            
+            if (taskName) {
+              const currentState = useConversationStore.getState();
+              const existingStatus = currentState.task_statuses?.[taskName];
+              
+              const updatedTaskStatuses = {
+                ...currentState.task_statuses,
+                [taskName]: {
+                  ...existingStatus,
+                  status: 'completed' as const,
+                  taskName,
+                  agentName,
+                  completedAt: new Date(),
+                  executionTime,
+                  cost,
+                  result,
+                }
+              };
+              
+              _setConversationState({
+                task_statuses: updatedTaskStatuses,
+                current_executing_task: null,
+              });
+              
+              console.debug('Task completed:', { taskName, executionTime, agentName });
+            }
+          }
+          else if (eventData.node === 'task_failed') {
+            // Real-time task execution tracking - task failed
+            const taskName = eventData.data?.task_name || eventData.task_name;
+            const executionTime = eventData.data?.execution_time || eventData.execution_time;
+            const error = eventData.data?.error || eventData.error;
+            const agentName = eventData.data?.agent_name || eventData.agent_name;
+            
+            if (taskName) {
+              const currentState = useConversationStore.getState();
+              const existingStatus = currentState.task_statuses?.[taskName];
+              
+              const updatedTaskStatuses = {
+                ...currentState.task_statuses,
+                [taskName]: {
+                  ...existingStatus,
+                  status: 'failed' as const,
+                  taskName,
+                  agentName,
+                  completedAt: new Date(),
+                  executionTime,
+                  error,
+                }
+              };
+              
+              _setConversationState({
+                task_statuses: updatedTaskStatuses,
+                current_executing_task: null,
+              });
+              
+              console.error('Task failed:', { taskName, error, executionTime });
+            }
           }
           else if (eventData.node === 'aggregate_responses') {
             // Preserve existing messages when updating state

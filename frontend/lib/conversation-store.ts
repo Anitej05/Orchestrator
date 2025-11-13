@@ -69,6 +69,9 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
   approval_required: false,
   estimated_cost: 0,
   task_count: 0,
+  // Real-time task tracking
+  task_statuses: {},
+  current_executing_task: null,
   isLoading: false,
 
   actions: {
@@ -429,6 +432,8 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
         final_response: undefined,
         metadata: {},
         uploaded_files: [],
+        task_statuses: {},
+        current_executing_task: null,
         isLoading: false,
       });
       // Also clear from localStorage

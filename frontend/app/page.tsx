@@ -76,11 +76,21 @@ function HomeContent() {
       console.log('Restoring conversation from localStorage:', savedThreadId);
       setIsRestoring(true);
       (async () => {
-        await loadConversation(savedThreadId);
-        setIsRestoring(false);
+        try {
+          await loadConversation(savedThreadId);
+        } catch (error: any) {
+          // If 403, clear localStorage and reset conversation
+          if (error?.message?.includes('403') || error?.message?.includes('permission')) {
+            console.log('Failed to restore conversation (403 - no permission), clearing localStorage');
+            localStorage.removeItem('thread_id');
+            resetConversation();
+          }
+        } finally {
+          setIsRestoring(false);
+        }
       })();
     }
-  }, [clerkLoaded, conversationState.thread_id, loadConversation]);
+  }, [clerkLoaded, conversationState.thread_id, loadConversation, resetConversation]);
 
   useEffect(() => {
     if (isRestoring) return; // Avoid side-effects while restoring existing convo

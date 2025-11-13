@@ -28,6 +28,7 @@ export default function Navbar() {
       <div className="flex items-center gap-6">
         <Link href="/" className="text-sm font-medium text-gray-700 dark:text-gray-200 hover:text-blue-600 dark:hover:text-blue-400">HOME</Link>
         <Link href="/agents" className="text-sm font-medium text-gray-700 dark:text-gray-200 hover:text-blue-600 dark:hover:text-blue-400">AGENT DIRECTORY</Link>
+        <Link href="/saved-workflows" className="text-sm font-medium text-gray-700 dark:text-gray-200 hover:text-blue-600 dark:hover:text-blue-400">SAVED WORKFLOWS</Link>
         <Link href="/workflow" className="text-sm font-medium text-gray-700 dark:text-gray-200 hover:text-blue-600 dark:hover:text-blue-400">WORKFLOW BUILDER</Link>
       </div>
       <div className="flex items-center gap-4">

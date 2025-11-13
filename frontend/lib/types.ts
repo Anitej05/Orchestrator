@@ -45,6 +45,19 @@ export interface ConversationStatus {
   task_agent_pairs: TaskAgentPair[];
 }
 
+export interface TaskStatus {
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  taskName: string;
+  taskDescription?: string;
+  agentName?: string;
+  startedAt?: Date;
+  completedAt?: Date;
+  executionTime?: number;
+  cost?: number;
+  result?: any;
+  error?: string;
+}
+
 export interface ConversationState {
   thread_id?: string;
   status: 'pending_user_input' | 'completed' | 'processing' | 'idle' | 'error';
@@ -56,6 +69,9 @@ export interface ConversationState {
   metadata?: any;
   uploaded_files?: FileObject[];
   plan?: any[];
+  // Real-time task execution tracking
+  task_statuses?: Record<string, TaskStatus>;
+  current_executing_task?: string | null;
   // Canvas feature fields
   canvas_content?: string;
   canvas_type?: 'html' | 'markdown';

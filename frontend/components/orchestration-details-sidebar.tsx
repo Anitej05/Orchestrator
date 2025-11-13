@@ -7,6 +7,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { DollarSign, Clock, FileIcon, FileText, Image as ImageIcon } from "lucide-react"
 import CollapsibleSection from "@/components/CollapsibleSection"
 import PlanGraph from "@/components/PlanGraph"
+import SaveWorkflowButton from "@/components/save-workflow-button"
 import { useEffect, useState } from "react"
 import { InteractiveStarRating, StarRating } from "@/components/ui/star-rating"
 import { useConversationStore } from "@/lib/conversation-store"
@@ -120,12 +121,29 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
         setIsLoadingPlan(false);
     }, [planData, conversationState.metadata]);
 
+    // Auto-switch to Plan tab when plan is created (validate_plan_for_execution starts)
+    useEffect(() => {
+        const currentStage = conversationState.metadata?.currentStage;
+        
+        // Switch to plan tab when validation starts or execution begins
+        if (currentStage === 'validating' || currentStage === 'executing') {
+            if (plan.pendingTasks.length > 0 || plan.completedTasks.length > 0) {
+                console.log('Auto-switching to plan tab - execution started');
+                setActiveTab('plan');
+            }
+        }
+    }, [conversationState.metadata?.currentStage, plan.pendingTasks.length, plan.completedTasks.length]);
+    
     // Auto-switch to canvas tab when NEW canvas content is created
     useEffect(() => {
         // Only switch if:
         // 1. We have canvas content
         // 2. The canvas content is different from what we've seen before (NEW content)
-        if (hasCanvas && canvasContent && canvasContent !== lastCanvasContent) {
+        // 3. Not currently executing (don't override plan view during execution)
+        const currentStage = conversationState.metadata?.currentStage;
+        const isExecuting = currentStage === 'executing' || currentStage === 'validating';
+        
+        if (hasCanvas && canvasContent && canvasContent !== lastCanvasContent && !isExecuting) {
             console.log('Auto-switching to canvas tab due to NEW canvas content');
             setActiveTab('canvas');
             setLastCanvasContent(canvasContent);
@@ -133,7 +151,7 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
             setViewedCanvasContent(undefined);
             setViewedCanvasType(undefined);
         }
-    }, [hasCanvas, canvasContent, lastCanvasContent]);
+    }, [hasCanvas, canvasContent, lastCanvasContent, conversationState.metadata?.currentStage]);
 
     useEffect(() => {
         const uniqueAgentsFromPairs = Array.from(new Set(taskAgentPairs.map((pair: TaskAgentPair) => pair.primary.id)))
@@ -216,7 +234,15 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
             <Tabs value={activeTab} onValueChange={setActiveTab} className="h-full flex flex-col">
                 <TabsList className="grid w-full grid-cols-4">
                     <TabsTrigger value="metadata">Metadata</TabsTrigger>
-                    <TabsTrigger value="plan">Plan</TabsTrigger>
+                    <TabsTrigger value="plan" className="relative">
+                        Plan
+                        {(conversationState.metadata?.currentStage === 'executing' || 
+                          conversationState.metadata?.currentStage === 'validating') && (
+                            <span className="ml-1 px-1.5 py-0.5 text-[10px] font-semibold bg-yellow-500 text-white rounded-full animate-pulse">
+                                Running
+                            </span>
+                        )}
+                    </TabsTrigger>
                     <TabsTrigger value="attachments">Attachments</TabsTrigger>
                     <TabsTrigger value="canvas">Canvas</TabsTrigger>
                 </TabsList>
@@ -224,6 +250,7 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                     <Card>
                         <CardHeader>
                             <CardTitle>Execution Summary</CardTitle>
+                            <CardDescription>Overview of task execution and performance metrics</CardDescription>
                         </CardHeader>
                         <CardContent className="space-y-4">
                             {isLoadingPlan ? (
@@ -309,8 +336,40 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                         </Card>
                     )}
                 </TabsContent>
-                <TabsContent value="plan" className="flex-1 flex items-center justify-center">
-                    <PlanGraph key={JSON.stringify(plan)} planData={plan} />
+                <TabsContent value="plan" className="flex-1 flex flex-col">
+                    {/* Plan Tab Header with Save Workflow Button */}
+                    <div className="flex items-center justify-between mb-4 px-4">
+                        <div className="flex-1">
+                            <div className="flex items-center gap-2">
+                                <h3 className="text-lg font-semibold">Workflow Visualization</h3>
+                                {(plan.pendingTasks.length > 0 || plan.completedTasks.length > 0) && (
+                                    <span className="text-xs px-2 py-1 bg-gray-100 text-gray-700 rounded-full font-medium">
+                                        {plan.completedTasks.length} / {plan.pendingTasks.length + plan.completedTasks.length} tasks
+                                    </span>
+                                )}
+                            </div>
+                            <p className="text-sm text-gray-500 mt-1">
+                                {conversationState.metadata?.currentStage === 'executing' 
+                                    ? `Executing tasks... ${conversationState.current_executing_task ? `(${conversationState.current_executing_task})` : ''}`
+                                    : conversationState.metadata?.currentStage === 'validating'
+                                    ? 'Validating execution plan...'
+                                    : 'View workflow structure'}
+                            </p>
+                        </div>
+                        <SaveWorkflowButton 
+                            threadId={threadId || ''} 
+                            disabled={!threadId || plan.completedTasks.length === 0}
+                        />
+                    </div>
+                    
+                    {/* Real-time Graph with Task Statuses */}
+                    <div className="flex-1 flex items-center justify-center">
+                        <PlanGraph 
+                            key={JSON.stringify(plan)} 
+                            planData={plan}
+                            taskStatuses={conversationState.task_statuses || {}}
+                        />
+                    </div>
                 </TabsContent>
                 <TabsContent value="attachments" className="flex-1 overflow-y-auto mt-4">
                     {allAttachments.length > 0 ? (

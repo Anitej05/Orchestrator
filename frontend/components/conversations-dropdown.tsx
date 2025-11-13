@@ -77,63 +77,65 @@ export default function ConversationsDropdown({
   };
 
   return (
-    <Collapsible open={isOpen} onOpenChange={setIsOpen}>
+    <Collapsible open={isOpen} onOpenChange={setIsOpen} className="w-full">
       <CollapsibleTrigger asChild>
         <Button
           variant="ghost"
-          className="w-full justify-between hover:bg-gray-100"
+          className="w-full justify-between hover:bg-gray-100 dark:hover:bg-gray-800"
         >
           <div className="flex items-center space-x-2">
             <MessageSquare className="w-4 h-4" />
-            <span>Conversations</span>
+            <span className="text-sm font-medium">Conversations</span>
           </div>
           <ChevronDown className={`w-4 h-4 transition-transform ${isOpen ? 'transform rotate-180' : ''}`} />
         </Button>
       </CollapsibleTrigger>
-      <CollapsibleContent className="pl-4 space-y-1">
+      <CollapsibleContent className="mt-2 space-y-1">
         {/* New Conversation Button */}
         {onNewConversation && (
           <Button
             variant="outline"
             size="sm"
-            className="w-full justify-start mb-2 border-dashed"
+            className="w-full justify-start mb-2 border-dashed hover:bg-gray-50 dark:hover:bg-gray-800"
             onClick={() => {
               onNewConversation();
               setIsOpen(false);
             }}
           >
             <Plus className="w-4 h-4 mr-2" />
-            New Conversation
+            <span className="text-sm">New Conversation</span>
           </Button>
         )}
         
-        {loading ? (
-          <div className="text-sm text-gray-500 px-3 py-2">Loading conversations...</div>
-        ) : conversations.length === 0 ? (
-          <div className="text-sm text-gray-500 px-3 py-2">No conversations yet</div>
-        ) : (
-          conversations
-            .filter((conversation) => conversation.thread_id) // Filter out invalid conversations
-            .map((conversation) => (
-              <Button
-                key={conversation.thread_id}
-                variant={currentThreadId === conversation.thread_id ? "secondary" : "ghost"}
-                size="sm"
-                className="w-full justify-start text-left h-auto py-2"
-                onClick={() => handleConversationClick(conversation.thread_id)}
-                title={conversation.preview || conversation.title || 'Untitled conversation'}
-              >
-                <div className="truncate w-full">
-                  <div className="font-medium text-sm truncate">
-                    {conversation.title || 'Untitled'}
+        <div className="max-h-[400px] overflow-y-auto pr-1">
+          {loading ? (
+            <div className="text-sm text-gray-500 dark:text-gray-400 px-2 py-2">Loading conversations...</div>
+          ) : conversations.length === 0 ? (
+            <div className="text-sm text-gray-500 dark:text-gray-400 px-2 py-2">No conversations yet</div>
+          ) : (
+            conversations
+              .filter((conversation) => conversation.thread_id) // Filter out invalid conversations
+              .map((conversation) => (
+                <Button
+                  key={conversation.thread_id}
+                  variant={currentThreadId === conversation.thread_id ? "secondary" : "ghost"}
+                  size="sm"
+                  className="w-full justify-start text-left h-auto py-2 px-2 mb-1 hover:bg-gray-100 dark:hover:bg-gray-800"
+                  onClick={() => handleConversationClick(conversation.thread_id)}
+                  title={conversation.preview || conversation.title || 'Untitled conversation'}
+                >
+                  <div className="flex flex-col w-full min-w-0 overflow-hidden">
+                    <div className="font-medium text-sm truncate w-full">
+                      {conversation.title || 'Untitled'}
+                    </div>
+                    <div className="text-xs text-gray-500 dark:text-gray-400 truncate w-full mt-0.5">
+                      {new Date(conversation.created_at || Date.now()).toLocaleDateString()}
+                    </div>
                   </div>
-                  <div className="text-xs text-gray-500 truncate mt-0.5">
-                    {conversation.thread_id?.substring(0, 12) || 'N/A'}...
-                  </div>
-                </div>
-              </Button>
-            ))
-        )}
+                </Button>
+              ))
+          )}
+        </div>
       </CollapsibleContent>
     </Collapsible>
   );

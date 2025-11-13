@@ -5,6 +5,7 @@ import json
 import asyncio
 import time
 import asyncio
+from datetime import datetime
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
 from pydantic.networks import HttpUrl
@@ -35,7 +36,7 @@ from sentence_transformers import SentenceTransformer
 # --- Local Application Imports ---
 CONVERSATION_HISTORY_DIR = "conversation_history"
 from database import SessionLocal
-from models import Agent, StatusEnum, AgentCapability, AgentEndpoint, EndpointParameter
+from models import Agent, StatusEnum, AgentCapability, AgentEndpoint, EndpointParameter, Workflow, WorkflowExecution, UserThread, WorkflowSchedule, WorkflowWebhook
 from schemas import AgentCard, ProcessRequest, ProcessResponse, PlanResponse, FileObject
 from orchestrator.graph import ForceJsonSerializer, graph, create_graph_with_checkpointer, create_execution_subgraph, messages_from_dict, messages_to_dict, serialize_complex_object
 from orchestrator.state import State
@@ -1214,10 +1215,15 @@ async def get_all_conversations(request: Request, db: Session = Depends(get_db))
                 except Exception as e:
                     logger.warning(f"Failed to read history for {ut.thread_id}: {e}")
             
+            # Handle title: check for None, empty string, or the literal string "None"
+            title = ut.title
+            if not title or title == "None" or title.strip() == "":
+                title = "Untitled Conversation"
+            
             conversations.append({
                 "id": ut.thread_id,
                 "thread_id": ut.thread_id,
-                "title": ut.title or "Untitled Conversation",
+                "title": title,
                 "created_at": ut.created_at.isoformat() if ut.created_at else None,
                 "updated_at": ut.updated_at.isoformat() if ut.updated_at else None,
                 "last_message": last_message
@@ -1281,6 +1287,265 @@ async def get_conversation_history(thread_id: str, request: Request, db: Session
         logger.error(f"Error loading conversation history for {thread_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred while loading the conversation: {str(e)}")
 
+# Workflow Endpoints
+@app.post("/api/workflows", tags=["Workflows"])
+async def save_workflow(request: Request, thread_id: str, name: str, description: str = "", db: Session = Depends(get_db)):
+    """Save conversation as reusable workflow"""
+    from auth import get_user_from_request
+    
+    user = get_user_from_request(request)
+    user_id = user.get("sub")
+    
+    # Load conversation
+    history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
+    if not os.path.exists(history_path):
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    
+    with open(history_path, "r", encoding="utf-8") as f:
+        history = json.load(f)
+    
+    workflow_id = str(uuid.uuid4())
+    
+    # Extract comprehensive blueprint from conversation state
+    state = history.get("state", {})
+    blueprint = {
+        "workflow_id": workflow_id,
+        "thread_id": thread_id,
+        "original_prompt": state.get("original_prompt", ""),
+        "task_agent_pairs": state.get("task_agent_pairs", []),
+        "task_plan": state.get("task_plan", []),
+        "parsed_tasks": state.get("parsed_tasks", []),
+        "candidate_agents": state.get("candidate_agents", {}),
+        "user_expectations": state.get("user_expectations"),
+        "completed_tasks": state.get("completed_tasks", []),
+        "final_response": state.get("final_response"),
+        "created_at": datetime.utcnow().isoformat()
+    }
+    
+    workflow = Workflow(
+        workflow_id=workflow_id,
+        user_id=user_id,
+        name=name,
+        description=description or state.get("original_prompt", "")[:200],  # Use prompt as fallback description
+        blueprint=blueprint
+    )
+    db.add(workflow)
+    db.commit()
+    
+    logger.info(f"Workflow '{name}' ({workflow_id}) saved by user {user_id}")
+    return {
+        "workflow_id": workflow_id,
+        "name": name,
+        "description": workflow.description,
+        "status": "saved",
+        "task_count": len(blueprint.get("task_agent_pairs", [])),
+        "created_at": blueprint["created_at"]
+    }
+
+@app.get("/api/workflows", tags=["Workflows"])
+async def list_workflows(request: Request, db: Session = Depends(get_db)):
+    """List user's workflows"""
+    from auth import get_user_from_request
+    
+    user = get_user_from_request(request)
+    user_id = user.get("sub")
+    
+    workflows = db.query(Workflow).filter_by(user_id=user_id, status='active').all()
+    return [{"workflow_id": w.workflow_id, "name": w.name, "description": w.description, "created_at": w.created_at.isoformat()} for w in workflows]
+
+@app.get("/api/workflows/{workflow_id}", tags=["Workflows"])
+async def get_workflow(workflow_id: str, request: Request, db: Session = Depends(get_db)):
+    """Get workflow details"""
+    from auth import get_user_from_request
+    
+    user = get_user_from_request(request)
+    user_id = user.get("sub")
+    
+    workflow = db.query(Workflow).filter_by(workflow_id=workflow_id, user_id=user_id).first()
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    
+    return {"workflow_id": workflow.workflow_id, "name": workflow.name, "description": workflow.description, "blueprint": workflow.blueprint, "created_at": workflow.created_at.isoformat()}
+
+@app.post("/api/workflows/{workflow_id}/execute", tags=["Workflows"])
+async def execute_workflow(workflow_id: str, inputs: Dict[str, Any], request: Request, db: Session = Depends(get_db)):
+    """Execute workflow with new inputs"""
+    from auth import get_user_from_request
+    
+    user = get_user_from_request(request)
+    user_id = user.get("sub")
+    
+    workflow = db.query(Workflow).filter_by(workflow_id=workflow_id, user_id=user_id).first()
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    
+    execution_id = str(uuid.uuid4())
+    new_thread_id = str(uuid.uuid4())
+    
+    # Create execution record
+    execution = WorkflowExecution(
+        execution_id=execution_id,
+        workflow_id=workflow_id,
+        user_id=user_id,
+        inputs=inputs,
+        status='queued'
+    )
+    db.add(execution)
+    db.commit()
+    
+    # Use orchestrator with modified prompt
+    blueprint = workflow.blueprint
+    original_prompt = blueprint.get("original_prompt", "")
+    
+    # Replace placeholders in prompt
+    modified_prompt = original_prompt
+    for key, value in inputs.items():
+        modified_prompt = modified_prompt.replace(f"{{{key}}}", str(value))
+    
+    logger.info(f"Executing workflow {workflow_id} as thread {new_thread_id}")
+    return {"execution_id": execution_id, "thread_id": new_thread_id, "status": "queued", "message": "Use /ws/chat with this thread_id to execute"}
+
+@app.post("/api/workflows/{workflow_id}/schedule", tags=["Workflows"])
+async def schedule_workflow(workflow_id: str, cron_expression: str, input_template: Dict[str, Any], request: Request, db: Session = Depends(get_db)):
+    """Schedule workflow execution with cron expression"""
+    from auth import get_user_from_request
+    from services.workflow_scheduler import get_scheduler
+    from database import SessionLocal
+    
+    user = get_user_from_request(request)
+    user_id = user.get("sub")
+    
+    workflow = db.query(Workflow).filter_by(workflow_id=workflow_id, user_id=user_id).first()
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    
+    schedule_id = str(uuid.uuid4())
+    schedule = WorkflowSchedule(
+        schedule_id=schedule_id,
+        workflow_id=workflow_id,
+        user_id=user_id,
+        cron_expression=cron_expression,
+        input_template=input_template
+    )
+    db.add(schedule)
+    db.commit()
+    
+    # Add to scheduler
+    try:
+        scheduler = get_scheduler()
+        scheduler.add_schedule(
+            schedule_id=schedule_id,
+            workflow_id=workflow_id,
+            cron_expression=cron_expression,
+            input_template=input_template,
+            user_id=user_id,
+            db_session_factory=SessionLocal
+        )
+        logger.info(f"Scheduled workflow {workflow_id} with cron: {cron_expression}")
+        return {"schedule_id": schedule_id, "status": "scheduled", "cron": cron_expression}
+    except Exception as e:
+        # Rollback if scheduling fails
+        db.delete(schedule)
+        db.commit()
+        logger.error(f"Failed to schedule workflow: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Invalid cron expression or scheduling error: {str(e)}")
+
+@app.post("/api/workflows/{workflow_id}/webhook", tags=["Workflows"])
+async def create_webhook(workflow_id: str, request: Request, db: Session = Depends(get_db)):
+    """Create webhook trigger for workflow"""
+    from auth import get_user_from_request
+    import secrets
+    
+    user = get_user_from_request(request)
+    user_id = user.get("sub")
+    
+    workflow = db.query(Workflow).filter_by(workflow_id=workflow_id, user_id=user_id).first()
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    
+    webhook_id = str(uuid.uuid4())
+    webhook_token = secrets.token_urlsafe(32)
+    
+    webhook = WorkflowWebhook(
+        webhook_id=webhook_id,
+        workflow_id=workflow_id,
+        user_id=user_id,
+        webhook_token=webhook_token
+    )
+    db.add(webhook)
+    db.commit()
+    
+    logger.info(f"Created webhook {webhook_id} for workflow {workflow_id}")
+    return {"webhook_id": webhook_id, "webhook_url": f"/webhooks/{webhook_id}", "webhook_token": webhook_token}
+
+@app.delete("/api/workflows/{workflow_id}/schedule/{schedule_id}", tags=["Workflows"])
+async def delete_schedule(workflow_id: str, schedule_id: str, request: Request, db: Session = Depends(get_db)):
+    """Delete a workflow schedule"""
+    from auth import get_user_from_request
+    from services.workflow_scheduler import get_scheduler
+    
+    user = get_user_from_request(request)
+    user_id = user.get("sub")
+    
+    schedule = db.query(WorkflowSchedule).filter_by(
+        schedule_id=schedule_id,
+        workflow_id=workflow_id,
+        user_id=user_id
+    ).first()
+    
+    if not schedule:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    
+    # Remove from scheduler
+    try:
+        scheduler = get_scheduler()
+        scheduler.remove_schedule(schedule_id)
+    except Exception as e:
+        logger.error(f"Failed to remove schedule from scheduler: {str(e)}")
+    
+    # Delete from database
+    db.delete(schedule)
+    db.commit()
+    
+    logger.info(f"Deleted schedule {schedule_id} for workflow {workflow_id}")
+    return {"status": "deleted"}
+
+@app.post("/webhooks/{webhook_id}", tags=["Webhooks"])
+async def trigger_webhook(webhook_id: str, payload: Dict[str, Any], webhook_token: str = Query(...), db: Session = Depends(get_db)):
+    """Trigger workflow via webhook - executes asynchronously"""
+    webhook = db.query(WorkflowWebhook).filter_by(webhook_id=webhook_id, is_active=True).first()
+    
+    if not webhook or webhook.webhook_token != webhook_token:
+        raise HTTPException(status_code=404, detail="Invalid webhook")
+    
+    workflow = db.query(Workflow).filter_by(workflow_id=webhook.workflow_id).first()
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    
+    execution_id = str(uuid.uuid4())
+    execution = WorkflowExecution(
+        execution_id=execution_id,
+        workflow_id=webhook.workflow_id,
+        user_id=webhook.user_id,
+        inputs=payload,
+        status='queued',
+        started_at=datetime.utcnow()
+    )
+    db.add(execution)
+    db.commit()
+    
+    # Execute workflow in background
+    from services.workflow_scheduler import get_scheduler
+    scheduler = get_scheduler()
+    asyncio.create_task(
+        scheduler._async_execute_workflow(
+            execution_id, workflow.workflow_id, workflow.blueprint, payload, webhook.user_id
+        )
+    )
+    
+    logger.info(f"Webhook {webhook_id} triggered workflow {webhook.workflow_id} (execution: {execution_id})")
+    return {"execution_id": execution_id, "status": "running", "message": "Workflow execution started"}
+
 @app.get("/api/plan/{thread_id}", response_model=PlanResponse)
 async def get_agent_plan(thread_id: str):
     """
@@ -1312,6 +1577,105 @@ async def get_agent_plan(thread_id: str):
             status_code=500,
             detail=f"An internal server error occurred while reading the plan file."
         )
+
+@app.websocket("/ws/workflow/{workflow_id}/execute")
+async def websocket_workflow_execute(websocket: WebSocket, workflow_id: str):
+    """Execute workflow via WebSocket with streaming - uses WorkflowExecutor"""
+    await websocket.accept()
+    thread_id = None
+    execution_id = None
+    db = None
+    
+    try:
+        from orchestrator.workflow_executor import WorkflowExecutor
+        
+        data = await websocket.receive_json()
+        inputs = data.get("inputs", {})
+        owner = data.get("owner")
+        
+        if not owner:
+            await websocket.send_json({"node": "__error__", "error": "Owner required"})
+            return
+        
+        # Get workflow
+        db = SessionLocal()
+        user_id = owner.get("user_id") or owner.get("sub") or owner
+        workflow = db.query(Workflow).filter_by(workflow_id=workflow_id, user_id=user_id).first()
+        
+        if not workflow:
+            await websocket.send_json({"node": "__error__", "error": "Workflow not found"})
+            return
+        
+        # Create execution record
+        execution_id = str(uuid.uuid4())
+        execution = WorkflowExecution(
+            execution_id=execution_id,
+            workflow_id=workflow_id,
+            user_id=user_id,
+            inputs=inputs,
+            status='running'
+        )
+        db.add(execution)
+        db.commit()
+        
+        # Use WorkflowExecutor to prepare execution
+        executor = WorkflowExecutor(workflow.blueprint)
+        execution_data = await executor.execute(inputs, owner)
+        
+        thread_id = execution_data["thread_id"]
+        prompt = execution_data["prompt"]
+        
+        logger.info(f"Executing workflow {workflow_id} as thread {thread_id}")
+        
+        # Stream via orchestrator
+        async for event in graph.astream_events(
+            {"original_prompt": prompt, "owner": owner},
+            config={"configurable": {"thread_id": thread_id}},
+            version="v2"
+        ):
+            if event["event"] == "on_chain_stream":
+                node_name = event.get("name", "unknown")
+                event_data = event.get("data", {})
+                
+                await websocket.send_json({
+                    "node": node_name,
+                    "data": serialize_complex_object(event_data),
+                    "thread_id": thread_id,
+                    "execution_id": execution_id,
+                    "workflow_id": workflow_id
+                })
+        
+        # Update execution status
+        execution.status = 'completed'
+        execution.completed_at = datetime.utcnow()
+        db.commit()
+        
+        await websocket.send_json({
+            "node": "__complete__",
+            "thread_id": thread_id,
+            "execution_id": execution_id,
+            "workflow_id": workflow_id
+        })
+        
+    except Exception as e:
+        logger.error(f"Workflow execution error: {e}", exc_info=True)
+        
+        if db and execution_id:
+            try:
+                execution = db.query(WorkflowExecution).filter_by(execution_id=execution_id).first()
+                if execution:
+                    execution.status = 'failed'
+                    execution.error = str(e)
+                    execution.completed_at = datetime.utcnow()
+                    db.commit()
+            except Exception as db_error:
+                logger.error(f"Failed to update execution status: {db_error}")
+        
+        await websocket.send_json({"node": "__error__", "error": str(e)})
+    
+    finally:
+        if db:
+            db.close()
 
 @app.websocket("/ws/chat")
 async def websocket_chat(websocket: WebSocket):
@@ -1443,6 +1807,48 @@ async def websocket_chat(websocket: WebSocket):
                         "timestamp": time.time()
                     })
                     logger.info(f"Streamed update from node '{node_name}' (#{node_count}) for thread_id {thread_id} - Progress: {progress:.1f}%")
+                    
+                    # Emit task status events for real-time UI updates
+                    if node_name == "execute_batch" and isinstance(node_output, dict):
+                        task_events = node_output.get("task_events", [])
+                        if task_events:
+                            logger.info(f"🔄 Emitting {len(task_events)} task status events")
+                            for event in task_events:
+                                event_type = event.get("event_type")
+                                task_name = event.get("task_name")
+                                
+                                if event_type == "task_started":
+                                    await websocket.send_json({
+                                        "node": "task_started",
+                                        "thread_id": thread_id,
+                                        "task_name": task_name,
+                                        "task_description": event.get("task_description"),
+                                        "agent_name": event.get("agent_name"),
+                                        "timestamp": event.get("timestamp", time.time())
+                                    })
+                                    logger.debug(f"🚀 Emitted task_started for '{task_name}'")
+                                    
+                                elif event_type == "task_completed":
+                                    await websocket.send_json({
+                                        "node": "task_completed",
+                                        "thread_id": thread_id,
+                                        "task_name": task_name,
+                                        "agent_name": event.get("agent_name"),
+                                        "execution_time": event.get("execution_time", 0),
+                                        "timestamp": event.get("timestamp", time.time())
+                                    })
+                                    logger.debug(f"✅ Emitted task_completed for '{task_name}'")
+                                    
+                                elif event_type == "task_failed":
+                                    await websocket.send_json({
+                                        "node": "task_failed",
+                                        "thread_id": thread_id,
+                                        "task_name": task_name,
+                                        "error": event.get("error"),
+                                        "execution_time": event.get("execution_time", 0),
+                                        "timestamp": event.get("timestamp", time.time())
+                                    })
+                                    logger.error(f"❌ Emitted task_failed for '{task_name}'")
 
                 except Exception as process_error:
                     logger.warning(f"Failed to process data from node '{node_name}': {process_error}")
@@ -2078,12 +2484,25 @@ def start_agents_async():
 
 @app.on_event("startup")
 async def startup_event():
-    """Start agents and background health checker on app startup"""
+    """Start agents, background health checker, and workflow scheduler on app startup"""
     # Start agents in background
     start_agents_async()
     
     # Start background health checker
     asyncio.create_task(check_agent_health_background())
+    
+    # Initialize workflow scheduler and load active schedules
+    try:
+        from services.workflow_scheduler import init_scheduler
+        from database import SessionLocal
+        db = SessionLocal()
+        try:
+            init_scheduler(db)
+            logger.info("Workflow scheduler initialized successfully")
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error(f"Failed to initialize workflow scheduler: {str(e)}", exc_info=True)
 
 if __name__ == "__main__":
     # Agents will be started automatically via @app.on_event("startup")

@@ -1551,6 +1551,9 @@ async def execute_batch(state: State, config: RunnableConfig):
     remaining_plan_objects = task_plan[1:]
     logger.info(f"Executing batch of {len(current_batch_plan)} tasks.")
     
+    # Initialize task events list for real-time status tracking
+    task_events = []
+    
     # Rehydrate the pairs
     task_agent_pair_dicts = state.get('task_agent_pairs', [])
     task_agent_pairs = [TaskAgentPair.model_validate(d) for d in task_agent_pair_dicts]
@@ -1566,6 +1569,20 @@ async def execute_batch(state: State, config: RunnableConfig):
         agents_to_try = [original_task_pair.primary] + original_task_pair.fallbacks
         final_error_result = None
         
+        # EMIT: Task started event
+        import time
+        task_start_time = time.time()
+        logger.info(f"🚀 Task started: '{planned_task.task_name}' with agent '{agents_to_try[0].name}'")
+        
+        # Record task started event
+        task_events.append({
+            "event_type": "task_started",
+            "task_name": planned_task.task_name,
+            "task_description": planned_task.task_description,
+            "agent_name": agents_to_try[0].name,
+            "timestamp": time.time()
+        })
+        
         for agent_to_try in agents_to_try:
             max_retries = 3 if agent_to_try.id == original_task_pair.primary.id else 1
             last_error = None
@@ -1579,7 +1596,23 @@ async def execute_batch(state: State, config: RunnableConfig):
                 is_error = isinstance(result_data, str) and "Error:" in result_data
                 
                 if not is_error:
-                    logger.info(f"Task '{planned_task.task_name}' succeeded with agent '{agent_to_try.name}'.")
+                    # EMIT: Task completed event
+                    task_end_time = time.time()
+                    execution_time = round(task_end_time - task_start_time, 2)
+                    logger.info(f"✅ Task completed: '{planned_task.task_name}' in {execution_time}s with agent '{agent_to_try.name}'")
+                    
+                    # Record task completed event
+                    task_events.append({
+                        "event_type": "task_completed",
+                        "task_name": planned_task.task_name,
+                        "agent_name": agent_to_try.name,
+                        "execution_time": execution_time,
+                        "timestamp": time.time()
+                    })
+                    
+                    # Add execution metadata to result
+                    task_result['execution_time'] = execution_time
+                    task_result['agent_used'] = agent_to_try.name
                     return task_result
                 
                 final_error_result = task_result
@@ -1594,7 +1627,24 @@ async def execute_batch(state: State, config: RunnableConfig):
                     logger.error(f"Server error or other issue for agent '{agent_to_try.name}', task '{planned_task.task_name}': {raw_response}")
                     break
         
-        logger.error(f"All agents failed for task '{planned_task.task_name}'. Returning final error.")
+        # EMIT: Task failed event
+        task_end_time = time.time()
+        execution_time = round(task_end_time - task_start_time, 2)
+        logger.error(f"❌ Task failed: '{planned_task.task_name}' after {execution_time}s - all agents exhausted")
+        
+        # Record task failed event
+        task_events.append({
+            "event_type": "task_failed",
+            "task_name": planned_task.task_name,
+            "execution_time": execution_time,
+            "error": str(final_error_result.get('result', 'Unknown error')) if final_error_result else 'Unknown error',
+            "timestamp": time.time()
+        })
+        
+        if final_error_result:
+            final_error_result['execution_time'] = execution_time
+            final_error_result['status'] = 'failed'
+        
         return final_error_result
 
     batch_results = await asyncio.gather(*(try_task_with_fallbacks(planned_task) for planned_task in current_batch_plan))
@@ -1606,8 +1656,13 @@ async def execute_batch(state: State, config: RunnableConfig):
     for res in batch_results:
         task_name = res['task_name']
         result_preview = str(res.get('result', {}))[:200]
-        print(f"!!! EXECUTE_BATCH: Task '{task_name}' result preview: {result_preview} !!!")
-        logger.info(f"Task '{task_name}' completed with result preview: {result_preview}")
+        execution_time = res.get('execution_time', 0)
+        agent_used = res.get('agent_used', 'Unknown')
+        status = res.get('status', 'completed')
+        
+        print(f"!!! EXECUTE_BATCH: Task '{task_name}' {status} in {execution_time}s with {agent_used} !!!")
+        logger.info(f"Task '{task_name}' {status} in {execution_time}s - Result preview: {result_preview}")
+        
         completed_tasks_with_desc.append(CompletedTask(
             task_name=task_name,
             result=res.get('result', {}),
@@ -1628,10 +1683,11 @@ async def execute_batch(state: State, config: RunnableConfig):
     output_state = {
         "task_plan": remaining_plan_dicts,
         "completed_tasks": completed_tasks_dicts,
-        "latest_completed_tasks": latest_completed_tasks_dicts
+        "latest_completed_tasks": latest_completed_tasks_dicts,
+        "task_events": task_events  # Include task status events for real-time updates
     }
     
-    print(f"!!! EXECUTE_BATCH: Returning output_state with latest_completed_tasks count={len(output_state['latest_completed_tasks'])} !!!")
+    print(f"!!! EXECUTE_BATCH: Returning output_state with latest_completed_tasks count={len(output_state['latest_completed_tasks'])}, task_events count={len(task_events)} !!!")
     logger.info(f"Output state keys: {list(output_state.keys())}")
 
     # Save the updated plan (using the object version for readability)
@@ -2817,6 +2873,63 @@ def get_serializable_state(state: dict | State, thread_id: str) -> dict:
         "timestamp": time.time(),
     }
 
+def generate_conversation_title(prompt: str, messages: List = None) -> str:
+    """
+    Generate a concise title for the conversation using LLM.
+    Similar to ChatGPT's title generation.
+    """
+    try:
+        # Use Cerebras for fast title generation
+        llm = ChatCerebras(model="llama3.1-8b", temperature=0.3)
+        
+        # Get first user message if prompt is empty
+        if not prompt and messages:
+            for msg in messages:
+                if hasattr(msg, 'type') and msg.type == "human":
+                    prompt = msg.content
+                    break
+                elif isinstance(msg, dict) and msg.get("type") == "human":
+                    prompt = msg.get("content", "")
+                    break
+        
+        if not prompt:
+            return None
+        
+        # Generate title (max 6 words, descriptive)
+        title_prompt = f"""Generate a short, descriptive title (maximum 6 words) for a conversation that starts with:
+
+"{prompt[:200]}"
+
+Rules:
+- Maximum 6 words
+- Descriptive and specific
+- No quotes or punctuation at the end
+- Capitalize first letter only
+
+Title:"""
+        
+        response = llm.invoke(title_prompt)
+        title = response.content.strip()
+        
+        # Clean up the title
+        title = title.replace('"', '').replace("'", "").strip()
+        if title.endswith('.'):
+            title = title[:-1]
+        
+        # Limit to 60 chars
+        if len(title) > 60:
+            title = title[:57] + "..."
+        
+        logger.info(f"Generated title: {title}")
+        return title
+        
+    except Exception as e:
+        logger.error(f"Failed to generate title: {e}")
+        # Fallback: use first 50 chars of prompt
+        if prompt:
+            return prompt[:50] + "..." if len(prompt) > 50 else prompt
+        return None
+
 def save_conversation_history(state: State, config: RunnableConfig):
     """
     Saves the full, serializable state of the conversation to a JSON file.
@@ -2878,12 +2991,19 @@ def save_conversation_history(state: State, config: RunnableConfig):
                         existing = db.query(UserThread).filter_by(thread_id=thread_id).first()
                         
                         if not existing:
-                            # Create new entry
-                            # Generate title from original prompt (first 50 chars)
+                            # Create new entry with AI-generated title
                             original_prompt = state_dict.get("original_prompt", "")
-                            title = original_prompt[:50] + "..." if len(original_prompt) > 50 else original_prompt
+                            messages = state_dict.get("messages", [])
+                            
+                            # Generate title using LLM
+                            title = generate_conversation_title(original_prompt, messages)
+                            
+                            # Fallback if generation fails
                             if not title:
-                                title = "Untitled Conversation"
+                                if original_prompt:
+                                    title = original_prompt[:50] + "..." if len(original_prompt) > 50 else original_prompt
+                                else:
+                                    title = "Untitled Conversation"
                             
                             user_thread = UserThread(
                                 user_id=user_id,
@@ -2892,9 +3012,9 @@ def save_conversation_history(state: State, config: RunnableConfig):
                             )
                             db.add(user_thread)
                             db.commit()
-                            logger.info(f"Registered conversation {thread_id} for user {user_id}")
+                            logger.info(f"Registered conversation {thread_id} for user {user_id} with title: '{title}'")
                         else:
-                            # Update timestamp
+                            # Only update timestamp
                             from datetime import datetime
                             existing.updated_at = datetime.utcnow()
                             db.commit()

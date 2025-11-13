@@ -75,3 +75,56 @@ class UserThread(Base):
     title = Column(String, nullable=True)  # Title for the conversation
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class Workflow(Base):
+    __tablename__ = "workflows"
+
+    id = Column(Integer, primary_key=True, index=True)
+    workflow_id = Column(String, nullable=False, unique=True, index=True)
+    user_id = Column(String, nullable=False, index=True)
+    name = Column(String, nullable=False)
+    description = Column(Text)
+    blueprint = Column(JSON, nullable=False)  # Full workflow structure
+    version = Column(Integer, default=1)
+    status = Column(String, default='active')  # active, archived
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class WorkflowExecution(Base):
+    __tablename__ = "workflow_executions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_id = Column(String, nullable=False, unique=True, index=True)
+    workflow_id = Column(String, ForeignKey("workflows.workflow_id"), nullable=False)
+    user_id = Column(String, nullable=False, index=True)
+    status = Column(String, default='running')  # queued, running, completed, failed
+    inputs = Column(JSON)
+    outputs = Column(JSON)
+    error = Column(Text)
+    started_at = Column(DateTime, default=datetime.utcnow)
+    completed_at = Column(DateTime)
+
+class WorkflowSchedule(Base):
+    __tablename__ = "workflow_schedules"
+
+    id = Column(Integer, primary_key=True, index=True)
+    schedule_id = Column(String, nullable=False, unique=True, index=True)
+    workflow_id = Column(String, ForeignKey("workflows.workflow_id"), nullable=False)
+    user_id = Column(String, nullable=False, index=True)
+    cron_expression = Column(String, nullable=False)
+    input_template = Column(JSON)
+    is_active = Column(Boolean, default=True)
+    last_run_at = Column(DateTime, nullable=True)
+    next_run_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class WorkflowWebhook(Base):
+    __tablename__ = "workflow_webhooks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    webhook_id = Column(String, nullable=False, unique=True, index=True)
+    workflow_id = Column(String, ForeignKey("workflows.workflow_id"), nullable=False)
+    user_id = Column(String, nullable=False, index=True)
+    webhook_token = Column(String, nullable=False)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)

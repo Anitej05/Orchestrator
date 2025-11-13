@@ -40,3 +40,4 @@ Pillow
 groq
 requests
 aiofiles
+apscheduler>=3.10.0

@@ -26,3 +26,5 @@ test-*.js
 
 # Logs
 backend/logs/*.log
+
+*.txt
