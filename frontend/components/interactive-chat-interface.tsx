@@ -337,7 +337,7 @@ export function InteractiveChatInterface({
       {/* Input Form */}
       <div className="p-4 border-t border-gray-200 dark:border-gray-700/50 bg-gray-50/80 dark:bg-gray-900/80 backdrop-blur-lg rounded-b-lg">
         {/* Consolidated Status Indicator - Shows orchestration progress above input */}
-        {(isLoading || state.status === 'processing' || state.isWaitingForUser) && (
+        {(isLoading || state.status === 'processing') && !state.isWaitingForUser && (
           <div className={`status-indicator p-3 rounded-lg mb-4 ${
             state.isWaitingForUser
               ? 'bg-yellow-50 border border-yellow-200' 
@@ -435,14 +435,15 @@ export function InteractiveChatInterface({
         {!state.approval_required && (
         <form onSubmit={handleSubmit} className="space-y-4">
           {state.isWaitingForUser ? (
-            <div className="space-y-2">
+            <div className="space-y-3">
               <Textarea
                 value={userResponse}
                 onChange={(e) => setUserResponse(e.target.value)}
-                placeholder="Your response..."
+                placeholder="Type your response here..."
                 disabled={isLoading}
                 className="min-h-[120px] text-base"
                 onKeyDown={handleKeyDown}
+                autoFocus
               />
             </div>
           ) : (
@@ -527,7 +528,10 @@ export function InteractiveChatInterface({
             <div className="flex space-x-2">
               <Button 
                 type="submit" 
-                disabled={isLoading || (!inputValue.trim() && attachedFiles.length === 0 && !userResponse.trim())}
+                disabled={
+                  isLoading || 
+                  (state.isWaitingForUser ? !userResponse.trim() : (!inputValue.trim() && attachedFiles.length === 0))
+                }
               >
                 {isLoading ? 'Processing...' : state.isWaitingForUser ? 'Send Response' : 'Start Workflow'}
               </Button>

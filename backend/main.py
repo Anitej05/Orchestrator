@@ -396,6 +396,7 @@ async def execute_orchestration(
     user_response: Optional[str] = None,
     files: Optional[List[FileObject]] = None,
     stream_callback=None,
+    task_event_callback=None,
     planning_mode: bool = False
 ):
     """
@@ -404,7 +405,11 @@ async def execute_orchestration(
     """
     logger.info(f"Starting orchestration for thread_id: {thread_id}, planning_mode: {planning_mode}")
 
+    # Build config with task_event_callback if provided
     config = {"configurable": {"thread_id": thread_id}}
+    if task_event_callback:
+        config["configurable"]["task_event_callback"] = task_event_callback
+        logger.info(f"✅ Task event callback registered for real-time streaming")
 
     # Get the current state of the conversation from the in-memory store first (most recent)
     # Fall back to checkpointer if not in memory
@@ -1848,28 +1853,51 @@ async def websocket_chat(websocket: WebSocket):
                                         "execution_time": event.get("execution_time", 0),
                                         "timestamp": event.get("timestamp", time.time())
                                     })
-                                    logger.error(f"❌ Emitted task_failed for '{task_name}'")
-
-                except Exception as process_error:
-                    logger.warning(f"Failed to process data from node '{node_name}': {process_error}")
-                    # Send a simplified message instead
-                    try:
+                except Exception as e:
+                    logger.error(f"Error in stream_callback: {e}", exc_info=True)
+            
+            # Define task event callback for REAL-TIME task status streaming
+            async def task_event_callback(event: dict):
+                """Stream task events in real-time as tasks start/complete"""
+                try:
+                    event_type = event.get("event_type")
+                    task_name = event.get("task_name")
+                    
+                    if event_type == "task_started":
                         await websocket.send_json({
-                            "node": node_name,
-                            "data": {
-                                "status": "completed",
-                                "message": f"Node {node_name} completed successfully",
-                                "warning": f"Data processing failed: {str(process_error)}",
-                                "progress_percentage": round(progress, 1),
-                                "node_sequence": node_count,
-                                "description": f"Node {node_name} processed with warning"
-                            },
+                            "node": "task_started",
                             "thread_id": thread_id,
-                            "error_type": "DataProcessingWarning",
-                            "timestamp": time.time()
+                            "task_name": task_name,
+                            "task_description": event.get("task_description"),
+                            "agent_name": event.get("agent_name"),
+                            "timestamp": event.get("timestamp", time.time())
                         })
-                    except Exception as send_error:
-                        logger.error(f"Failed to send fallback message for node '{node_name}': {send_error}")
+                        logger.info(f"📡 REAL-TIME: Task started - '{task_name}'")
+                        
+                    elif event_type == "task_completed":
+                        await websocket.send_json({
+                            "node": "task_completed",
+                            "thread_id": thread_id,
+                            "task_name": task_name,
+                            "agent_name": event.get("agent_name"),
+                            "execution_time": event.get("execution_time", 0),
+                            "timestamp": event.get("timestamp", time.time())
+                        })
+                        logger.info(f"📡 REAL-TIME: Task completed - '{task_name}' ({event.get('execution_time', 0):.2f}s)")
+                        
+                    elif event_type == "task_failed":
+                        await websocket.send_json({
+                            "node": "task_failed",
+                            "thread_id": thread_id,
+                            "task_name": task_name,
+                            "error": event.get("error"),
+                            "execution_time": event.get("execution_time", 0),
+                            "timestamp": event.get("timestamp", time.time())
+                        })
+                        logger.warning(f"📡 REAL-TIME: Task failed - '{task_name}': {event.get('error')}")
+                        
+                except Exception as e:
+                    logger.error(f"Error in task_event_callback: {e}", exc_info=True)
 
             # Convert files data to FileObject instances with enhanced error handling
             file_objects = []
@@ -1941,6 +1969,7 @@ async def websocket_chat(websocket: WebSocket):
                         user_response=user_response,
                         files=file_objects if file_objects else None,
                         stream_callback=stream_callback,
+                        task_event_callback=task_event_callback,
                         planning_mode=planning_mode
                     )
                 except asyncio.TimeoutError as timeout_err:

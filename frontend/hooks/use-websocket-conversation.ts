@@ -46,11 +46,11 @@ export function useWebSocketManager({
     }
 
     try {
-      console.debug(`Initiating WebSocket connection to ${url}`);
+      console.log('🔌 Initiating WebSocket connection to', url);
       ws.current = new WebSocket(url);
 
       ws.current.onopen = () => {
-        console.debug('WebSocket connected successfully');
+        console.log('✅ WebSocket connected successfully to', url);
         setIsConnected(true);
 
         // Expose WebSocket to window for conversation store to use
@@ -59,6 +59,35 @@ export function useWebSocketManager({
         // The WebSocket will wait for the first message from the client
         // which will be sent when startConversation or continueConversation is called
         console.debug('WebSocket ready to receive messages');
+      };
+
+      ws.current.onerror = (error) => {
+        console.error('❌ WebSocket connection error:', error);
+        console.error('Failed to connect to:', url);
+        console.error('Make sure the backend is running on http://localhost:8000');
+        setIsConnected(false);
+      };
+
+      ws.current.onclose = (event) => {
+        console.warn('⚠️ WebSocket connection closed:', {
+          code: event.code,
+          reason: event.reason || 'No reason provided',
+          wasClean: event.wasClean
+        });
+        setIsConnected(false);
+        (window as any).__websocket = null;
+        
+        // Always attempt to reconnect after a delay (for new conversations)
+        // Only skip reconnect if this is a user-initiated disconnect (code 1000 with clean close)
+        const isUserDisconnect = event.wasClean && event.code === 1000 && event.reason === 'User initiated disconnect';
+        
+        if (!isUserDisconnect) {
+          console.log('🔄 Will attempt to reconnect in 2 seconds...');
+          setTimeout(() => {
+            console.log('🔄 Attempting to reconnect WebSocket...');
+            connect();
+          }, 2000);
+        }
       };
 
       ws.current.onmessage = (event) => {
@@ -209,6 +238,8 @@ export function useWebSocketManager({
             const taskName = eventData.data?.task_name || eventData.task_name;
             const agentName = eventData.data?.agent_name || eventData.agent_name;
             
+            console.log('📨 WebSocket task_started event received:', { taskName, agentName, eventData });
+            
             if (taskName) {
               const currentState = useConversationStore.getState();
               const updatedTaskStatuses = {
@@ -227,6 +258,7 @@ export function useWebSocketManager({
                 current_executing_task: taskName,
               });
               
+              console.log('✅ Updated task_statuses in store:', updatedTaskStatuses);
               console.debug('Task started:', { taskName, agentName });
             }
           }
@@ -237,6 +269,8 @@ export function useWebSocketManager({
             const agentName = eventData.data?.agent_name || eventData.agent_name;
             const result = eventData.data?.result || eventData.result;
             const cost = eventData.data?.cost || eventData.cost;
+            
+            console.log('📨 WebSocket task_completed event received:', { taskName, executionTime, agentName });
             
             if (taskName) {
               const currentState = useConversationStore.getState();
@@ -261,6 +295,7 @@ export function useWebSocketManager({
                 current_executing_task: null,
               });
               
+              console.log('✅ Updated task_statuses in store:', updatedTaskStatuses);
               console.debug('Task completed:', { taskName, executionTime, agentName });
             }
           }
@@ -323,10 +358,24 @@ export function useWebSocketManager({
           }
           else if (eventData.node === 'ask_user' || eventData.node === '__user_input_required__') {
             const currentMessages = useConversationStore.getState().messages;
+            const question = eventData.data?.question_for_user || eventData.data?.question || 'Please provide additional information';
+            
+            console.log('📨 ask_user event received:', question);
+            
+            // Add the question as a system message so user can see it
+            const questionMessage: Message = {
+              id: Date.now().toString(),
+              type: 'system',
+              content: question,
+              timestamp: new Date()
+            };
+            
             _setConversationState({
-              messages: currentMessages,
+              messages: [...currentMessages, questionMessage],
               status: 'waiting_for_user',
               isWaitingForUser: true,
+              isLoading: false,  // IMPORTANT: Stop loading so user can respond
+              currentQuestion: question,
               metadata: {
                 ...useConversationStore.getState().metadata,
                 currentStage: 'waiting',
@@ -334,6 +383,8 @@ export function useWebSocketManager({
                 progress: 100
               }
             });
+            
+            console.log('Ask user - question:', question);
           }
           else if (eventData.node === 'save_history') {
             const currentMessages = useConversationStore.getState().messages;
@@ -867,8 +918,21 @@ export function useWebSocketManager({
   useEffect(() => {
     // Connect on mount
     connect();
+    
+    // Listen for reconnection requests
+    const handleReconnect = () => {
+      console.log('🔄 Reconnection requested');
+      if (ws.current && (ws.current.readyState === WebSocket.CLOSED || ws.current.readyState === WebSocket.CLOSING)) {
+        console.log('🔄 Reconnecting WebSocket...');
+        connect();
+      }
+    };
+    
+    window.addEventListener('reconnect-websocket', handleReconnect);
+    
     // Disconnect on unmount
     return () => {
+      window.removeEventListener('reconnect-websocket', handleReconnect);
       // Add a small delay before disconnecting to allow final messages to be sent
       setTimeout(() => {
         disconnect();

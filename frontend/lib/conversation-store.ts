@@ -127,9 +127,19 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
 
         // Send message to WebSocket with connection wait and enhanced error handling
         const sendMessageToWebSocket = async () => {
-          const maxAttempts = 30; // Increased from 10 to 30 attempts
-          const delayMs = 500; // Increased from 200ms to 500ms
+          const maxAttempts = 50; // Increase attempts
+          const delayMs = 300; // Reduce delay
           const maxWaitTime = (maxAttempts * delayMs); // ~15 seconds total
+          
+          // Check if WebSocket is closed and trigger reconnection
+          const ws = (window as any).__websocket;
+          if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+            console.log('🔄 WebSocket is closed, triggering reconnection...');
+            // Trigger reconnection by dispatching custom event
+            window.dispatchEvent(new CustomEvent('reconnect-websocket'));
+            // Wait a bit for reconnection to start
+            await new Promise(resolve => setTimeout(resolve, 500));
+          }
           
           for (let attempt = 0; attempt < maxAttempts; attempt++) {
             try {
@@ -138,12 +148,14 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
               // Check if WebSocket exists and is open
               if (!ws) {
                 if (attempt === 0) {
-                  console.debug('WebSocket not yet initialized, waiting for connection...');
+                  console.log('⏳ WebSocket not yet initialized, waiting for connection...');
+                } else if (attempt % 10 === 0) {
+                  console.log(`⏳ Still waiting for WebSocket... (attempt ${attempt + 1}/${maxAttempts})`);
                 }
               } else if (ws.readyState === WebSocket.OPEN) {
                 // Successfully connected, send the message
                 try {
-                  ws.send(JSON.stringify({
+                  const message = {
                     thread_id: get().thread_id,
                     prompt: input,
                     planning_mode: planningMode,
@@ -153,22 +165,31 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
                       file_path: file.file_path,
                       file_type: file.file_type
                     }))
-                  }));
-                  console.debug(`WebSocket message sent successfully on attempt ${attempt + 1}`);
+                  };
+                  console.log('📤 Sending WebSocket message:', { 
+                    thread_id: message.thread_id,
+                    has_prompt: !!message.prompt,
+                    planning_mode: message.planning_mode,
+                    has_owner: !!message.owner,
+                    files_count: message.files.length
+                  });
+                  ws.send(JSON.stringify(message));
+                  console.log(`✅ WebSocket message sent successfully on attempt ${attempt + 1}`);
                   return; // Successfully sent
                 } catch (sendErr) {
                   console.error(`Failed to serialize/send message: ${sendErr instanceof Error ? sendErr.message : String(sendErr)}`);
                   throw new Error('Failed to send message to server');
                 }
               } else if (ws.readyState === WebSocket.CONNECTING) {
-                console.debug(`WebSocket connecting (attempt ${attempt + 1}/${maxAttempts})...`);
+                if (attempt % 5 === 0) {
+                  console.log(`🔄 WebSocket connecting (attempt ${attempt + 1}/${maxAttempts})...`);
+                }
               } else if (ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) {
-                console.warn(`WebSocket in ${ws.readyState === WebSocket.CLOSING ? 'closing' : 'closed'} state`);
+                console.warn(`❌ WebSocket in ${ws.readyState === WebSocket.CLOSING ? 'closing' : 'closed'} state`);
               }
               
               // Wait before retrying
               if (attempt < maxAttempts - 1) {
-                console.debug(`Waiting ${delayMs}ms before retry (attempt ${attempt + 1}/${maxAttempts})...`);
                 await new Promise(resolve => setTimeout(resolve, delayMs));
               }
             } catch (retryErr) {
@@ -180,14 +201,15 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
           }
           
           // If we've exhausted all attempts, show an error
-          console.error(`WebSocket not connected after ${maxAttempts} attempts (~${maxWaitTime}ms)`);
+          console.error(`❌ WebSocket not connected after ${maxAttempts} attempts (~${maxWaitTime}ms)`);
+          console.error('Backend might not be running. Please check: http://localhost:8000');
           set({ status: 'error', isLoading: false });
           
           // Add detailed error message to chat
           const errorSystemMessage: Message = {
             id: Date.now().toString(),
             type: 'system',
-            content: `Error: Failed to establish connection after ${Math.round(maxWaitTime / 1000)} seconds. Please check if the backend server is running at ${new URL((window as any).__websocket?.url || 'ws://localhost:8000/ws/chat').origin} and refresh the page to try again.`,
+            content: `Error: Failed to establish connection after ${Math.round(maxWaitTime / 1000)} seconds. Please check if the backend server is running at http://localhost:8000 and refresh the page to try again.`,
             timestamp: new Date()
           };
           set((state: ConversationStore) => ({ messages: [...state.messages, errorSystemMessage] }));

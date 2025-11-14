@@ -1552,7 +1552,11 @@ async def execute_batch(state: State, config: RunnableConfig):
     logger.info(f"Executing batch of {len(current_batch_plan)} tasks.")
     
     # Initialize task events list for real-time status tracking
+    # Use a list that can be modified by nested async functions
     task_events = []
+    
+    # Get callback for real-time event emission (if available in config)
+    task_event_callback = config.get("configurable", {}).get("task_event_callback")
     
     # Rehydrate the pairs
     task_agent_pair_dicts = state.get('task_agent_pairs', [])
@@ -1560,6 +1564,7 @@ async def execute_batch(state: State, config: RunnableConfig):
     task_agent_pairs_map = {pair.task_name: pair for pair in task_agent_pairs}
     
     async def try_task_with_fallbacks(planned_task: PlannedTask):
+        nonlocal task_events  # Ensure we're modifying the outer scope's task_events
         original_task_pair = task_agent_pairs_map.get(planned_task.task_name)
         if not original_task_pair:
             error_msg = f"Could not find original task pair for '{planned_task.task_name}' to get fallbacks."
@@ -1575,13 +1580,23 @@ async def execute_batch(state: State, config: RunnableConfig):
         logger.info(f"🚀 Task started: '{planned_task.task_name}' with agent '{agents_to_try[0].name}'")
         
         # Record task started event
-        task_events.append({
+        started_event = {
             "event_type": "task_started",
             "task_name": planned_task.task_name,
             "task_description": planned_task.task_description,
             "agent_name": agents_to_try[0].name,
             "timestamp": time.time()
-        })
+        }
+        task_events.append(started_event)
+        logger.info(f"✅ Added task_started event for '{planned_task.task_name}', total events: {len(task_events)}")
+        
+        # Emit event in real-time if callback available
+        if task_event_callback:
+            try:
+                await task_event_callback(started_event)
+                logger.info(f"📡 Streamed task_started event for '{planned_task.task_name}'")
+            except Exception as e:
+                logger.error(f"Failed to stream task_started event: {e}")
         
         for agent_to_try in agents_to_try:
             max_retries = 3 if agent_to_try.id == original_task_pair.primary.id else 1
@@ -1602,13 +1617,23 @@ async def execute_batch(state: State, config: RunnableConfig):
                     logger.info(f"✅ Task completed: '{planned_task.task_name}' in {execution_time}s with agent '{agent_to_try.name}'")
                     
                     # Record task completed event
-                    task_events.append({
+                    completed_event = {
                         "event_type": "task_completed",
                         "task_name": planned_task.task_name,
                         "agent_name": agent_to_try.name,
                         "execution_time": execution_time,
                         "timestamp": time.time()
-                    })
+                    }
+                    task_events.append(completed_event)
+                    logger.info(f"✅ Added task_completed event for '{planned_task.task_name}', total events: {len(task_events)}")
+                    
+                    # Emit event in real-time if callback available
+                    if task_event_callback:
+                        try:
+                            await task_event_callback(completed_event)
+                            logger.info(f"📡 Streamed task_completed event for '{planned_task.task_name}'")
+                        except Exception as e:
+                            logger.error(f"Failed to stream task_completed event: {e}")
                     
                     # Add execution metadata to result
                     task_result['execution_time'] = execution_time
@@ -1633,13 +1658,23 @@ async def execute_batch(state: State, config: RunnableConfig):
         logger.error(f"❌ Task failed: '{planned_task.task_name}' after {execution_time}s - all agents exhausted")
         
         # Record task failed event
-        task_events.append({
+        failed_event = {
             "event_type": "task_failed",
             "task_name": planned_task.task_name,
             "execution_time": execution_time,
             "error": str(final_error_result.get('result', 'Unknown error')) if final_error_result else 'Unknown error',
             "timestamp": time.time()
-        })
+        }
+        task_events.append(failed_event)
+        logger.error(f"✅ Added task_failed event for '{planned_task.task_name}', total events: {len(task_events)}")
+        
+        # Emit event in real-time if callback available
+        if task_event_callback:
+            try:
+                await task_event_callback(failed_event)
+                logger.error(f"📡 Streamed task_failed event for '{planned_task.task_name}'")
+            except Exception as e:
+                logger.error(f"Failed to stream task_failed event: {e}")
         
         if final_error_result:
             final_error_result['execution_time'] = execution_time
