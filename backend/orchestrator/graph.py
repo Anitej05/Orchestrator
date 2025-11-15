@@ -2377,12 +2377,14 @@ def generate_text_answer(state: State):
                         'result': task.get('result'),
                     }
                     # Include raw_response data if available (contains extracted_data, actions, etc.)
-                    if 'raw_response' in task and task['raw_response']:
+                    if 'raw_response' in task and task['raw_response'] and isinstance(task['raw_response'], dict):
                         raw = task['raw_response']
                         task_info['extracted_data'] = raw.get('extracted_data')
                         task_info['actions_taken'] = raw.get('actions_taken', [])
                         task_info['task_summary'] = raw.get('task_summary')
                         logger.info(f"📊 Task '{task.get('task_name')}' extracted_data: {raw.get('extracted_data')}")
+                    elif 'raw_response' in task and task['raw_response']:
+                        logger.warning(f"⚠️  Task '{task.get('task_name')}' has raw_response as string (likely an error): {task['raw_response'][:100]}")
                     else:
                         logger.warning(f"⚠️  Task '{task.get('task_name')}' has no raw_response data")
                     detailed_results.append(task_info)
@@ -2422,12 +2424,14 @@ def generate_text_answer(state: State):
                         'result': task.get('result'),
                     }
                     # Include raw_response data if available (contains extracted_data, actions, etc.)
-                    if 'raw_response' in task and task['raw_response']:
+                    if 'raw_response' in task and task['raw_response'] and isinstance(task['raw_response'], dict):
                         raw = task['raw_response']
                         task_info['extracted_data'] = raw.get('extracted_data')
                         task_info['actions_taken'] = raw.get('actions_taken', [])
                         task_info['task_summary'] = raw.get('task_summary')
                         logger.info(f"📊 Task '{task.get('task_name')}' extracted_data: {raw.get('extracted_data')}")
+                    elif 'raw_response' in task and task['raw_response']:
+                        logger.warning(f"⚠️  Task '{task.get('task_name')}' has raw_response as string (likely an error): {task['raw_response'][:100]}")
                     else:
                         logger.warning(f"⚠️  Task '{task.get('task_name')}' has no raw_response data")
                     detailed_results.append(task_info)

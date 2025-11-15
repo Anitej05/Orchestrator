@@ -1311,19 +1311,50 @@ async def save_workflow(request: Request, thread_id: str, name: str, description
     
     workflow_id = str(uuid.uuid4())
     
+    # The conversation history file structure is flat, not nested under 'state'
+    # Try to get data from the flat structure first, fall back to checkpointer if needed
+    
+    # Check if we have the data directly in history
+    task_agent_pairs = history.get("task_agent_pairs", [])
+    original_prompt = history.get("original_prompt", "")
+    
+    # If original_prompt is missing, extract from first user message
+    if not original_prompt:
+        messages = history.get("messages", [])
+        if messages and len(messages) > 0:
+            first_msg = messages[0]
+            if isinstance(first_msg, dict) and first_msg.get("type") == "user":
+                original_prompt = first_msg.get("content", "")
+                logger.info(f"Extracted original_prompt from first message: '{original_prompt[:50]}...'")
+    
+    # If empty, try from metadata or get from checkpointer
+    if not task_agent_pairs or not original_prompt:
+        logger.info(f"History file missing data, attempting to load from checkpointer for {thread_id}")
+        try:
+            config = {"configurable": {"thread_id": thread_id}}
+            checkpoint = checkpointer.get(config)
+            if checkpoint:
+                checkpoint_state = checkpoint.get("values", {})
+                task_agent_pairs = checkpoint_state.get("task_agent_pairs", task_agent_pairs)
+                original_prompt = checkpoint_state.get("original_prompt", original_prompt)
+                # Also get other fields from checkpoint
+                history = {**history, **checkpoint_state}
+                logger.info(f"Retrieved workflow data from checkpointer")
+        except Exception as e:
+            logger.warning(f"Could not load from checkpointer: {e}")
+    
     # Extract comprehensive blueprint from conversation state
-    state = history.get("state", {})
     blueprint = {
         "workflow_id": workflow_id,
         "thread_id": thread_id,
-        "original_prompt": state.get("original_prompt", ""),
-        "task_agent_pairs": state.get("task_agent_pairs", []),
-        "task_plan": state.get("task_plan", []),
-        "parsed_tasks": state.get("parsed_tasks", []),
-        "candidate_agents": state.get("candidate_agents", {}),
-        "user_expectations": state.get("user_expectations"),
-        "completed_tasks": state.get("completed_tasks", []),
-        "final_response": state.get("final_response"),
+        "original_prompt": original_prompt,
+        "task_agent_pairs": task_agent_pairs,
+        "task_plan": history.get("task_plan", []) or history.get("plan", []),
+        "parsed_tasks": history.get("parsed_tasks", []),
+        "candidate_agents": history.get("candidate_agents", {}),
+        "user_expectations": history.get("user_expectations"),
+        "completed_tasks": history.get("completed_tasks", []),
+        "final_response": history.get("final_response"),
         "created_at": datetime.utcnow().isoformat()
     }
     
@@ -1331,7 +1362,7 @@ async def save_workflow(request: Request, thread_id: str, name: str, description
         workflow_id=workflow_id,
         user_id=user_id,
         name=name,
-        description=description or state.get("original_prompt", "")[:200],  # Use prompt as fallback description
+        description=description or blueprint.get("original_prompt", "")[:200],  # Use prompt as fallback description
         blueprint=blueprint
     )
     db.add(workflow)
@@ -1356,7 +1387,32 @@ async def list_workflows(request: Request, db: Session = Depends(get_db)):
     user_id = user.get("sub")
     
     workflows = db.query(Workflow).filter_by(user_id=user_id, status='active').all()
-    return [{"workflow_id": w.workflow_id, "name": w.name, "description": w.description, "created_at": w.created_at.isoformat()} for w in workflows]
+    
+    result = []
+    for w in workflows:
+        # Extract task count from blueprint
+        blueprint = w.blueprint or {}
+        task_count = len(blueprint.get("task_agent_pairs", []))
+        
+        # Calculate estimated cost from completed tasks if available
+        estimated_cost = 0.0
+        completed_tasks = blueprint.get("completed_tasks", [])
+        for task in completed_tasks:
+            if isinstance(task, dict):
+                estimated_cost += task.get("cost", 0.0)
+        
+        result.append({
+            "workflow_id": w.workflow_id,
+            "workflow_name": w.name,
+            "workflow_description": w.description or "No description",
+            "created_at": w.created_at.isoformat(),
+            "updated_at": w.updated_at.isoformat() if w.updated_at else w.created_at.isoformat(),
+            "task_count": task_count,
+            "estimated_cost": estimated_cost,
+            "is_public": False  # Add public flag support later
+        })
+    
+    return result
 
 @app.get("/api/workflows/{workflow_id}", tags=["Workflows"])
 async def get_workflow(workflow_id: str, request: Request, db: Session = Depends(get_db)):

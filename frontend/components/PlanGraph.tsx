@@ -268,10 +268,10 @@ export default function PlanGraph({ planData, taskStatuses = {} }: PlanGraphProp
     }
 
     // Calculate progress
-    const totalTasks = planData.pendingTasks.length + planData.completedTasks.length;
-    const completedCount = planData.completedTasks.length;
-    const runningCount = Object.values(taskStatuses).filter(t => t.status === 'running').length;
-    const failedCount = Object.values(taskStatuses).filter(t => t.status === 'failed').length;
+    const totalTasks = planData.pendingTasks.length;
+    const completedCount = Object.values(taskStatuses).filter((t: any) => t.status === 'completed').length;
+    const runningCount = Object.values(taskStatuses).filter((t: any) => t.status === 'running').length;
+    const failedCount = Object.values(taskStatuses).filter((t: any) => t.status === 'failed').length;
     const progress = totalTasks > 0 ? (completedCount / totalTasks) * 100 : 0;
 
     return (
