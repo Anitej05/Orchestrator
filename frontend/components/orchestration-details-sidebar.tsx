@@ -68,6 +68,7 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
     const canvasType = conversationState.canvas_type;
     const browserView = (conversationState as any).browser_view;
     const planView = (conversationState as any).plan_view;
+    const taskStatuses = conversationState.task_statuses || {};
     
     // Determine which canvas to display - viewed canvas takes precedence, then toggle view
     let displayCanvasContent = viewedCanvasContent || canvasContent;
@@ -331,11 +332,15 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                         <div className="flex-1">
                             <div className="flex items-center gap-2">
                                 <h3 className="text-lg font-semibold">Workflow Visualization</h3>
-                                {(plan.pendingTasks.length > 0 || plan.completedTasks.length > 0) && (
-                                    <span className="text-xs px-2 py-1 bg-gray-100 text-gray-700 rounded-full font-medium">
-                                        {plan.completedTasks.length} / {plan.pendingTasks.length + plan.completedTasks.length} tasks
-                                    </span>
-                                )}
+                                {plan.pendingTasks.length > 0 && (() => {
+                                    const completedCount = Object.values(taskStatuses).filter((status: any) => status === 'completed').length;
+                                    const totalTasks = plan.pendingTasks.length;
+                                    return (
+                                        <span className="text-xs px-2 py-1 bg-gray-100 text-gray-700 rounded-full font-medium">
+                                            {completedCount} / {totalTasks} tasks
+                                        </span>
+                                    );
+                                })()}
                             </div>
                             <p className="text-sm text-gray-500 mt-1">
                                 {conversationState.metadata?.currentStage === 'executing' 
@@ -347,7 +352,7 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                         </div>
                         <SaveWorkflowButton 
                             threadId={threadId || ''} 
-                            disabled={!threadId || plan.completedTasks.length === 0}
+                            disabled={!threadId || plan.pendingTasks.length === 0}
                         />
                     </div>
                     
