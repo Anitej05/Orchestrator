@@ -1429,9 +1429,10 @@ async def get_workflow(workflow_id: str, request: Request, db: Session = Depends
     return {"workflow_id": workflow.workflow_id, "name": workflow.name, "description": workflow.description, "blueprint": workflow.blueprint, "created_at": workflow.created_at.isoformat()}
 
 @app.post("/api/workflows/{workflow_id}/execute", tags=["Workflows"])
-async def execute_workflow(workflow_id: str, inputs: Dict[str, Any], request: Request, db: Session = Depends(get_db)):
-    """Execute workflow with new inputs"""
+async def execute_workflow(workflow_id: str, request: Request, inputs: Dict[str, Any] = Body(default={}), db: Session = Depends(get_db)):
+    """Execute workflow by re-running the saved plan (no re-planning)"""
     from auth import get_user_from_request
+    from langgraph.checkpoint.memory import MemorySaver
     
     user = get_user_from_request(request)
     user_id = user.get("sub")
@@ -1449,22 +1450,134 @@ async def execute_workflow(workflow_id: str, inputs: Dict[str, Any], request: Re
         workflow_id=workflow_id,
         user_id=user_id,
         inputs=inputs,
-        status='queued'
+        status='running'
     )
     db.add(execution)
     db.commit()
     
-    # Use orchestrator with modified prompt
+    # Get the saved plan from blueprint
     blueprint = workflow.blueprint
+    task_plan = blueprint.get("task_plan", [])
+    task_agent_pairs = blueprint.get("task_agent_pairs", [])
     original_prompt = blueprint.get("original_prompt", "")
     
-    # Replace placeholders in prompt
-    modified_prompt = original_prompt
-    for key, value in inputs.items():
-        modified_prompt = modified_prompt.replace(f"{{{key}}}", str(value))
+    if not task_plan or not task_agent_pairs:
+        raise HTTPException(status_code=400, detail="Workflow has no saved execution plan")
     
-    logger.info(f"Executing workflow {workflow_id} as thread {new_thread_id}")
-    return {"execution_id": execution_id, "thread_id": new_thread_id, "status": "queued", "message": "Use /ws/chat with this thread_id to execute"}
+    # Create a memory saver for this thread
+    memory = MemorySaver()
+    
+    # Pre-seed the thread state with the saved plan (bypass planning phase)
+    initial_state = {
+        "thread_id": new_thread_id,
+        "original_prompt": original_prompt,
+        "task_plan": task_plan,
+        "task_agent_pairs": task_agent_pairs,
+        "messages": [{"type": "user", "content": original_prompt}],
+        "status": "executing",
+        "planning_mode": False,
+        "plan_approved": True,  # Skip approval, go straight to execution
+        "completed_tasks": [],
+        "task_events": []
+    }
+    
+    # Save initial state to memory so WebSocket can pick it up
+    config = {"configurable": {"thread_id": new_thread_id}}
+    memory.put(config, {
+        "values": initial_state,
+        "next": ["execute_batch"]  # Start directly at execution
+    })
+    
+    logger.info(f"Pre-seeded workflow execution {workflow_id} as thread {new_thread_id} with {len(task_plan)} batches")
+    return {
+        "execution_id": execution_id, 
+        "thread_id": new_thread_id, 
+        "status": "running", 
+        "task_count": len(task_agent_pairs),
+        "message": "Connect to /ws/chat with this thread_id - execution will start automatically"
+    }
+
+@app.post("/api/workflows/{workflow_id}/create-conversation", tags=["Workflows"])
+async def create_workflow_conversation(workflow_id: str, request: Request, db: Session = Depends(get_db)):
+    """
+    Create a new conversation pre-seeded with the workflow's saved plan.
+    This endpoint creates a new thread with the plan already loaded, allowing
+    the user to review and modify it before execution.
+    
+    Returns thread_id and the plan details (task_agent_pairs, task_plan, original_prompt)
+    """
+    from auth import get_user_from_request
+    from models import UserThread
+    
+    user = get_user_from_request(request)
+    user_id = user.get("sub")
+    
+    workflow = db.query(Workflow).filter_by(workflow_id=workflow_id, user_id=user_id).first()
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    
+    # Create a new thread
+    new_thread_id = str(uuid.uuid4())
+    
+    # Get the saved plan from blueprint
+    blueprint = workflow.blueprint
+    task_plan = blueprint.get("task_plan", [])
+    task_agent_pairs = blueprint.get("task_agent_pairs", [])
+    original_prompt = blueprint.get("original_prompt", "")
+    
+    if not task_plan or not task_agent_pairs:
+        raise HTTPException(status_code=400, detail="Workflow has no saved execution plan")
+    
+    # Create UserThread record in database
+    user_thread = UserThread(
+        thread_id=new_thread_id,
+        user_id=user_id,
+        title=f"From: {workflow.name}"
+    )
+    db.add(user_thread)
+    db.commit()
+    
+    # Save the conversation JSON file so it persists and frontend can load it
+    # This pre-seeds the plan so it displays immediately in the sidebar
+    history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{new_thread_id}.json")
+    try:
+        os.makedirs(CONVERSATION_HISTORY_DIR, exist_ok=True)
+        conversation_json = {
+            "thread_id": new_thread_id,
+            "original_prompt": original_prompt,
+            "task_agent_pairs": task_agent_pairs,
+            "task_plan": task_plan,
+            "messages": [],
+            "completed_tasks": [],
+            "final_response": None,
+            "pending_user_input": False,
+            "question_for_user": None,
+            "status": "planning_complete",
+            "metadata": {
+                "from_workflow": workflow_id,
+                "workflow_name": workflow.name
+            },
+            "uploaded_files": []
+        }
+        with open(history_path, "w", encoding="utf-8") as f:
+            json.dump(conversation_json, f, ensure_ascii=False, indent=2)
+        logger.info(f"Saved conversation JSON file for thread {new_thread_id} from workflow {workflow_id}")
+    except Exception as e:
+        logger.warning(f"Failed to save conversation JSON file: {e}")
+        # Don't fail the whole operation if JSON save fails
+    
+    logger.info(f"Created new conversation {new_thread_id} from workflow {workflow_id} for user {user_id}")
+    
+    return {
+        "thread_id": new_thread_id,
+        "workflow_id": workflow_id,
+        "original_prompt": original_prompt,
+        "task_agent_pairs": task_agent_pairs,
+        "task_plan": task_plan,
+        "task_count": len(task_agent_pairs),
+        "status": "planning_complete",
+        "message": "Plan loaded. Review and run from the input box."
+    }
 
 @app.post("/api/workflows/{workflow_id}/schedule", tags=["Workflows"])
 async def schedule_workflow(workflow_id: str, cron_expression: str, input_template: Dict[str, Any], request: Request, db: Session = Depends(get_db)):

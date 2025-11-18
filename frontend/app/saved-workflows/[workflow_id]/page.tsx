@@ -67,15 +67,28 @@ export default function WorkflowDetailPage() {
     if (!workflow) return;
     
     try {
-      toast.info('Starting workflow execution...');
+      toast.info('Creating new conversation with workflow plan...');
       
-      // Navigate to home page with the original prompt
-      const originalPrompt = workflow.blueprint.original_prompt || "Execute saved workflow";
-      router.push(`/?prompt=${encodeURIComponent(originalPrompt)}&executeNow=true`);
+      // Call the create-conversation endpoint which creates a new thread with the plan pre-seeded
+      const response = await authFetch(`http://localhost:8000/api/workflows/${workflowId}/create-conversation`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      
+      if (!response.ok) {
+        throw new Error('Failed to create conversation');
+      }
+      
+      const data = await response.json();
+      toast.success('Conversation created! Redirecting to workflow view...');
+      
+      // Navigate to home page with the thread_id to show the plan
+      // The plan will be displayed in the right panel for user review
+      router.push(`/?threadId=${data.thread_id}`);
       
     } catch (err) {
-      console.error('Failed to execute workflow:', err);
-      toast.error('Failed to start workflow');
+      console.error('Failed to create workflow conversation:', err);
+      toast.error('Failed to create conversation with workflow');
     }
   };
 

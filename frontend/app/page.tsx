@@ -117,14 +117,27 @@ function HomeContent() {
     }
   }, [conversationState.status, conversationState.final_response, conversationState.thread_id, isRestoring]);
 
-  // Handle URL parameters for auto-executing saved workflows
+  // Handle URL parameters for auto-executing saved workflows or pre-seeded threads
   useEffect(() => {
     if (typeof window === 'undefined' || !clerkLoaded) return;
     
     const params = new URLSearchParams(window.location.search);
+    const threadId = params.get('threadId');
     const promptParam = params.get('prompt');
     const executeNow = params.get('executeNow');
     
+    // Priority 1: Pre-seeded workflow thread (from workflow execute endpoint)
+    if (threadId) {
+      // Clear the URL parameters
+      window.history.replaceState({}, '', window.location.pathname);
+      
+      console.log('Loading pre-seeded workflow thread:', threadId);
+      // Load this thread - it already has the plan pre-seeded, just connect and let it execute
+      loadConversation(threadId);
+      return;
+    }
+    
+    // Priority 2: Auto-execute with prompt (legacy)
     if (promptParam && executeNow === 'true') {
       // Clear the URL parameters
       window.history.replaceState({}, '', window.location.pathname);
