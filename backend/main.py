@@ -2581,6 +2581,93 @@ def health_check():
     """Simple health check endpoint."""
     return {"status": "ok"}
 
+@app.get("/api/metrics/dashboard")
+async def get_dashboard_metrics(request: Request, db: Session = Depends(get_db)):
+    """Get dashboard metrics for the current user"""
+    try:
+        # Get user ID from request headers
+        user_id = request.headers.get("X-User-ID")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="User ID not provided")
+        
+        # Get conversation count
+        conversation_count = db.query(UserThread).filter(UserThread.user_id == user_id).count()
+        
+        # Get workflow count
+        workflow_count = db.query(Workflow).filter(Workflow.user_id == user_id).count()
+        
+        # Get total agents
+        agent_count = db.query(Agent).filter(Agent.status == StatusEnum.active).count()
+        
+        # Get recent activity (last 24 hours)
+        from datetime import datetime, timedelta
+        yesterday = datetime.utcnow() - timedelta(days=1)
+        recent_activity = db.query(UserThread).filter(
+            UserThread.user_id == user_id,
+            UserThread.created_at >= yesterday
+        ).count()
+        
+        # Get conversation trend (last 7 days)
+        conversation_trend = []
+        for i in range(6, -1, -1):
+            date = datetime.utcnow() - timedelta(days=i)
+            date_str = date.strftime('%Y-%m-%d')
+            count = db.query(UserThread).filter(
+                UserThread.user_id == user_id,
+                UserThread.created_at >= date,
+                UserThread.created_at < date + timedelta(days=1)
+            ).count()
+            conversation_trend.append({
+                "date": date.strftime('%b %d'),
+                "count": count
+            })
+        
+        # Get workflow status distribution
+        active_workflows = db.query(Workflow).filter(
+            Workflow.user_id == user_id,
+            Workflow.status == 'active'
+        ).count()
+        archived_workflows = db.query(Workflow).filter(
+            Workflow.user_id == user_id,
+            Workflow.status == 'archived'
+        ).count()
+        
+        workflow_status = []
+        if active_workflows > 0:
+            workflow_status.append({"name": "Active", "value": active_workflows})
+        if archived_workflows > 0:
+            workflow_status.append({"name": "Archived", "value": archived_workflows})
+        
+        # Get recent conversations
+        recent_conversations = db.query(UserThread).filter(
+            UserThread.user_id == user_id
+        ).order_by(UserThread.updated_at.desc()).limit(5).all()
+        
+        recent_conv_list = [
+            {
+                "id": conv.thread_id,
+                "title": conv.title or "Untitled Conversation",
+                "date": conv.created_at.strftime('%Y-%m-%d'),
+                "status": "completed"
+            }
+            for conv in recent_conversations
+        ]
+        
+        return {
+            "total_conversations": conversation_count,
+            "total_workflows": workflow_count,
+            "total_agents": agent_count,
+            "recent_activity": recent_activity,
+            "conversation_trend": conversation_trend,
+            "workflow_status": workflow_status,
+            "recent_conversations": recent_conv_list
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching dashboard metrics: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch metrics: {str(e)}")
+
 @app.get("/api/agent-servers/status")
 async def get_agent_servers_status():
     """Get the status of all agent servers"""
