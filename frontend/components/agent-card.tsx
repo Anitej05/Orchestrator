@@ -60,11 +60,11 @@ export default function AgentCard({ agent, isRegistered = false, onToggleRegistr
   }
 
   return (
-    <div className="bg-white rounded-lg border p-6 hover:shadow-md transition-shadow">
+    <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 hover:shadow-lg hover:border-blue-500 dark:hover:border-blue-400 transition-all">
       {/* Header */}
       <div className="flex items-start justify-between mb-4">
         <div>
-          <h3 className="font-semibold text-lg">{agent.name}</h3>
+          <h3 className="font-semibold text-lg text-gray-900 dark:text-gray-100">{agent.name}</h3>
           <div className="flex items-center space-x-2 mt-1">
             <StarRating currentRating={currentRating} readonly={true} size="sm" />
             <Badge variant={agent.status === "active" ? "default" : "secondary"} className="text-xs">
@@ -73,7 +73,7 @@ export default function AgentCard({ agent, isRegistered = false, onToggleRegistr
           </div>
         </div>
         <div className="text-right">
-          <div className="flex items-center text-green-600">
+          <div className="flex items-center text-green-600 dark:text-green-400">
             <DollarSign className="w-4 h-4" />
             <span className="font-semibold">{agent.price_per_call_usd}</span>
           </div>
@@ -81,7 +81,7 @@ export default function AgentCard({ agent, isRegistered = false, onToggleRegistr
       </div>
 
       {/* Description */}
-      <p className="text-gray-600 text-sm mb-4 line-clamp-2">{agent.description}</p>
+      <p className="text-gray-600 dark:text-gray-300 text-sm mb-4 line-clamp-2">{agent.description}</p>
 
       {/* Capabilities */}
       <div className="flex flex-wrap gap-1 mb-4">

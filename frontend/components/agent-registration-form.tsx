@@ -93,14 +93,14 @@ export default function AgentRegistrationForm({
   }
 
   return (
-    <div className="bg-white rounded-lg shadow-sm p-6">
-      <h2 className="text-xl font-bold text-gray-900 mb-6">Agent Details</h2>
+    <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg border border-gray-200 dark:border-gray-700 p-6">
+      <h2 className="text-xl font-bold text-blue-600 dark:text-blue-400 mb-6">Agent Details</h2>
 
       <div className="space-y-6">
         {/* Basic Information */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Agent Name *</label>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Agent Name *</label>
             <Input
               placeholder="My Awesome Agent"
               value={formData.name}
@@ -109,7 +109,7 @@ export default function AgentRegistrationForm({
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Framework *</label>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Framework *</label>
             <Select value={formData.framework} onValueChange={(value) => updateField("framework", value)}>
               <SelectTrigger>
                 <SelectValue placeholder="Select framework" />
@@ -127,7 +127,7 @@ export default function AgentRegistrationForm({
 
         {/* Capabilities */}
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">Capability Tags *</label>
+          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Capability Tags *</label>
           <Select onValueChange={addCapability}>
             <SelectTrigger>
               <SelectValue placeholder="Add capabilities" />
@@ -154,15 +154,15 @@ export default function AgentRegistrationForm({
 
         {/* Endpoints */}
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">Endpoints *</label>
+          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Endpoints *</label>
 
           {/* Existing Endpoints */}
           <div className="space-y-3 mb-4">
             {formData.endpoints.map((endpoint, index) => (
-              <div key={`${endpoint.endpoint}-${index}`} className="border rounded-lg p-4 bg-gray-50">
+              <div key={`${endpoint.endpoint}-${index}`} className="border dark:border-gray-600 rounded-lg p-4 bg-gray-50 dark:bg-gray-700">
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                   <div>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">URL</label>
+                    <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">URL</label>
                     <Input
                       value={endpoint.endpoint}
                       onChange={(e) => updateEndpoint(index, "endpoint", e.target.value)}
@@ -170,7 +170,7 @@ export default function AgentRegistrationForm({
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">Method</label>
+                    <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Method</label>
                     <Select
                       value={endpoint.http_method}
                       onValueChange={(value) => updateEndpoint(index, "http_method", value)}
@@ -199,7 +199,7 @@ export default function AgentRegistrationForm({
                   </div>
                 </div>
                 <div className="mt-3">
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Description</label>
+                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Description</label>
                   <Input
                     value={endpoint.description || ""}
                     onChange={(e) => updateEndpoint(index, "description", e.target.value)}
@@ -211,8 +211,8 @@ export default function AgentRegistrationForm({
           </div>
 
           {/* Add New Endpoint */}
-          <div className="border rounded-lg p-4 bg-blue-50">
-            <h4 className="text-sm font-medium text-gray-700 mb-3">Add New Endpoint</h4>
+          <div className="border-2 border-blue-200 dark:border-blue-800 rounded-lg p-4 bg-blue-50 dark:bg-blue-900/20">
+            <h4 className="text-sm font-medium text-blue-700 dark:text-blue-300 mb-3">Add New Endpoint</h4>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               <div>
                 <Input
@@ -257,7 +257,7 @@ export default function AgentRegistrationForm({
         {/* Pricing and Performance */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Price per Call (USD) *</label>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Price per Call (USD) *</label>
             <Input
               type="number"
               step="0.01"
@@ -268,7 +268,7 @@ export default function AgentRegistrationForm({
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Success Rate (%)</label>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Success Rate (%)</label>
             <Input
               type="number"
               min="0"
@@ -282,7 +282,7 @@ export default function AgentRegistrationForm({
 
         {/* Description */}
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">Agent Description *</label>
+          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Agent Description *</label>
           <Textarea
             placeholder="Describe what your agent does, its strengths, and ideal use cases..."
             rows={4}
@@ -292,8 +292,8 @@ export default function AgentRegistrationForm({
         </div>
 
         {/* Action Buttons */}
-        <div className="flex flex-col sm:flex-row gap-3 pt-6 border-t">
-          <Button onClick={onSave} className="flex-1" disabled={isSaving || isTesting}>
+        <div className="flex flex-col sm:flex-row gap-3 pt-6 border-t border-gray-200 dark:border-gray-700">
+          <Button onClick={onSave} className="flex-1 bg-blue-600 hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-600" disabled={isSaving || isTesting}>
             {isSaving ? (
               <>
                 <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>

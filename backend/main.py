@@ -36,11 +36,12 @@ from sentence_transformers import SentenceTransformer
 # --- Local Application Imports ---
 CONVERSATION_HISTORY_DIR = "conversation_history"
 from database import SessionLocal
-from models import Agent, StatusEnum, AgentCapability, AgentEndpoint, EndpointParameter, Workflow, WorkflowExecution, UserThread, WorkflowSchedule, WorkflowWebhook
+from models import Agent, StatusEnum, AgentCapability, AgentEndpoint, EndpointParameter, Workflow, WorkflowExecution, UserThread, WorkflowSchedule, WorkflowWebhook, AgentType
 from schemas import AgentCard, ProcessRequest, ProcessResponse, PlanResponse, FileObject
 from orchestrator.graph import ForceJsonSerializer, graph, create_graph_with_checkpointer, create_execution_subgraph, messages_from_dict, messages_to_dict, serialize_complex_object
 from orchestrator.state import State
 from langgraph.checkpoint.memory import MemorySaver
+from routers import connect_router
 
 # --- App Initialization and Configuration ---
 app = FastAPI(
@@ -115,6 +116,9 @@ app.add_middleware(
     allow_headers=["*"],  # Allow all headers
     expose_headers=["*"],  # Expose all headers
 )
+
+# Include routers
+app.include_router(connect_router.router)
 
 # --- Static Files for Screenshots ---
 from fastapi.staticfiles import StaticFiles
@@ -604,19 +608,25 @@ async def execute_orchestration(
         if stream_callback:
             # Streaming mode for WebSocket
             node_count = 0
-            expected_nodes = ["load_history", "execute_batch", "evaluate_agent_response", "generate_final_response"] if is_post_approval else ["analyze_request", "parse_prompt", "agent_directory_search", "rank_agents", "plan_execution", "execute_batch", "aggregate_responses"]
-
+            # Track all nodes dynamically instead of using a fixed list
+            total_nodes_estimate = 5 if is_post_approval else 11
+            
             async for event in selected_graph.astream(graph_input, config=config, stream_mode="updates"):
                 for node_name, node_output in event.items():
                     node_count += 1
-                    # More accurate progress calculation
-                    progress = min((node_count / len(expected_nodes)) * 100, 100) if expected_nodes else 50
+                    # Calculate progress based on actual node count with a reasonable estimate
+                    # Use 90% as max during execution, reserve 10% for completion
+                    progress = min((node_count / total_nodes_estimate) * 90, 90)
                     if isinstance(node_output, dict):
                         final_state = {**final_state, **node_output} if final_state else node_output
                     await stream_callback(node_name, node_output, progress, node_count, thread_id)
                     if isinstance(node_output, dict) and node_output.get("pending_user_input"):
                         logger.info(f"Workflow paused for user input in thread_id: {thread_id}")
                         break
+            
+            # Send final 100% progress after all nodes complete
+            if final_state and not (isinstance(final_state, dict) and final_state.get("pending_user_input")):
+                await stream_callback("workflow_complete", {"status": "completed"}, 100, node_count, thread_id)
             
             # After streaming, get the actual state if not available
             if not final_state:
@@ -666,9 +676,29 @@ async def execute_orchestration(
 def process_node_data(node_name: str, node_output, progress: float, node_count: int, thread_id: str = None):
     """Extract meaningful data from node output consistently"""
     serializable_data = {}
+    
+    # Map node names to user-friendly stage names and descriptions
+    stage_mapping = {
+        "analyze_request": {"stage": "analyzing", "message": "Analyzing your request..."},
+        "parse_prompt": {"stage": "parsing", "message": "Breaking down your request into tasks..."},
+        "agent_directory_search": {"stage": "searching", "message": "Searching for capable agents (REST & MCP)..."},
+        "rank_agents": {"stage": "ranking", "message": "Ranking and selecting best agents..."},
+        "plan_execution": {"stage": "planning", "message": "Creating execution plan..."},
+        "validate_plan_for_execution": {"stage": "validating", "message": "Validating execution plan..."},
+        "execute_batch": {"stage": "executing", "message": "Executing tasks with agents..."},
+        "evaluate_agent_response": {"stage": "evaluating", "message": "Evaluating agent responses..."},
+        "generate_final_response": {"stage": "aggregating", "message": "Generating final response..."},
+        "save_history": {"stage": "finalizing", "message": "Saving conversation history..."},
+        "load_history": {"stage": "loading", "message": "Loading conversation history..."},
+    }
+    
+    stage_info = stage_mapping.get(node_name, {"stage": "processing", "message": f"Processing {node_name.replace('_', ' ')}..."})
+    
     node_specific_data = {
         "progress_percentage": round(progress, 1),
-        "node_sequence": node_count
+        "node_sequence": node_count,
+        "current_stage": stage_info["stage"],
+        "stage_message": stage_info["message"]
     }
 
     if isinstance(node_output, dict):
@@ -920,30 +950,57 @@ async def update_canvas(update_data: Dict[str, Any] = Body(...)):
         progress_percent = (completed_count / total_count * 100) if total_count > 0 else 0
         
         plan_view_html = '''
-        <div style="padding: 24px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh;">
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                /* Minimalistic scrollbar */
+                ::-webkit-scrollbar {
+                    width: 6px;
+                    height: 6px;
+                }
+                ::-webkit-scrollbar-track {
+                    background: transparent;
+                }
+                ::-webkit-scrollbar-thumb {
+                    background: rgba(156, 163, 175, 0.3);
+                    border-radius: 10px;
+                    transition: background 0.2s ease;
+                }
+                ::-webkit-scrollbar-thumb:hover {
+                    background: rgba(156, 163, 175, 0.5);
+                }
+                * {
+                    scrollbar-width: thin;
+                    scrollbar-color: rgba(156, 163, 175, 0.3) transparent;
+                }
+            </style>
+        </head>
+        <body style="margin: 0; padding: 0;">
+        <div style="padding: 24px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f9fafb; min-height: 100vh;">
             <div style="max-width: 800px; margin: 0 auto;">
                 <!-- Header -->
-                <div style="background: white; border-radius: 12px; padding: 20px 24px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+                <div style="background: white; border-radius: 12px; padding: 20px 24px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); border: 1px solid #e5e7eb;">
                     <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
-                        <h2 style="margin: 0; color: #1a202c; font-size: 24px; font-weight: 600;">📋 Task Execution Plan</h2>
-                        <div style="background: #667eea; color: white; padding: 6px 12px; border-radius: 20px; font-size: 14px; font-weight: 600;">
+                        <h2 style="margin: 0; color: #111827; font-size: 24px; font-weight: 600;">📋 Task Execution Plan</h2>
+                        <div style="background: #3b82f6; color: white; padding: 6px 12px; border-radius: 20px; font-size: 14px; font-weight: 600;">
                             Step ''' + str(step) + '''
                         </div>
                     </div>
-                    <div style="color: #4a5568; font-size: 14px; line-height: 1.5;">''' + task[:150] + ('...' if len(task) > 150 else '') + '''</div>
+                    <div style="color: #6b7280; font-size: 14px; line-height: 1.5;">''' + task[:150] + ('...' if len(task) > 150 else '') + '''</div>
                 </div>
         '''
         
         if task_plan:
             # Progress bar
             plan_view_html += f'''
-                <div style="background: white; border-radius: 12px; padding: 20px 24px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+                <div style="background: white; border-radius: 12px; padding: 20px 24px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); border: 1px solid #e5e7eb;">
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                        <span style="font-size: 14px; font-weight: 600; color: #4a5568;">Progress</span>
-                        <span style="font-size: 14px; font-weight: 600; color: #667eea;">{completed_count}/{total_count} completed</span>
+                        <span style="font-size: 14px; font-weight: 600; color: #6b7280;">Progress</span>
+                        <span style="font-size: 14px; font-weight: 600; color: #3b82f6;">{completed_count}/{total_count} completed</span>
                     </div>
-                    <div style="background: #e2e8f0; border-radius: 10px; height: 8px; overflow: hidden;">
-                        <div style="background: linear-gradient(90deg, #667eea 0%, #764ba2 100%); height: 100%; width: {progress_percent}%; transition: width 0.3s ease;"></div>
+                    <div style="background: #e5e7eb; border-radius: 10px; height: 8px; overflow: hidden;">
+                        <div style="background: linear-gradient(90deg, #3b82f6 0%, #2563eb 100%); height: 100%; width: {progress_percent}%; transition: width 0.3s ease;"></div>
                     </div>
                 </div>
             '''
@@ -951,7 +1008,7 @@ async def update_canvas(update_data: Dict[str, Any] = Body(...)):
             # Current action
             if current_action:
                 plan_view_html += f'''
-                <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 12px; padding: 16px 20px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); color: white;">
+                <div style="background: #3b82f6; border-radius: 12px; padding: 16px 20px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); color: white;">
                     <div style="display: flex; align-items: center; gap: 10px;">
                         <span style="font-size: 20px;">▶️</span>
                         <div>
@@ -1011,7 +1068,7 @@ async def update_canvas(update_data: Dict[str, Any] = Body(...)):
             </div>
             '''
         
-        plan_view_html += '</div></div>'
+        plan_view_html += '</div></div></body></html>'
         
         # Store both views in global canvas updates
         with canvas_lock:
@@ -1851,6 +1908,18 @@ async def websocket_workflow_execute(websocket: WebSocket, workflow_id: str):
         if db:
             db.close()
 
+async def safe_websocket_send(websocket: WebSocket, data: dict, thread_id: str = "unknown"):
+    """
+    Safely send JSON data through WebSocket, handling closed connections gracefully.
+    """
+    try:
+        await websocket.send_json(data)
+        return True
+    except Exception as e:
+        # Connection is closed or broken - log but don't raise
+        logger.debug(f"WebSocket send failed for thread {thread_id} (connection likely closed): {e}")
+        return False
+
 @app.websocket("/ws/chat")
 async def websocket_chat(websocket: WebSocket):
     """
@@ -2255,16 +2324,21 @@ async def websocket_chat(websocket: WebSocket):
                     "warning": f"Some data could not be processed: {str(serialize_err)[:100]}"
                 }
 
-            await websocket.send_json({
-                "node": "__end__",
-                "thread_id": thread_id,
-                "data": serializable_state, # Send the entire state object
-                "message": "Agent orchestration completed successfully.",
-                "status": "completed",
-                "timestamp": time.time()
-            })
-
-            logger.info(f"WebSocket stream completed successfully for thread_id {thread_id}")
+            # Try to send the __end__ event, but handle if connection is already closed
+            try:
+                await websocket.send_json({
+                    "node": "__end__",
+                    "thread_id": thread_id,
+                    "data": serializable_state, # Send the entire state object
+                    "message": "Agent orchestration completed successfully.",
+                    "status": "completed",
+                    "timestamp": time.time()
+                })
+                logger.info(f"WebSocket stream completed successfully for thread_id {thread_id}")
+            except Exception as send_error:
+                # Connection might be closed already - that's okay, the data is saved in the database
+                logger.warning(f"Could not send __end__ event (connection closed): {send_error}")
+                logger.info(f"Orchestration completed for thread_id {thread_id}, but client disconnected before receiving final message")
             
             # Keep the connection open for multi-turn conversations
             # The frontend will continue to send messages or close the connection when done
@@ -2305,21 +2379,22 @@ async def websocket_chat(websocket: WebSocket):
         # Truncate error details for security
         error_details = error_message[:150] if len(error_message) > 150 else error_message
         
-        try:
-            await websocket.send_json({
-                "node": "__error__",
-                "thread_id": thread_id or "unknown",
-                "error": error_details,
-                "error_type": error_type,
-                "error_category": error_category,
-                "message": user_message,
-                "status": "error",
-                "timestamp": time.time()
-            })
+        # Use safe send to handle closed connections gracefully
+        sent = await safe_websocket_send(websocket, {
+            "node": "__error__",
+            "thread_id": thread_id or "unknown",
+            "error": error_details,
+            "error_type": error_type,
+            "error_category": error_category,
+            "message": user_message,
+            "status": "error",
+            "timestamp": time.time()
+        }, thread_id or "unknown")
+        
+        if sent:
             logger.info(f"Error response sent to client for thread_id {thread_id}")
-        except Exception as send_err:
-            # If we can't send the error, the connection is likely already closed
-            logger.error(f"Could not send error message to WebSocket for thread_id {thread_id}: {send_err}")
+        else:
+            logger.debug(f"Could not send error message (connection closed) for thread_id {thread_id}")
 
 @app.post("/api/agents/register", response_model=AgentCard)
 def register_or_update_agent(agent_data: AgentCard, response: Response, db: Session = Depends(get_db)):

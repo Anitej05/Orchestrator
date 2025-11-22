@@ -4,7 +4,7 @@ import Link from "next/link"
 import Image from "next/image"
 import { Button } from "@/components/ui/button"
 import { SignInButton, SignOutButton, useUser, UserButton } from "@clerk/nextjs"
-import DarkModeToggle from "./dark-mode-toggle"
+import { ThemeToggle } from "./theme-toggle"
 import { Bot } from "lucide-react"
 
 export default function Navbar() {
@@ -25,15 +25,18 @@ export default function Navbar() {
           <span className="text-lg font-bold text-blue-600 dark:text-blue-400">Orbimesh</span>
         </Link>
       </div>
-      <div className="flex items-center gap-6">
-        <Link href="/" className="text-sm font-medium text-gray-700 dark:text-gray-200 hover:text-blue-600 dark:hover:text-blue-400">HOME</Link>
-        <Link href="/agents" className="text-sm font-medium text-gray-700 dark:text-gray-200 hover:text-blue-600 dark:hover:text-blue-400">AGENT DIRECTORY</Link>
-        <Link href="/saved-workflows" className="text-sm font-medium text-gray-700 dark:text-gray-200 hover:text-blue-600 dark:hover:text-blue-400">SAVED WORKFLOWS</Link>
-        <Link href="/workflow" className="text-sm font-medium text-gray-700 dark:text-gray-200 hover:text-blue-600 dark:hover:text-blue-400">WORKFLOW BUILDER</Link>
+      <div className="flex items-center gap-16">
+        <Link href="/" className="text-sm font-medium text-gray-700 dark:text-gray-200 hover:text-blue-600 dark:hover:text-blue-400 transition-colors">HOME</Link>
+        <Link href="/agents" className="text-sm font-medium text-gray-700 dark:text-gray-200 hover:text-blue-600 dark:hover:text-blue-400 transition-colors">AGENT DIRECTORY</Link>
+        <Link href="/saved-workflows" className="text-sm font-medium text-gray-700 dark:text-gray-200 hover:text-blue-600 dark:hover:text-blue-400 transition-colors">SAVED WORKFLOWS</Link>
       </div>
-      <div className="flex items-center gap-4">
-        <DarkModeToggle />
-        <UserButton afterSignOutUrl="/sign-in" />
+      <div className="flex items-center gap-5">
+        <div className="scale-125">
+          <ThemeToggle />
+        </div>
+        <div className="scale-110">
+          <UserButton afterSignOutUrl="/sign-in" />
+        </div>
       </div>
     </nav>
   );

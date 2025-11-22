@@ -41,3 +41,5 @@ groq
 requests
 aiofiles
 apscheduler>=3.10.0
+mcp>=1.0.0
+httpx-sse>=0.4.0

@@ -3,6 +3,7 @@
 import { useState } from "react"
 import { useRouter } from "next/navigation"
 import AppSidebar from "@/components/app-sidebar"
+import Navbar from "@/components/navbar"
 import { SidebarProvider, SidebarInset, SidebarTrigger } from "@/components/ui/sidebar"
 import AgentRegistrationForm from "@/components/agent-registration-form"
 import AgentPreview from "@/components/agent-preview"
@@ -155,25 +156,27 @@ klmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ
   }
 
   return (
-    <SidebarProvider>
-      <AppSidebar />
-      <SidebarInset>
-        <div className="min-h-screen bg-gray-50">
-          {/* Header */}
-          <div className="sticky top-0 z-10 bg-white border-b border-gray-200 px-4 py-3">
-            <div className="flex items-center space-x-4">
-              <SidebarTrigger className="h-8 w-8" />
-              <Button variant="ghost" onClick={() => router.back()}>
-                <ArrowLeft className="w-4 h-4 mr-2" />
-                Back
-              </Button>
+    <>
+      <Navbar />
+      <SidebarProvider>
+        <AppSidebar />
+        <SidebarInset>
+          <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50 dark:from-gray-900 dark:to-gray-800">
+            {/* Header */}
+            <div className="sticky top-0 z-10 bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm border-b border-gray-200 dark:border-gray-700 px-4 py-3">
+              <div className="flex items-center space-x-4">
+                <SidebarTrigger className="h-8 w-8" />
+                <Button variant="ghost" onClick={() => router.back()}>
+                  <ArrowLeft className="w-4 h-4 mr-2" />
+                  Back
+                </Button>
+              </div>
             </div>
-          </div>
 
           <main className="container mx-auto px-4 py-6">
             <div className="mb-6">
-              <h1 className="text-3xl font-bold text-gray-900">Register New Agent</h1>
-              <p className="text-gray-600 mt-2">
+              <h1 className="text-3xl font-bold text-blue-600 dark:text-blue-400">Register New Agent</h1>
+              <p className="text-gray-600 dark:text-gray-300 mt-2">
                 Add your AI agent to the marketplace and start earning from task executions.
               </p>
             </div>
@@ -201,5 +204,6 @@ klmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ
         </div>
       </SidebarInset>
     </SidebarProvider>
+    </>
   )
 }

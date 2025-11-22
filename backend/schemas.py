@@ -39,6 +39,8 @@ class AgentCard(BaseModel):
     endpoints: List[EndpointDetail]
     rating: float = 0.0
     public_key_pem: Optional[str] = None
+    agent_type: Literal['http_rest', 'mcp_http'] = 'http_rest'
+    connection_config: Optional[Dict[str, Any]] = None
 
     class Config:
         from_attributes = True
@@ -46,6 +48,13 @@ class AgentCard(BaseModel):
     @field_validator('status', mode='before')
     def serialize_status(cls, v):
         """Convert StatusEnum to string"""
+        if hasattr(v, 'value'):
+            return v.value
+        return v
+    
+    @field_validator('agent_type', mode='before')
+    def serialize_agent_type(cls, v):
+        """Convert AgentType enum to string"""
         if hasattr(v, 'value'):
             return v.value
         return v
@@ -75,11 +84,14 @@ class Task(BaseModel):
     """Represents a single, discrete task parsed from the user's prompt."""
     task_name: str = Field(..., description="A short, actionable name for the task.")
     task_description: str = Field(..., description="A detailed description of the task.")
+    parameters: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Pre-extracted parameters for the task (e.g., {'ticker': 'AAPL'})")
 
 class ParsedRequest(BaseModel):
     """The output of the initial prompt parsing node."""
     tasks: List[Task]
     user_expectations: Optional[Dict[str, float]] = None
+    direct_response: Optional[str] = Field(None, description="If set, skip the graph and return this immediately (for greetings, thanks, etc.)")
+    suggested_title: Optional[str] = Field(None, description="Suggested conversation title (generated on first turn)")
 
 class TaskAgentPair(BaseModel):
     """Pairs a task with its ranked primary and fallback agents."""
@@ -190,3 +202,23 @@ class AnalysisResult(BaseModel):
     needs_complex_processing: bool = Field(..., description="Whether the request requires complex orchestration or can be handled with a simple response")
     reasoning: str = Field(..., description="The reasoning behind the analysis decision")
     response: Optional[str] = Field(None, description="Direct response if needs_complex_processing is False")
+
+class PlanValidationResult(BaseModel):
+    """Schema for the advanced validation node's output."""
+    status: Literal["ready", "replan_needed", "user_input_required"] = Field(..., description="The status of the plan validation.")
+    reasoning: Optional[str] = Field(None, description="Required explanation if status is 'replan_needed' or 'user_input_required'.")
+    question: Optional[str] = Field(None, description="The direct question for the user if input is absolutely required.")
+
+class AgentResponseEvaluationEnhanced(BaseModel):
+    """Enhanced schema for evaluating agent responses with reactive routing support."""
+    status: Literal["complete", "partial_success", "failed", "user_input_required"] = Field(..., description="The status of the agent response evaluation.")
+    reasoning: str = Field(..., description="Explanation of the evaluation decision.")
+    feedback_for_replanning: Optional[str] = Field(None, description="Specific feedback for the planner if status is 'failed'.")
+    question: Optional[str] = Field(None, description="Question to ask the user if status is 'user_input_required'.")
+
+class FinalResponse(BaseModel):
+    """Schema for unified final response generation (text + canvas)."""
+    response_text: str = Field(..., description="The text response for the user")
+    canvas_required: bool = Field(..., description="Whether canvas visualization is needed")
+    canvas_type: Optional[Literal["html", "markdown"]] = Field(None, description="Type of canvas content")
+    canvas_content: Optional[str] = Field(None, description="The actual canvas content (HTML or Markdown)")

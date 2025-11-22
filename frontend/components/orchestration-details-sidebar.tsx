@@ -222,13 +222,13 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
     return (
         <aside className={cn("border-l border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950 p-4 flex flex-col h-full", className)}>
             <Tabs value={activeTab} onValueChange={setActiveTab} className="h-full flex flex-col">
-                <TabsList className="grid w-full grid-cols-4">
+                <TabsList className="grid w-full grid-cols-4 bg-gray-100/80 dark:bg-gray-800/50 backdrop-blur-xl border border-gray-200/50 dark:border-gray-700/50 shadow-lg">
                     <TabsTrigger value="metadata">Metadata</TabsTrigger>
                     <TabsTrigger value="plan" className="relative">
                         Plan
                         {(conversationState.metadata?.currentStage === 'executing' || 
                           conversationState.metadata?.currentStage === 'validating') && (
-                            <span className="ml-1 px-1.5 py-0.5 text-[10px] font-semibold bg-yellow-500 text-white rounded-full animate-pulse">
+                            <span className="ml-1 px-1.5 py-0.5 text-[10px] font-semibold bg-blue-500 dark:bg-blue-600 text-white rounded-full animate-pulse">
                                 Running
                             </span>
                         )}
@@ -328,10 +328,10 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                 </TabsContent>
                 <TabsContent value="plan" className="flex-1 flex flex-col">
                     {/* Plan Tab Header with Save Workflow Button */}
-                    <div className="flex items-center justify-between mb-4 px-4">
+                    <div className="flex items-center justify-between mt-4 px-4 py-3">
                         <div className="flex-1">
                             <div className="flex items-center gap-2">
-                                <h3 className="text-lg font-semibold">Workflow Visualization</h3>
+                                <h3 className="text-xl font-semibold">Workflow Visualization</h3>
                                 {plan.pendingTasks.length > 0 && (() => {
                                     const completedCount = Object.values(taskStatuses).filter((status: any) => status === 'completed').length;
                                     const totalTasks = plan.pendingTasks.length;
@@ -421,20 +421,23 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                         <div className="h-full flex flex-col">
                             {/* Toggle buttons for browser/plan view */}
                             {!viewedCanvasContent && browserView && planView && (
-                                <div className="bg-gradient-to-r from-purple-600 via-purple-500 to-indigo-600 px-6 py-4 shadow-lg">
+                                <div className="bg-gradient-to-r from-gray-800 via-gray-850 to-gray-900 dark:from-gray-900 dark:via-gray-925 dark:to-gray-950 border-b border-gray-700/50 dark:border-gray-800/50 px-6 py-4 shadow-xl backdrop-blur-sm">
                                     <div className="flex items-center justify-between max-w-4xl mx-auto">
-                                        <div className="flex items-center gap-2">
-                                            <div className="w-2 h-2 bg-white rounded-full animate-pulse"></div>
-                                            <span className="text-sm font-semibold text-white/90 uppercase tracking-wide">Live View</span>
+                                        <div className="flex items-center gap-3">
+                                            <div className="relative">
+                                                <div className="w-2.5 h-2.5 bg-green-500 rounded-full animate-pulse"></div>
+                                                <div className="absolute inset-0 w-2.5 h-2.5 bg-green-500 rounded-full animate-ping opacity-75"></div>
+                                            </div>
+                                            <span className="text-sm font-bold text-white uppercase tracking-wider">Live View</span>
                                         </div>
-                                        <div className="flex gap-3">
+                                        <div className="flex gap-2.5">
                                             <button
                                                 onClick={() => setCanvasView('browser')}
                                                 className={cn(
-                                                    "px-5 py-2.5 text-sm font-medium rounded-lg transition-all duration-200 transform hover:scale-105 active:scale-95 shadow-md",
+                                                    "px-5 py-2.5 text-sm font-semibold rounded-lg transition-all duration-200 transform hover:scale-105 active:scale-95 shadow-md",
                                                     canvasView === 'browser'
-                                                        ? "bg-white text-purple-700 shadow-xl ring-2 ring-white/50"
-                                                        : "bg-white/10 text-white hover:bg-white/20 backdrop-blur-sm border border-white/20"
+                                                        ? "bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-lg ring-2 ring-white/30 dark:ring-gray-500"
+                                                        : "bg-gray-700/50 dark:bg-gray-800/50 text-gray-300 dark:text-gray-400 hover:bg-gray-600/70 dark:hover:bg-gray-700/70 border border-gray-600/50 dark:border-gray-700/50 backdrop-blur-sm"
                                                 )}
                                             >
                                                 <span className="flex items-center gap-2">
@@ -445,10 +448,10 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                                             <button
                                                 onClick={() => setCanvasView('plan')}
                                                 className={cn(
-                                                    "px-5 py-2.5 text-sm font-medium rounded-lg transition-all duration-200 transform hover:scale-105 active:scale-95 shadow-md",
+                                                    "px-5 py-2.5 text-sm font-semibold rounded-lg transition-all duration-200 transform hover:scale-105 active:scale-95 shadow-md",
                                                     canvasView === 'plan'
-                                                        ? "bg-white text-purple-700 shadow-xl ring-2 ring-white/50"
-                                                        : "bg-white/10 text-white hover:bg-white/20 backdrop-blur-sm border border-white/20"
+                                                        ? "bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-lg ring-2 ring-white/30 dark:ring-gray-500"
+                                                        : "bg-gray-700/50 dark:bg-gray-800/50 text-gray-300 dark:text-gray-400 hover:bg-gray-600/70 dark:hover:bg-gray-700/70 border border-gray-600/50 dark:border-gray-700/50 backdrop-blur-sm"
                                                 )}
                                             >
                                                 <span className="flex items-center gap-2">
@@ -461,13 +464,13 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                                 </div>
                             )}
                             {viewedCanvasContent && (
-                                <div className="bg-gradient-to-r from-blue-500 to-indigo-600 px-6 py-3 shadow-md">
+                                <div className="bg-gray-800 dark:bg-gray-900 border-b border-gray-700 dark:border-gray-800 px-6 py-3 shadow-md">
                                     <div className="flex items-center justify-between max-w-4xl mx-auto">
                                         <div className="flex items-center gap-3">
                                             <span className="text-2xl">📌</span>
                                             <div>
-                                                <div className="text-sm font-semibold text-white">Viewing Previous Canvas</div>
-                                                <div className="text-xs text-white/80">From an earlier message in the conversation</div>
+                                                <div className="text-sm font-semibold text-gray-200 dark:text-gray-300">Viewing Previous Canvas</div>
+                                                <div className="text-xs text-gray-400 dark:text-gray-500">From an earlier message in the conversation</div>
                                             </div>
                                         </div>
                                         <button 
@@ -475,7 +478,7 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                                                 setViewedCanvasContent(undefined);
                                                 setViewedCanvasType(undefined);
                                             }}
-                                            className="px-4 py-2 text-sm font-medium text-white bg-white/20 hover:bg-white/30 rounded-lg transition-all duration-200 backdrop-blur-sm border border-white/30 hover:scale-105 active:scale-95"
+                                            className="px-4 py-2 text-sm font-medium text-gray-200 dark:text-gray-300 bg-gray-700 dark:bg-gray-800 hover:bg-gray-600 dark:hover:bg-gray-700 rounded-lg transition-all duration-200 border border-gray-600 dark:border-gray-700 hover:scale-105 active:scale-95"
                                         >
                                             ← Return to Latest
                                         </button>

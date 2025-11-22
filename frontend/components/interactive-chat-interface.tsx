@@ -198,7 +198,7 @@ export function InteractiveChatInterface({
   return (
     <div className="flex flex-col h-full">
       {/* Chat Messages */}
-      <div className="flex-1 space-y-4 overflow-y-auto p-6 scrollbar-thin scrollbar-thumb-gray-300 dark:scrollbar-thumb-gray-700">
+      <div className="flex-1 space-y-6 overflow-y-auto p-6">
         {state.messages.length === 0 && (
           <div className="text-center text-gray-500 dark:text-gray-400 py-8 h-full flex flex-col justify-center items-center">
             <div className="p-4 rounded-full bg-gradient-to-br from-gray-100 to-gray-200 dark:from-gray-800 dark:to-gray-900 mb-4">

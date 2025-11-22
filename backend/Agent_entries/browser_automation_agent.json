@@ -46,7 +46,7 @@
   "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA3FcU8hPhmFLgez6qPf801aQahasAlG5S4MPb16nWJPA=\n-----END PUBLIC KEY-----",
   "endpoints": [
     {
-      "endpoint": "http://localhost:8070/browse",
+      "endpoint": "http://localhost:8090/browse",
       "http_method": "POST",
       "description": "Execute browser automation task with live streaming. Supports real-time screenshot streaming to canvas.",
       "parameters": [

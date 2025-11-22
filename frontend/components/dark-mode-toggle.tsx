@@ -1,34 +1,46 @@
 "use client"
-import { useEffect, useState } from "react";
-import { Moon, Sun } from "lucide-react";
+
+import { Moon, Sun } from "lucide-react"
+import { useTheme } from "next-themes"
+import { useEffect, useState } from "react"
 
 export default function DarkModeToggle() {
-  const [dark, setDark] = useState(false);
+  const { theme, setTheme } = useTheme()
+  const [mounted, setMounted] = useState(false)
 
+  // Avoid hydration mismatch by only rendering after mount
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      setDark(document.documentElement.classList.contains("dark"));
-    }
-  }, []);
+    setMounted(true)
+  }, [])
 
-  const toggleDark = () => {
-    if (typeof window !== "undefined") {
-      document.documentElement.classList.toggle("dark");
-      setDark(document.documentElement.classList.contains("dark"));
-    }
-  };
+  if (!mounted) {
+    return (
+      <button
+        aria-label="Toggle dark mode"
+        className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+      >
+        <div className="w-5 h-5" />
+      </button>
+    )
+  }
+
+  const isDark = theme === "dark"
+
+  const toggleTheme = () => {
+    setTheme(isDark ? "light" : "dark")
+  }
 
   return (
     <button
       aria-label="Toggle dark mode"
-      onClick={toggleDark}
+      onClick={toggleTheme}
       className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
     >
-      {dark ? (
+      {isDark ? (
         <Sun className="w-5 h-5 text-yellow-400" />
       ) : (
         <Moon className="w-5 h-5 text-gray-700" />
       )}
     </button>
-  );
+  )
 }

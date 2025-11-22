@@ -1649,6 +1649,19 @@ IMPORTANT:
             'recent_history': recent_history,
             'repeated_failure_warning': repeated_failure_warning
         }
+    
+    def _format_task_plan_status(self) -> str:
+        """Format task plan status for LLM context"""
+        if not self.task_plan:
+            return "No subtasks defined"
+        
+        status_lines = []
+        for i, subtask in enumerate(self.task_plan, 1):
+            status = subtask['status']
+            icon = "✅" if status == 'completed' else "❌" if status == 'failed' else "⏳"
+            status_lines.append(f"{icon} {i}. {subtask['subtask']} [{status}]")
+        
+        return "\n".join(status_lines)
         
         # Use ContextOptimizer for compact prompt
         prompt = self.context_optimizer.build_compact_context(
@@ -1660,17 +1673,36 @@ IMPORTANT:
             max_steps=self.max_steps
         )
         
-        # Add critical instructions (kept minimal)
-        prompt += """
+        # Add critical instructions with completed_subtask guidance
+        prompt += f"""
+
+TASK PLAN STATUS:
+{self._format_task_plan_status()}
 
 CRITICAL RULES:
 1. Use EXACT selectors from elements list
 2. If stuck (same action 2+ times), try different approach or skip
-3. Mark subtask complete after successful action
-4. Use "done" only when ALL work complete
+3. **IMPORTANT**: After EVERY successful action, check if it completes a subtask
+4. Use "done" only when ALL subtasks are complete
+
+SUBTASK COMPLETION:
+- If your action will complete the current subtask, set "completed_subtask" to the EXACT subtask name
+- Examples:
+  * After extracting data → mark "extract" or "locate" subtasks as complete
+  * After navigating to page → mark "navigate" or "go to" subtasks as complete
+  * After clicking button → mark "click" or "select" subtasks as complete
+- Be proactive: If action achieves subtask goal, mark it complete!
 
 ACTIONS: navigate, click, type, scroll, extract, done
-Return JSON only, no markdown."""
+
+RESPONSE FORMAT (JSON only, no markdown):
+{{
+  "action": "navigate|click|type|scroll|extract|done",
+  "params": {{}},
+  "reasoning": "why this action",
+  "completed_subtask": "exact subtask name if this action completes it (or null)",
+  "is_complete": false
+}}"""
         
         # Now use the optimized prompt (already built above)
         # The old massive prompt code has been removed
@@ -1972,9 +2004,18 @@ MODALITY DECISION (next_step_needs_vision):
 - true: If next page will have CAPTCHA, challenge, complex visual layout, or few DOM elements
 - false: If next page will be standard HTML with good selectors (most websites)
 
+SUBTASK COMPLETION (completed_subtask):
+- **CRITICAL**: After EVERY action, check if it completes a subtask from the task plan above
+- Set "completed_subtask" to the EXACT subtask name if your action achieves its goal
+- Examples:
+  * After extracting/locating data → mark "extract", "locate", "find", "identify", "get", "retrieve" subtasks complete
+  * After navigating → mark "navigate", "go to", "visit", "open" subtasks complete  
+  * After clicking → mark "click", "select", "choose", "press" subtasks complete
+- Be proactive! If action achieves the subtask goal, mark it complete immediately
+
 PLAN UPDATES:
 - Use "new_subtask" if you discover additional work needed
-- Use "completed_subtask" when you finish a subtask
+- Use "completed_subtask" when you finish a subtask (BE AGGRESSIVE about marking complete!)
 
 ACTIONS:
 - click: Click at (x, y) - buttons, checkboxes, links
@@ -2177,12 +2218,21 @@ Respond with ONLY a valid JSON object:
         "text": "text to type",
         "url": "url to navigate"
     }},
-    "completed_subtask": "name of subtask if completed",
+    "completed_subtask": "EXACT subtask name if this action completes it (or null)",
     "new_subtask": "new subtask to add if discovered additional work",
     "is_complete": false,
     "next_step_needs_vision": true|false,
     "next_step_reasoning": "why vision is/isn't needed for next step"
 }}
+
+SUBTASK COMPLETION (completed_subtask):
+- **CRITICAL**: After EVERY action, check if it completes a subtask from the task plan above
+- Set "completed_subtask" to the EXACT subtask name if your action achieves its goal
+- Examples:
+  * After extracting/locating data → mark "extract", "locate", "find", "identify", "get", "retrieve" subtasks complete
+  * After navigating → mark "navigate", "go to", "visit", "open" subtasks complete  
+  * After clicking → mark "click", "select", "choose", "press" subtasks complete
+- Be proactive! If action achieves the subtask goal, mark it complete immediately
 
 MODALITY DECISION (next_step_needs_vision):
 - true: If next page will have CAPTCHA, challenge, complex visual layout, or few DOM elements
@@ -3629,7 +3679,7 @@ CRITICAL FOR TYPE ACTION:
                                         logger.info(f"🎨 Matched vision subtask with vision-based extract action")
                                     elif not is_vision_subtask and current_action == "extract":
                                         # Text extraction subtask
-                                        if any(word in subtask_lower for word in ["extract", "get", "tell me", "find", "content"]):
+                                        if any(word in subtask_lower for word in ["extract", "get", "tell me", "find", "content", "locate", "identify", "retrieve", "collect", "gather"]):
                                             matched = True
                                 
                                 # Match type/search actions
@@ -3800,7 +3850,7 @@ async def get_all_live_screenshots():
         return {"active_tasks": list(live_screenshots.keys()), "screenshots": live_screenshots}
 
 if __name__ == "__main__":
-    port = int(os.getenv("BROWSER_AGENT_PORT", 8070))
+    port = int(os.getenv("BROWSER_AGENT_PORT", 8090))
     logger.info(f"Starting Custom Browser Automation Agent on port {port}")
     
     # Configure uvicorn to filter out /live endpoint logs

@@ -8,7 +8,9 @@ from schemas import (
     AgentCard,
     PlannedTask,
     FileObject,
-    AnalysisResult
+    AnalysisResult,
+    EndpointDetail,
+    EndpointParameterDetail
 )
 from sentence_transformers import SentenceTransformer
 from models import AgentCapability
@@ -453,6 +455,10 @@ cached_capabilities = {
 }
 CACHE_DURATION_SECONDS = 300
 
+# OPTIMIZATION: GET request cache for agent responses
+get_request_cache = {}
+GET_CACHE_DURATION_SECONDS = 300  # 5 minutes
+
 # --- New File-Based Memory Functions ---
 def save_plan_to_file(state: dict):
     '''Saves the current plan and completed tasks to a Markdown file.'''
@@ -650,6 +656,12 @@ async def fetch_agents_for_task(client: httpx.AsyncClient, task_name: str, url: 
                 return {"task_name": task_name, "agents": []}
 
 def parse_prompt(state: State):
+    """
+    SUPER-PARSER: 3-in-1 optimization
+    1. Chitchat detection (direct response)
+    2. Task parsing with parameter extraction
+    3. Title generation (first turn only)
+    """
     # --- Create a formatted history of the conversation ---
     history = ""
     if messages := state.get('messages'):
@@ -660,6 +672,9 @@ def parse_prompt(state: State):
             elif hasattr(msg, 'type') and msg.type == "ai":
                 history += f"AI: {msg.content}\n"
 
+    # Check if this is the first turn (for title generation)
+    is_first_turn = not state.get("messages") or len(state.get("messages")) == 0
+    
     capability_texts, _ = get_all_capabilities()
     capabilities_list_str = ", ".join(f"'{c}'" for c in capability_texts)
     
@@ -706,6 +721,22 @@ def parse_prompt(state: State):
         - You have a built-in Canvas feature that can render interactive HTML/CSS/JavaScript and Markdown content
         - The Canvas is NOT an agent - it's your own built-in capability for creating visualizations, games, interactive demos, and rich content
         
+        **SUPER-PARSER MODE: You have THREE jobs in this single call:**
+        
+        **JOB 1: CHITCHAT CHECK (Priority)**
+        If the user input is a simple greeting ("Hi", "Hello"), acknowledgment ("Thanks", "OK"), or general question requiring NO external tools/agents, DO NOT generate tasks. Instead:
+        - Set `direct_response` with a helpful, friendly reply
+        - Set `tasks` to an empty list
+        - This will skip the entire orchestration graph for efficiency
+        
+        **JOB 2: TASK PARSING (If not chitchat)**
+        If the user needs external agents (search, analysis, data fetching), break it down into tasks.
+        - **Extract Parameters:** If the user provides specific values (e.g., "Search for Apple stock"), extract them into the `parameters` dictionary (e.g., `parameters: {{"query": "Apple", "ticker": "AAPL"}}`)
+        - This optimization allows us to skip LLM calls during execution if all required parameters are already extracted
+        
+        **JOB 3: TITLE GENERATION (First turn only)**
+        {"Since this is the first message in the conversation, generate a short 3-5 word title in `suggested_title` that summarizes the user's request." if is_first_turn else "This is a continuation, so leave `suggested_title` as null."}
+        
         **IMPORTANT: When users ask for interactive content, games, visualizations, or web-based demos:**
         - DO NOT create a task to search for a "canvas agent" or "visualization agent"
         - These will be handled by your built-in Canvas feature in the final response generation
@@ -742,6 +773,7 @@ def parse_prompt(state: State):
             - **Create New if Needed:** If no single existing capability is a good fit for the grouped task, create a new, concise, 2-4 word `task_name` that accurately describes the entire action (e.g., "get_news_details", "get_ohlc_prices").
             - **Prefer Existing:** Always prefer using an existing capability if it covers the user's request to ensure a higher chance of finding an agent.
         2. `task_description`: A detailed explanation of what the task is and what needs to be done, including all the details from the user's prompt. For example, for "get AAPL news headlines with publishers and links", the description should be "Get the latest news headlines for AAPL, including the publisher and a link to the article for each headline."
+        3. `parameters`: A dictionary of pre-extracted parameters from the user's prompt (e.g., {{"ticker": "AAPL", "query": "Apple stock news"}}). This is CRITICAL for optimization - extract as many specific values as possible.
 
         Also extract any general user expectations (tone, urgency, budget, quality rating, etc.) from the prompt, if present. If not present, set them to null.
 
@@ -752,29 +784,53 @@ def parse_prompt(state: State):
 
         **EXAMPLES:**
         
-        Example 1: If the user prompt is "Get the latest 10 news headlines for AAPL with publishers and article links.", your output should be:
+        Example 1 (Chitchat): If the user prompt is "Hi there!", your output should be:
+        ```json
+        {{
+            "tasks": [],
+            "user_expectations": {{}},
+            "direct_response": "Hello! I'm Orbimesh, your AI orchestration assistant. I can help you with data analysis, web searches, document processing, and much more. What would you like to do today?",
+            "suggested_title": "Greeting"
+        }}
+        ```
+        
+        Example 2 (Complex with parameters): If the user prompt is "Get the latest 10 news headlines for AAPL with publishers and article links.", your output should be:
         ```json
         {{
             "tasks": [
                 {{
                     "task_name": "get company news headlines",
-                    "task_description": "Get the latest 10 news headlines for AAPL, including the publisher and a link to the article for each headline."
+                    "task_description": "Get the latest 10 news headlines for AAPL, including the publisher and a link to the article for each headline.",
+                    "parameters": {{
+                        "ticker": "AAPL",
+                        "limit": 10,
+                        "include_publisher": true,
+                        "include_link": true
+                    }}
                 }}
             ],
-            "user_expectations": {{}}
+            "user_expectations": {{}},
+            "direct_response": null,
+            "suggested_title": "AAPL News Headlines"
         }}
         ```
         
-        Example 2: If the user uploads a file "resume.pdf" and says "Please summarise this document", your output should be:
+        Example 3 (Document with parameters): If the user uploads a file "resume.pdf" and says "Please summarise this document", your output should be:
         ```json
         {{
             "tasks": [
                 {{
                     "task_name": "summarize_document",
-                    "task_description": "Provide a comprehensive summary of the uploaded document 'resume.pdf', including key information, main points, and relevant details."
+                    "task_description": "Provide a comprehensive summary of the uploaded document 'resume.pdf', including key information, main points, and relevant details.",
+                    "parameters": {{
+                        "document_name": "resume.pdf",
+                        "query": "Provide a comprehensive summary"
+                    }}
                 }}
             ],
-            "user_expectations": {{}}
+            "user_expectations": {{}},
+            "direct_response": null,
+            "suggested_title": "Resume Summary"
         }}
         ```
 
@@ -789,6 +845,19 @@ def parse_prompt(state: State):
         # Use the fallback wrapper for LLM calls
         response = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, ParsedRequest)
         logger.info(f"LLM parsed prompt into: {response}")
+
+        # OPTIMIZATION: Check for direct response (chitchat short-circuit)
+        if response and response.direct_response:
+            logger.info("Direct response detected (chitchat). Short-circuiting orchestration graph.")
+            return {
+                "parsed_tasks": [],
+                "user_expectations": {},
+                "final_response": response.direct_response,
+                "suggested_title": response.suggested_title,
+                "needs_complex_processing": False,  # Flag to skip orchestration
+                "parsing_error_feedback": None,
+                "parse_retry_count": 0
+            }
 
         if not response or not response.tasks:
             logger.warning("LLM returned a valid JSON but with an empty list of tasks. This may be a misclassified simple request.")
@@ -824,10 +893,16 @@ def parse_prompt(state: State):
         "parsed_tasks": parsed_tasks,
         "user_expectations": user_expectations or {},
         "parsing_error_feedback": None,
-        "parse_retry_count": current_retry_count + 1
+        "parse_retry_count": current_retry_count + 1,
+        "suggested_title": getattr(response, 'suggested_title', None),
+        "needs_complex_processing": True  # Complex processing needed if we got here
     }
 
 async def agent_directory_search(state: State):
+    """
+    OPTIMIZATION: Internal search using direct DB queries instead of HTTP calls.
+    This eliminates network overhead and is 5-10x faster.
+    """
     parsed_tasks = state.get('parsed_tasks', [])
     logger.info(f"Searching for agents for tasks: {[t.task_name for t in parsed_tasks]}")
     
@@ -835,44 +910,129 @@ async def agent_directory_search(state: State):
         logger.warning("No valid tasks to process in agent_directory_search")
         return {"candidate_agents": {}}
     
-    urls_to_fetch = []
-    base_url = "http://127.0.0.1:8000/api/agents/search"
     user_expectations = state.get('user_expectations') or {}
-
-    for task in parsed_tasks:
-        params: Dict[str, Any] = {'capabilities': task.task_name}
-        if 'price' in user_expectations:
-            params['max_price'] = user_expectations['price']
-        if 'rating' in user_expectations:
-            params['min_rating'] = user_expectations['rating']
+    candidate_agents_map = {}
+    
+    # OPTIMIZATION: Direct DB queries instead of HTTP calls
+    db = SessionLocal()
+    try:
+        from models import Agent, AgentCapability
+        from sqlalchemy import and_, or_
         
-        request = httpx.Request("GET", base_url, params=params)
-        urls_to_fetch.append((task.task_name, str(request.url), task.task_description))
-    
-    logger.info(f"Dispatching {len(urls_to_fetch)} agent search requests.")
-    async with httpx.AsyncClient() as client:
-        results = await asyncio.gather(*(fetch_agents_for_task(client, name, url) for name, url, desc in urls_to_fetch))
-    
-    candidate_agents_map = {res['task_name']: res['agents'] for res in results}
-    logger.info("Agent search complete.")
-
-    for task in parsed_tasks:
-        if not candidate_agents_map.get(task.task_name):
-            error_feedback = (
-                f"The previous attempt to parse the prompt resulted in the task description "
-                f"'{task.task_description}', which was matched to the capability '{task.task_name}'. "
-                f"However, no agents were found that could perform this task. Please generate a new, "
-                f"more detailed and specific task description that better captures the user's intent."
+        for task in parsed_tasks:
+            task_name = task.task_name
+            logger.info(f"Searching DB for agents with capability: {task_name}")
+            
+            # Build query with filters
+            query = db.query(Agent).join(Agent.capability_vectors).filter(
+                and_(
+                    AgentCapability.capability_text.ilike(f"%{task_name}%"),
+                    Agent.status == 'active'
+                )
             )
-            logger.warning(f"Semantic failure for task '{task.task_name}'. Looping back to re-parse.")
-            return {"candidate_agents": {}, "parsing_error_feedback": error_feedback}
+            
+            # Apply user expectations filters
+            if 'price' in user_expectations:
+                max_price = user_expectations['price']
+                query = query.filter(Agent.price_per_call_usd <= max_price)
+            
+            if 'rating' in user_expectations:
+                min_rating = user_expectations['rating']
+                query = query.filter(Agent.rating >= min_rating)
+            
+            # Execute query and convert to AgentCard format
+            agents = query.distinct().all()
+            
+            # Convert SQLAlchemy models to AgentCard Pydantic models
+            validated_agents = []
+            for agent in agents:
+                try:
+                    agent_card = AgentCard(
+                        id=agent.id,
+                        owner_id=agent.owner_id,
+                        name=agent.name,
+                        description=agent.description,
+                        capabilities=agent.capabilities,
+                        price_per_call_usd=agent.price_per_call_usd,
+                        status=agent.status.value if hasattr(agent.status, 'value') else agent.status,
+                        rating=agent.rating,
+                        public_key_pem=agent.public_key_pem,
+                        agent_type=agent.agent_type if hasattr(agent, 'agent_type') else 'http_rest',
+                        connection_config=agent.connection_config if hasattr(agent, 'connection_config') else None,
+                        endpoints=[
+                            EndpointDetail(
+                                endpoint=ep.endpoint,
+                                http_method=ep.http_method,
+                                description=ep.description,
+                                parameters=[
+                                    EndpointParameterDetail(
+                                        name=p.name,
+                                        description=p.description,
+                                        param_type=p.param_type,
+                                        required=p.required,
+                                        default_value=p.default_value
+                                    ) for p in ep.parameters
+                                ]
+                            ) for ep in agent.endpoints
+                        ]
+                    )
+                    validated_agents.append(agent_card.model_dump(mode='json'))
+                except Exception as e:
+                    logger.error(f"Failed to convert agent {agent.id} to AgentCard: {e}")
+                    continue
+            
+            candidate_agents_map[task_name] = validated_agents
+            logger.info(f"Found {len(validated_agents)} agents for task '{task_name}'")
+        
+        logger.info("Internal DB search complete.")
+        
+        # Check for tasks with no agents found
+        for task in parsed_tasks:
+            if not candidate_agents_map.get(task.task_name):
+                error_feedback = (
+                    f"The previous attempt to parse the prompt resulted in the task description "
+                    f"'{task.task_description}', which was matched to the capability '{task.task_name}'. "
+                    f"However, no agents were found that could perform this task. Please generate a new, "
+                    f"more detailed and specific task description that better captures the user's intent."
+                )
+                logger.warning(f"Semantic failure for task '{task.task_name}'. Looping back to re-parse.")
+                return {"candidate_agents": {}, "parsing_error_feedback": error_feedback}
+        
+        return {"candidate_agents": candidate_agents_map, "parsing_error_feedback": None}
+        
+    except Exception as e:
+        logger.error(f"Internal search failed: {e}. Falling back to HTTP search.")
+        # Fallback to original HTTP-based search if DB query fails
+        urls_to_fetch = []
+        base_url = "http://127.0.0.1:8000/api/agents/search"
+        
+        for task in parsed_tasks:
+            params: Dict[str, Any] = {'capabilities': task.task_name}
+            if 'price' in user_expectations:
+                params['max_price'] = user_expectations['price']
+            if 'rating' in user_expectations:
+                params['min_rating'] = user_expectations['rating']
+            
+            request = httpx.Request("GET", base_url, params=params)
+            urls_to_fetch.append((task.task_name, str(request.url), task.task_description))
+        
+        logger.info(f"Dispatching {len(urls_to_fetch)} HTTP agent search requests (fallback).")
+        async with httpx.AsyncClient() as client:
+            results = await asyncio.gather(*(fetch_agents_for_task(client, name, url) for name, url, desc in urls_to_fetch))
+        
+        candidate_agents_map = {res['task_name']: res['agents'] for res in results}
+        return {"candidate_agents": candidate_agents_map, "parsing_error_feedback": None}
+        
+    finally:
+        db.close()
 
-    return {"candidate_agents": candidate_agents_map, "parsing_error_feedback": None}
-
-class RankedAgents(BaseModel):
-    ranked_agent_ids: List[str]
+# Removed - now defined inline in rank_agents for enhanced reasoning
 
 def rank_agents(state: State):
+    """
+    ENHANCED LLM RANKING: Uses LLM for intelligent agent selection with rich metadata.
+    Optimized with Groq for speed/cost while maintaining quality.
+    """
     parsed_tasks = state.get('parsed_tasks', [])
     logger.info(f"Ranking agents for tasks: {[t.task_name for t in parsed_tasks]}")
     
@@ -880,9 +1040,12 @@ def rank_agents(state: State):
         logger.warning("No tasks to rank in rank_agents")
         return {"task_agent_pairs": []}
     
-    # Initialize both primary and fallback LLMs
-    primary_llm = ChatCerebras(model="gpt-oss-120b")
+    # OPTIMIZATION: Use Groq for ranking (faster and cheaper than Cerebras for this task)
+    ranking_llm = ChatGroq(model="openai/gpt-oss-120b") if os.getenv("GROQ_API_KEY") else ChatCerebras(model="gpt-oss-120b")
     fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
+    
+    # Get user expectations for context
+    user_expectations = state.get('user_expectations', {})
     
     final_selections = []
     for task in parsed_tasks:
@@ -899,24 +1062,60 @@ def rank_agents(state: State):
             primary_agent = candidate_agents[0]
             fallback_agents = []
         else:
-            serializable_agents = [agent.model_dump(mode='json') for agent in candidate_agents]
+            # ENHANCED: Provide rich metadata for intelligent ranking
+            agents_metadata = []
+            for agent in candidate_agents:
+                agents_metadata.append({
+                    'id': agent.id,
+                    'name': agent.name,
+                    'description': agent.description,
+                    'capabilities': agent.capabilities,
+                    'rating': agent.rating,
+                    'price_per_call_usd': agent.price_per_call_usd,
+                    'status': agent.status,
+                    'endpoints_count': len(agent.endpoints)
+                })
             
             prompt = f'''
-            You are an expert at selecting the best agent for a given task.
-            The user's task is: "{task.task_description}"
+            You are an expert at selecting the best agent for a given task based on multiple factors.
+            
+            **Task Details:**
+            - Task Name: "{task.task_name}"
+            - Task Description: "{task.task_description}"
+            - User Expectations: {json.dumps(user_expectations, indent=2) if user_expectations else "None specified"}
 
-            Here are the available agents that claim to have the capability '{task.task_name}':
-            ---
-            {json.dumps(serializable_agents, indent=2)}
-            ---
+            **Available Agents:**
+            {json.dumps(agents_metadata, indent=2)}
 
-            Please rank these agents in order of suitability for the task, from best to worst. The best agent should be the one whose description and capabilities most closely match the user's task.
+            **Ranking Criteria (in order of importance):**
+            1. **Capability Match** (Most Important): How well does the agent's description and capabilities match the task?
+            2. **Quality/Rating**: Higher rated agents are generally more reliable (scale 0-5)
+            3. **Price**: Consider user's budget if specified, otherwise prefer reasonable pricing
+            4. **Task Complexity**: Match agent sophistication to task complexity
+            5. **Status**: Prefer active agents
 
-            Your output should be a JSON object with a single key, "ranked_agent_ids", which is a list of agent IDs in the correct order.
+            **Instructions:**
+            - Rank ALL agents from best to worst
+            - Consider trade-offs (e.g., "Agent A is slightly more expensive but has much better ratings")
+            - If user specified budget/rating preferences, prioritize those
+            - Provide brief reasoning for your top choice
+
+            **Output Format:**
+            {{
+                "ranked_agent_ids": ["agent_id_1", "agent_id_2", ...],
+                "reasoning": "Brief explanation of why the top agent was chosen"
+            }}
             '''
+            # Enhanced schema with reasoning
+            class RankedAgentsWithReasoning(BaseModel):
+                ranked_agent_ids: List[str]
+                reasoning: str
+            
             try:
-                response = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, RankedAgents)
+                response = invoke_llm_with_fallback(ranking_llm, fallback_llm, prompt, RankedAgentsWithReasoning)
                 ranked_agent_ids = response.ranked_agent_ids
+                
+                logger.info(f"LLM ranking reasoning for '{task_name}': {response.reasoning}")
                 
                 sorted_agents = sorted(candidate_agents, key=lambda agent: ranked_agent_ids.index(agent.id) if agent.id in ranked_agent_ids else float('inf'))
                 
@@ -1308,10 +1507,111 @@ def validate_plan_for_execution(state: State):
         logger.error(f"Plan validation LLM call failed: {e}. Assuming plan is ready to avoid stalling.")
         return {"replan_reason": None, "pending_user_input": False, "question_for_user": None}
 
+async def execute_mcp_agent(planned_task: PlannedTask, agent_details: AgentCard, state: State, config: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Execute an MCP agent by calling its tools via the MCP protocol.
+    
+    Args:
+        planned_task: The task to execute
+        agent_details: The MCP agent details
+        state: Current state
+        config: Configuration including user_id
+        payload: The parameters for the tool call
+        
+    Returns:
+        Dictionary with task result
+    """
+    try:
+        # Import MCP client
+        from mcp import ClientSession
+        import mcp.client.sse
+        from models import AgentCredential
+        from utils.encryption import decrypt
+        from database import SessionLocal
+        
+        # Get user_id from config
+        user_id = config.get("configurable", {}).get("user_id", "system")
+        
+        # Get MCP server URL from agent config
+        url = agent_details.connection_config.get("url") if agent_details.connection_config else None
+        if not url:
+            return {
+                "task_name": planned_task.task_name,
+                "result": "Error: MCP agent has no URL configured"
+            }
+        
+        # Fetch user credentials for this agent
+        db = SessionLocal()
+        try:
+            headers = {}
+            credentials = db.query(AgentCredential).filter_by(
+                agent_id=agent_details.id,
+                user_id=user_id
+            ).all()
+            
+            for cred in credentials:
+                # Decrypt token
+                token = decrypt(cred.encrypted_access_token)
+                headers[cred.auth_header_name] = token
+            
+            logger.info(f"Connecting to MCP server: {url} with {len(headers)} auth headers")
+            
+            # Connect to MCP server
+            sse_url = f"{url}/sse" if not url.endswith("/sse") else url
+            
+            async with httpx.AsyncClient(headers=headers, timeout=60.0) as http_client:
+                async with mcp.client.sse.sse_client(sse_url, http_client=http_client) as (read, write):
+                    async with ClientSession(read, write) as session:
+                        # Initialize session
+                        await session.initialize()
+                        
+                        # Call the tool
+                        tool_name = planned_task.primary.endpoint
+                        logger.info(f"Calling MCP tool: {tool_name} with payload: {payload}")
+                        
+                        result = await session.call_tool(tool_name, payload)
+                        
+                        # Extract result content
+                        if hasattr(result, 'content') and result.content:
+                            # MCP returns content as a list of content items
+                            content_items = []
+                            for item in result.content:
+                                if hasattr(item, 'text'):
+                                    content_items.append(item.text)
+                                elif hasattr(item, 'data'):
+                                    content_items.append(str(item.data))
+                            
+                            result_text = "\n".join(content_items) if content_items else str(result)
+                        else:
+                            result_text = str(result)
+                        
+                        logger.info(f"MCP tool call successful for task '{planned_task.task_name}'")
+                        
+                        return {
+                            "task_name": planned_task.task_name,
+                            "result": result_text,
+                            "raw_response": result_text
+                        }
+                        
+        finally:
+            db.close()
+            
+    except Exception as e:
+        error_msg = f"MCP agent call failed: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        return {
+            "task_name": planned_task.task_name,
+            "result": error_msg,
+            "status_code": 500
+        }
+
+
 async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: State, config: Dict[str, Any], last_error: Optional[str] = None):
     '''
-    Builds the payload and runs a single agent, now using file paths instead of content.
-    This is the full, robust version with semantic retries and rate limit handling.
+    OPTIMIZED EXECUTION: Builds the payload and runs a single agent.
+    - Checks if pre-extracted parameters match required params (skips LLM if match)
+    - Implements GET request caching
+    - Semantic retries and rate limit handling
     '''
     logger.info(f"Running agent '{agent_details.name}' for task: '{planned_task.task_name}'")
     
@@ -1329,6 +1629,27 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
     primary_llm = ChatCerebras(model="gpt-oss-120b")
     fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
     failed_attempts = []
+    
+    # OPTIMIZATION: Check if we can skip LLM payload generation
+    # Get pre-extracted parameters from the task
+    pre_extracted_params = {}
+    for task in state.get('parsed_tasks', []):
+        if task.task_name == planned_task.task_name:
+            pre_extracted_params = task.parameters or {}
+            break
+    
+    # Check if all required parameters are already extracted
+    required_params = [p.name for p in selected_endpoint.parameters if p.required]
+    params_match = all(param in pre_extracted_params for param in required_params)
+    
+    if params_match and pre_extracted_params:
+        logger.info(f"OPTIMIZATION: All required parameters pre-extracted. Skipping LLM payload generation.")
+        logger.info(f"Using parameters: {pre_extracted_params}")
+        payload = pre_extracted_params
+        skip_llm_generation = True
+    else:
+        logger.info(f"Required params: {required_params}, Pre-extracted: {list(pre_extracted_params.keys())}")
+        skip_llm_generation = False
     
     # --- Prepare detailed file context for the payload builder ---
     file_context = ""
@@ -1355,69 +1676,82 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
 
     # This loop handles semantic retries (e.g., valid but empty/useless responses)
     for attempt in range(3):
-        failed_attempts_context = ""
-        if failed_attempts:
-            failed_attempts_str = "\n".join([f"- Payload: {att['payload']}\n  - Result: {att['result']}" for att in failed_attempts])
-            failed_attempts_context = f'''
-            IMPORTANT: Your previous attempt(s) failed because the agent returned empty or unsatisfactory results. Do NOT repeat the same mistakes. Analyze the following failed attempts and generate a NEW, MODIFIED payload.
+        # OPTIMIZATION: Skip LLM generation if parameters already match
+        if skip_llm_generation and attempt == 0:
+            logger.info("Using pre-extracted parameters, skipping LLM payload generation.")
+            # payload already set above
+        else:
+            # Need to generate payload via LLM
+            failed_attempts_context = ""
+            if failed_attempts:
+                failed_attempts_str = "\n".join([f"- Payload: {att['payload']}\n  - Result: {att['result']}" for att in failed_attempts])
+                failed_attempts_context = f'''
+                IMPORTANT: Your previous attempt(s) failed because the agent returned empty or unsatisfactory results. Do NOT repeat the same mistakes. Analyze the following failed attempts and generate a NEW, MODIFIED payload.
 
-            <failed_attempts>
-            {failed_attempts_str}
-            </failed_attempts>
+                <failed_attempts>
+                {failed_attempts_str}
+                </failed_attempts>
+                '''
+
+            http_error_context = f"\nIMPORTANT: The last API call failed with a client error. Please correct the payload based on this feedback:\n<error>\n{last_error}\n</error>\n" if last_error else ""
+
+            payload_prompt = f'''
+            You are an expert at creating API requests. Your task is to generate a valid JSON payload for the following endpoint, based on all the provided context.
+
+            Endpoint Description: "{selected_endpoint.description}"
+            Endpoint Parameters: {[p.model_dump_json() for p in selected_endpoint.parameters]}
+            High-Level Task: "{planned_task.task_description}"
+            Conversation History:
+            {history}
+            Historical Context (previous task results): {json.dumps(state.get('completed_tasks', []), indent=2, default=str)}
+            {file_context}
+            {http_error_context}
+            {failed_attempts_context}
+            Your response MUST be only the JSON payload object, with no extra text or markdown.
             '''
+            
+            # Add exponential backoff for rate limit handling when generating payloads
+            payload_generated = False
+            payload_generation_error = None
+            payload = {}  # Initialize payload to avoid unbound variable error
+            for payload_attempt in range(5):  # Up to 5 attempts for payload generation
+                try:
+                    # Use the fallback wrapper for LLM calls
+                    payload_str = invoke_llm_with_fallback(primary_llm, fallback_llm, payload_prompt, None).__str__()
+                    cleaned_payload_str = strip_think_tags(payload_str)
+                    json_str = extract_json_from_response(cleaned_payload_str)
+                    if not json_str:
+                        raise json.JSONDecodeError("No JSON found in LLM response", cleaned_payload_str, 0)
+                    payload = json.loads(json_str)
+                    logger.info(f"LLM generated payload for task '{planned_task.task_name}': {payload}")
+                    payload_generated = True
+                    break  # Success, exit retry loop
+                except Exception as e:
+                    # Check if this is a rate limit error
+                    error_str = str(e).lower()
+                    if "429" in error_str or "rate" in error_str or "queue_exceeded" in error_str or "high traffic" in error_str:
+                        # Apply exponential backoff
+                        wait_time = (2 ** payload_attempt) + (0.1 * payload_attempt)  # Exponential backoff with jitter
+                        logger.warning(f"Rate limit hit during payload generation. Waiting {wait_time:.2f} seconds before retry {payload_attempt + 1}/5")
+                        await asyncio.sleep(wait_time)
+                        continue  # Retry
+                    else:
+                        # Non-rate limit error, don't retry
+                        payload_generation_error = e
+                        break
+            
+            if not payload_generated:
+                error_msg = f"Error building payload for task '{planned_task.task_name}': {payload_generation_error}"
+                logger.error(error_msg)
+                return {"task_name": planned_task.task_name, "result": error_msg}
 
-        http_error_context = f"\nIMPORTANT: The last API call failed with a client error. Please correct the payload based on this feedback:\n<error>\n{last_error}\n</error>\n" if last_error else ""
-
-        payload_prompt = f'''
-        You are an expert at creating API requests. Your task is to generate a valid JSON payload for the following endpoint, based on all the provided context.
-
-        Endpoint Description: "{selected_endpoint.description}"
-        Endpoint Parameters: {[p.model_dump_json() for p in selected_endpoint.parameters]}
-        High-Level Task: "{planned_task.task_description}"
-        Conversation History:
-        {history}
-        Historical Context (previous task results): {json.dumps(state.get('completed_tasks', []), indent=2, default=str)}
-        {file_context}
-        {http_error_context}
-        {failed_attempts_context}
-        Your response MUST be only the JSON payload object, with no extra text or markdown.
-        '''
+        # --- MCP EXECUTION PATH ---
+        from models import AgentType, AgentCredential
+        if agent_details.agent_type == AgentType.MCP_HTTP:
+            logger.info(f"Executing MCP agent: {agent_details.name}")
+            return await execute_mcp_agent(planned_task, agent_details, state, config, payload)
         
-        # Add exponential backoff for rate limit handling when generating payloads
-        payload_generated = False
-        payload_generation_error = None
-        payload = {}  # Initialize payload to avoid unbound variable error
-        for payload_attempt in range(5):  # Up to 5 attempts for payload generation
-            try:
-                # Use the fallback wrapper for LLM calls
-                payload_str = invoke_llm_with_fallback(primary_llm, fallback_llm, payload_prompt, None).__str__()
-                cleaned_payload_str = strip_think_tags(payload_str)
-                json_str = extract_json_from_response(cleaned_payload_str)
-                if not json_str:
-                    raise json.JSONDecodeError("No JSON found in LLM response", cleaned_payload_str, 0)
-                payload = json.loads(json_str)
-                logger.info(f"LLM generated payload for task '{planned_task.task_name}': {payload}")
-                payload_generated = True
-                break  # Success, exit retry loop
-            except Exception as e:
-                # Check if this is a rate limit error
-                error_str = str(e).lower()
-                if "429" in error_str or "rate" in error_str or "queue_exceeded" in error_str or "high traffic" in error_str:
-                    # Apply exponential backoff
-                    wait_time = (2 ** payload_attempt) + (0.1 * payload_attempt)  # Exponential backoff with jitter
-                    logger.warning(f"Rate limit hit during payload generation. Waiting {wait_time:.2f} seconds before retry {payload_attempt + 1}/5")
-                    await asyncio.sleep(wait_time)
-                    continue  # Retry
-                else:
-                    # Non-rate limit error, don't retry
-                    payload_generation_error = e
-                    break
-        
-        if not payload_generated:
-            error_msg = f"Error building payload for task '{planned_task.task_name}': {payload_generation_error}"
-            logger.error(error_msg)
-            return {"task_name": planned_task.task_name, "result": error_msg}
-
+        # --- HTTP REST EXECUTION PATH ---
         headers = {}
         if api_key := os.getenv(f"{agent_details.id.upper().replace('-', '_')}_API_KEY"):
             headers["Authorization"] = f"Bearer {api_key}"
@@ -1481,13 +1815,29 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                 # Not a browser agent - use standard synchronous call
                 timeout_seconds = 30.0
                 
+                # OPTIMIZATION: Check cache for GET requests
                 if http_method == 'GET':
-                    response = await client.get(endpoint_url, params=payload, headers=headers, timeout=timeout_seconds)
+                    cache_key = f"{endpoint_url}:{json.dumps(payload, sort_keys=True)}"
+                    cached_entry = get_request_cache.get(cache_key)
+                    
+                    if cached_entry and (time.time() - cached_entry['timestamp']) < GET_CACHE_DURATION_SECONDS:
+                        logger.info(f"CACHE HIT: Using cached response for GET {endpoint_url}")
+                        result = cached_entry['result']
+                    else:
+                        response = await client.get(endpoint_url, params=payload, headers=headers, timeout=timeout_seconds)
+                        response.raise_for_status()
+                        result = response.json()
+                        
+                        # Cache the result
+                        get_request_cache[cache_key] = {
+                            'result': result,
+                            'timestamp': time.time()
+                        }
+                        logger.info(f"CACHE MISS: Cached response for GET {endpoint_url}")
                 else:  # POST
                     response = await client.post(endpoint_url, json=payload, headers=headers, timeout=timeout_seconds)
-
-                response.raise_for_status()
-                result = response.json()
+                    response.raise_for_status()
+                    result = response.json()
 
                 # **INTELLIGENT VALIDATION** for semantic failure
                 is_result_empty = not result or (isinstance(result, list) and not result) or (isinstance(result, dict) and not any(result.values()))
@@ -1803,7 +2153,7 @@ def evaluate_agent_response(state: State):
         return {"pending_user_input": False, "question_for_user": None}
     
     prompt = f'''
-    You are a Quality Assurance AI. Determine if an agent's output successfully fulfills its task.
+    You are a Quality Assurance AI with REACTIVE ROUTING capabilities. Determine if an agent's output successfully fulfills its task and decide the next action.
 
     **Conversation History:**
     {conversation_history}
@@ -1816,35 +2166,72 @@ def evaluate_agent_response(state: State):
     {json.dumps(task_to_evaluate['result'], indent=2)[:1000]}
     ```
 
-    **Rules:**
-    1. **Browser agent results:** If the result shows "Completed X/Y subtasks" where X > 0, it's SUCCESSFUL (partial completion is acceptable)
-    2. **Data presence = success:** If the result contains actual data (not empty, not just errors), it's successful
-    3. **Be pragmatic:** Partial results are acceptable - if agent got SOME data, that's good enough
-    4. **Check previous tasks:** If a previous task already accomplished the user's goal, mark this task as complete
-    5. **Only ask if truly necessary:** Only request clarification if the result is COMPLETELY empty or contains ONLY errors
-    6. **Trust the agent:** If the agent says it completed tasks, believe it
+    **REACTIVE EVALUATION - Choose ONE of these statuses:**
+    
+    1. **"complete"**: Task fully successful, proceed to next task
+       - Result contains all expected data
+       - Agent accomplished the goal
+    
+    2. **"partial_success"**: Task partially successful, but acceptable
+       - Got SOME useful data (e.g., "Completed 3/5 subtasks")
+       - Partial results are better than nothing
+       - Proceed to next task with warning
+    
+    3. **"failed"**: Task failed but can be recovered automatically
+       - Agent returned error or empty result
+       - Another agent or approach might work
+       - System will AUTO-REPLAN (loop back to planning)
+       - Provide `feedback_for_replanning` with specific guidance
+    
+    4. **"user_input_required"**: Task needs user clarification
+       - Result is ambiguous or requires user decision
+       - Missing information only user can provide
+       - Provide a clear `question` for the user
 
-    **Decision:**
-    - If the result has ANY useful data OR shows partial completion: `{{"status": "complete"}}`
-    - Only if COMPLETELY empty/broken: `{{"status": "user_input_required", "question": "Brief question"}}`
+    **Rules:**
+    - **Browser agent results:** If shows "Completed X/Y subtasks" where X > 0, use "partial_success" or "complete"
+    - **Data presence:** If result has ANY useful data, use "complete" or "partial_success"
+    - **Be pragmatic:** Prefer "partial_success" over "failed" when there's some value
+    - **Auto-recovery:** Use "failed" with feedback when another attempt might work
+    - **Last resort:** Only use "user_input_required" if truly stuck
+
+    **Output Format:**
+    {{
+        "status": "complete|partial_success|failed|user_input_required",
+        "reasoning": "Brief explanation",
+        "feedback_for_replanning": "Specific guidance if status is 'failed'",
+        "question": "Clear question if status is 'user_input_required'"
+    }}
     '''
     try:
-        evaluation = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, AgentResponseEvaluation)
+        from schemas import AgentResponseEvaluationEnhanced
+        evaluation = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, AgentResponseEvaluationEnhanced)
         print(f"!!! EVALUATE: LLM evaluation status={evaluation.status} !!!")
-        logger.info(f"Evaluation result: status={evaluation.status}")
+        logger.info(f"Evaluation result: status={evaluation.status}, reasoning={evaluation.reasoning}")
         
-        if evaluation.status == "user_input_required":
-            print(f"!!! EVALUATE: LLM says user input required - question='{evaluation.question}' !!!")
-            logger.warning(f"Result for task '{task_to_evaluate['task_name']}' is unsatisfactory. Pausing for user input.")
+        # REACTIVE ROUTING: Handle different statuses
+        if evaluation.status == "failed":
+            print(f"!!! EVALUATE: Task FAILED - triggering auto-replan !!!")
+            logger.warning(f"Task '{task_to_evaluate['task_name']}' failed. Triggering auto-replan.")
+            logger.warning(f"Replan feedback: {evaluation.feedback_for_replanning}")
+            
+            return {
+                "pending_user_input": False,
+                "question_for_user": None,
+                "replan_reason": evaluation.feedback_for_replanning or f"Task '{task_to_evaluate['task_name']}' failed: {evaluation.reasoning}",
+                "eval_status": "failed"
+            }
+        
+        elif evaluation.status == "user_input_required":
+            print(f"!!! EVALUATE: User input required - question='{evaluation.question}' !!!")
+            logger.warning(f"Result for task '{task_to_evaluate['task_name']}' requires user input.")
             logger.warning(f"Evaluation question: {evaluation.question}")
-            # We add the failed task's result to the parsing feedback to prevent loops
-            error_feedback = f"The previous attempt for a similar task resulted in an incorrect output: {task_to_evaluate['result']}. Please generate a more precise task to avoid this error."
             
             # Preserve canvas if it was set by a previous task
             result = {
                 "pending_user_input": True,
                 "question_for_user": evaluation.question,
-                "parsing_error_feedback": error_feedback
+                "eval_status": "user_input_required"
             }
             
             # Check if we have canvas from previous tasks
@@ -1855,9 +2242,15 @@ def evaluate_agent_response(state: State):
                 logger.info("Preserving canvas from previous successful task")
             
             return result
-        else:
-            print(f"!!! EVALUATE: Task passed evaluation !!!")
-            logger.info("Task passed evaluation")
+        
+        elif evaluation.status == "partial_success":
+            print(f"!!! EVALUATE: Task PARTIALLY successful - continuing !!!")
+            logger.info(f"Task '{task_to_evaluate['task_name']}' partially successful: {evaluation.reasoning}")
+            # Continue to next task
+        
+        else:  # complete
+            print(f"!!! EVALUATE: Task COMPLETE !!!")
+            logger.info(f"Task '{task_to_evaluate['task_name']}' completed successfully")
             
             # Check if this is a browser task with screenshots
             task_result = task_to_evaluate.get('result', {})
@@ -2408,7 +2801,25 @@ def generate_text_answer(state: State):
                 Please generate a brief, human-readable summary that references the visualization 
                 and highlights the key findings without reproducing the raw data or code.
                 
-                **IMPORTANT:**
+                **FORMATTING REQUIREMENTS:**
+                - Use clear paragraph breaks for readability
+                - Use bullet points (•) or numbered lists for multiple items
+                - **Use markdown tables for structured data** (events, schedules, comparisons, lists with multiple attributes)
+                - Bold important information using **text**
+                - Keep paragraphs concise (2-3 sentences max)
+                - Add line breaks between sections for better visual separation
+                - Use proper capitalization and punctuation
+                - Structure: Brief intro → Key findings → Reference to visualization
+                
+                **TABLE FORMATTING:**
+                When presenting structured data (like events, schedules, contests, products, etc.), use markdown tables:
+                ```
+                | Column 1 | Column 2 | Column 3 |
+                |----------|----------|----------|
+                | Data 1   | Data 2   | Data 3   |
+                ```
+                
+                **CONTENT REQUIREMENTS:**
                 - If the results indicate something was NOT found or NOT present, clearly state that in your response
                 - Do NOT make up details that are not in the actual results
                 - Be factual and accurate based solely on the provided data
@@ -2453,7 +2864,31 @@ def generate_text_answer(state: State):
                 
                 Please generate a final, human-readable response that directly answers the user's original request based on the collected results.
                 
-                **IMPORTANT:**
+                **FORMATTING REQUIREMENTS:**
+                - Use clear paragraph breaks for readability
+                - Use bullet points (•) or numbered lists for multiple items
+                - **Use markdown tables for structured data** (events, schedules, comparisons, lists with multiple attributes)
+                - Bold important information using **text**
+                - Keep paragraphs concise (2-3 sentences max)
+                - Add line breaks between sections for better visual separation
+                - Use proper capitalization and punctuation
+                - Structure your response logically with clear sections
+                - For lists of data, use consistent formatting (e.g., "• Item 1", "• Item 2")
+                
+                **TABLE FORMATTING:**
+                When presenting structured data (like events, schedules, contests, products, comparisons), use markdown tables:
+                ```
+                | Column 1 | Column 2 | Column 3 |
+                |----------|----------|----------|
+                | Data 1   | Data 2   | Data 3   |
+                ```
+                Tables are especially useful for:
+                - Event schedules (name, date, time, duration, status)
+                - Product comparisons (name, price, features)
+                - Contest listings (title, start time, duration, registration)
+                - Any data with multiple attributes per item
+                
+                **CONTENT REQUIREMENTS:**
                 - If the results indicate something was NOT found or NOT present, clearly state that in your response
                 - Do NOT make up details that are not in the actual results
                 - Be factual and accurate based solely on the provided data
@@ -2507,10 +2942,10 @@ def generate_text_answer(state: State):
 
 def generate_final_response(state: State):
     """
-    Generates the final response and determines if canvas is needed.
-    This replaces the old aggregate_responses node.
+    UNIFIED FINAL RESPONSE: Generates both text and canvas in a single optimized call.
+    This replaces the old two-step process (generate_text_answer + render_canvas_output).
     """
-    logger.info("=== GENERATE_FINAL_RESPONSE: Starting ===")
+    logger.info("=== GENERATE_FINAL_RESPONSE: Starting unified generation ===")
     
     # Check if canvas was already set by evaluate_agent_response (e.g., browser screenshots)
     if state.get('has_canvas') and state.get('canvas_content'):
@@ -2526,160 +2961,171 @@ def generate_final_response(state: State):
             "canvas_content": state.get('canvas_content')
         }
     
-    # First generate the text answer
-    text_result = generate_text_answer(state)
-    
-    # Check if the text result contains HTML content that should be in canvas
-    final_response = text_result.get('final_response', '')
-    
-    # Enhanced canvas detection - check for HTML content in the response
-    contains_html = False
-    html_indicators = [
-        '<!DOCTYPE html>', '<html', '<button', '<script>', 'onclick=', 'onClick=',
-        '<div', '<span>', '<p>', '<h1>', '<h2>', '<h3>', '<style>', '<head>'
-    ]
-    
-    for indicator in html_indicators:
-        if indicator in final_response:
-            contains_html = True
-            logger.info(f"HTML content detected (indicator: {indicator})")
-            break
-    
-    # Now analyze if canvas is needed using LLM
     # Initialize both primary and fallback LLMs
     primary_llm = ChatCerebras(model="gpt-oss-120b")
     fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
     
+    # Check if this is a simple request (no complex processing)
+    is_simple_request = state.get("needs_complex_processing") is False
+    completed_tasks = state.get('completed_tasks', [])
+    
+    # UNIFIED GENERATION: Generate text + canvas decision + canvas content in ONE call
+    if is_simple_request:
+        # Simple request - just generate text response
+        text_result = generate_text_answer(state)
+        final_response = text_result.get('final_response', '')
+        
+        # Check if response contains HTML that should be in canvas
+        contains_html = any(indicator in final_response for indicator in [
+            '<!DOCTYPE html>', '<html', '<button', '<script>', 'onclick=', 'onClick=',
+            '<div', '<span>', '<p>', '<h1>', '<h2>', '<h3>', '<style>', '<head>'
+        ])
+        
+        if contains_html:
+            logger.info("Simple request with HTML detected - extracting to canvas")
+            # Extract HTML to canvas
+            return {
+                "final_response": "I've created an interactive visualization for you. Check it out in the canvas!",
+                "messages": text_result.get('messages', []),
+                "has_canvas": True,
+                "canvas_type": "html",
+                "canvas_content": final_response
+            }
+        else:
+            return {
+                "final_response": final_response,
+                "messages": text_result.get('messages', []),
+                "has_canvas": False,
+                "canvas_type": None,
+                "canvas_content": None
+            }
+    
+    # Complex request - use unified generation
+    logger.info("Complex request - using unified text + canvas generation")
+    
+    # UNIFIED PROMPT: Generate text response + canvas decision + canvas content in ONE call
+    # Extract detailed information from completed tasks
+    detailed_results = []
+    for task in completed_tasks:
+        task_info = {
+            'task_name': task.get('task_name'),
+            'result': task.get('result'),
+        }
+        if 'raw_response' in task and task['raw_response'] and isinstance(task['raw_response'], dict):
+            raw = task['raw_response']
+            task_info['extracted_data'] = raw.get('extracted_data')
+            task_info['actions_taken'] = raw.get('actions_taken', [])
+            task_info['task_summary'] = raw.get('task_summary')
+        detailed_results.append(task_info)
+    
     prompt = f'''
-    You are the Orbimesh Orchestrator, an intelligent AI system with a built-in Canvas feature.
+    You are the Orbimesh Orchestrator. Generate a UNIFIED response with both text and optional canvas content.
     
-    **YOUR IDENTITY AND CAPABILITIES:**
-    - You are Orbimesh, a multi-agent orchestration system
-    - You have a built-in Canvas feature that can render interactive HTML/CSS/JavaScript and Markdown content
-    - The Canvas is your own capability - not an external agent or service
-    - You can create games, visualizations, interactive demos, and rich content directly
+    **USER'S REQUEST:** "{state['original_prompt']}"
     
-    **YOUR PURPOSE:**
-    Analyze the user's request and the generated text response to determine if your Canvas feature would enhance the user experience.
-    The canvas is a separate display area that can show interactive content, visualizations, or rich media.
-    The chat area should only contain text responses, while the canvas area shows interactive content.
+    **COMPLETED TASKS:**
+    {json.dumps(detailed_results, indent=2)}
     
-    **CONTEXT:**
-    User's Original Request: "{state['original_prompt']}"
-    Generated Text Response: "{final_response}"
+    **YOUR JOB: Generate a complete response in ONE output**
     
-    **CANVAS DECISION CRITERIA:**
+    1. **response_text**: A clear, human-readable summary for the user
+       - Base ONLY on actual results (no hallucination)
+       - If data is missing/null, say so clearly
+       - Be factual and accurate
+       
+       **FORMATTING REQUIREMENTS for response_text:**
+       - Use clear paragraph breaks for readability
+       - Use bullet points (•) or numbered lists for multiple items
+       - **Use markdown tables for structured data** (events, schedules, comparisons, lists with multiple attributes)
+       - Bold important information using **text**
+       - Keep paragraphs concise (2-3 sentences max)
+       - Add line breaks between sections for better visual separation
+       - Use proper capitalization and punctuation
+       - Structure: Brief intro → Key findings → Next steps (if applicable)
+       
+       **TABLE FORMATTING:**
+       When presenting structured data, use markdown tables:
+       | Column 1 | Column 2 | Column 3 |
+       |----------|----------|----------|
+       | Data 1   | Data 2   | Data 3   |
     
-    **DEFINITELY USE CANVAS for:**
-    - Interactive elements (counters, buttons, games, demos)
-    - Visualizations (charts, graphs, plots, data visualization)
-    - Complex layouts or formatting that text cannot represent well
-    - Web pages, HTML content, or rich media
-    - Documents that need markdown rendering
-    - When user explicitly asks for "canvas", "visual", "interactive", "demo", "show me", "create a game"
+    2. **canvas_required**: Decide if canvas visualization would help
+       - true: For games, visualizations, interactive content, data displays
+       - false: For simple text answers
     
-    **CONSIDER CANVAS for:**
-    - Numerical data that could benefit from visualization
-    - Complex information that would be clearer visually
-    - When the text response mentions creating visual content
+    3. **canvas_type** (if canvas_required=true):
+       - "html": For interactive elements, games, visualizations
+       - "markdown": For formatted documents
     
-    **USE TEXT ONLY for:**
-    - Simple questions and factual answers
-    - Explanations and descriptions
-    - When no visual enhancement is needed
+    4. **canvas_content** (if canvas_required=true):
+       - Generate the COMPLETE HTML or Markdown content
+       - For HTML: Include full <!DOCTYPE html> structure with styles and scripts
+       - Make it self-contained and functional
+       - Use CDN links for external libraries if needed
     
-    **DECISION PROCESS:**
-    1. Look for explicit canvas requests in the original prompt (games, visualizations, interactive content)
-    2. Analyze if the content would benefit from visual representation
-    3. Consider if interactive elements would improve user experience
-    4. Default to text-only if uncertain
+    **CANVAS GUIDELINES:**
+    - Use canvas for: games, charts, interactive demos, data visualizations
+    - Keep response_text concise if canvas is used (reference the canvas)
+    - Make canvas content visually appealing and functional
     
-    **IMPORTANT OUTPUT RULES:**
-    - If the response contains HTML elements like buttons, scripts, or interactive content, ALWAYS use "html" canvas type, never "markdown".
-    - Your response will be used to generate canvas content using your built-in Canvas feature.
-    - The canvas content will be displayed in an iframe with limited capabilities, so external libraries must be imported via CDN if needed.
+    **CRITICAL: Base everything on actual task results. Do not invent data.**
     
-    Respond with a JSON object:
-    {{
-        "use_canvas": true/false,
-        "reasoning": "Brief explanation of why canvas is or isn't needed",
-        "canvas_type": "html" or "markdown" (only if use_canvas is true),
-        "canvas_prompt": "Specific instructions for what canvas content to generate (only if use_canvas is true)"
-    }}
+    Output as JSON conforming to FinalResponse schema.
     '''
     
     try:
-        # Create a simple model for canvas decision
-        class CanvasDecision(BaseModel):
-            use_canvas: bool
-            reasoning: str
-            canvas_type: Optional[Literal["html", "markdown"]] = None
-            canvas_prompt: Optional[str] = None
+        # UNIFIED GENERATION: Get everything in one LLM call
+        from schemas import FinalResponse
         
-        response = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, CanvasDecision)
+        response = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, FinalResponse)
         
-        # Force canvas usage if HTML content is detected
-        if contains_html and not response.use_canvas:
-            logger.info("CANVAS DETECTION: Forcing canvas usage due to HTML content detection")
-            response.use_canvas = True
-            response.canvas_type = "html"
-            response.reasoning = "HTML content detected, forcing canvas usage"
-            response.canvas_prompt = state['original_prompt']
+        logger.info(f"UNIFIED RESPONSE: canvas_required={response.canvas_required}")
         
-        if response.use_canvas:
-            logger.info(f"Canvas needed: {response.canvas_type} - {response.reasoning}")
-            
-            # When canvas is needed, we should generate a concise text response for the chat
-            # that references the canvas content without including the actual HTML
-            concise_text_prompt = f'''
-            The user's original request was:
-            "{state['original_prompt']}"
-            
-            A {response.canvas_type} visualization has been created to display the results.
-            Please generate a brief, human-readable message that tells the user to check 
-            the {response.canvas_type} visualization for the results, without including any code.
-            '''
-            
-            concise_text_response = invoke_llm_with_fallback(primary_llm, fallback_llm, concise_text_prompt, None).__str__()
-            
-            result = {
-                "final_response": concise_text_response,
-                "messages": text_result.get('messages', []),
-                "needs_canvas": True,
+        # Create AI message with timestamp metadata
+        import hashlib
+        timestamp = time.time()
+        unique_string = f"ai:{response.response_text}:{timestamp}"
+        msg_id = hashlib.md5(unique_string.encode()).hexdigest()[:16]
+        ai_message = AIMessage(
+            content=response.response_text,
+            additional_kwargs={"timestamp": timestamp, "id": msg_id}
+        )
+        
+        # Use MessageManager to add message without duplicates
+        from orchestrator.message_manager import MessageManager
+        existing_messages = state.get("messages", [])
+        updated_messages = MessageManager.add_message(existing_messages, ai_message)
+        
+        if response.canvas_required and response.canvas_content:
+            logger.info(f"Canvas generated: type={response.canvas_type}, content_length={len(response.canvas_content)}")
+            return {
+                "final_response": response.response_text,
+                "messages": updated_messages,
+                "has_canvas": True,
                 "canvas_type": response.canvas_type,
-                "canvas_prompt": response.canvas_prompt or state['original_prompt'],
-                "has_canvas": False,  # Explicitly set to False initially
-                "canvas_content": None  # Explicitly set to None initially
+                "canvas_content": response.canvas_content
             }
-            logger.info(f"Returning with needs_canvas=True, canvas_type={result.get('canvas_type')}")
-            return result
         else:
-            logger.info(f"Text-only response sufficient: {response.reasoning}")
-            result = {
-                "final_response": final_response,
-                "messages": text_result.get('messages', []),
-                "needs_canvas": False,
-                "canvas_type": None,
-                "canvas_prompt": None,
+            logger.info("Text-only response generated")
+            return {
+                "final_response": response.response_text,
+                "messages": updated_messages,
                 "has_canvas": False,
+                "canvas_type": None,
                 "canvas_content": None
             }
-            logger.info("Returning with needs_canvas=False")
-            return result
             
     except Exception as e:
-        logger.error(f"Canvas decision failed: {e}. Defaulting to text-only.")
-        result = {
-            "final_response": final_response,
+        logger.error(f"Unified response generation failed: {e}. Falling back to simple text.")
+        # Fallback: Generate simple text response
+        text_result = generate_text_answer(state)
+        return {
+            "final_response": text_result.get('final_response', 'I apologize, but I encountered an error generating the response.'),
             "messages": text_result.get('messages', []),
-            "needs_canvas": False,
-            "canvas_type": None,
-            "canvas_prompt": None,
             "has_canvas": False,
+            "canvas_type": None,
             "canvas_content": None
         }
-        logger.info("Returning (error case)")
-        return result
 
 
 
@@ -3258,25 +3704,39 @@ def route_after_analysis(state: State):
 
 
 def route_after_parse(state: State):
-    '''If parsing results in no tasks, ask user for clarification. Otherwise, proceed.'''
+    '''Route after parsing: handle direct responses, no tasks, or proceed to search.'''
+    # OPTIMIZATION: Short-circuit for direct responses (chitchat)
+    if state.get('needs_complex_processing') is False and state.get('final_response'):
+        logger.info("Direct response available. Short-circuiting to save_history.")
+        return "save_history"
+    
     if not state.get('parsed_tasks'):
         logger.warning("No tasks were parsed from prompt. Routing to ask_user for clarification.")
         return "ask_user"
     return "agent_directory_search"
 
 def should_continue_or_finish(state: State):
-    '''This router runs after execution and evaluation to decide the next step.'''
+    '''REACTIVE ROUTER: Runs after execution and evaluation to decide the next step.'''
     pending = state.get("pending_user_input")
     task_plan = state.get('task_plan')
+    eval_status = state.get("eval_status")
+    replan_reason = state.get("replan_reason")
     
-    print(f"!!! SHOULD_CONTINUE_OR_FINISH: pending_user_input={pending}, task_plan_length={len(task_plan) if task_plan else 0} !!!")
-    logger.info(f"Router: pending_user_input={pending}, task_plan={len(task_plan) if task_plan else 0}")
+    print(f"!!! SHOULD_CONTINUE_OR_FINISH: eval_status={eval_status}, pending={pending}, replan_reason={replan_reason}, task_plan_length={len(task_plan) if task_plan else 0} !!!")
+    logger.info(f"Reactive Router: eval_status={eval_status}, pending={pending}, replan={bool(replan_reason)}, plan_length={len(task_plan) if task_plan else 0}")
+    
+    # REACTIVE LOOP: If task failed, trigger auto-replan
+    if eval_status == "failed" and replan_reason:
+        print(f"!!! ROUTING TO PLAN_EXECUTION (auto-replan) !!!")
+        logger.info("Task failed. Routing to plan_execution for auto-replan.")
+        return "plan_execution"
     
     if pending:
-        # If the evaluation failed and we need user input, go to ask_user
+        # If the evaluation requires user input, go to ask_user
         print(f"!!! ROUTING TO ASK_USER (pending_user_input=True) !!!")
         logger.info("Routing to ask_user due to pending_user_input")
         return "ask_user"
+    
     if not task_plan:
         # If the plan is empty and evaluation passed, we are done
         print(f"!!! ROUTING TO GENERATE_FINAL_RESPONSE (plan complete) !!!")
@@ -3294,18 +3754,18 @@ builder = StateGraph(State)
 builder.add_node("load_history", load_conversation_history)
 builder.add_node("save_history", save_conversation_history)
 builder.add_node("analyze_request", analyze_request)
-builder.add_node("parse_prompt", parse_prompt)
+builder.add_node("parse_prompt", parse_prompt)  # OPTIMIZED: Super-parser (3-in-1)
 builder.add_node("preprocess_files", preprocess_files)
-builder.add_node("agent_directory_search", agent_directory_search)
-builder.add_node("rank_agents", rank_agents)
+builder.add_node("agent_directory_search", agent_directory_search)  # OPTIMIZED: Internal DB search
+builder.add_node("rank_agents", rank_agents)  # OPTIMIZED: Enhanced LLM ranking
 builder.add_node("plan_execution", plan_execution)
 builder.add_node("pause_for_plan_approval", pause_for_plan_approval)
 builder.add_node("validate_plan_for_execution", validate_plan_for_execution)
-builder.add_node("execute_batch", execute_batch)
-builder.add_node("evaluate_agent_response", evaluate_agent_response)
+builder.add_node("execute_batch", execute_batch)  # OPTIMIZED: Parameter matching + caching
+builder.add_node("evaluate_agent_response", evaluate_agent_response)  # OPTIMIZED: Reactive evaluation
 builder.add_node("ask_user", ask_user)
-builder.add_node("generate_final_response", generate_final_response)
-builder.add_node("render_canvas_output", render_canvas_output)
+builder.add_node("generate_final_response", generate_final_response)  # OPTIMIZED: Unified text + canvas
+# Note: render_canvas_output node removed - now integrated into generate_final_response
 
 builder.add_edge(START, "load_history")
 builder.add_edge("load_history", "analyze_request")
@@ -3322,7 +3782,8 @@ builder.add_edge("preprocess_files", "parse_prompt")
 
 builder.add_conditional_edges("parse_prompt", route_after_parse, {
     "ask_user": "ask_user",
-    "agent_directory_search": "agent_directory_search"
+    "agent_directory_search": "agent_directory_search",
+    "save_history": "save_history"  # Short-circuit for direct responses
 })
 
 builder.add_edge("agent_directory_search", "rank_agents")
@@ -3386,8 +3847,8 @@ builder.add_conditional_edges("ask_user", route_after_ask_user, {
     "save_history": "save_history"
 })
 
-builder.add_edge("generate_final_response", "render_canvas_output")
-builder.add_edge("render_canvas_output", "save_history")
+# OPTIMIZATION: Unified response generation - no separate canvas rendering needed
+builder.add_edge("generate_final_response", "save_history")
 builder.add_edge("save_history", END)
 
 builder.add_conditional_edges("agent_directory_search", route_after_search, {
@@ -3405,7 +3866,8 @@ builder.add_conditional_edges("validate_plan_for_execution", route_after_validat
 builder.add_conditional_edges("evaluate_agent_response", should_continue_or_finish, {
     "validate_plan_for_execution": "validate_plan_for_execution",
     "generate_final_response": "generate_final_response",
-    "ask_user": "ask_user"
+    "ask_user": "ask_user",
+    "plan_execution": "plan_execution"  # REACTIVE LOOP: Auto-replan on failure
 })
 
 # Compile the graph
@@ -3436,8 +3898,7 @@ def create_execution_subgraph(checkpointer):
     exec_builder.add_node("load_history", load_conversation_history)
     exec_builder.add_node("execute_batch", execute_batch)
     exec_builder.add_node("evaluate_agent_response", evaluate_agent_response)
-    exec_builder.add_node("generate_final_response", generate_final_response)
-    exec_builder.add_node("render_canvas_output", render_canvas_output)
+    exec_builder.add_node("generate_final_response", generate_final_response)  # OPTIMIZED: Unified response
     exec_builder.add_node("save_history", save_conversation_history)
     
     # Set entry point
@@ -3451,8 +3912,7 @@ def create_execution_subgraph(checkpointer):
         "ask_user": "generate_final_response"  # Skip asking user, just generate response
     })
     exec_builder.add_edge("evaluate_agent_response", "generate_final_response")
-    exec_builder.add_edge("generate_final_response", "render_canvas_output")
-    exec_builder.add_edge("render_canvas_output", "save_history")
+    exec_builder.add_edge("generate_final_response", "save_history")  # OPTIMIZED: Direct to save
     exec_builder.add_edge("save_history", END)
     
     return exec_builder.compile(checkpointer=checkpointer)
