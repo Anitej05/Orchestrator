@@ -3,6 +3,7 @@
 
 import { useState } from "react"
 import Link from "next/link"
+import Image from "next/image"
 import { Button } from "@/components/ui/button"
 import {
   Sidebar,
@@ -41,7 +42,7 @@ export default function AppSidebar({ onConversationSelect, onNewConversation, cu
     <>
       {/* Mini Sidebar - Always visible when sidebar is collapsed */}
       {!open && (
-        <div className="fixed left-0 top-[64px] h-[calc(100vh-64px)] w-16 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800 z-40 flex flex-col items-center py-4 gap-2">
+        <div className="fixed left-0 top-16 h-[calc(100vh-4rem)] w-16 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800 z-40 flex flex-col items-center py-4 gap-2">
           <button
             onClick={toggleSidebar}
             className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors flex items-center justify-center w-10 h-10"
@@ -68,18 +69,11 @@ export default function AppSidebar({ onConversationSelect, onNewConversation, cu
       {/* Main Sidebar */}
       <Sidebar 
         collapsible="offcanvas" 
-        className="border-r z-40 fixed left-0 top-0 h-screen bg-gradient-to-br from-gray-50 to-gray-100 dark:from-gray-950 dark:to-gray-900 [&_[data-sidebar=sidebar]]:bg-transparent [&_[data-sidebar=sidebar]]:bg-gradient-to-br [&_[data-sidebar=sidebar]]:from-gray-50 [&_[data-sidebar=sidebar]]:to-gray-100 [&_[data-sidebar=sidebar]]:dark:from-gray-950 [&_[data-sidebar=sidebar]]:dark:to-gray-900" 
+        className="border-r z-40 fixed left-0 top-16 h-[calc(100vh-4rem)] bg-gradient-to-br from-gray-50 to-gray-100 dark:from-gray-950 dark:to-gray-900 [&_[data-sidebar=sidebar]]:bg-transparent [&_[data-sidebar=sidebar]]:bg-gradient-to-br [&_[data-sidebar=sidebar]]:from-gray-50 [&_[data-sidebar=sidebar]]:to-gray-100 [&_[data-sidebar=sidebar]]:dark:from-gray-950 [&_[data-sidebar=sidebar]]:dark:to-gray-900" 
         open={open} 
         onOpenChange={setOpen}
       >
-        <div className="flex h-full flex-col pt-16">
-      {/* <SidebarHeader className="border-b border-gray-200 p-4">
-        <Link href="/" className="flex items-center space-x-2">
-          <Bot className="w-8 h-8 text-blue-600" />
-          <span className="text-xl font-bold text-blue-600">Orbimesh</span>
-        </Link>
-      </SidebarHeader> */}
-
+        <div className="flex h-full flex-col">
       <SidebarContent>
         <SidebarGroup>
           <SidebarGroupLabel>Navigation</SidebarGroupLabel>
@@ -115,7 +109,7 @@ export default function AppSidebar({ onConversationSelect, onNewConversation, cu
         </SidebarGroup>
       </SidebarContent>
 
-      <SidebarFooter className="border-t border-gray-200 p-4">
+      <SidebarFooter className="border-t border-gray-200 dark:border-gray-700 p-4">
         {/* Close button */}
         <button
           onClick={toggleSidebar}
@@ -125,9 +119,6 @@ export default function AppSidebar({ onConversationSelect, onNewConversation, cu
           <span className="text-sm text-gray-700 dark:text-gray-300">Close Sidebar</span>
         </button>
         
-        {/* <div className="flex items-center justify-between gap-2 mb-2">
-          <UserButton afterSignOutUrl="/sign-in" />
-        </div> */}
         <Link href="/register-agent">
           <Button className="w-full bg-blue-600 hover:bg-blue-700 text-white">
             <Plus className="w-4 h-4 mr-2" />

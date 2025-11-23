@@ -222,17 +222,14 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
         
       } catch (error: any) {
         const errorMessage = error instanceof Error ? error.message : (error?.message || 'An unknown error occurred');
-        console.error('Error in continueConversation:', errorMessage, error);
-        set({ status: 'error', isLoading: false });
+        console.error('Error in startConversation:', errorMessage, error);
         
-        // Add error message to the chat
-        const errorSystemMessage: Message = {
-          id: Date.now().toString(),
-          type: 'system',
-          content: `Error: ${errorMessage}`,
-          timestamp: new Date()
-        };
-        set((state: ConversationStore) => ({ messages: [...state.messages, errorSystemMessage] }));
+        // Don't add error messages here - the orchestrator will send its response via WebSocket
+        // Just reset the loading state and let the WebSocket handle the response
+        set({ isLoading: false, status: 'idle' });
+        
+        // The orchestrator's actual response will come through the WebSocket __end__ event
+        // Don't throw - let the user continue
       }
     },
 
@@ -360,15 +357,14 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
         
       } catch (error: any) {
         const errorMessage = error.message || 'An unknown error occurred';
-        console.debug('Error in continueConversation:', errorMessage);
-        set({ status: 'error', isLoading: false });
-        const errorSystemMessage: Message = {
-          id: Date.now().toString(),
-          type: 'system',
-          content: `Error: ${errorMessage}`,
-          timestamp: new Date()
-        };
-        set((state: ConversationStore) => ({ messages: [...state.messages, errorSystemMessage] }));
+        console.error('Error in continueConversation:', errorMessage, error);
+        
+        // Don't add error messages here - the orchestrator will send its response via WebSocket
+        // Just reset the loading state and let the WebSocket handle the response
+        set({ isLoading: false, status: 'idle' });
+        
+        // The orchestrator's actual response will come through the WebSocket __end__ event
+        // Don't throw - let the user continue and wait for WebSocket response
       }
     },
 

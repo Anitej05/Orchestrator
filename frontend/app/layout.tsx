@@ -24,9 +24,9 @@ export default function RootLayout({
         <body className={inter.className} suppressHydrationWarning>
           <ThemeProvider
             attribute="class"
-            // Stabilize SSR vs client to avoid hydration mismatches from system theme detection
-            defaultTheme="dark"
-            enableSystem={false}
+            defaultTheme="system"
+            enableSystem={true}
+            storageKey="orbimesh-theme"
             disableTransitionOnChange
           >
             {children}

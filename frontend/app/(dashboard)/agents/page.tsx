@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react"
 import AppSidebar from "@/components/app-sidebar"
 import AgentGrid from "@/components/agent-grid"
+import Navbar from "@/components/navbar"
 import { SidebarProvider, SidebarInset, SidebarTrigger } from "@/components/ui/sidebar"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -103,20 +104,29 @@ export default function AgentsPage() {
   const filteredAgents = getAgentsByCategory(selectedCategory)
 
   return (
-    <SidebarProvider>
-      <AppSidebar />
-      <SidebarInset>
-        <div className="min-h-screen bg-gray-50">
-          {/* Simple Header */}
-          <div className="bg-white border-b px-6 py-4">
-            <div className="flex items-center space-x-4">
-              <SidebarTrigger />
-              <h1 className="text-2xl font-bold text-gray-900">Agents</h1>
+    <>
+      <Navbar />
+      <SidebarProvider>
+        <AppSidebar />
+        <SidebarInset>
+          <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50 dark:from-gray-900 dark:to-gray-800">
+            {/* Header */}
+            <div className="bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm border-b dark:border-gray-700 px-6 py-4">
+              <div className="flex items-center space-x-4">
+                <SidebarTrigger />
+              </div>
             </div>
-          </div>
 
           {/* Main Content */}
           <main className="p-6">
+            {/* Title Section */}
+            <div className="mb-6">
+              <h1 className="text-3xl font-bold text-blue-600 dark:text-blue-400">Agent Directory</h1>
+              <p className="text-gray-600 dark:text-gray-300 mt-2">
+                Browse and discover AI agents for your orchestration workflows.
+              </p>
+            </div>
+
             {/* Search and Category Filter */}
             <div className="flex flex-col sm:flex-row gap-4 mb-6">
               {/* Search */}
@@ -146,7 +156,7 @@ export default function AgentsPage() {
             </div>
 
             {/* Results Count */}
-            <div className="mb-4 text-sm text-gray-600">
+            <div className="mb-4 text-sm text-gray-600 dark:text-gray-400">
               {loading ? "Loading agents..." : (
                 <>
                   {filteredAgents.length} agent{filteredAgents.length !== 1 ? "s" : ""}
@@ -161,5 +171,6 @@ export default function AgentsPage() {
         </div>
       </SidebarInset>
     </SidebarProvider>
+    </>
   )
 }

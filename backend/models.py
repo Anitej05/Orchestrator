@@ -6,12 +6,22 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSON
 from pgvector.sqlalchemy import Vector
 from database import Base
 import enum
+import uuid
 from datetime import datetime
 
 class StatusEnum(str, enum.Enum):
     active = "active"
     inactive = "inactive"
     deprecated = "deprecated"
+
+class AgentType(str, enum.Enum):
+    HTTP_REST = "http_rest"   # Legacy OpenAPI/REST agents
+    MCP_HTTP = "mcp_http"     # Modern MCP Servers
+
+class AuthType(str, enum.Enum):
+    NONE = "none"
+    API_KEY = "api_key"       # Bearer token or custom header
+    OAUTH2 = "oauth2"         # Access/Refresh tokens
 
 class Agent(Base):
     __tablename__ = "agents"
@@ -21,15 +31,23 @@ class Agent(Base):
     name = Column(String, nullable=False)
     description = Column(Text)
     capabilities = Column(JSON, nullable=False) # Store raw text capabilities in a JSON array
-    price_per_call_usd = Column(Float, nullable=False)
+    price_per_call_usd = Column(Float, nullable=False, default=0.0)
     status = Column(SAEnum(StatusEnum), nullable=False, default=StatusEnum.active, index=True)
     rating = Column(Float, default=0.0)
     rating_count = Column(Integer, default=0, nullable=False)
-    public_key_pem = Column(Text, nullable=False)
+    public_key_pem = Column(Text, nullable=True)  # Optional for MCP agents
     created_at = Column(DateTime, default=datetime.utcnow)  # Track when the agent was created
+    
+    # MCP Support
+    agent_type = Column(String, default=AgentType.HTTP_REST.value)
+    # Connection Config
+    # REST: { "base_url": "https://api.weather.com" }
+    # MCP:  { "url": "https://mcp.supabase.com/mcp" }
+    connection_config = Column(JSON, nullable=True)
 
     capability_vectors = relationship("AgentCapability", back_populates="agent", cascade="all, delete-orphan")
     endpoints = relationship("AgentEndpoint", back_populates="agent", cascade="all, delete-orphan", lazy="joined")
+    credentials = relationship("AgentCredential", back_populates="agent", cascade="all, delete-orphan")
 
 class AgentCapability(Base):
     __tablename__ = "agent_capabilities"
@@ -128,3 +146,27 @@ class WorkflowWebhook(Base):
     webhook_token = Column(String, nullable=False)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+class AgentCredential(Base):
+    """
+    Stores user-specific authentication for an agent.
+    Links a User + Agent + Encrypted Keys.
+    """
+    __tablename__ = "agent_credentials"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, nullable=False, index=True)  # Clerk User ID
+    agent_id = Column(String, ForeignKey("agents.id"), nullable=False)
+    auth_type = Column(String, default=AuthType.NONE.value)
+    
+    # Encrypted Data (Using Fernet)
+    encrypted_access_token = Column(Text, nullable=True)
+    encrypted_refresh_token = Column(Text, nullable=True)
+    
+    # Metadata
+    auth_header_name = Column(String, default="Authorization")  # e.g. "X-OpenAI-Key"
+    token_expires_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    agent = relationship("Agent", back_populates="credentials")
