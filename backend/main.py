@@ -1260,6 +1260,7 @@ async def get_conversation_history(thread_id: str, request: Request, db: Session
         
         # Verify ownership - check if this thread belongs to this user
         from models import UserThread
+        logger.info(f"Checking ownership: looking for thread_id={thread_id}, user_id={user_id}")
         user_thread = db.query(UserThread).filter_by(
             thread_id=thread_id,
             user_id=user_id
@@ -1267,6 +1268,13 @@ async def get_conversation_history(thread_id: str, request: Request, db: Session
         
         if not user_thread:
             logger.warning(f"User {user_id} attempted to access thread {thread_id} they don't own")
+            # Debug: list all threads for this user
+            all_user_threads = db.query(UserThread).filter_by(user_id=user_id).all()
+            logger.debug(f"User {user_id} owns {len(all_user_threads)} threads: {[t.thread_id for t in all_user_threads]}")
+            # Debug: check if thread exists for any user
+            thread_for_any_user = db.query(UserThread).filter_by(thread_id=thread_id).first()
+            if thread_for_any_user:
+                logger.debug(f"Thread {thread_id} exists and belongs to user: {thread_for_any_user.user_id}")
             raise HTTPException(status_code=403, detail="You don't have permission to access this conversation")
         
         # Load the conversation history
@@ -1299,7 +1307,7 @@ async def save_workflow(request: Request, thread_id: str, name: str, description
     from auth import get_user_from_request
     
     user = get_user_from_request(request)
-    user_id = user.get("sub")
+    user_id = user.get("sub") or user.get("user_id") or user.get("id")
     
     # Load conversation
     history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
@@ -1384,7 +1392,7 @@ async def list_workflows(request: Request, db: Session = Depends(get_db)):
     from auth import get_user_from_request
     
     user = get_user_from_request(request)
-    user_id = user.get("sub")
+    user_id = user.get("sub") or user.get("user_id") or user.get("id")
     
     workflows = db.query(Workflow).filter_by(user_id=user_id, status='active').all()
     
@@ -1420,7 +1428,7 @@ async def get_workflow(workflow_id: str, request: Request, db: Session = Depends
     from auth import get_user_from_request
     
     user = get_user_from_request(request)
-    user_id = user.get("sub")
+    user_id = user.get("sub") or user.get("user_id") or user.get("id")
     
     workflow = db.query(Workflow).filter_by(workflow_id=workflow_id, user_id=user_id).first()
     if not workflow:
@@ -1435,7 +1443,7 @@ async def execute_workflow(workflow_id: str, request: Request, inputs: Dict[str,
     from langgraph.checkpoint.memory import MemorySaver
     
     user = get_user_from_request(request)
-    user_id = user.get("sub")
+    user_id = user.get("sub") or user.get("user_id") or user.get("id")
     
     workflow = db.query(Workflow).filter_by(workflow_id=workflow_id, user_id=user_id).first()
     if not workflow:
@@ -1510,10 +1518,15 @@ async def create_workflow_conversation(workflow_id: str, request: Request, db: S
     from models import UserThread
     
     user = get_user_from_request(request)
-    user_id = user.get("sub")
+    user_id = user.get("sub") or user.get("user_id") or user.get("id")
+    logger.info(f"create_workflow_conversation: user_id={user_id}")
+    
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unable to determine user identity")
     
     workflow = db.query(Workflow).filter_by(workflow_id=workflow_id, user_id=user_id).first()
     if not workflow:
+        logger.error(f"Workflow {workflow_id} not found for user {user_id}")
         raise HTTPException(status_code=404, detail="Workflow not found")
     
     # Create a new thread
@@ -1521,14 +1534,31 @@ async def create_workflow_conversation(workflow_id: str, request: Request, db: S
     
     # Get the saved plan from blueprint
     blueprint = workflow.blueprint
+    
+    # Handle blueprint stored as JSON string
+    if isinstance(blueprint, str):
+        try:
+            blueprint = json.loads(blueprint)
+            logger.info(f"Deserialized blueprint from JSON string")
+        except Exception as e:
+            logger.error(f"Failed to deserialize blueprint JSON: {e}")
+            raise HTTPException(status_code=400, detail="Invalid workflow blueprint format")
+    
     task_plan = blueprint.get("task_plan", [])
     task_agent_pairs = blueprint.get("task_agent_pairs", [])
     original_prompt = blueprint.get("original_prompt", "")
     
-    if not task_plan or not task_agent_pairs:
-        raise HTTPException(status_code=400, detail="Workflow has no saved execution plan")
+    logger.info(f"Retrieved blueprint with {len(task_agent_pairs)} task pairs and {len(task_plan)} plan items")
+    logger.info(f"Blueprint keys: {list(blueprint.keys())}")
+    logger.info(f"Blueprint task_agent_pairs type: {type(task_agent_pairs)}, value: {task_agent_pairs}")
+    logger.info(f"Blueprint task_plan type: {type(task_plan)}, value: {task_plan}")
+    
+    # We need task_agent_pairs to proceed - task_plan can be empty (will be generated if needed)
+    if not task_agent_pairs:
+        raise HTTPException(status_code=400, detail=f"Workflow has no task agent pairs. task_agent_pairs count: {len(task_agent_pairs) if task_agent_pairs else 0}, blueprint keys: {list(blueprint.keys())}")
     
     # Create UserThread record in database
+    logger.info(f"Creating UserThread: thread_id={new_thread_id}, user_id={user_id}, workflow_name={workflow.name}")
     user_thread = UserThread(
         thread_id=new_thread_id,
         user_id=user_id,
@@ -1536,6 +1566,7 @@ async def create_workflow_conversation(workflow_id: str, request: Request, db: S
     )
     db.add(user_thread)
     db.commit()
+    logger.info(f"UserThread created successfully")
     
     # Save the conversation JSON file so it persists and frontend can load it
     # This pre-seeds the plan so it displays immediately in the sidebar
