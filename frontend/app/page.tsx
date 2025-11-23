@@ -5,16 +5,11 @@ import { useState, useRef, useEffect } from "react"
 import AppSidebar from "@/components/app-sidebar"
 import TaskBuilder from "@/components/task-builder"
 import { SidebarProvider, SidebarInset, SidebarTrigger, useSidebar } from "@/components/ui/sidebar"
-import Link from "next/link"
-import { Button } from "@/components/ui/button"
-import { Users } from "lucide-react"
-import { ThemeToggle } from "@/components/theme-toggle"
 import OrchestrationDetailsSidebar, { type OrchestrationDetailsSidebarRef } from "@/components/orchestration-details-sidebar"
 import { type TaskAgentPair, type ProcessResponse } from "@/lib/types"
 import { useToast } from "@/hooks/use-toast"
 import { useConversationStore } from "@/lib/conversation-store"
 import { useWebSocketManager } from "@/hooks/use-websocket-conversation"
-import { OrchestrationProgress } from "@/components/orchestration-progress"
 import { useUser } from "@clerk/nextjs"
 import { PlanReviewModal } from "@/components/plan-review-modal"
 import {
@@ -351,7 +346,7 @@ function HomeContent() {
         <div className="h-screen pt-[64px] bg-gradient-to-br from-gray-50 to-gray-100 dark:from-gray-950 dark:to-gray-900 relative flex flex-col transition-all duration-300">
           {/* Main Content Area - Resizable */}
           <ResizablePanelGroup direction="horizontal" className="flex-1 overflow-hidden">
-            <ResizablePanel defaultSize={70} minSize={50}>
+            <ResizablePanel defaultSize={45} minSize={35} maxSize={60}>
               <main className="h-full p-6">
                 <TaskBuilder
                   onWorkflowComplete={handleInteractiveWorkflowComplete}
@@ -370,7 +365,7 @@ function HomeContent() {
 
             <ResizableHandle withHandle />
 
-            <ResizablePanel defaultSize={30} maxSize={50} minSize={20}>
+            <ResizablePanel defaultSize={50} maxSize={65} minSize={35}>
               <OrchestrationDetailsSidebar
                 ref={sidebarRef}
                 executionResults={executionResults}
@@ -389,7 +384,7 @@ export default function Home() {
   return (
     <>
       <Navbar />
-      <SidebarProvider>
+      <SidebarProvider defaultOpen={false}>
         <HomeContent />
       </SidebarProvider>
     </>

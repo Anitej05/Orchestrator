@@ -220,7 +220,7 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
     const hasResults = executionResults.length > 0 || allTasks.length > 0
 
     return (
-        <aside className={cn("border-l border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950 p-4 flex flex-col h-full", className)}>
+        <aside className={cn("border-l border-gray-200 dark:border-gray-800/30 bg-white dark:bg-gray-900 p-4 flex flex-col h-full", className)}>
             <Tabs value={activeTab} onValueChange={setActiveTab} className="h-full flex flex-col">
                 <TabsList className="grid w-full grid-cols-4 bg-gray-100/80 dark:bg-gray-800/50 backdrop-blur-xl border border-gray-200/50 dark:border-gray-700/50 shadow-lg">
                     <TabsTrigger value="metadata">Metadata</TabsTrigger>

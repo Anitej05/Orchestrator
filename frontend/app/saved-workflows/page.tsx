@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Play, Trash2, Copy, Calendar, Clock, DollarSign, Zap } from 'lucide-react';
+import Navbar from "@/components/navbar"
 
 interface Workflow {
   workflow_id: string;
@@ -157,6 +158,8 @@ export default function SavedWorkflowsPage() {
   }
 
   return (
+  <>
+    <Navbar />
     <div className="container mx-auto px-4 py-8 max-w-7xl">
       <div className="mb-8">
         <h1 className="text-3xl font-bold mb-2">Saved Workflows</h1>
@@ -251,5 +254,6 @@ export default function SavedWorkflowsPage() {
         </div>
       )}
     </div>
+  </>
   );
 }

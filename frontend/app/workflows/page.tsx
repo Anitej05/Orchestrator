@@ -9,6 +9,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Play, Calendar, Webhook, Trash2, Clock, CheckCircle2, XCircle } from "lucide-react";
 import { authFetch } from "@/lib/auth-fetch";
 import { Textarea } from "@/components/ui/textarea";
+import Navbar from "@/components/navbar"
 
 interface Workflow {
   workflow_id: string;
@@ -152,11 +153,13 @@ export default function WorkflowsPage() {
   }
 
   return (
-    <div className="container mx-auto p-6 max-w-6xl">
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold mb-2">Saved Workflows</h1>
-        <p className="text-gray-600">
-          Manage and execute your saved workflows. Re-run them with different inputs, schedule executions, or trigger via webhooks.
+    <>
+      <Navbar />
+      <div className="container mx-auto p-6 max-w-6xl">
+        <div className="mb-8">
+          <h1 className="text-3xl font-bold mb-2">Saved Workflows</h1>
+          <p className="text-gray-600">
+            Manage and execute your saved workflows. Re-run them with different inputs, schedule executions, or trigger via webhooks.
         </p>
       </div>
 
@@ -342,5 +345,6 @@ export default function WorkflowsPage() {
         </DialogContent>
       </Dialog>
     </div>
+    </>
   );
 }

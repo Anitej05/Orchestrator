@@ -196,15 +196,15 @@ export function InteractiveChatInterface({
 
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full bg-gradient-to-br from-gray-50 via-white to-gray-50/50 dark:from-gray-950 dark:via-gray-900/95 dark:to-gray-950">
       {/* Chat Messages */}
       <div className="flex-1 space-y-6 overflow-y-auto p-6">
         {state.messages.length === 0 && (
-          <div className="text-center text-gray-500 dark:text-gray-400 py-8 h-full flex flex-col justify-center items-center">
-            <div className="p-4 rounded-full bg-gradient-to-br from-gray-100 to-gray-200 dark:from-gray-800 dark:to-gray-900 mb-4">
-              <MessageCircle className="w-12 h-12 text-gray-400 dark:text-gray-600" />
+          <div className="text-center text-gray-400 dark:text-gray-500 py-8 h-full flex flex-col justify-center items-center">
+            <div className="p-6 rounded-full bg-white/40 dark:bg-gray-800/40 backdrop-blur-sm mb-6 border border-gray-200/50 dark:border-gray-700/50">
+              <MessageCircle className="w-16 h-16 text-gray-300 dark:text-gray-600" />
             </div>
-            <p>Start a conversation to orchestrate your workflow</p>
+            <p className="text-lg font-medium">Start a conversation to orchestrate your workflow</p>
           </div>
         )}
         
@@ -222,12 +222,12 @@ export function InteractiveChatInterface({
             
             return (
               <div key={messageId} className={`message message-${message.type} w-full flex ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div className={`p-4 rounded-2xl shadow-sm ${
+                <div className={`p-4 rounded-2xl shadow-lg ${
                   message.type === 'user' 
-                    ? 'bg-gradient-to-br from-blue-600 to-blue-700 dark:from-blue-600 dark:to-blue-800 text-white max-w-[85%] shadow-blue-500/20'
+                    ? 'bg-gradient-to-br from-blue-600 to-blue-700 dark:from-blue-600 dark:to-blue-800 text-white max-w-[85%] shadow-lg shadow-blue-500/30'
                     : message.type === 'system'
-                    ? 'bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/50 text-amber-900 dark:text-amber-200 max-w-[90%]'
-                    : 'bg-gray-50/80 dark:bg-gray-800/90 border border-gray-200 dark:border-gray-700/50 text-gray-900 dark:text-gray-100 max-w-[95%] backdrop-blur-sm'
+                    ? 'bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700/40 text-amber-900 dark:text-amber-200 max-w-[90%] shadow-md'
+                    : 'bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700/40 text-gray-900 dark:text-gray-100 max-w-[95%] shadow-md'
                 }`}>
                   <div className="message-content space-y-2">
                     {/* Browser automation progress indicator */}
@@ -265,10 +265,10 @@ export function InteractiveChatInterface({
                         </button>
                         
                         {expandedTraces.has(messageId) && (
-                          <div className="mt-2 space-y-2 p-3 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-gray-200 dark:border-gray-700">
+                          <div className="mt-2 space-y-2 p-3 bg-gray-50 dark:bg-gray-800/30 rounded-lg border border-gray-200 dark:border-gray-800/30">
                             <h4 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Browsing Trace:</h4>
                             {message.browsing_trace.map((step, i) => (
-                              <div key={i} className="flex items-start gap-3 p-2 bg-white dark:bg-gray-800 rounded border border-gray-100 dark:border-gray-700">
+                              <div key={i} className="flex items-start gap-3 p-2 bg-white dark:bg-gray-800/50 rounded border border-gray-100 dark:border-gray-800/30">
                                 <div className="flex-shrink-0 mt-0.5">
                                   {step.status === 'success' && <CheckCircle className="w-4 h-4 text-green-500" />}
                                   {step.status === 'error' && <AlertCircle className="w-4 h-4 text-red-500" />}
@@ -335,7 +335,7 @@ export function InteractiveChatInterface({
       </div>
 
       {/* Input Form */}
-      <div className="p-4 border-t border-gray-200 dark:border-gray-700/50 bg-gray-50/80 dark:bg-gray-900/80 backdrop-blur-lg rounded-b-lg">
+      <div className="p-4 border-t border-gray-200 dark:border-gray-800/30 bg-gray-50/80 dark:bg-gray-800/70 backdrop-blur-lg rounded-b-lg">
         {/* Consolidated Status Indicator - Shows orchestration progress above input */}
         {(isLoading || state.status === 'processing') && !state.isWaitingForUser && (
           <div className={`status-indicator p-3 rounded-lg mb-4 ${

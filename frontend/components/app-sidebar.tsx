@@ -34,7 +34,7 @@ export default function AppSidebar({ onConversationSelect, onNewConversation, cu
   const navItems = [
     { href: "/", label: "Orchestrator", icon: Workflow },
     { href: "/agents", label: "Agent Directory", icon: Users },
-    { href: "/metrics", label: "Metrics & Dashboard", icon: BarChart3 },
+    { href: "/saved-workflows", label: "Saved Workflows", icon: BarChart3 },
     { href: "/profile", label: "Profile / Settings", icon: Settings },
   ]
 
@@ -42,7 +42,7 @@ export default function AppSidebar({ onConversationSelect, onNewConversation, cu
     <>
       {/* Mini Sidebar - Always visible when sidebar is collapsed */}
       {!open && (
-        <div className="fixed left-0 top-16 h-[calc(100vh-4rem)] w-16 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800 z-40 flex flex-col items-center py-4 gap-2">
+        <div className="fixed left-0 top-16 h-[calc(100vh-4rem)] w-16 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800/30 z-40 flex flex-col items-center py-4 gap-2">
           <button
             onClick={toggleSidebar}
             className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors flex items-center justify-center w-10 h-10"
@@ -69,20 +69,20 @@ export default function AppSidebar({ onConversationSelect, onNewConversation, cu
       {/* Main Sidebar */}
       <Sidebar 
         collapsible="offcanvas" 
-        className="border-r z-40 fixed left-0 top-16 h-[calc(100vh-4rem)] bg-gradient-to-br from-gray-50 to-gray-100 dark:from-gray-950 dark:to-gray-900 [&_[data-sidebar=sidebar]]:bg-transparent [&_[data-sidebar=sidebar]]:bg-gradient-to-br [&_[data-sidebar=sidebar]]:from-gray-50 [&_[data-sidebar=sidebar]]:to-gray-100 [&_[data-sidebar=sidebar]]:dark:from-gray-950 [&_[data-sidebar=sidebar]]:dark:to-gray-900" 
+        className="border-r z-40 fixed left-0 top-16 h-[calc(100vh-4rem)] bg-white dark:bg-gray-900 [&_[data-sidebar=sidebar]]:bg-white [&_[data-sidebar=sidebar]]:dark:bg-gray-900 overflow-hidden" 
         open={open} 
         onOpenChange={setOpen}
       >
-        <div className="flex h-full flex-col">
-      <SidebarContent>
+        <div className="flex h-full flex-col overflow-hidden">
+      <SidebarContent className="flex-1 overflow-y-auto">
         <SidebarGroup>
-          <SidebarGroupLabel>Navigation</SidebarGroupLabel>
+          <SidebarGroupLabel className="text-gray-700 dark:text-gray-300">Navigation</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
               {navItems.map((item) => (
                 <SidebarMenuItem key={item.href + item.label}>
                   <SidebarMenuButton asChild>
-                    <Link href={item.href} className="flex items-center space-x-2">
+                    <Link href={item.href} className="flex items-center space-x-2 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800">
                       <item.icon className="w-4 h-4" />
                       <span>{item.label}</span>
                     </Link>
@@ -93,7 +93,7 @@ export default function AppSidebar({ onConversationSelect, onNewConversation, cu
           </SidebarGroupContent>
         </SidebarGroup>
 
-        <SidebarGroup>
+        <SidebarGroup className="flex-1 overflow-hidden">
           {/* <SidebarGroupLabel>Conversations</SidebarGroupLabel> */}
           <SidebarGroupContent className="px-2 pt-2 flex flex-col items-center">
             {onConversationSelect && (
@@ -109,7 +109,7 @@ export default function AppSidebar({ onConversationSelect, onNewConversation, cu
         </SidebarGroup>
       </SidebarContent>
 
-      <SidebarFooter className="border-t border-gray-200 dark:border-gray-700 p-4">
+      <SidebarFooter className="border-t border-gray-200 dark:border-gray-800/30 p-4 flex-shrink-0">
         {/* Close button */}
         <button
           onClick={toggleSidebar}

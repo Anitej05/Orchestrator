@@ -24,8 +24,8 @@ export default function RootLayout({
         <body className={inter.className} suppressHydrationWarning>
           <ThemeProvider
             attribute="class"
-            defaultTheme="system"
-            enableSystem={true}
+            defaultTheme="light"
+            enableSystem={false}
             storageKey="orbimesh-theme"
             disableTransitionOnChange
           >
