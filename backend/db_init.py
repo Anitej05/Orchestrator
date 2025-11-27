@@ -5,7 +5,7 @@ This module ensures all database tables are created and handles schema migration
 All table definitions come from models.py - this just ensures they exist.
 """
 
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 import logging
 
 logger = logging.getLogger(__name__)
@@ -14,6 +14,7 @@ def init_database(engine):
     """
     Initialize the database by creating all tables defined in models.py.
     This is safe to run multiple times - it only creates tables that don't exist.
+    Also handles column migrations for existing tables.
     
     Args:
         engine: SQLAlchemy engine instance
@@ -31,6 +32,9 @@ def init_database(engine):
     try:
         # Create all tables defined in models
         Base.metadata.create_all(bind=engine)
+        
+        # Run column migrations for existing installations
+        _run_column_migrations(engine)
         
         # Verify tables were created
         inspector = inspect(engine)
@@ -57,3 +61,36 @@ def init_database(engine):
     except Exception as e:
         logger.error(f"❌ Database initialization failed: {e}")
         raise
+
+
+def _run_column_migrations(engine):
+    """
+    Add missing columns to existing tables.
+    This handles schema updates for existing installations.
+    """
+    inspector = inspect(engine)
+    
+    # Migration: Add agent_type and connection_config to agents table
+    if inspector.has_table('agents'):
+        columns = [col['name'] for col in inspector.get_columns('agents')]
+        
+        with engine.connect() as conn:
+            if 'agent_type' not in columns:
+                logger.info("  Adding agent_type column to agents table...")
+                conn.execute(text("ALTER TABLE agents ADD COLUMN agent_type VARCHAR(50) DEFAULT 'http_rest'"))
+                conn.commit()
+            
+            if 'connection_config' not in columns:
+                logger.info("  Adding connection_config column to agents table...")
+                conn.execute(text("ALTER TABLE agents ADD COLUMN connection_config JSON"))
+                conn.commit()
+    
+    # Migration: Add plan_graph to workflows table
+    if inspector.has_table('workflows'):
+        columns = [col['name'] for col in inspector.get_columns('workflows')]
+        
+        with engine.connect() as conn:
+            if 'plan_graph' not in columns:
+                logger.info("  Adding plan_graph column to workflows table...")
+                conn.execute(text("ALTER TABLE workflows ADD COLUMN plan_graph JSON"))
+                conn.commit()

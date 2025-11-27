@@ -4,6 +4,7 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Button } from "@/components/ui/button"
 import { DollarSign, Clock, FileIcon, FileText, Image as ImageIcon } from "lucide-react"
 import CollapsibleSection from "@/components/CollapsibleSection"
 import PlanGraph from "@/components/PlanGraph"
@@ -31,6 +32,8 @@ interface OrchestrationDetailsSidebarProps {
     threadId: string | null;
     className?: string;
     onThreadIdUpdate?: (threadId: string) => void;
+    onAcceptPlan?: (modifiedPrompt?: string) => Promise<void>;
+    onRejectPlan?: () => void;
 }
 
 interface Plan {
@@ -46,7 +49,7 @@ export interface OrchestrationDetailsSidebarRef {
 }
 
 const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, OrchestrationDetailsSidebarProps>(
- ({ executionResults, threadId, className, onThreadIdUpdate }, ref) => {
+ ({ executionResults, threadId, className, onThreadIdUpdate, onAcceptPlan, onRejectPlan }, ref) => {
     const [plan, setPlan] = useState<Plan>({ pendingTasks: [], completedTasks: [] });
     const [isLoadingPlan, setIsLoadingPlan] = useState(false);
     const [agents, setAgents] = useState<Agent[]>([]);
@@ -103,13 +106,26 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
             });
         }
         
+        // FALLBACK: If planData is empty but we have task_agent_pairs, use those
+        // This handles older conversations where task_plan wasn't saved
+        if (pendingTasks.length === 0 && taskAgentPairs && taskAgentPairs.length > 0) {
+            console.log('Plan data empty, building from task_agent_pairs for visualization');
+            taskAgentPairs.forEach((pair: TaskAgentPair) => {
+                pendingTasks.push({
+                    task: pair.task_name || 'Unknown Task',
+                    description: pair.task_description || 'No description',
+                    agent: pair.primary?.name || pair.primary?.id || 'Unknown Agent'
+                });
+            });
+        }
+        
         // Don't use completedTasks - status updates come from task_statuses instead
         setPlan({ 
             pendingTasks: pendingTasks, 
             completedTasks: [] // Always empty - we use task_statuses for real-time updates
         });
         setIsLoadingPlan(false);
-    }, [planData]);
+    }, [planData, taskAgentPairs]);
 
     // Auto-switch to Plan tab when plan is created (validate_plan_for_execution starts)
     useEffect(() => {
@@ -350,10 +366,36 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                                     : 'View workflow structure'}
                             </p>
                         </div>
-                        <SaveWorkflowButton 
-                            threadId={threadId || ''} 
-                            disabled={!threadId || plan.pendingTasks.length === 0}
-                        />
+                        
+                        {/* Show approval buttons when plan is ready for execution */}
+                        {(conversationState.metadata?.currentStage === 'validating' || 
+                          conversationState.status === 'planning_complete') && 
+                         onAcceptPlan && onRejectPlan && (
+                            <div className="flex gap-2">
+                                <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={onRejectPlan}
+                                >
+                                    Modify Plan
+                                </Button>
+                                <Button
+                                    size="sm"
+                                    onClick={() => onAcceptPlan()}
+                                    className="bg-green-600 hover:bg-green-700"
+                                >
+                                    Accept & Execute
+                                </Button>
+                            </div>
+                        )}
+                        
+                        {/* Show save button after execution completes */}
+                        {conversationState.status === 'completed' && (
+                            <SaveWorkflowButton 
+                                threadId={threadId || ''} 
+                                disabled={!threadId || plan.pendingTasks.length === 0}
+                            />
+                        )}
                     </div>
                     
                     {/* Real-time Graph with Task Statuses */}

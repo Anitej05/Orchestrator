@@ -2,6 +2,7 @@
 "use client"
 
 import { useState, useRef, useEffect } from "react"
+import { useRouter } from "next/navigation"
 import AppSidebar from "@/components/app-sidebar"
 import TaskBuilder from "@/components/task-builder"
 import { SidebarProvider, SidebarInset, SidebarTrigger, useSidebar } from "@/components/ui/sidebar"
@@ -11,7 +12,6 @@ import { useToast } from "@/hooks/use-toast"
 import { useConversationStore } from "@/lib/conversation-store"
 import { useWebSocketManager } from "@/hooks/use-websocket-conversation"
 import { useUser } from "@clerk/nextjs"
-import { PlanReviewModal } from "@/components/plan-review-modal"
 import {
   ResizablePanelGroup,
   ResizablePanel,
@@ -40,6 +40,7 @@ interface ApiResponse {
 
 function HomeContent() {
   const { open } = useSidebar()
+  const router = useRouter()
   const { user, isLoaded: clerkLoaded } = useUser()
   const [taskAgentPairs, setTaskAgentPairs] = useState<TaskAgentPair[]>([])
   const [selectedAgents, setSelectedAgents] = useState<Record<string, string>>({})
@@ -48,8 +49,6 @@ function HomeContent() {
   const [apiResponseData, setApiResponseData] = useState<ApiResponse | null>(null)
   const [currentThreadId, setCurrentThreadId] = useState<string | null>(null)
   const [isRestoring, setIsRestoring] = useState(false)
-  const [showPlanReview, setShowPlanReview] = useState(false)
-  const [isExecutingPlan, setIsExecutingPlan] = useState(false)
   const { toast } = useToast()
   const sidebarRef = useRef<OrchestrationDetailsSidebarRef>(null);
 
@@ -65,30 +64,31 @@ function HomeContent() {
   // Initialize the WebSocket manager. It will automatically connect and keep the Zustand store in sync with backend updates.
   useWebSocketManager();
 
-  // Load conversation from localStorage on page load (persistence)
+  // Redirect to conversation URL when thread_id is created (new conversation)
+  useEffect(() => {
+    if (!clerkLoaded) return;
+    
+    // Only navigate if we're on the home page and a thread_id appears
+    if (conversationState.thread_id && 
+        typeof window !== 'undefined' && 
+        window.location.pathname === '/' &&
+        !isRestoring) {
+      console.log('New thread_id detected, navigating to:', conversationState.thread_id);
+      router.push(`/${conversationState.thread_id}`);
+    }
+  }, [conversationState.thread_id, clerkLoaded, router, isRestoring]);
+
+  // Load conversation from localStorage on page load and redirect to URL
   // Defer until Clerk is loaded to ensure auth tokens are available and avoid 401s
   useEffect(() => {
     if (!clerkLoaded) return;
     const savedThreadId = typeof window !== 'undefined' ? localStorage.getItem('thread_id') : null;
     if (savedThreadId && !conversationState.thread_id) {
-      console.log('Restoring conversation from localStorage:', savedThreadId);
-      setIsRestoring(true);
-      (async () => {
-        try {
-          await loadConversation(savedThreadId);
-        } catch (error: any) {
-          // If 403, clear localStorage and reset conversation
-          if (error?.message?.includes('403') || error?.message?.includes('permission')) {
-            console.log('Failed to restore conversation (403 - no permission), clearing localStorage');
-            localStorage.removeItem('thread_id');
-            resetConversation();
-          }
-        } finally {
-          setIsRestoring(false);
-        }
-      })();
+      console.log('Restoring conversation from localStorage and redirecting:', savedThreadId);
+      // Redirect to the conversation URL instead of loading here
+      router.push(`/${savedThreadId}`);
     }
-  }, [clerkLoaded, conversationState.thread_id, loadConversation, resetConversation]);
+  }, [clerkLoaded, conversationState.thread_id, router]);
 
   useEffect(() => {
     if (isRestoring) return; // Avoid side-effects while restoring existing convo
@@ -131,10 +131,8 @@ function HomeContent() {
       
       console.log('Loading pre-seeded workflow thread:', threadId);
       // Load this thread - it already has the plan pre-seeded
-      loadConversation(threadId).then(() => {
-        // Show the plan review modal for user to accept or modify
-        setTimeout(() => setShowPlanReview(true), 500);
-      }).catch((error) => {
+      // The plan will automatically show in the sidebar with approval buttons
+      loadConversation(threadId).catch((error) => {
         console.error('Failed to load workflow:', error);
         toast({
           title: "Error",
@@ -187,42 +185,16 @@ function HomeContent() {
 
 
   const handleConversationSelect = async (threadId: string) => {
-    try {
-      setIsRestoring(true);
-      await loadConversation(threadId);
-      setIsRestoring(false);
-
-      // Update local state with loaded conversation data
-      if (conversationState.task_agent_pairs && conversationState.task_agent_pairs.length > 0) {
-        setTaskAgentPairs(conversationState.task_agent_pairs);
-
-        // Update selected agents
-        const initialSelections: Record<string, string> = {};
-        conversationState.task_agent_pairs.forEach((pair: TaskAgentPair) => {
-          initialSelections[pair.task_name] = pair.primary.id;
-        });
-        setSelectedAgents(initialSelections);
-      }
-
-      toast({
-        title: "Conversation loaded",
-        description: `Loaded conversation ${threadId}`,
-      });
-
-      // Refresh the plan in the sidebar after loading the conversation
-      if (sidebarRef.current) {
-        sidebarRef.current.refreshPlan();
-      }
-    } catch (error) {
-      toast({
-        title: "Error loading conversation",
-        description: "Failed to load the selected conversation",
-        variant: "destructive",
-      });
-    }
+    // Navigate to the conversation URL
+    router.push(`/${threadId}`);
   };
 
   const handleNewConversation = () => {
+    // Clear localStorage to prevent auto-restoration
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem('thread_id')
+    }
+    
     resetConversation();
     setTaskAgentPairs([]);
     setSelectedAgents({});
@@ -234,7 +206,7 @@ function HomeContent() {
       title: "New conversation started",
       description: "Ready to start a new orchestration",
     });
-  };
+  }
 
   const handleOrchestrationComplete = (results: ExecutionResult[]) => {
     setExecutionResults(results)
@@ -250,6 +222,11 @@ function HomeContent() {
 
   const handleThreadIdUpdate = (threadId: string) => {
     setCurrentThreadId(threadId)
+    
+    // Navigate to the new conversation URL when a thread is created
+    if (threadId && typeof window !== 'undefined' && window.location.pathname === '/') {
+      router.push(`/${threadId}`)
+    }
   }
 
   const handleExecutionResultsUpdate = (results: ExecutionResult[]) => {
@@ -257,8 +234,6 @@ function HomeContent() {
   }
 
   const handleAcceptPlan = async (modifiedPrompt?: string) => {
-    setShowPlanReview(false)
-    
     try {
       // If prompt was modified, we need to re-plan (not implemented in initial version)
       // For now, just accept and execute the pre-seeded plan
@@ -272,18 +247,18 @@ function HomeContent() {
       }
       
       toast({
-        title: "Plan Accepted!",
-        description: "Ready to execute. Click the send button or type to start the workflow.",
+        title: "Executing Workflow",
+        description: "Starting workflow execution...",
       })
       
-      // The plan is now loaded in the store
-      // Auto-focus the input field so user can easily proceed
-      setTimeout(() => {
-        const inputField = document.querySelector('input[placeholder*="Type your"]') as HTMLInputElement;
-        if (inputField) {
-          inputField.focus();
-        }
-      }, 300);
+      // For saved workflows with pre-seeded plans, send approval via WebSocket
+      // This will skip re-planning and go straight to execution
+      if (conversationState.status === 'planning_complete' && conversationState.thread_id) {
+        const { continueConversation } = useConversationStore.getState().actions
+        // Send "approve" as user_response to trigger execution of pre-seeded plan
+        await continueConversation("approve", [], false, user?.id)
+      }
+      
     } catch (error) {
       console.error('Error accepting plan:', error)
       toast({
@@ -295,7 +270,6 @@ function HomeContent() {
   }
 
   const handleRejectPlan = () => {
-    setShowPlanReview(false)
     resetConversation()
     toast({
       title: "Workflow cancelled",
@@ -332,16 +306,6 @@ function HomeContent() {
         currentThreadId={conversationState.thread_id || undefined}
       />
       
-      {/* Plan Review Modal for Pre-seeded Workflows */}
-      <PlanReviewModal
-        isOpen={showPlanReview}
-        plan={conversationState.plan || []}
-        taskAgentPairs={conversationState.task_agent_pairs || []}
-        originalPrompt={conversationState.original_prompt || ''}
-        onAccept={handleAcceptPlan}
-        onReject={handleRejectPlan}
-        isLoading={isExecutingPlan}
-      />
       <SidebarInset className={!open ? "ml-16" : ""}>
         <div className="h-screen pt-[64px] bg-gradient-to-br from-gray-50 to-gray-100 dark:from-gray-950 dark:to-gray-900 relative flex flex-col transition-all duration-300">
           {/* Main Content Area - Resizable */}
@@ -371,6 +335,8 @@ function HomeContent() {
                 executionResults={executionResults}
                 threadId={currentThreadId || conversationState.thread_id || null}
                 onThreadIdUpdate={handleThreadIdUpdate}
+                onAcceptPlan={handleAcceptPlan}
+                onRejectPlan={handleRejectPlan}
               />
             </ResizablePanel>
           </ResizablePanelGroup>

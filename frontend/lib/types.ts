@@ -52,6 +52,7 @@ export interface TaskStatus {
   agentName?: string;
   startedAt?: Date;
   completedAt?: Date;
+  startTime?: number;  // Unix timestamp
   executionTime?: number;
   cost?: number;
   result?: any;

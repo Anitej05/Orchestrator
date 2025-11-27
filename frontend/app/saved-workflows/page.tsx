@@ -58,27 +58,32 @@ export default function SavedWorkflowsPage() {
       const { authFetch } = await import('@/lib/auth-fetch');
       const { toast } = await import('sonner');
       
-      // Load the workflow to get the original prompt
-      const response = await authFetch(`http://localhost:8000/api/workflows/${workflowId}`);
+      toast.info('Loading workflow...');
+      
+      // Create a new conversation pre-seeded with the workflow plan
+      const response = await authFetch(`http://localhost:8000/api/workflows/${workflowId}/create-conversation`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
       
       if (!response.ok) {
+        const errorText = await response.text();
+        console.error('Failed to create conversation:', errorText);
         throw new Error('Failed to load workflow');
       }
       
-      const workflow = await response.json();
-      const originalPrompt = workflow.conversation_history?.messages?.[0]?.content || 
-                           workflow.conversation_history?.original_prompt ||
-                           "Execute saved workflow";
+      const data = await response.json();
+      const threadId = data.thread_id;
       
-      toast.success('Redirecting to execute workflow...');
+      toast.success('Workflow loaded! Review the plan and click to execute.');
       
-      // Navigate to home page with prompt to execute
-      router.push(`/?prompt=${encodeURIComponent(originalPrompt)}&executeNow=true`);
+      // Navigate to the conversation URL with the pre-seeded plan
+      router.push(`/${threadId}`);
       
     } catch (err) {
       console.error('Failed to execute workflow:', err);
       const { toast } = await import('sonner');
-      toast.error('Failed to start workflow');
+      toast.error('Failed to load workflow');
     }
   };
 

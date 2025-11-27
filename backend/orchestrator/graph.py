@@ -1234,8 +1234,11 @@ def plan_execution(state: State, config: RunnableConfig):
             if response and hasattr(response, 'plan'):
                 serializable_plan = [[task.model_dump(mode='json') for task in batch] for batch in (response.plan or [])]
                 output_state = {"task_plan": serializable_plan, "user_response": None}
+                print(f"!!! PLAN_EXECUTION: LLM created plan with {len(serializable_plan)} batches, total tasks: {sum(len(batch) for batch in serializable_plan)} !!!")
+                logger.info(f"LLM created plan with {len(serializable_plan)} batches")
             else:
                 # If response is None or doesn't have plan attribute, create a simple plan
+                print(f"!!! PLAN_EXECUTION: LLM response invalid, creating simple plan !!!")
                 logger.warning("Planning LLM response was invalid. Creating simple plan.")
                 # Create a simple plan with one batch containing all tasks
                 from schemas import ExecutionStep
@@ -1260,8 +1263,10 @@ def plan_execution(state: State, config: RunnableConfig):
                 if simple_plan:
                     serializable_plan = [[task.model_dump(mode='json') for task in simple_plan]]
                     output_state = {"task_plan": serializable_plan, "user_response": None}
+                    print(f"!!! PLAN_EXECUTION: Created simple plan with {len(simple_plan)} tasks !!!")
                     logger.info("Created simplified plan as fallback")
                 else:
+                    print(f"!!! PLAN_EXECUTION: Failed to create simple plan - no tasks created !!!")
                     output_state = {"task_plan": [], "user_response": None}
         except Exception as e:
             logger.error(f"Initial planning failed: {e}")
@@ -1319,6 +1324,9 @@ def plan_execution(state: State, config: RunnableConfig):
         logger.info(f"Plan execution output state: needs_approval={output_state['needs_approval']}, pending_user_input={output_state['pending_user_input']}")
     else:
         logger.info("=== PLAN EXECUTION: Planning mode OFF. No approval needed ===")
+    
+    print(f"!!! PLAN_EXECUTION COMPLETE: Returning task_plan with {len(output_state.get('task_plan', []))} batches !!!")
+    logger.info(f"Plan execution complete. Returning {len(output_state.get('task_plan', []))} batches")
     
     return output_state
 

@@ -103,6 +103,7 @@ class Workflow(Base):
     name = Column(String, nullable=False)
     description = Column(Text)
     blueprint = Column(JSON, nullable=False)  # Full workflow structure
+    plan_graph = Column(JSON, nullable=True)  # Execution graph/visualization
     version = Column(Integer, default=1)
     status = Column(String, default='active')  # active, archived
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -170,3 +171,176 @@ class AgentCredential(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     agent = relationship("Agent", back_populates="credentials")
+
+
+# ============================================================================
+# ENHANCED ANALYTICS & TAGGING TABLES
+# ============================================================================
+
+class ConversationPlan(Base):
+    """
+    Tracks plan iterations for a conversation.
+    Allows storing multiple plan attempts per conversation.
+    """
+    __tablename__ = "conversation_plans"
+    
+    id = Column(Integer, primary_key=True)
+    plan_id = Column(String(255), nullable=False, unique=True, index=True)
+    thread_id = Column(String(255), ForeignKey("user_threads.thread_id"), nullable=False, index=True)
+    user_id = Column(String(255), nullable=False, index=True)
+    plan_version = Column(Integer, default=1)
+    
+    # Plan content
+    task_agent_pairs = Column(JSON, nullable=False)
+    task_plan = Column(JSON, nullable=False)
+    plan_graph = Column(JSON, nullable=True)  # Execution visualization graph
+    
+    # Execution info
+    status = Column(String(50), default='draft')  # 'draft', 'executing', 'completed', 'failed'
+    result = Column(JSON, nullable=True)  # Execution results
+    execution_time_ms = Column(Integer, nullable=True)
+    error_message = Column(Text, nullable=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ConversationSearch(Base):
+    """
+    Stores searchable content from conversations.
+    Enables full-text search across user's conversations.
+    """
+    __tablename__ = "conversation_search"
+    
+    id = Column(Integer, primary_key=True)
+    thread_id = Column(String(255), ForeignKey("user_threads.thread_id"), nullable=False, index=True)
+    user_id = Column(String(255), nullable=False, index=True)
+    message_index = Column(Integer, nullable=False)
+    message_content = Column(Text, nullable=False)
+    message_role = Column(String(50), nullable=True)  # 'user', 'assistant', 'agent'
+    message_timestamp = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ConversationTag(Base):
+    """
+    User-defined or system tags for organizing conversations.
+    """
+    __tablename__ = "conversation_tags"
+    
+    id = Column(Integer, primary_key=True)
+    tag_id = Column(String(255), nullable=False, unique=True, index=True)
+    user_id = Column(String(255), nullable=False, index=True)
+    tag_name = Column(String(100), nullable=False)
+    tag_color = Column(String(7), default='#808080')  # Hex color
+    tag_description = Column(Text, nullable=True)
+    is_system = Column(Boolean, default=False)  # System vs user-created
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ConversationTagAssignment(Base):
+    """
+    Many-to-many junction table for conversations and tags.
+    """
+    __tablename__ = "conversation_tag_assignments"
+    
+    id = Column(Integer, primary_key=True)
+    thread_id = Column(String(255), ForeignKey("user_threads.thread_id"), nullable=False, index=True)
+    tag_id = Column(String(255), ForeignKey("conversation_tags.tag_id"), nullable=False, index=True)
+    assigned_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ConversationAnalytics(Base):
+    """
+    Analytics metrics for each conversation.
+    Tracks performance, success rates, and usage patterns.
+    """
+    __tablename__ = "conversation_analytics"
+    
+    id = Column(Integer, primary_key=True)
+    thread_id = Column(String(255), ForeignKey("user_threads.thread_id"), nullable=False, unique=True, index=True)
+    user_id = Column(String(255), nullable=False, index=True)
+    
+    # Metrics
+    total_messages = Column(Integer, default=0)
+    total_agents_used = Column(Integer, default=0)
+    plan_attempts = Column(Integer, default=0)
+    successful_plans = Column(Integer, default=0)
+    total_execution_time_ms = Column(Integer, default=0)
+    failed_executions = Column(Integer, default=0)
+    avg_response_time_ms = Column(Float, default=0)
+    conversation_duration_seconds = Column(Integer, default=0)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class AgentUsageAnalytics(Base):
+    """
+    Tracks agent usage patterns per user.
+    """
+    __tablename__ = "agent_usage_analytics"
+    
+    id = Column(Integer, primary_key=True)
+    analytics_id = Column(String(255), nullable=False, unique=True, index=True)
+    user_id = Column(String(255), nullable=False, index=True)
+    agent_id = Column(String(255), ForeignKey("agents.id"), nullable=False)
+    
+    # Execution metrics
+    execution_count = Column(Integer, default=0)
+    success_count = Column(Integer, default=0)
+    failure_count = Column(Integer, default=0)
+    avg_execution_time_ms = Column(Float, default=0)
+    last_used_at = Column(DateTime, nullable=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class UserActivitySummary(Base):
+    """
+    Daily/periodic activity summary for each user.
+    Used for analytics dashboards and reporting.
+    """
+    __tablename__ = "user_activity_summary"
+    
+    id = Column(Integer, primary_key=True)
+    user_id = Column(String(255), nullable=False, index=True)
+    activity_date = Column(String(10), nullable=False)  # YYYY-MM-DD
+    
+    # Daily counts
+    total_conversations_started = Column(Integer, default=0)
+    total_workflows_executed = Column(Integer, default=0)
+    total_plans_created = Column(Integer, default=0)
+    successful_executions = Column(Integer, default=0)
+    failed_executions = Column(Integer, default=0)
+    total_execution_time_ms = Column(Integer, default=0)
+    agents_used = Column(Integer, default=0)
+    api_calls_made = Column(Integer, default=0)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class WorkflowExecutionAnalytics(Base):
+    """
+    Detailed analytics for each workflow execution.
+    """
+    __tablename__ = "workflow_execution_analytics"
+    
+    id = Column(Integer, primary_key=True)
+    execution_id = Column(String(255), ForeignKey("workflow_executions.execution_id"), nullable=False, unique=True, index=True)
+    user_id = Column(String(255), nullable=False, index=True)
+    workflow_id = Column(String(255), ForeignKey("workflows.workflow_id"), nullable=False, index=True)
+    
+    # Execution metrics
+    total_steps = Column(Integer, default=0)
+    completed_steps = Column(Integer, default=0)
+    failed_steps = Column(Integer, default=0)
+    total_duration_ms = Column(Integer, default=0)
+    retry_count = Column(Integer, default=0)
+    error_type = Column(String(100), nullable=True)
+    success_rate = Column(Float, default=0)  # Percentage (0-100)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

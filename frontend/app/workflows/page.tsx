@@ -65,7 +65,7 @@ export default function WorkflowsPage() {
       const ws = new WebSocket(`ws://localhost:8000/ws/workflow/${selectedWorkflow.workflow_id}/execute`);
       
       ws.onopen = () => {
-        // Send inputs with owner info
+        // Send inputs with owner ivnfo
         ws.send(JSON.stringify({
           inputs,
           owner: { user_id: "current_user" } // Will be replaced by actual auth

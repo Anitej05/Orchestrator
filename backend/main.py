@@ -1409,12 +1409,14 @@ async def save_workflow(request: Request, thread_id: str, name: str, description
             logger.warning(f"Could not load from checkpointer: {e}")
     
     # Extract comprehensive blueprint from conversation state
+    task_plan = history.get("task_plan", []) or history.get("plan", [])
+    
     blueprint = {
         "workflow_id": workflow_id,
         "thread_id": thread_id,
         "original_prompt": original_prompt,
         "task_agent_pairs": task_agent_pairs,
-        "task_plan": history.get("task_plan", []) or history.get("plan", []),
+        "task_plan": task_plan,
         "parsed_tasks": history.get("parsed_tasks", []),
         "candidate_agents": history.get("candidate_agents", {}),
         "user_expectations": history.get("user_expectations"),
@@ -1423,12 +1425,23 @@ async def save_workflow(request: Request, thread_id: str, name: str, description
         "created_at": datetime.utcnow().isoformat()
     }
     
+    # Generate plan_graph structure from task_plan for visualization
+    # The frontend PlanGraph component can reconstruct this, but we store it for convenience
+    plan_graph = None
+    if task_plan:
+        plan_graph = {
+            "nodes": [],
+            "edges": [],
+            "tasks": task_plan
+        }
+    
     workflow = Workflow(
         workflow_id=workflow_id,
         user_id=user_id,
         name=name,
         description=description or blueprint.get("original_prompt", "")[:200],  # Use prompt as fallback description
-        blueprint=blueprint
+        blueprint=blueprint,
+        plan_graph=plan_graph
     )
     db.add(workflow)
     db.commit()
@@ -1474,6 +1487,7 @@ async def list_workflows(request: Request, db: Session = Depends(get_db)):
             "updated_at": w.updated_at.isoformat() if w.updated_at else w.created_at.isoformat(),
             "task_count": task_count,
             "estimated_cost": estimated_cost,
+            "has_plan_graph": w.plan_graph is not None,
             "is_public": False  # Add public flag support later
         })
     
@@ -1491,7 +1505,14 @@ async def get_workflow(workflow_id: str, request: Request, db: Session = Depends
     if not workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
     
-    return {"workflow_id": workflow.workflow_id, "name": workflow.name, "description": workflow.description, "blueprint": workflow.blueprint, "created_at": workflow.created_at.isoformat()}
+    return {
+        "workflow_id": workflow.workflow_id,
+        "name": workflow.name,
+        "description": workflow.description,
+        "blueprint": workflow.blueprint,
+        "plan_graph": workflow.plan_graph,
+        "created_at": workflow.created_at.isoformat()
+    }
 
 @app.post("/api/workflows/{workflow_id}/execute", tags=["Workflows"])
 async def execute_workflow(workflow_id: str, request: Request, inputs: Dict[str, Any] = Body(default={}), db: Session = Depends(get_db)):
@@ -1638,8 +1659,11 @@ async def create_workflow_conversation(workflow_id: str, request: Request, db: S
             "messages": [],
             "completed_tasks": [],
             "final_response": None,
-            "pending_user_input": False,
-            "question_for_user": None,
+            "pending_user_input": True,
+            "question_for_user": "Review the execution plan and approve to proceed.",
+            "needs_approval": True,
+            "approval_required": True,
+            "plan_approved": False,
             "status": "planning_complete",
             "metadata": {
                 "from_workflow": workflow_id,
@@ -2875,7 +2899,16 @@ def start_agents_async():
 
 @app.on_event("startup")
 async def startup_event():
-    """Start agents, background health checker, and workflow scheduler on app startup"""
+    """Initialize database, start agents, health checker, and workflow scheduler on app startup"""
+    # Initialize database tables
+    try:
+        from database import engine
+        from db_init import init_database
+        init_database(engine)
+    except Exception as e:
+        logger.error(f"Database initialization failed: {str(e)}", exc_info=True)
+        # Don't exit - let the app continue, it might still work
+    
     # Start agents in background
     start_agents_async()
     
