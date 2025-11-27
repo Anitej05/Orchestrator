@@ -3602,10 +3602,23 @@ def load_conversation_history(state: State, config: RunnableConfig):
                 "messages": valid_messages
             }
         
+        # Load the pre-seeded plan if it exists (for workflow re-execution)
+        task_plan = data.get("task_plan", [])
+        task_agent_pairs = data.get("task_agent_pairs", [])
+        original_prompt = data.get("original_prompt", "")
+        
+        if task_plan:
+            logger.info(f"Loaded pre-seeded task_plan with {len(task_plan)} batches")
+        if task_agent_pairs:
+            logger.info(f"Loaded pre-seeded task_agent_pairs with {len(task_agent_pairs)} tasks")
+        
         return {
             "messages": valid_messages,
             "thread_id": data.get("thread_id"),
-            "final_response": data.get("final_response")
+            "final_response": data.get("final_response"),
+            "task_plan": task_plan,
+            "task_agent_pairs": task_agent_pairs,
+            "original_prompt": original_prompt if original_prompt else state.get("original_prompt", "")
         }
 
     except Exception as e:

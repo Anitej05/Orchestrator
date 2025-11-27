@@ -16,6 +16,7 @@ import { useConversationStore } from "@/lib/conversation-store"
 import { useWebSocketManager } from "@/hooks/use-websocket-conversation"
 import { OrchestrationProgress } from "@/components/orchestration-progress"
 import { useUser } from "@clerk/nextjs"
+import { PlanReviewModal } from "@/components/plan-review-modal"
 import {
   ResizablePanelGroup,
   ResizablePanel,
@@ -52,6 +53,8 @@ function HomeContent() {
   const [apiResponseData, setApiResponseData] = useState<ApiResponse | null>(null)
   const [currentThreadId, setCurrentThreadId] = useState<string | null>(null)
   const [isRestoring, setIsRestoring] = useState(false)
+  const [showPlanReview, setShowPlanReview] = useState(false)
+  const [isExecutingPlan, setIsExecutingPlan] = useState(false)
   const { toast } = useToast()
   const sidebarRef = useRef<OrchestrationDetailsSidebarRef>(null);
 
@@ -132,8 +135,18 @@ function HomeContent() {
       window.history.replaceState({}, '', window.location.pathname);
       
       console.log('Loading pre-seeded workflow thread:', threadId);
-      // Load this thread - it already has the plan pre-seeded, just connect and let it execute
-      loadConversation(threadId);
+      // Load this thread - it already has the plan pre-seeded
+      loadConversation(threadId).then(() => {
+        // Show the plan review modal for user to accept or modify
+        setTimeout(() => setShowPlanReview(true), 500);
+      }).catch((error) => {
+        console.error('Failed to load workflow:', error);
+        toast({
+          title: "Error",
+          description: "Failed to load workflow. Please try again.",
+          variant: "destructive"
+        });
+      });
       return;
     }
     
@@ -248,6 +261,53 @@ function HomeContent() {
     setExecutionResults(results)
   }
 
+  const handleAcceptPlan = async (modifiedPrompt?: string) => {
+    setShowPlanReview(false)
+    
+    try {
+      // If prompt was modified, we need to re-plan (not implemented in initial version)
+      // For now, just accept and execute the pre-seeded plan
+      if (modifiedPrompt && modifiedPrompt !== conversationState.original_prompt) {
+        // TODO: Implement re-planning with modified prompt
+        console.log('Modified prompt execution not yet implemented')
+        toast({
+          title: "Info",
+          description: "Modified prompt execution will be available soon. Using original plan for now.",
+        })
+      }
+      
+      toast({
+        title: "Plan Accepted!",
+        description: "Ready to execute. Click the send button or type to start the workflow.",
+      })
+      
+      // The plan is now loaded in the store
+      // Auto-focus the input field so user can easily proceed
+      setTimeout(() => {
+        const inputField = document.querySelector('input[placeholder*="Type your"]') as HTMLInputElement;
+        if (inputField) {
+          inputField.focus();
+        }
+      }, 300);
+    } catch (error) {
+      console.error('Error accepting plan:', error)
+      toast({
+        title: "Error",
+        description: error instanceof Error ? error.message : "Failed to process plan. Please try again.",
+        variant: "destructive"
+      })
+    }
+  }
+
+  const handleRejectPlan = () => {
+    setShowPlanReview(false)
+    resetConversation()
+    toast({
+      title: "Workflow cancelled",
+      description: "Workflow execution was cancelled. You can start a new conversation."
+    })
+  }
+
   // This useEffect was causing issues with sidebar content display
   // The sidebar should update naturally through its existing mechanisms
   // useEffect(() => {
@@ -275,6 +335,17 @@ function HomeContent() {
         onConversationSelect={handleConversationSelect}
         onNewConversation={handleNewConversation}
         currentThreadId={conversationState.thread_id || undefined}
+      />
+      
+      {/* Plan Review Modal for Pre-seeded Workflows */}
+      <PlanReviewModal
+        isOpen={showPlanReview}
+        plan={conversationState.plan || []}
+        taskAgentPairs={conversationState.task_agent_pairs || []}
+        originalPrompt={conversationState.original_prompt || ''}
+        onAccept={handleAcceptPlan}
+        onReject={handleRejectPlan}
+        isLoading={isExecutingPlan}
       />
       <SidebarInset className={!open ? "ml-16" : ""}>
         <div className="h-screen pt-[64px] bg-gradient-to-br from-gray-50 to-gray-100 dark:from-gray-950 dark:to-gray-900 relative flex flex-col transition-all duration-300">

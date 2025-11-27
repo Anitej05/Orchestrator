@@ -69,6 +69,8 @@ export interface ConversationState {
   metadata?: any;
   uploaded_files?: FileObject[];
   plan?: any[];
+  // Original prompt for pre-seeded workflows
+  original_prompt?: string;
   // Real-time task execution tracking
   task_statuses?: Record<string, TaskStatus>;
   current_executing_task?: string | null;
