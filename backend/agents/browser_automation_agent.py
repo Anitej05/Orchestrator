@@ -85,6 +85,11 @@ AGENT_DEFINITION = {
 
 app = FastAPI(title="Custom Browser Automation Agent")
 
+@app.get("/")
+async def root():
+    """Root endpoint for health checks"""
+    return {"status": "healthy", "agent": "custom_browser_agent", "message": "Browser Automation Agent is running"}
+
 @app.on_event("shutdown")
 async def shutdown_event():
     """Clean up all browsers on shutdown"""
@@ -1649,19 +1654,6 @@ IMPORTANT:
             'recent_history': recent_history,
             'repeated_failure_warning': repeated_failure_warning
         }
-    
-    def _format_task_plan_status(self) -> str:
-        """Format task plan status for LLM context"""
-        if not self.task_plan:
-            return "No subtasks defined"
-        
-        status_lines = []
-        for i, subtask in enumerate(self.task_plan, 1):
-            status = subtask['status']
-            icon = "✅" if status == 'completed' else "❌" if status == 'failed' else "⏳"
-            status_lines.append(f"{icon} {i}. {subtask['subtask']} [{status}]")
-        
-        return "\n".join(status_lines)
         
         # Use ContextOptimizer for compact prompt
         prompt = self.context_optimizer.build_compact_context(
@@ -1740,6 +1732,19 @@ RESPONSE FORMAT (JSON only, no markdown):
             if subtask['status'] == 'pending':
                 return subtask
         return None
+    
+    def _format_task_plan_status(self) -> str:
+        """Format task plan status for LLM context"""
+        if not self.task_plan:
+            return "No subtasks defined"
+        
+        status_lines = []
+        for i, subtask in enumerate(self.task_plan, 1):
+            status = subtask['status']
+            icon = "✅" if status == 'completed' else "❌" if status == 'failed' else "⏳"
+            status_lines.append(f"{icon} {i}. {subtask['subtask']} [{status}]")
+        
+        return "\n".join(status_lines)
     
     async def _replan_task(self, reason: str):
         """Dynamically replan when stuck or failing"""
@@ -3283,20 +3288,19 @@ CRITICAL FOR TYPE ACTION:
         self.start_time = datetime.now()
         logger.info(f"🚀 Starting browser agent for task: {self.task}")
         
-        # Create initial task plan
-        plan_start = datetime.now()
-        self.task_plan = await self.create_task_plan()
-        self.metrics["llm_calls"] += 1
-        
-        # Start live screenshot streaming
-        self.is_running = True
-        if self.enable_streaming:
-            self.streaming_task = asyncio.create_task(self.stream_screenshots())
-            logger.info("📹 Live screenshot streaming enabled")
-        
         result_summary = ""
         
         try:
+            # Create initial task plan
+            plan_start = datetime.now()
+            self.task_plan = await self.create_task_plan()
+            self.metrics["llm_calls"] += 1
+            
+            # Start live screenshot streaming
+            self.is_running = True
+            if self.enable_streaming:
+                self.streaming_task = asyncio.create_task(self.stream_screenshots())
+                logger.info("📹 Live screenshot streaming enabled")
             for step in range(1, self.max_steps + 1):
                 logger.info(f"\n{'='*60}")
                 logger.info(f"📍 Step {step}/{self.max_steps}")
@@ -3719,11 +3723,18 @@ CRITICAL FOR TYPE ACTION:
                 logger.error("🚨 This indicates the LLM may be hallucinating responses!")
             elif extract_actions:
                 logger.info(f"✅ Validation passed: {len(extract_actions)} extract actions, {len(getattr(self, 'extracted_data', []))} data entries")
+        
+        except Exception as e:
+            # CRITICAL FIX: Catch any exception in the main loop and return a proper error result
+            logger.error(f"❌ Exception in browser agent run loop: {e}")
+            import traceback
+            traceback.print_exc()
+            result_summary = f"Error during execution: {str(e)}"
             
         finally:
             # Stop streaming
             self.is_running = False
-            if self.streaming_task:
+            if hasattr(self, 'streaming_task') and self.streaming_task:
                 self.streaming_task.cancel()
                 try:
                     await self.streaming_task
@@ -3746,21 +3757,24 @@ CRITICAL FOR TYPE ACTION:
         else:
             logger.warning("⚠️  No data was extracted during this task")
         
+        # Determine success based on whether we had an error
+        is_success = not result_summary.startswith("Error")
+        
         return {
-            "success": True,
+            "success": is_success,
             "task_summary": result_summary or "Completed all steps",
             "summary": result_summary or "Completed all steps",  # Keep for backward compatibility
-            "actions": self.actions_taken,
-            "actions_planned": self.actions_planned,
-            "actions_succeeded": self.actions_succeeded,
-            "actions_failed": self.actions_failed,
-            "action_success_rate": f"{len(self.actions_succeeded)}/{len(self.actions_planned)}" if self.actions_planned else "0/0",
-            "screenshots": self.screenshots,
-            "downloads": self.downloads,
-            "uploaded_files": self.uploaded_files,
+            "actions": getattr(self, 'actions_taken', []),
+            "actions_planned": getattr(self, 'actions_planned', []),
+            "actions_succeeded": getattr(self, 'actions_succeeded', []),
+            "actions_failed": getattr(self, 'actions_failed', []),
+            "action_success_rate": f"{len(getattr(self, 'actions_succeeded', []))}/{len(getattr(self, 'actions_planned', []))}" if getattr(self, 'actions_planned', []) else "0/0",
+            "screenshots": getattr(self, 'screenshots', []),
+            "downloads": getattr(self, 'downloads', []),
+            "uploaded_files": getattr(self, 'uploaded_files', []),
             "extracted_data": extracted_data_summary,
             "task_id": self.task_id,
-            "metrics": self.metrics
+            "metrics": getattr(self, 'metrics', {})
         }
 
 @app.post("/browse")
@@ -3780,6 +3794,19 @@ async def browse(request: BrowseRequest, headless: bool = False, enable_streamin
         ) as agent:
             result = await agent.run()
             
+            # CRITICAL FIX: Handle None result
+            if result is None:
+                logger.error("❌ agent.run() returned None - this should not happen")
+                return {
+                    "success": False,
+                    "task_summary": "Error: Browser agent returned no result",
+                    "actions_taken": [],
+                    "screenshot_files": None,
+                    "extracted_data": None,
+                    "task_id": None,
+                    "error": "Browser agent returned no result"
+                }
+            
             # Log extracted data if available
             extracted_data = result.get("extracted_data")
             if extracted_data:
@@ -3788,18 +3815,18 @@ async def browse(request: BrowseRequest, headless: bool = False, enable_streamin
                 logger.warning("⚠️  Task completed but no data was extracted")
             
             return {
-                "success": result["success"],
-                "task_summary": result["summary"],
-                "actions_taken": result["actions"],
+                "success": result.get("success", False),
+                "task_summary": result.get("summary", result.get("task_summary", "Unknown")),
+                "actions_taken": result.get("actions", []),
                 "actions_planned": result.get("actions_planned", []),
                 "actions_succeeded": result.get("actions_succeeded", []),
                 "actions_failed": result.get("actions_failed", []),
                 "action_success_rate": result.get("action_success_rate", "0/0"),
-                "screenshot_files": result["screenshots"],
+                "screenshot_files": result.get("screenshots", []),
                 "downloaded_files": result.get("downloads", []),
                 "uploaded_files": result.get("uploaded_files", []),
                 "extracted_data": extracted_data,
-                "task_id": result["task_id"],
+                "task_id": result.get("task_id"),
                 "metrics": result.get("metrics", {}),
                 "error": None
             }

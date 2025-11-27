@@ -4,7 +4,7 @@ import { useState, useEffect } from "react"
 import AppSidebar from "@/components/app-sidebar"
 import AgentGrid from "@/components/agent-grid"
 import Navbar from "@/components/navbar"
-import { SidebarProvider, SidebarInset, SidebarTrigger } from "@/components/ui/sidebar"
+import { SidebarProvider, SidebarInset, SidebarTrigger, useSidebar } from "@/components/ui/sidebar"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Search } from "lucide-react"
@@ -21,11 +21,12 @@ const categories = [
   "Content & Media",
 ]
 
-export default function AgentsPage() {
+function AgentsContent() {
   const [searchQuery, setSearchQuery] = useState("")
   const [selectedCategory, setSelectedCategory] = useState("All")
   const [agents, setAgents] = useState<Agent[]>([]) // Initial state is an empty array
   const [loading, setLoading] = useState(true)
+  const { open } = useSidebar()
 
   // Fetch agents from backend on component mount
   useEffect(() => {
@@ -104,11 +105,7 @@ export default function AgentsPage() {
   const filteredAgents = getAgentsByCategory(selectedCategory)
 
   return (
-    <>
-      <Navbar />
-      <SidebarProvider>
-        <AppSidebar />
-        <SidebarInset>
+    <SidebarInset className={!open ? "ml-16" : ""}>
           <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50 dark:from-gray-900 dark:to-gray-800">
             {/* Header */}
             <div className="bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm border-b dark:border-gray-700 px-6 py-4">
@@ -170,7 +167,17 @@ export default function AgentsPage() {
           </main>
         </div>
       </SidebarInset>
-    </SidebarProvider>
+  )
+}
+
+export default function AgentsPage() {
+  return (
+    <>
+      <Navbar />
+      <SidebarProvider>
+        <AppSidebar />
+        <AgentsContent />
+      </SidebarProvider>
     </>
   )
 }

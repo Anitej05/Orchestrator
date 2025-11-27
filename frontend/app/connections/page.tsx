@@ -5,7 +5,10 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { Loader2, Plus, Link as LinkIcon, Trash2, CheckCircle2, AlertCircle, Plug } from "lucide-react"
+import { Label } from "@/components/ui/label"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Alert, AlertDescription } from "@/components/ui/alert"
+import { Loader2, Plus, Link as LinkIcon, Trash2, CheckCircle2, AlertCircle, Plug, Key, Eye, EyeOff, Shield, Save } from "lucide-react"
 import { useUser } from "@clerk/nextjs"
 import { useToast } from "@/hooks/use-toast"
 

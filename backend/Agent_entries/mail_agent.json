@@ -1,0 +1,313 @@
+{
+  "id": "mail_agent",
+  "owner_id": "orbimesh-vendor",
+  "name": "Mail Agent",
+  "description": "Gmail integration via Composio. Read, send, search, and manage emails with full Gmail API capabilities.",
+  "requires_credentials": true,
+  "credential_fields": [
+    {
+      "name": "composio_api_key",
+      "label": "Composio API Key",
+      "type": "password",
+      "required": true,
+      "description": "Your Composio API key from https://app.composio.dev/settings/api-keys",
+      "placeholder": "ak_..."
+    },
+    {
+      "name": "gmail_connection_id",
+      "label": "Gmail Connection ID",
+      "type": "text",
+      "required": true,
+      "description": "Your Gmail connection ID from Composio dashboard",
+      "placeholder": "Gmail-xxxxx"
+    }
+  ],
+  "capabilities": [
+    "read emails",
+    "send emails",
+    "search emails",
+    "fetch emails",
+    "compose emails",
+    "reply to emails",
+    "manage email labels",
+    "get email threads",
+    "fetch unread emails",
+    "send email with attachments",
+    "search inbox",
+    "check email",
+    "email automation",
+    "gmail integration",
+    "email management",
+    "list email threads",
+    "create email draft",
+    "add email labels",
+    "delete emails",
+    "get email attachments",
+    "download attachments",
+    "fetch message by id",
+    "email operations",
+    "fetch sent emails",
+    "get sent email content",
+    "view sent mail",
+    "check sent folder",
+    "get last sent email",
+    "verify sent email",
+    "see what was sent",
+    "search emails with attachments",
+    "find attachments",
+    "download email attachments",
+    "get attachment files"
+  ],
+  "price_per_call_usd": 0.005,
+  "status": "active",
+  "agent_type": "http_rest",
+  "connection_config": {
+    "base_url": "http://localhost:8040"
+  },
+  "endpoints": [
+    {
+      "endpoint": "/fetch_emails",
+      "http_method": "POST",
+      "description": "Fetch/search emails from Gmail inbox",
+      "parameters": [
+        {
+          "name": "query",
+          "param_type": "string",
+          "required": false,
+          "description": "Gmail search query (e.g., 'is:unread', 'from:example@gmail.com')"
+        },
+        {
+          "name": "max_results",
+          "param_type": "integer",
+          "required": false,
+          "description": "Maximum number of emails to fetch (default: 10)"
+        },
+        {
+          "name": "user_id",
+          "param_type": "string",
+          "required": false,
+          "description": "Gmail user ID (default: 'me')"
+        },
+        {
+          "name": "label_ids",
+          "param_type": "array",
+          "required": false,
+          "description": "Label IDs to filter by (default: ['INBOX'])"
+        }
+      ]
+    },
+    {
+      "endpoint": "/send_email",
+      "http_method": "POST",
+      "description": "Send a new email via Gmail",
+      "parameters": [
+        {
+          "name": "to",
+          "param_type": "array",
+          "required": true,
+          "description": "Array of recipient email addresses"
+        },
+        {
+          "name": "subject",
+          "param_type": "string",
+          "required": true,
+          "description": "Email subject line"
+        },
+        {
+          "name": "body",
+          "param_type": "string",
+          "required": true,
+          "description": "Email body content"
+        },
+        {
+          "name": "cc",
+          "param_type": "array",
+          "required": false,
+          "description": "Array of CC email addresses (optional)"
+        },
+        {
+          "name": "bcc",
+          "param_type": "array",
+          "required": false,
+          "description": "Array of BCC email addresses (optional)"
+        },
+        {
+          "name": "user_id",
+          "param_type": "string",
+          "required": false,
+          "description": "Gmail user ID (default: 'me')"
+        }
+      ]
+    },
+    {
+      "endpoint": "/get_message",
+      "http_method": "POST",
+      "description": "Get full message details by ID",
+      "parameters": [
+        {
+          "name": "message_id",
+          "param_type": "string",
+          "required": true,
+          "description": "Gmail message ID"
+        },
+        {
+          "name": "format",
+          "param_type": "string",
+          "required": false,
+          "description": "Message format: 'full' or 'minimal' (default: 'full')"
+        },
+        {
+          "name": "user_id",
+          "param_type": "string",
+          "required": false,
+          "description": "Gmail user ID (default: 'me')"
+        }
+      ]
+    },
+    {
+      "endpoint": "/add_label",
+      "http_method": "POST",
+      "description": "Add labels to emails",
+      "parameters": [
+        {
+          "name": "message_ids",
+          "param_type": "array",
+          "required": true,
+          "description": "Array of message IDs to label"
+        },
+        {
+          "name": "label_ids",
+          "param_type": "array",
+          "required": true,
+          "description": "Array of label IDs to add (e.g., ['IMPORTANT', 'STARRED'])"
+        },
+        {
+          "name": "user_id",
+          "param_type": "string",
+          "required": false,
+          "description": "Gmail user ID (default: 'me')"
+        }
+      ]
+    },
+    {
+      "endpoint": "/delete_message",
+      "http_method": "POST",
+      "description": "Delete emails by message ID",
+      "parameters": [
+        {
+          "name": "message_ids",
+          "param_type": "array",
+          "required": true,
+          "description": "Array of message IDs to delete"
+        },
+        {
+          "name": "user_id",
+          "param_type": "string",
+          "required": false,
+          "description": "Gmail user ID (default: 'me')"
+        }
+      ]
+    },
+    {
+      "endpoint": "/get_attachment",
+      "http_method": "POST",
+      "description": "Download email attachment",
+      "parameters": [
+        {
+          "name": "message_id",
+          "param_type": "string",
+          "required": true,
+          "description": "Gmail message ID"
+        },
+        {
+          "name": "attachment_id",
+          "param_type": "string",
+          "required": true,
+          "description": "Attachment ID from the message"
+        },
+        {
+          "name": "user_id",
+          "param_type": "string",
+          "required": false,
+          "description": "Gmail user ID (default: 'me')"
+        }
+      ]
+    },
+    {
+      "endpoint": "/fetch_sent_emails",
+      "http_method": "POST",
+      "description": "Fetch sent emails with full content (subject, body, recipients). Use this to see what emails you have sent.",
+      "parameters": [
+        {
+          "name": "max_results",
+          "param_type": "integer",
+          "required": false,
+          "description": "Maximum number of sent emails to fetch (default: 10)"
+        },
+        {
+          "name": "include_body",
+          "param_type": "boolean",
+          "required": false,
+          "description": "Whether to include full email body (default: true)"
+        },
+        {
+          "name": "user_id",
+          "param_type": "string",
+          "required": false,
+          "description": "Gmail user ID (default: 'me')"
+        }
+      ]
+    },
+    {
+      "endpoint": "/get_sent_email",
+      "http_method": "POST",
+      "description": "Get a specific sent email by message ID with full content (subject, body, recipients)",
+      "parameters": [
+        {
+          "name": "message_id",
+          "param_type": "string",
+          "required": true,
+          "description": "Gmail message ID of the sent email"
+        },
+        {
+          "name": "user_id",
+          "param_type": "string",
+          "required": false,
+          "description": "Gmail user ID (default: 'me')"
+        }
+      ]
+    },
+    {
+      "endpoint": "/get_last_sent_email",
+      "http_method": "POST",
+      "description": "Get the most recently sent email with full content. Quick way to check what was just sent.",
+      "parameters": []
+    },
+    {
+      "endpoint": "/download_attachments",
+      "http_method": "POST",
+      "description": "Download all attachments from an email. Returns file paths for image/document agents to analyze.",
+      "parameters": [
+        {
+          "name": "message_id",
+          "param_type": "string",
+          "required": true,
+          "description": "Gmail message ID to download attachments from"
+        }
+      ]
+    },
+    {
+      "endpoint": "/search_emails_with_attachments",
+      "http_method": "POST",
+      "description": "Search for emails that have attachments",
+      "parameters": [
+        {
+          "name": "max_results",
+          "param_type": "integer",
+          "required": false,
+          "description": "Maximum number of emails to return (default: 10)"
+        }
+      ]
+    }
+  ]
+}

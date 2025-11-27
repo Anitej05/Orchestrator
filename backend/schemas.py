@@ -19,7 +19,7 @@ class EndpointParameterDetail(BaseModel):
 
 class EndpointDetail(BaseModel):
     """Defines the structure for an agent's API endpoint."""
-    endpoint: HttpUrl
+    endpoint: str  # Changed from HttpUrl to support MCP tool names
     http_method: str
     description: Optional[str] = None
     parameters: List[EndpointParameterDetail] = []
@@ -104,7 +104,7 @@ class ExecutionStep(BaseModel):
     """A concise, executable step for a single agent call in the final plan."""
     id: str
     http_method: str
-    endpoint: HttpUrl
+    endpoint: str  # Changed from HttpUrl to support MCP tool names
     payload: Dict[str, Any]
 
 class PlannedTask(BaseModel):
@@ -145,7 +145,7 @@ class PlanResponse(BaseModel):
 
 class SelectedEndpoint(BaseModel):
     """Used to validate the LLM's choice of endpoint for a task."""
-    endpoint: HttpUrl
+    endpoint: str  # Changed from HttpUrl to support MCP tool names
     http_method: str
 
 class PriorityMapper(BaseModel):

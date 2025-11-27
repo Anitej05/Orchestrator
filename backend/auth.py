@@ -177,3 +177,30 @@ def get_user_from_request(request: Request):
         # python-jose does not have InvalidAudienceError/InvalidIssuerError, so handle generically
         logger.error(f"JWT error: {e}")
         raise HTTPException(status_code=401, detail=f"JWT error: {str(e)}")
+
+
+def get_current_user_id(request: Request) -> str:
+    """
+    Extract user ID from JWT token in request.
+    Used by credential management endpoints.
+    """
+    try:
+        payload = get_user_from_request(request)
+        user_id = payload.get("sub")
+        
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User ID not found in token"
+            )
+        
+        return user_id
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to extract user ID: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Failed to authenticate user"
+        )

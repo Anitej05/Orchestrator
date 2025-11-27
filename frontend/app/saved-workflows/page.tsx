@@ -2,6 +2,9 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import AppSidebar from "@/components/app-sidebar"
+import Navbar from "@/components/navbar"
+import { SidebarProvider, SidebarInset, SidebarTrigger, useSidebar } from "@/components/ui/sidebar"
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -18,8 +21,9 @@ interface Workflow {
   is_public: boolean;
 }
 
-export default function SavedWorkflowsPage() {
+function SavedWorkflowsContent() {
   const router = useRouter();
+  const { open } = useSidebar();
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -136,56 +140,89 @@ export default function SavedWorkflowsPage() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center min-h-screen">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-gray-900 dark:border-white mx-auto"></div>
-          <p className="mt-4 text-gray-600 dark:text-gray-400">Loading workflows...</p>
+      <SidebarInset className={!open ? "ml-16" : ""}>
+        <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50 dark:from-gray-900 dark:to-gray-800">
+          <div className="bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm border-b dark:border-gray-700 px-6 py-4">
+            <div className="flex items-center space-x-4">
+              <SidebarTrigger />
+            </div>
+          </div>
+          <main className="p-6">
+            <div className="flex items-center justify-center h-64">
+              <div className="text-center">
+                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
+                <p className="mt-4 text-gray-600 dark:text-gray-400">Loading workflows...</p>
+              </div>
+            </div>
+          </main>
         </div>
-      </div>
+      </SidebarInset>
     );
   }
 
   if (error) {
     return (
-      <div className="flex items-center justify-center min-h-screen">
-        <div className="text-center">
-          <p className="text-red-600 dark:text-red-400">{error}</p>
-          <Button onClick={loadWorkflows} className="mt-4">Retry</Button>
+      <SidebarInset className={!open ? "ml-16" : ""}>
+        <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50 dark:from-gray-900 dark:to-gray-800">
+          <div className="bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm border-b dark:border-gray-700 px-6 py-4">
+            <div className="flex items-center space-x-4">
+              <SidebarTrigger />
+            </div>
+          </div>
+          <main className="p-6">
+            <div className="flex items-center justify-center h-64">
+              <div className="text-center">
+                <p className="text-red-600 dark:text-red-400">{error}</p>
+                <Button onClick={loadWorkflows} className="mt-4">Retry</Button>
+              </div>
+            </div>
+          </main>
         </div>
-      </div>
+      </SidebarInset>
     );
   }
 
   return (
-    <div className="container mx-auto px-4 py-8 max-w-7xl">
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold mb-2">Saved Workflows</h1>
-        <p className="text-gray-600 dark:text-gray-400">
-          Your reusable automation workflows. Execute, edit, or delete them anytime.
-        </p>
-      </div>
+    <SidebarInset className={!open ? "ml-16" : ""}>
+      <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50 dark:from-gray-900 dark:to-gray-800">
+        {/* Header */}
+        <div className="bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm border-b dark:border-gray-700 px-6 py-4">
+          <div className="flex items-center space-x-4">
+            <SidebarTrigger />
+          </div>
+        </div>
 
-      {workflows.length === 0 ? (
-        <Card>
-          <CardContent className="flex flex-col items-center justify-center py-12">
-            <Zap className="w-16 h-16 text-gray-400 mb-4" />
-            <h3 className="text-xl font-semibold mb-2">No workflows yet</h3>
-            <p className="text-gray-600 dark:text-gray-400 text-center mb-4">
-              Start a conversation and click "Save as Workflow" to create your first reusable workflow.
+        {/* Main Content */}
+        <main className="p-6">
+          {/* Title Section */}
+          <div className="mb-6">
+            <h1 className="text-3xl font-bold text-blue-600 dark:text-blue-400">Saved Workflows</h1>
+            <p className="text-gray-600 dark:text-gray-300 mt-2">
+              Your reusable automation workflows. Execute, edit, or delete them anytime.
             </p>
-            <Button onClick={() => router.push('/')}>
-              Start Conversation
-            </Button>
-          </CardContent>
-        </Card>
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {workflows.map((workflow) => (
-            <Card key={workflow.workflow_id} className="flex flex-col">
-              <CardHeader 
-                className="cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
-                onClick={() => router.push(`/saved-workflows/${workflow.workflow_id}`)}
-              >
+          </div>
+
+          {workflows.length === 0 ? (
+            <Card className="bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700">
+              <CardContent className="flex flex-col items-center justify-center py-12">
+                <Zap className="w-16 h-16 text-gray-400 mb-4" />
+                <h3 className="text-xl font-semibold mb-2">No workflows yet</h3>
+                <p className="text-gray-600 dark:text-gray-400 text-center mb-4">
+                  Start a conversation and click "Save as Workflow" to create your first reusable workflow.
+                </p>
+                <Button onClick={() => router.push('/')}>
+                  Start Conversation
+                </Button>
+              </CardContent>
+            </Card>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {workflows.map((workflow) => (
+                <Card key={workflow.workflow_id} className="flex flex-col bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700 hover:shadow-lg hover:border-blue-500 dark:hover:border-blue-400 transition-all">
+                  <CardHeader 
+                    className="cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+                    onClick={() => router.push(`/saved-workflows/${workflow.workflow_id}`)}
+                  >
                 <div className="flex items-start justify-between">
                   <div className="flex-1">
                     <CardTitle className="text-lg mb-1">{workflow.workflow_name || 'Untitled Workflow'}</CardTitle>
@@ -193,63 +230,77 @@ export default function SavedWorkflowsPage() {
                       {workflow.workflow_description || 'No description'}
                     </CardDescription>
                   </div>
-                  {workflow.is_public && (
-                    <Badge variant="secondary" className="ml-2">Public</Badge>
-                  )}
-                </div>
-              </CardHeader>
-              
-              <CardContent className="flex-1 flex flex-col justify-between">
-                <div className="space-y-2 mb-4">
-                  <div className="flex items-center text-sm text-gray-600 dark:text-gray-400">
-                    <Clock className="w-4 h-4 mr-2" />
-                    <span>{workflow.task_count} tasks</span>
-                  </div>
-                  
-                  {workflow.estimated_cost > 0 && (
-                    <div className="flex items-center text-sm text-gray-600 dark:text-gray-400">
-                      <DollarSign className="w-4 h-4 mr-2" />
-                      <span>${workflow.estimated_cost.toFixed(4)}</span>
+                      {workflow.is_public && (
+                        <Badge variant="secondary" className="ml-2">Public</Badge>
+                      )}
                     </div>
-                  )}
+                  </CardHeader>
                   
-                  <div className="flex items-center text-sm text-gray-600 dark:text-gray-400">
-                    <Calendar className="w-4 h-4 mr-2" />
-                    <span>{new Date(workflow.created_at).toLocaleDateString()}</span>
-                  </div>
-                </div>
-                
-                <div className="flex gap-2">
-                  <Button 
-                    size="sm" 
-                    className="flex-1"
-                    onClick={(e) => handleExecuteWorkflow(workflow.workflow_id, e)}
-                  >
-                    <Play className="w-4 h-4 mr-1" />
-                    Run
-                  </Button>
-                  
-                  <Button 
-                    size="sm" 
-                    variant="outline"
-                    onClick={(e) => handleCloneWorkflow(workflow.workflow_id, e)}
-                  >
-                    <Copy className="w-4 h-4" />
-                  </Button>
-                  
-                  <Button 
-                    size="sm" 
-                    variant="destructive"
-                    onClick={(e) => handleDeleteWorkflow(workflow.workflow_id, e)}
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-          ))}
-        </div>
-      )}
-    </div>
+                  <CardContent className="flex-1 flex flex-col justify-between">
+                    <div className="space-y-2 mb-4">
+                      <div className="flex items-center text-sm text-gray-600 dark:text-gray-400">
+                        <Clock className="w-4 h-4 mr-2" />
+                        <span>{workflow.task_count} tasks</span>
+                      </div>
+                      
+                      {workflow.estimated_cost > 0 && (
+                        <div className="flex items-center text-sm text-gray-600 dark:text-gray-400">
+                          <DollarSign className="w-4 h-4 mr-2" />
+                          <span>${workflow.estimated_cost.toFixed(4)}</span>
+                        </div>
+                      )}
+                      
+                      <div className="flex items-center text-sm text-gray-600 dark:text-gray-400">
+                        <Calendar className="w-4 h-4 mr-2" />
+                        <span>{new Date(workflow.created_at).toLocaleDateString()}</span>
+                      </div>
+                    </div>
+                    
+                    <div className="flex gap-2">
+                      <Button 
+                        size="sm" 
+                        className="flex-1"
+                        onClick={(e) => handleExecuteWorkflow(workflow.workflow_id, e)}
+                      >
+                        <Play className="w-4 h-4 mr-1" />
+                        Run
+                      </Button>
+                      
+                      <Button 
+                        size="sm" 
+                        variant="outline"
+                        onClick={(e) => handleCloneWorkflow(workflow.workflow_id, e)}
+                      >
+                        <Copy className="w-4 h-4" />
+                      </Button>
+                      
+                      <Button 
+                        size="sm" 
+                        variant="destructive"
+                        onClick={(e) => handleDeleteWorkflow(workflow.workflow_id, e)}
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </Button>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          )}
+        </main>
+      </div>
+    </SidebarInset>
+  );
+}
+
+export default function SavedWorkflowsPage() {
+  return (
+    <>
+      <Navbar />
+      <SidebarProvider>
+        <AppSidebar />
+        <SavedWorkflowsContent />
+      </SidebarProvider>
+    </>
   );
 }

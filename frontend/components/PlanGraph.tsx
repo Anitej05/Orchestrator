@@ -88,10 +88,10 @@ const CustomNode: React.FC<NodeProps<CustomNodeData>> = ({ data }) => {
                 isFailed && "workflow-node-failed"
             )}
             style={{
-                minWidth: 240,
-                maxWidth: 340,
+                minWidth: 280,
+                maxWidth: 400,
                 width: 'auto',
-                minHeight: 80,
+                minHeight: 100,
                 height: 'auto',
                 whiteSpace: 'normal',
                 wordBreak: 'break-word',
@@ -201,8 +201,9 @@ export default function PlanGraph({ planData, taskStatuses = {} }: PlanGraphProp
         const initialNodes: Node[] = [];
         const initialEdges: Edge[] = [];
 
-        const yOffset = 150;
-        const xPos = 100;
+        // Improved layout parameters for better spacing
+        const yOffset = 220;  // Increased vertical spacing
+        const xPos = 400;     // Centered horizontally
 
         // Add a Start node
         initialNodes.push({

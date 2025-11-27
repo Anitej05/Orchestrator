@@ -195,11 +195,16 @@ export function InteractiveChatInterface({
   };
 
 
+  // Get browser view from conversation store for live streaming
+  const browserView = useConversationStore((s) => (s as any).browser_view);
+  const currentStage = state.metadata?.currentStage;
+  const isBrowserRunning = currentStage === 'executing' && browserView;
+
   return (
     <div className="flex flex-col h-full">
       {/* Chat Messages */}
       <div className="flex-1 space-y-6 overflow-y-auto p-6">
-        {state.messages.length === 0 && (
+        {state.messages.length === 0 && !isBrowserRunning && (
           <div className="text-center text-gray-500 dark:text-gray-400 py-8 h-full flex flex-col justify-center items-center">
             <div className="p-4 rounded-full bg-gradient-to-br from-gray-100 to-gray-200 dark:from-gray-800 dark:to-gray-900 mb-4">
               <MessageCircle className="w-12 h-12 text-gray-400 dark:text-gray-600" />
@@ -230,20 +235,6 @@ export function InteractiveChatInterface({
                     : 'bg-gray-50/80 dark:bg-gray-800/90 border border-gray-200 dark:border-gray-700/50 text-gray-900 dark:text-gray-100 max-w-[95%] backdrop-blur-sm'
                 }`}>
                   <div className="message-content space-y-2">
-                    {/* Browser automation progress indicator */}
-                    {message.is_browser_task && message.browser_in_progress && (
-                      <div className="browser-progress mb-3 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
-                        <div className="flex items-center gap-2 text-blue-700 dark:text-blue-300">
-                          <Globe className="w-4 h-4 animate-pulse" />
-                          <span className="font-medium">Browser automation in progress...</span>
-                        </div>
-                        <div className="mt-2 flex items-center gap-2 text-sm text-blue-600 dark:text-blue-400">
-                          <Loader2 className="w-3 h-3 animate-spin" />
-                          <span>Navigating and analyzing web page</span>
-                        </div>
-                      </div>
-                    )}
-                    
                     {message.content && (message.type === 'assistant' ? <Markdown content={message.content} /> : <p>{message.content}</p>)}
                     
                     {/* Collapsible browsing trace */}
@@ -332,6 +323,40 @@ export function InteractiveChatInterface({
               </div>
             );
           })}
+        
+        {/* Live Browser Stream - shown AFTER messages while browser is running */}
+        {isBrowserRunning && (
+          <div className="browser-live-stream w-full flex justify-start">
+            <div className="w-full max-w-[95%] rounded-2xl overflow-hidden shadow-lg border border-gray-200 dark:border-gray-700 bg-gray-900">
+              {/* Header */}
+              <div className="bg-gradient-to-r from-gray-800 to-gray-900 px-4 py-3 flex items-center justify-between border-b border-gray-700">
+                <div className="flex items-center gap-3">
+                  <div className="relative">
+                    <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse"></div>
+                    <div className="absolute inset-0 w-3 h-3 bg-green-500 rounded-full animate-ping opacity-75"></div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Globe className="w-4 h-4 text-blue-400" />
+                    <span className="text-sm font-semibold text-white">Live Browser View</span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 text-xs text-gray-400">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  <span>Automating...</span>
+                </div>
+              </div>
+              {/* Browser Content */}
+              <div className="relative w-full" style={{ aspectRatio: '16/10' }}>
+                <iframe
+                  srcDoc={browserView}
+                  className="w-full h-full border-0"
+                  sandbox="allow-scripts allow-same-origin"
+                  title="Live Browser View"
+                />
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Input Form */}
@@ -432,7 +457,8 @@ export function InteractiveChatInterface({
           </div>
         )}
 
-        {!state.approval_required && (
+        {/* Hide input form when browser is running - only show progress bar */}
+        {!state.approval_required && !isBrowserRunning && (
         <form onSubmit={handleSubmit} className="space-y-4">
           {state.isWaitingForUser ? (
             <div className="space-y-3">
