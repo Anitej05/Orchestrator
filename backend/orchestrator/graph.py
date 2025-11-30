@@ -3228,10 +3228,20 @@ def load_conversation_history(state: State, config: RunnableConfig):
         task_agent_pairs = data.get("task_agent_pairs", [])
         original_prompt = data.get("original_prompt", "")
         
+        # Load approval-related flags for saved workflow execution
+        needs_approval = data.get("needs_approval", False)
+        plan_approved = data.get("plan_approved", False)
+        approval_required = data.get("approval_required", False)
+        pending_user_input = data.get("pending_user_input", False)
+        question_for_user = data.get("question_for_user")
+        status = data.get("status")
+        
         if task_plan:
             logger.info(f"Loaded pre-seeded task_plan with {len(task_plan)} batches")
         if task_agent_pairs:
             logger.info(f"Loaded pre-seeded task_agent_pairs with {len(task_agent_pairs)} tasks")
+        if needs_approval:
+            logger.info(f"Loaded needs_approval=True - workflow requires approval before execution")
         
         return {
             "messages": valid_messages,
@@ -3239,7 +3249,13 @@ def load_conversation_history(state: State, config: RunnableConfig):
             "final_response": data.get("final_response"),
             "task_plan": task_plan,
             "task_agent_pairs": task_agent_pairs,
-            "original_prompt": original_prompt if original_prompt else state.get("original_prompt", "")
+            "original_prompt": original_prompt if original_prompt else state.get("original_prompt", ""),
+            "needs_approval": needs_approval,
+            "plan_approved": plan_approved,
+            "approval_required": approval_required,
+            "pending_user_input": pending_user_input,
+            "question_for_user": question_for_user,
+            "status": status
         }
 
     except Exception as e:
@@ -3355,9 +3371,13 @@ def get_serializable_state(state: dict | State, thread_id: str) -> dict:
         "status": "pending_user_input" if state.get("pending_user_input") else "completed",
         "messages": serializable_messages,
         "task_agent_pairs": serialize_complex_object(state.get("task_agent_pairs", [])),
+        "task_plan": serialize_complex_object(state.get("task_plan", [])),  # Save as task_plan for consistency
         "final_response": state.get("final_response"),
         "pending_user_input": state.get("pending_user_input", False),
         "question_for_user": state.get("question_for_user"),
+        "needs_approval": state.get("needs_approval", False),
+        "plan_approved": state.get("plan_approved", False),
+        "approval_required": state.get("approval_required", False),
         # Metadata for the sidebar
         "metadata": {
             "original_prompt": state.get("original_prompt"),
@@ -3369,7 +3389,7 @@ def get_serializable_state(state: dict | State, thread_id: str) -> dict:
         },
         # Attachments for the sidebar
         "uploaded_files": serialize_complex_object(state.get("uploaded_files", [])),
-        # Plan for the sidebar
+        # Plan for the sidebar (deprecated, use task_plan instead)
         "plan": serialize_complex_object(state.get("task_plan", [])),
         # Canvas fields for the sidebar
         "has_canvas": state.get("has_canvas", False),
@@ -3699,6 +3719,28 @@ def analyze_request(state: State):
         }
 
 
+def route_after_load_history(state: State):
+    """Route after loading history: skip orchestration for pre-approved workflows."""
+    plan_approved = state.get("plan_approved", False)
+    has_plan = state.get("task_plan") and len(state.get("task_plan", [])) > 0
+    needs_approval = state.get("needs_approval", False)
+    
+    print(f"!!! ROUTE AFTER LOAD HISTORY: plan_approved={plan_approved}, has_plan={has_plan}, needs_approval={needs_approval} !!!")
+    print(f"!!! STATE KEYS: {list(state.keys())} !!!")
+    print(f"!!! TASK_PLAN VALUE: {state.get('task_plan')} !!!")
+    
+    # If workflow is pre-approved (saved workflow execution), skip directly to validation
+    if plan_approved and has_plan:
+        print("!!! PRE-APPROVED WORKFLOW DETECTED = SKIP TO VALIDATION !!!")
+        logger.info("Pre-approved workflow detected. Skipping orchestration and jumping to validation.")
+        return "validate_plan_for_execution"
+    
+    # Otherwise, proceed with normal orchestration flow
+    print("!!! NO PRE-APPROVED PLAN = PROCEED TO ANALYSIS !!!")
+    logger.info("No pre-approved plan. Proceeding to analyze_request.")
+    return "analyze_request"
+
+
 def route_after_analysis(state: State):
     """Route based on whether we have an existing plan or need to create one."""
     has_plan = state.get("task_plan") and len(state.get("task_plan", [])) > 0
@@ -3789,7 +3831,10 @@ builder.add_node("generate_final_response", generate_final_response)  # OPTIMIZE
 # Note: render_canvas_output node removed - now integrated into generate_final_response
 
 builder.add_edge(START, "load_history")
-builder.add_edge("load_history", "analyze_request")
+builder.add_conditional_edges("load_history", route_after_load_history, {
+    "analyze_request": "analyze_request",
+    "validate_plan_for_execution": "validate_plan_for_execution"
+})
 
 builder.add_conditional_edges("analyze_request", route_after_analysis, {
     "preprocess_files": "preprocess_files",

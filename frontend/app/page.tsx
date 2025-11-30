@@ -49,6 +49,7 @@ function HomeContent() {
   const [apiResponseData, setApiResponseData] = useState<ApiResponse | null>(null)
   const [currentThreadId, setCurrentThreadId] = useState<string | null>(null)
   const [isRestoring, setIsRestoring] = useState(false)
+  const [isResetting, setIsResetting] = useState(false) // Track intentional resets
   const { toast } = useToast()
   const sidebarRef = useRef<OrchestrationDetailsSidebarRef>(null);
 
@@ -66,9 +67,9 @@ function HomeContent() {
 
   // Redirect to conversation URL when thread_id is created (new conversation)
   useEffect(() => {
-    if (!clerkLoaded) return;
+    if (!clerkLoaded || isResetting) return;
     
-    // Only navigate if we're on the home page and a thread_id appears
+    // Only navigate if we have a VALID thread_id and we're on home page
     if (conversationState.thread_id && 
         typeof window !== 'undefined' && 
         window.location.pathname === '/' &&
@@ -76,19 +77,23 @@ function HomeContent() {
       console.log('New thread_id detected, navigating to:', conversationState.thread_id);
       router.push(`/${conversationState.thread_id}`);
     }
-  }, [conversationState.thread_id, clerkLoaded, router, isRestoring]);
+  }, [conversationState.thread_id, clerkLoaded, router, isRestoring, isResetting]);
 
-  // Load conversation from localStorage on page load and redirect to URL
-  // Defer until Clerk is loaded to ensure auth tokens are available and avoid 401s
+  // Check localStorage on initial mount only (not on every state change)
   useEffect(() => {
     if (!clerkLoaded) return;
+    
     const savedThreadId = typeof window !== 'undefined' ? localStorage.getItem('thread_id') : null;
-    if (savedThreadId && !conversationState.thread_id) {
-      console.log('Restoring conversation from localStorage and redirecting:', savedThreadId);
-      // Redirect to the conversation URL instead of loading here
+    // Only redirect if we have a saved thread AND we're on home page AND conversation state is empty
+    if (savedThreadId && 
+        !conversationState.thread_id && 
+        typeof window !== 'undefined' && 
+        window.location.pathname === '/') {
+      console.log('Initial load: Redirecting to saved conversation:', savedThreadId);
       router.push(`/${savedThreadId}`);
     }
-  }, [clerkLoaded, conversationState.thread_id, router]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clerkLoaded]); // Only run on Clerk load, not on state changes
 
   useEffect(() => {
     if (isRestoring) return; // Avoid side-effects while restoring existing convo
@@ -190,17 +195,31 @@ function HomeContent() {
   };
 
   const handleNewConversation = () => {
+    console.log('Starting new conversation - clearing all state');
+    setIsResetting(true);
+    
     // Clear localStorage to prevent auto-restoration
     if (typeof window !== 'undefined') {
       localStorage.removeItem('thread_id')
     }
     
+    // Reset all conversation state
     resetConversation();
     setTaskAgentPairs([]);
     setSelectedAgents({});
     setExecutionResults([]);
     setApiResponseData(null);
     setCurrentThreadId(null);
+    
+    // If we're on a conversation page, navigate to home
+    if (typeof window !== 'undefined' && window.location.pathname !== '/') {
+      router.push('/');
+    }
+    
+    // Clear the resetting flag after state has settled
+    setTimeout(() => {
+      setIsResetting(false);
+    }, 100);
 
     toast({
       title: "New conversation started",

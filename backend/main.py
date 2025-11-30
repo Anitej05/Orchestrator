@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
 from pydantic.networks import HttpUrl
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 import shutil
 from fastapi import UploadFile, File
 from aiofiles import open as aio_open
@@ -426,6 +426,62 @@ async def execute_orchestration(
         # Extract the state from the checkpoint if it exists
         # The checkpoint structure is { "values": State, "next": List[str], "config": RunnableConfig }
         current_conversation = current_checkpoint.get("values", {}) if current_checkpoint else {}
+    
+    # If still no conversation data, try loading from JSON file (for saved workflows)
+    if not current_conversation:
+        history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
+        if os.path.exists(history_path):
+            try:
+                with open(history_path, "r", encoding="utf-8") as f:
+                    json_data = json.load(f)
+                    
+                    # Convert message dicts to LangChain message objects
+                    messages = []
+                    for msg_data in json_data.get("messages", []):
+                        try:
+                            msg_type = msg_data.get("type", "").lower()
+                            content = msg_data.get("content", "")
+                            metadata = msg_data.get("metadata", {})
+                            msg_id = msg_data.get("id")
+                            timestamp = msg_data.get("timestamp")
+                            
+                            # Prepare additional_kwargs
+                            additional_kwargs = metadata.copy() if metadata else {}
+                            if timestamp:
+                                additional_kwargs['timestamp'] = timestamp
+                            if msg_id:
+                                additional_kwargs['id'] = msg_id
+                            
+                            if msg_type in ["user", "human"]:
+                                messages.append(HumanMessage(content=content, additional_kwargs=additional_kwargs))
+                            elif msg_type in ["assistant", "ai"]:
+                                messages.append(AIMessage(content=content, additional_kwargs=additional_kwargs))
+                            else:
+                                messages.append(SystemMessage(content=content, additional_kwargs=additional_kwargs))
+                        except Exception as msg_err:
+                            logger.warning(f"Failed to convert message: {msg_err}")
+                    
+                    # Extract the saved workflow data
+                    current_conversation = {
+                        "thread_id": json_data.get("thread_id"),
+                        "original_prompt": json_data.get("original_prompt", "") or json_data.get("metadata", {}).get("original_prompt", ""),
+                        "task_plan": json_data.get("task_plan", []) or json_data.get("plan", []),
+                        "task_agent_pairs": json_data.get("task_agent_pairs", []),
+                        "needs_approval": json_data.get("needs_approval", False),
+                        "plan_approved": json_data.get("plan_approved", False),
+                        "approval_required": json_data.get("approval_required", False),
+                        "pending_user_input": json_data.get("pending_user_input", False),
+                        "question_for_user": json_data.get("question_for_user"),
+                        "status": json_data.get("status"),
+                        "messages": messages,
+                        "completed_tasks": json_data.get("completed_tasks", []),
+                        "uploaded_files": json_data.get("uploaded_files", []),
+                        "parsed_tasks": json_data.get("parsed_tasks", []) or json_data.get("metadata", {}).get("parsed_tasks", [])
+                    }
+                    logger.info(f"Loaded workflow data from JSON: needs_approval={current_conversation.get('needs_approval')}, task_plan_count={len(current_conversation.get('task_plan', []))}, messages_count={len(messages)}")
+            except Exception as e:
+                logger.error(f"Failed to load conversation JSON for {thread_id}: {e}")
+                current_conversation = {}
 
     # --- State Initialization ---
     if user_response:
@@ -440,8 +496,9 @@ async def execute_orchestration(
         
         # Handle plan approval responses
         needs_approval = initial_state.get("needs_approval", False)
-        print(f"!!! USER RESPONSE: needs_approval={needs_approval}, response='{user_response}' !!!")
-        logger.info(f"Checking approval state: needs_approval={needs_approval}, user_response='{user_response}'")
+        task_plan = initial_state.get("task_plan", [])
+        print(f"!!! USER RESPONSE: needs_approval={needs_approval}, response='{user_response}', task_plan_count={len(task_plan)} !!!")
+        logger.info(f"Checking approval state: needs_approval={needs_approval}, user_response='{user_response}', task_plan_count={len(task_plan)}")
         
         if needs_approval:
             user_response_lower = user_response.lower().strip()
@@ -503,19 +560,22 @@ async def execute_orchestration(
         updated_messages = MessageManager.add_message(existing_messages, new_user_message)
         logger.info(f"Continuing conversation. Total messages: {len(updated_messages)}")
         
+        # Check if this is a plan approval - if so, preserve the plan
+        is_plan_approval = needs_approval and user_response and user_response.lower().strip() in ["approve", "yes", "proceed", "continue", "execute", "go", "ok"]
+        
         initial_state = {
             # Carry over essential long-term memory from the previous turn
             "messages": updated_messages,
             "completed_tasks": current_conversation.get("completed_tasks", []),  # Preserve completed tasks for context
             "uploaded_files": current_conversation.get("uploaded_files", []), # Persist files
 
-            # Reset short-term memory for the new task
+            # Reset short-term memory for the new task (UNLESS it's a plan approval)
             "original_prompt": prompt,
-            "parsed_tasks": [],
-            "user_expectations": {},
-            "candidate_agents": {},
-            "task_agent_pairs": [],
-            "task_plan": [],
+            "parsed_tasks": current_conversation.get("parsed_tasks", []) if is_plan_approval else [],
+            "user_expectations": current_conversation.get("user_expectations", {}) if is_plan_approval else {},
+            "candidate_agents": current_conversation.get("candidate_agents", {}) if is_plan_approval else {},
+            "task_agent_pairs": current_conversation.get("task_agent_pairs", []) if is_plan_approval else [],
+            "task_plan": current_conversation.get("task_plan", []) if is_plan_approval else [],
             "final_response": None,
             "pending_user_input": False,
             "question_for_user": None,
@@ -525,7 +585,7 @@ async def execute_orchestration(
             "needs_complex_processing": None,  # Let analyze_request determine this
             "analysis_reasoning": None,
             "planning_mode": planning_mode,  # Set planning mode from parameter
-            "plan_approved": False,  # Reset plan_approved for new request
+            "plan_approved": current_conversation.get("plan_approved", False) if is_plan_approval else False,
         }
     
     elif current_conversation:
