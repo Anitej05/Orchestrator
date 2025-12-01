@@ -28,7 +28,8 @@ export default function Navbar() {
       <div className="flex items-center gap-16">
         <Link href="/" className="text-sm font-medium text-gray-700 dark:text-gray-200 hover:text-blue-600 dark:hover:text-blue-400 transition-colors">HOME</Link>
         <Link href="/agents" className="text-sm font-medium text-gray-700 dark:text-gray-200 hover:text-blue-600 dark:hover:text-blue-400 transition-colors">AGENT DIRECTORY</Link>
-        <Link href="/saved-workflows" className="text-sm font-medium text-gray-700 dark:text-gray-200 hover:text-blue-600 dark:hover:text-blue-400 transition-colors">SAVED WORKFLOWS</Link>
+        <Link href="/workflows" className="text-sm font-medium text-gray-700 dark:text-gray-200 hover:text-blue-600 dark:hover:text-blue-400 transition-colors">WORKFLOWS</Link>
+        <Link href="/schedules" className="text-sm font-medium text-gray-700 dark:text-gray-200 hover:text-blue-600 dark:hover:text-blue-400 transition-colors">SCHEDULES</Link>
       </div>
       <div className="flex items-center gap-5">
         <div className="scale-125">

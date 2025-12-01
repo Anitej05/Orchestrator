@@ -148,6 +148,17 @@ class ConversationStatus(BaseModel):
     thread_id: str
     status: str  # "completed", "pending_user_input", "error"
     question_for_user: Optional[str] = None
+
+class ScheduleWorkflowRequest(BaseModel):
+    """Model for scheduling workflow requests"""
+    cron_expression: str
+    input_template: Dict[str, Any] = {}
+
+class UpdateScheduleRequest(BaseModel):
+    """Model for updating schedule requests"""
+    is_active: Optional[bool] = None
+    cron_expression: Optional[str] = None
+    input_template: Optional[Dict[str, Any]] = None
     final_response: Optional[str] = None
     task_agent_pairs: Optional[List[Dict]] = None
     error_message: Optional[str] = None
@@ -1752,7 +1763,7 @@ async def create_workflow_conversation(workflow_id: str, request: Request, db: S
     }
 
 @app.post("/api/workflows/{workflow_id}/schedule", tags=["Workflows"])
-async def schedule_workflow(workflow_id: str, cron_expression: str, input_template: Dict[str, Any], request: Request, db: Session = Depends(get_db)):
+async def schedule_workflow(workflow_id: str, body: ScheduleWorkflowRequest, request: Request, db: Session = Depends(get_db)):
     """Schedule workflow execution with cron expression"""
     from auth import get_user_from_request
     from services.workflow_scheduler import get_scheduler
@@ -1770,8 +1781,8 @@ async def schedule_workflow(workflow_id: str, cron_expression: str, input_templa
         schedule_id=schedule_id,
         workflow_id=workflow_id,
         user_id=user_id,
-        cron_expression=cron_expression,
-        input_template=input_template
+        cron_expression=body.cron_expression,
+        input_template=body.input_template
     )
     db.add(schedule)
     db.commit()
@@ -1782,13 +1793,13 @@ async def schedule_workflow(workflow_id: str, cron_expression: str, input_templa
         scheduler.add_schedule(
             schedule_id=schedule_id,
             workflow_id=workflow_id,
-            cron_expression=cron_expression,
-            input_template=input_template,
+            cron_expression=body.cron_expression,
+            input_template=body.input_template,
             user_id=user_id,
             db_session_factory=SessionLocal
         )
-        logger.info(f"Scheduled workflow {workflow_id} with cron: {cron_expression}")
-        return {"schedule_id": schedule_id, "status": "scheduled", "cron": cron_expression}
+        logger.info(f"Scheduled workflow {workflow_id} with cron: {body.cron_expression}")
+        return {"schedule_id": schedule_id, "status": "scheduled", "cron": body.cron_expression}
     except Exception as e:
         # Rollback if scheduling fails
         db.delete(schedule)
@@ -1823,6 +1834,207 @@ async def create_webhook(workflow_id: str, request: Request, db: Session = Depen
     
     logger.info(f"Created webhook {webhook_id} for workflow {workflow_id}")
     return {"webhook_id": webhook_id, "webhook_url": f"/webhooks/{webhook_id}", "webhook_token": webhook_token}
+
+@app.get("/api/schedules", tags=["Workflows"])
+async def list_schedules(request: Request, db: Session = Depends(get_db)):
+    """List all workflow schedules for the authenticated user"""
+    from auth import get_user_from_request
+    
+    user = get_user_from_request(request)
+    user_id = user.get("sub")
+    
+    schedules = db.query(WorkflowSchedule).filter_by(user_id=user_id).order_by(WorkflowSchedule.created_at.desc()).all()
+    
+    result = []
+    for schedule in schedules:
+        workflow = db.query(Workflow).filter_by(workflow_id=schedule.workflow_id).first()
+        
+        # Calculate next run time from cron expression
+        next_run = None
+        if schedule.is_active:
+            try:
+                from apscheduler.triggers.cron import CronTrigger
+                from datetime import timezone
+                parts = schedule.cron_expression.split()
+                if len(parts) == 5:
+                    minute, hour, day, month, day_of_week = parts
+                    trigger = CronTrigger(
+                        minute=minute, hour=hour, day=day, 
+                        month=month, day_of_week=day_of_week, timezone='UTC'
+                    )
+                    # Get next fire time after current UTC time
+                    now = datetime.now(timezone.utc)
+                    next_run = trigger.get_next_fire_time(None, now)
+                    if next_run:
+                        next_run = next_run.isoformat()
+            except Exception as e:
+                logger.error(f"Failed to calculate next run time: {str(e)}")
+        
+        result.append({
+            "schedule_id": schedule.schedule_id,
+            "workflow_id": schedule.workflow_id,
+            "workflow_name": workflow.name if workflow else "Unknown",
+            "cron_expression": schedule.cron_expression,
+            "input_template": schedule.input_template,
+            "is_active": schedule.is_active,
+            "last_run_at": schedule.last_run_at.isoformat() if schedule.last_run_at else None,
+            "next_run_at": next_run,
+            "created_at": schedule.created_at.isoformat()
+        })
+    
+    return {"schedules": result, "count": len(result)}
+
+@app.get("/api/schedules/{schedule_id}/executions", tags=["Workflows"])
+async def get_schedule_executions(schedule_id: str, request: Request, db: Session = Depends(get_db)):
+    """Get execution history for a specific schedule"""
+    from auth import get_user_from_request
+    
+    user = get_user_from_request(request)
+    user_id = user.get("sub")
+    
+    schedule = db.query(WorkflowSchedule).filter_by(
+        schedule_id=schedule_id,
+        user_id=user_id
+    ).first()
+    
+    if not schedule:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    
+    # Get all executions for this workflow (we'll filter by time range near schedule runs)
+    executions = db.query(WorkflowExecution).filter_by(
+        workflow_id=schedule.workflow_id,
+        user_id=user_id
+    ).order_by(WorkflowExecution.started_at.desc()).limit(50).all()
+    
+    result = []
+    for execution in executions:
+        result.append({
+            "execution_id": execution.execution_id,
+            "status": execution.status,
+            "inputs": execution.inputs,
+            "outputs": execution.outputs,
+            "error": execution.error,
+            "started_at": execution.started_at.isoformat() if execution.started_at else None,
+            "completed_at": execution.completed_at.isoformat() if execution.completed_at else None,
+            "duration_ms": int((execution.completed_at - execution.started_at).total_seconds() * 1000) if execution.completed_at and execution.started_at else None
+        })
+    
+    return {"executions": result, "count": len(result)}
+
+@app.patch("/api/schedules/{schedule_id}", tags=["Workflows"])
+async def update_schedule(schedule_id: str, body: UpdateScheduleRequest, request: Request, db: Session = Depends(get_db)):
+    """Update a workflow schedule (pause/resume, change cron, update inputs)"""
+    from auth import get_user_from_request
+    from services.workflow_scheduler import get_scheduler
+    from database import SessionLocal
+    
+    user = get_user_from_request(request)
+    user_id = user.get("sub")
+    
+    schedule = db.query(WorkflowSchedule).filter_by(
+        schedule_id=schedule_id,
+        user_id=user_id
+    ).first()
+    
+    if not schedule:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    
+    scheduler = get_scheduler()
+    
+    # Update fields
+    if body.is_active is not None:
+        schedule.is_active = body.is_active
+        
+        if body.is_active:
+            # Re-add to scheduler
+            try:
+                scheduler.add_schedule(
+                    schedule_id=schedule.schedule_id,
+                    workflow_id=schedule.workflow_id,
+                    cron_expression=schedule.cron_expression,
+                    input_template=schedule.input_template or {},
+                    user_id=schedule.user_id,
+                    db_session_factory=SessionLocal
+                )
+                logger.info(f"Resumed schedule {schedule_id}")
+            except Exception as e:
+                logger.error(f"Failed to resume schedule: {str(e)}")
+                raise HTTPException(status_code=400, detail=f"Failed to resume schedule: {str(e)}")
+        else:
+            # Remove from scheduler
+            try:
+                scheduler.remove_schedule(schedule_id)
+                logger.info(f"Paused schedule {schedule_id}")
+            except Exception as e:
+                logger.error(f"Failed to pause schedule: {str(e)}")
+    
+    if body.cron_expression is not None:
+        schedule.cron_expression = body.cron_expression
+        
+        # Update in scheduler if active
+        if schedule.is_active:
+            try:
+                scheduler.add_schedule(
+                    schedule_id=schedule.schedule_id,
+                    workflow_id=schedule.workflow_id,
+                    cron_expression=body.cron_expression,
+                    input_template=schedule.input_template or {},
+                    user_id=schedule.user_id,
+                    db_session_factory=SessionLocal
+                )
+                logger.info(f"Updated cron expression for schedule {schedule_id}")
+            except Exception as e:
+                logger.error(f"Failed to update schedule: {str(e)}")
+                raise HTTPException(status_code=400, detail=f"Invalid cron expression: {str(e)}")
+    
+    if body.input_template is not None:
+        schedule.input_template = body.input_template
+    
+    db.commit()
+    
+    return {
+        "schedule_id": schedule.schedule_id,
+        "is_active": schedule.is_active,
+        "cron_expression": schedule.cron_expression,
+        "input_template": schedule.input_template,
+        "status": "updated"
+    }
+
+
+@app.post("/api/admin/reload-schedules", tags=["Admin"])
+async def reload_schedules(
+    db: Session = Depends(get_db)
+):
+    """
+    Reload all active schedules from database into the scheduler.
+    Useful for debugging or recovering from scheduler initialization issues.
+    """
+    scheduler = get_scheduler()
+    
+    try:
+        # Load active schedules
+        scheduler.load_active_schedules(db)
+        
+        # Get job count
+        jobs = scheduler.scheduler.get_jobs()
+        job_details = []
+        
+        for job in jobs:
+            job_details.append({
+                "job_id": job.id,
+                "next_run_time": job.next_run_time.isoformat() if job.next_run_time else None
+            })
+        
+        logger.info(f"Reloaded schedules - {len(jobs)} jobs now active")
+        
+        return {
+            "status": "success",
+            "jobs_loaded": len(jobs),
+            "jobs": job_details
+        }
+    except Exception as e:
+        logger.error(f"Failed to reload schedules: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to reload schedules: {str(e)}")
 
 @app.delete("/api/workflows/{workflow_id}/schedule/{schedule_id}", tags=["Workflows"])
 async def delete_schedule(workflow_id: str, schedule_id: str, request: Request, db: Session = Depends(get_db)):
@@ -2960,33 +3172,48 @@ def start_agents_async():
 @app.on_event("startup")
 async def startup_event():
     """Initialize database, start agents, health checker, and workflow scheduler on app startup"""
+    logger.info("=" * 60)
+    logger.info("APPLICATION STARTUP INITIATED")
+    logger.info("=" * 60)
+    
     # Initialize database tables
     try:
         from database import engine
         from db_init import init_database
         init_database(engine)
+        logger.info("✓ Database initialized successfully")
     except Exception as e:
-        logger.error(f"Database initialization failed: {str(e)}", exc_info=True)
+        logger.error(f"✗ Database initialization failed: {str(e)}", exc_info=True)
         # Don't exit - let the app continue, it might still work
     
     # Start agents in background
     start_agents_async()
+    logger.info("✓ Agents started in background")
     
     # Start background health checker
     asyncio.create_task(check_agent_health_background())
+    logger.info("✓ Health checker started")
     
     # Initialize workflow scheduler and load active schedules
     try:
+        logger.info("Initializing workflow scheduler...")
         from services.workflow_scheduler import init_scheduler
         from database import SessionLocal
         db = SessionLocal()
         try:
-            init_scheduler(db)
-            logger.info("Workflow scheduler initialized successfully")
+            scheduler = init_scheduler(db)
+            jobs = scheduler.scheduler.get_jobs()
+            logger.info(f"✓ Workflow scheduler initialized with {len(jobs)} jobs loaded")
+            for job in jobs:
+                logger.info(f"  - Job: {job.id} | Next run: {job.next_run_time}")
         finally:
             db.close()
     except Exception as e:
-        logger.error(f"Failed to initialize workflow scheduler: {str(e)}", exc_info=True)
+        logger.error(f"✗ Failed to initialize workflow scheduler: {str(e)}", exc_info=True)
+    
+    logger.info("=" * 60)
+    logger.info("APPLICATION STARTUP COMPLETED")
+    logger.info("=" * 60)
 
 if __name__ == "__main__":
     # Agents will be started automatically via @app.on_event("startup")

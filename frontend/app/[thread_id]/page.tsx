@@ -157,14 +157,45 @@ function ConversationContent() {
   }
 
   const handleNewConversation = () => {
-    // Clear localStorage and reset conversation state
+    console.log('Starting new conversation from dynamic route')
+    
+    // Clear localStorage first
     if (typeof window !== 'undefined') {
       localStorage.removeItem('thread_id')
     }
+    
+    // Force clear the Zustand store completely
+    useConversationStore.setState({
+      metadata: {},
+      plan: [],
+      task_agent_pairs: [],
+      messages: [],
+      final_response: undefined,
+      thread_id: undefined,
+      status: 'idle',
+      canvas_content: undefined,
+      has_canvas: false,
+      task_statuses: {},
+      current_executing_task: null,
+    })
+    
+    // Reset local state
+    setTaskAgentPairs([])
+    setSelectedAgents({})
+    setExecutionResults([])
+    setApiResponseData(null)
+    setCurrentThreadId(null)
+    
+    // Call resetConversation for cleanup
     resetConversation()
     
     // Navigate to home, which will start fresh
     router.push('/')
+    
+    toast({
+      title: "New conversation started",
+      description: "Ready to start a new orchestration",
+    })
   }
 
   const handleOrchestrationComplete = (results: ExecutionResult[]) => {

@@ -112,12 +112,22 @@ class WorkflowScheduler:
                 
                 db.commit()
                 
-                # Execute workflow asynchronously (queue it for background execution)
-                asyncio.create_task(self._async_execute_workflow(
-                    execution_id, workflow_id, workflow.blueprint, input_template, user_id
-                ))
+                # Execute workflow synchronously (run async code in new event loop)
+                import asyncio
+                try:
+                    # Create a new event loop for this thread
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(
+                        self._async_execute_workflow(
+                            execution_id, workflow_id, workflow.blueprint, input_template, user_id
+                        )
+                    )
+                    loop.close()
+                except Exception as e:
+                    logger.error(f"Error running async execution: {str(e)}", exc_info=True)
                 
-                logger.info(f"Queued execution {execution_id} for scheduled workflow {workflow_id}")
+                logger.info(f"Completed execution {execution_id} for scheduled workflow {workflow_id}")
                 
             finally:
                 db.close()
@@ -127,12 +137,13 @@ class WorkflowScheduler:
     
     async def _async_execute_workflow(self, execution_id: str, workflow_id: str, 
                                       blueprint: Dict, inputs: Dict, user_id: str):
-        """Actually execute the workflow asynchronously"""
+        """Actually execute the workflow asynchronously using the orchestrator"""
         try:
-            from orchestrator.workflow_executor import WorkflowExecutor
-            from orchestrator.graph import graph
             from database import SessionLocal
             from models import WorkflowExecution
+            from orchestrator.graph import graph
+            from langgraph.checkpoint.memory import MemorySaver
+            import uuid
             
             db = SessionLocal()
             
@@ -143,30 +154,79 @@ class WorkflowScheduler:
                 ).first()
                 if execution:
                     execution.status = 'running'
+                    execution.started_at = datetime.utcnow()
                     db.commit()
                 
-                # Execute workflow
-                executor = WorkflowExecutor(blueprint)
-                owner = {"user_id": user_id}
-                execution_metadata = await executor.execute(inputs, owner)
+                # Get the saved plan from blueprint
+                task_plan = blueprint.get("task_plan", [])
+                task_agent_pairs = blueprint.get("task_agent_pairs", [])
+                original_prompt = blueprint.get("original_prompt", "")
                 
-                # Stream through orchestrator (collect results)
-                final_output = ""
-                async for event in graph.astream_events(
-                    {"messages": [("user", execution_metadata["prompt"])]},
-                    execution_metadata["config"],
-                    version="v2"
+                if not task_plan or not task_agent_pairs:
+                    raise Exception("Workflow has no saved execution plan")
+                
+                # Create a new thread for this execution
+                thread_id = str(uuid.uuid4())
+                memory = MemorySaver()
+                
+                # Pre-seed the thread state with the saved plan
+                initial_state = {
+                    "thread_id": thread_id,
+                    "original_prompt": original_prompt,
+                    "task_plan": task_plan,
+                    "task_agent_pairs": task_agent_pairs,
+                    "user_inputs": inputs,  # Pass any input parameters
+                    "messages": [{"type": "user", "content": original_prompt}],
+                    "status": "executing",
+                    "planning_mode": False,
+                    "plan_approved": True,  # Skip approval for scheduled runs
+                    "completed_tasks": [],
+                    "task_events": [],
+                    "owner": {"user_id": user_id}
+                }
+                
+                config = {
+                    "configurable": {
+                        "thread_id": thread_id,
+                        "checkpoint_ns": "",
+                        "checkpoint_id": str(uuid.uuid4())
+                    }
+                }
+                
+                # Execute the workflow through the orchestrator graph
+                final_state = None
+                async for event in graph.astream(
+                    initial_state,
+                    config,
+                    stream_mode="values"
                 ):
-                    kind = event.get("event")
-                    if kind == "on_chat_model_stream":
-                        content = event.get("data", {}).get("chunk", {}).content
-                        if content:
-                            final_output += content
+                    final_state = event
+                    # Log progress
+                    if event.get("status"):
+                        logger.info(f"Execution {execution_id} status: {event.get('status')}")
+                
+                # Extract results from final state
+                final_response = None
+                if final_state:
+                    # Get the final response from messages or final_response field
+                    messages = final_state.get("messages", [])
+                    if messages:
+                        last_message = messages[-1]
+                        if isinstance(last_message, dict):
+                            final_response = last_message.get("content", "")
+                        else:
+                            final_response = str(last_message)
+                    
+                    if not final_response:
+                        final_response = final_state.get("final_response", "")
                 
                 # Update execution with results
                 if execution:
                     execution.status = 'completed'
-                    execution.outputs = {"response": final_output}
+                    execution.outputs = {
+                        "response": final_response or "Workflow completed",
+                        "completed_tasks": final_state.get("completed_tasks", []) if final_state else []
+                    }
                     execution.completed_at = datetime.utcnow()
                     db.commit()
                 
@@ -181,6 +241,7 @@ class WorkflowScheduler:
                     db.commit()
                 
                 logger.error(f"Scheduled workflow execution {execution_id} failed: {str(e)}")
+                raise
                 
             finally:
                 db.close()

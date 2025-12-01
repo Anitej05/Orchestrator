@@ -61,7 +61,7 @@ export interface TaskStatus {
 
 export interface ConversationState {
   thread_id?: string;
-  status: 'pending_user_input' | 'completed' | 'processing' | 'idle' | 'error';
+  status: 'pending_user_input' | 'completed' | 'processing' | 'idle' | 'error' | 'planning_complete';
   messages: Message[];
   isWaitingForUser: boolean;
   currentQuestion?: string;

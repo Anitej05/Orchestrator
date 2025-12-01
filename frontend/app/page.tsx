@@ -65,9 +65,21 @@ function HomeContent() {
   // Initialize the WebSocket manager. It will automatically connect and keep the Zustand store in sync with backend updates.
   useWebSocketManager();
 
-  // Redirect to conversation URL when thread_id is created (new conversation)
+  // Save thread_id to localStorage and navigate when conversation is created
   useEffect(() => {
     if (!clerkLoaded || isResetting) return;
+    
+    // Save thread_id to localStorage for page reload persistence
+    if (conversationState.thread_id && typeof window !== 'undefined') {
+      localStorage.setItem('thread_id', conversationState.thread_id);
+      console.log('Saved thread_id to localStorage:', conversationState.thread_id);
+    }
+    
+    // Clear localStorage if thread_id is cleared
+    if (!conversationState.thread_id && typeof window !== 'undefined') {
+      localStorage.removeItem('thread_id');
+      console.log('Cleared thread_id from localStorage');
+    }
     
     // Only navigate if we have a VALID thread_id and we're on home page
     if (conversationState.thread_id && 
@@ -79,18 +91,58 @@ function HomeContent() {
     }
   }, [conversationState.thread_id, clerkLoaded, router, isRestoring, isResetting]);
 
-  // Check localStorage on initial mount only (not on every state change)
+  // On initial load, if there's a saved thread_id in localStorage and we're on home page,
+  // load that conversation into the store but DON'T redirect (stay on home page)
   useEffect(() => {
     if (!clerkLoaded) return;
     
+    // If user navigates directly to home, check if we should clear state
+    if (typeof window !== 'undefined' && window.location.pathname === '/') {
+      // If there's no query parameters and we have a thread_id in state but NOT in localStorage
+      const params = new URLSearchParams(window.location.search);
+      const hasQueryParams = params.has('threadId') || params.has('prompt');
+      const savedThreadId = localStorage.getItem('thread_id');
+      
+      if (!hasQueryParams && conversationState.thread_id && !savedThreadId) {
+        // User manually navigated to home - clear the state
+        console.log('User navigated to home manually - clearing state');
+        setIsResetting(true);
+        useConversationStore.setState({
+          metadata: {},
+          plan: [],
+          task_agent_pairs: [],
+          messages: [],
+          final_response: undefined,
+          thread_id: undefined,
+          status: 'idle',
+          canvas_content: undefined,
+          has_canvas: false,
+          task_statuses: {},
+          current_executing_task: null,
+        });
+        resetConversation();
+        setTaskAgentPairs([]);
+        setSelectedAgents({});
+        setExecutionResults([]);
+        setApiResponseData(null);
+        setCurrentThreadId(null);
+        setTimeout(() => setIsResetting(false), 200);
+        return;
+      }
+    }
+    
     const savedThreadId = typeof window !== 'undefined' ? localStorage.getItem('thread_id') : null;
-    // Only redirect if we have a saved thread AND we're on home page AND conversation state is empty
+    // Only load if we have a saved thread AND conversation state is empty AND we're on home page
     if (savedThreadId && 
         !conversationState.thread_id && 
         typeof window !== 'undefined' && 
         window.location.pathname === '/') {
-      console.log('Initial load: Redirecting to saved conversation:', savedThreadId);
-      router.push(`/${savedThreadId}`);
+      console.log('Initial load: Loading saved conversation into state:', savedThreadId);
+      // Load the conversation but stay on home page
+      setIsRestoring(true);
+      loadConversation(savedThreadId)
+        .catch(err => console.error('Failed to restore conversation:', err))
+        .finally(() => setIsRestoring(false));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clerkLoaded]); // Only run on Clerk load, not on state changes
@@ -203,7 +255,22 @@ function HomeContent() {
       localStorage.removeItem('thread_id')
     }
     
-    // Reset all conversation state
+    // Force clear the Zustand store's metadata and plan FIRST
+    useConversationStore.setState({
+      metadata: {},
+      plan: [],
+      task_agent_pairs: [],
+      messages: [],
+      final_response: undefined,
+      thread_id: undefined,
+      status: 'idle',
+      canvas_content: undefined,
+      has_canvas: false,
+      task_statuses: {},
+      current_executing_task: null,
+    });
+    
+    // Reset ALL conversation state including metadata and plan
     resetConversation();
     setTaskAgentPairs([]);
     setSelectedAgents({});
@@ -216,10 +283,10 @@ function HomeContent() {
       router.push('/');
     }
     
-    // Clear the resetting flag after state has settled
+    // Clear the resetting flag after navigation has settled
     setTimeout(() => {
       setIsResetting(false);
-    }, 100);
+    }, 200);
 
     toast({
       title: "New conversation started",

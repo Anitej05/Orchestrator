@@ -441,6 +441,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
     },
 
     resetConversation: () => {
+      console.log('Resetting conversation state - clearing ALL fields including plan and metadata');
       set({
         thread_id: undefined,
         status: 'idle',
@@ -449,16 +450,21 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
         currentQuestion: undefined,
         task_agent_pairs: [],
         final_response: undefined,
-        metadata: {},
+        metadata: {}, // Explicitly clear metadata
         uploaded_files: [],
-        task_statuses: {},
+        task_statuses: {}, // Explicitly clear task statuses
         current_executing_task: null,
         isLoading: false,
+        plan: [], // Explicitly clear plan
+        canvas_content: undefined, // Clear canvas
+        has_canvas: false,
+        canvas_type: undefined,
       });
       // Also clear from localStorage
       if (typeof window !== 'undefined') {
         localStorage.removeItem('thread_id');
       }
+      console.log('Conversation reset complete - all state cleared');
     },
 
     _setConversationState: (newState: Partial<ConversationStore>) => {
