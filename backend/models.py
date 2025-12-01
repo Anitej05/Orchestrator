@@ -44,6 +44,11 @@ class Agent(Base):
     # REST: { "base_url": "https://api.weather.com" }
     # MCP:  { "url": "https://mcp.supabase.com/mcp" }
     connection_config = Column(JSON, nullable=True)
+    
+    # Credential Management
+    requires_credentials = Column(Boolean, default=False)  # Does this agent need credentials?
+    credential_fields = Column(JSON, nullable=True)  # Define what credentials are needed
+    # Format: [{"name": "api_key", "label": "API Key", "type": "password", "required": true, "description": "..."}]
 
     capability_vectors = relationship("AgentCapability", back_populates="agent", cascade="all, delete-orphan")
     endpoints = relationship("AgentEndpoint", back_populates="agent", cascade="all, delete-orphan", lazy="joined")
@@ -152,21 +157,27 @@ class AgentCredential(Base):
     """
     Stores user-specific authentication for an agent.
     Links a User + Agent + Encrypted Keys.
+    Supports multiple credential fields per agent.
     """
     __tablename__ = "agent_credentials"
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String, nullable=False, index=True)  # Clerk User ID
     agent_id = Column(String, ForeignKey("agents.id"), nullable=False)
-    auth_type = Column(String, default=AuthType.NONE.value)
     
-    # Encrypted Data (Using Fernet)
+    # New: Store all credentials as encrypted JSON
+    # Format: {"api_key": "encrypted_value", "connection_id": "encrypted_value", ...}
+    encrypted_credentials = Column(JSON, nullable=True, default=dict)
+    
+    # Legacy fields (kept for backward compatibility)
+    auth_type = Column(String, default=AuthType.NONE.value)
     encrypted_access_token = Column(Text, nullable=True)
     encrypted_refresh_token = Column(Text, nullable=True)
+    auth_header_name = Column(String, default="Authorization")
+    token_expires_at = Column(DateTime, nullable=True)
     
     # Metadata
-    auth_header_name = Column(String, default="Authorization")  # e.g. "X-OpenAI-Key"
-    token_expires_at = Column(DateTime, nullable=True)
+    is_active = Column(Boolean, default=True)  # Can be disabled without deleting
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     

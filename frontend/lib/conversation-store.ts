@@ -244,7 +244,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
       const wasWaitingForUser = get().isWaitingForUser;
       
       console.log(`Continuing conversation with thread_id: ${thread_id}, planning_mode: ${planningMode}, wasWaitingForUser: ${wasWaitingForUser}`);
-      set({ isLoading: true, status: 'processing', isWaitingForUser: false });
+      set({ isLoading: true, status: 'processing', isWaitingForUser: false, task_statuses: {}, current_executing_task: null });
 
       try {
         let uploadedFiles: FileObject[] = [];

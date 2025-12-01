@@ -12,7 +12,8 @@ from schemas import (
     EndpointDetail,
     EndpointParameterDetail
 )
-from sentence_transformers import SentenceTransformer
+# Lazy import to avoid jaxlib issues
+# from sentence_transformers import SentenceTransformer
 from models import AgentCapability
 import httpx
 import asyncio
@@ -45,7 +46,7 @@ from langgraph.graph import StateGraph, START, END
 from dotenv import load_dotenv
 from typing import List, Optional, Dict, Any, Literal
 from database import SessionLocal
-from models import AgentCapability
+from models import AgentCapability, AgentEndpoint
 from sqlalchemy import select
 import logging
 from langchain_core.outputs import ChatResult, ChatGeneration
@@ -65,6 +66,22 @@ class ForceJsonSerializer(JsonPlusSerializer):
 BACKEND_DIR_FOR_HISTORY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 CONVERSATION_HISTORY_DIR = os.path.join(BACKEND_DIR_FOR_HISTORY, "conversation_history")
 os.makedirs(CONVERSATION_HISTORY_DIR, exist_ok=True)
+
+# --- Artifact Management Integration ---
+# Import artifact hooks for automatic context management
+try:
+    from orchestrator.artifact_integration import (
+        hooks as artifact_hooks,
+        ArtifactConfig,
+        compress_state_for_saving,
+        expand_state_from_saved,
+        get_optimized_llm_context,
+        build_prompt_with_artifacts
+    )
+    ARTIFACT_INTEGRATION_ENABLED = True
+except ImportError:
+    ARTIFACT_INTEGRATION_ENABLED = False
+    artifact_hooks = None
 
 # --- Imports for Document Processing ---
 from langchain_community.vectorstores import FAISS
@@ -123,6 +140,127 @@ def extract_json_from_response(text: str) -> str | None:
 
     # 4. As a last resort, if the above methods fail, return None.
     return None
+
+
+def _summarize_completed_tasks_for_context(completed_tasks: List[Dict]) -> List[Dict]:
+    """
+    Summarize completed tasks to reduce context size for LLM calls.
+    Keeps essential information while removing large data payloads.
+    Specifically handles browser agent responses to extract useful content.
+    """
+    if not completed_tasks:
+        return []
+    
+    summarized = []
+    for task in completed_tasks:
+        summary = {
+            "task_name": task.get("task_name", "unknown"),
+            "status": "completed"
+        }
+        
+        result = task.get("result", {})
+        raw_response = task.get("raw_response", {})
+        
+        if isinstance(result, str):
+            # Truncate long string results
+            summary["result_preview"] = result[:500] + "..." if len(result) > 500 else result
+        elif isinstance(result, dict):
+            # Extract key information from dict results
+            if "status" in result:
+                summary["result_status"] = result["status"]
+            if "summary" in result:
+                summary["result_summary"] = str(result["summary"])[:500]
+            elif "task_summary" in result:
+                summary["result_summary"] = str(result["task_summary"])[:500]
+        
+        # Handle browser agent raw_response specially - extract the useful content
+        if raw_response and isinstance(raw_response, dict):
+            # Get task summary
+            if "task_summary" in raw_response:
+                summary["task_summary"] = raw_response["task_summary"]
+            
+            # Extract the actual useful data from browser results
+            if "extracted_data" in raw_response:
+                extracted = raw_response["extracted_data"]
+                
+                # Handle entries array (browser agent format)
+                if isinstance(extracted, dict) and "entries" in extracted:
+                    entries = extracted["entries"]
+                    if entries and len(entries) > 0:
+                        # Get the text_content which has the actual useful data
+                        first_entry = entries[0]
+                        if "text_content" in first_entry:
+                            # This is the key data - the actual page content
+                            text_content = first_entry["text_content"]
+                            # Truncate but keep enough for useful context
+                            summary["page_content"] = text_content[:2000] if len(text_content) > 2000 else text_content
+                        if "title" in first_entry:
+                            summary["page_title"] = first_entry["title"]
+                        if "url" in first_entry:
+                            summary["page_url"] = first_entry["url"]
+                        # Skip links, images, headings - they bloat the context
+                
+                # Handle direct extracted_data dict
+                elif isinstance(extracted, dict):
+                    if "text_content" in extracted:
+                        summary["page_content"] = extracted["text_content"][:2000]
+                    if "title" in extracted:
+                        summary["page_title"] = extracted["title"]
+            
+            # Include actions summary
+            if "actions_taken" in raw_response:
+                actions = raw_response["actions_taken"]
+                summary["actions_count"] = len(actions)
+                # Just include action types, not full details
+                summary["actions"] = [a.get("action", "unknown") for a in actions[:5]]
+        
+        # Include error info if present
+        if isinstance(result, dict) and "error" in result:
+            summary["error"] = str(result["error"])[:200]
+        
+        summarized.append(summary)
+    
+    return summarized
+
+
+def transform_payload_types(payload: Dict[str, Any], parameters: List[Any]) -> Dict[str, Any]:
+    '''
+    Transform payload parameter types to match the endpoint schema.
+    Fixes common issues like:
+    - String values that should be arrays (e.g., "email@example.com" -> ["email@example.com"])
+    - Missing optional parameters with defaults
+    '''
+    transformed = payload.copy()
+    
+    for param in parameters:
+        param_name = param.name
+        param_type = param.param_type
+        
+        # Skip if parameter not in payload
+        if param_name not in transformed:
+            continue
+        
+        value = transformed[param_name]
+        
+        # Transform string to array if parameter expects array
+        if param_type == "array" and isinstance(value, str):
+            logger.info(f"Transforming parameter '{param_name}' from string to array: '{value}' -> ['{value}']")
+            transformed[param_name] = [value]
+        
+        # Transform single item to array if parameter expects array
+        elif param_type == "array" and not isinstance(value, list):
+            logger.info(f"Transforming parameter '{param_name}' to array: {value} -> [{value}]")
+            transformed[param_name] = [value]
+        
+        # Ensure integer type
+        elif param_type == "integer" and isinstance(value, str):
+            try:
+                transformed[param_name] = int(value)
+                logger.info(f"Transformed parameter '{param_name}' from string to integer: '{value}' -> {transformed[param_name]}")
+            except ValueError:
+                logger.warning(f"Could not convert '{param_name}' value '{value}' to integer")
+    
+    return transformed
 
 def serialize_complex_object(obj):
     '''Helper function to serialize complex objects consistently'''
@@ -378,7 +516,8 @@ def invoke_llm_with_fallback(primary_llm, fallback_llm, prompt: str, pydantic_sc
             errors[current_llm_name] = e
             error_msg = str(e).lower()
             # Check if this is an external API issue that warrants trying the next provider
-            if any(keyword in error_msg for keyword in ["429", "rate", "too_many_requests", "high traffic", "queue_exceeded"]):
+            # Include 413 (request too large) as some providers have different token limits
+            if any(keyword in error_msg for keyword in ["429", "413", "rate", "too_many_requests", "high traffic", "queue_exceeded", "request too large", "tokens per"]):
                 logger.warning(f"{current_llm_name} LLM failed with external API issue: {e}. Will try next LLM provider.")
                 if is_last_attempt:
                     # If this is the last attempt and it failed, we've exhausted all options
@@ -900,10 +1039,20 @@ def parse_prompt(state: State):
 
 async def agent_directory_search(state: State):
     """
-    OPTIMIZATION: Internal search using direct DB queries instead of HTTP calls.
-    This eliminates network overhead and is 5-10x faster.
+    LLM-BASED SEMANTIC AGENT SELECTION (Primary) with vector similarity as fallback.
+    
+    This approach:
+    1. Fetches ALL active agents with their names, descriptions, and capabilities
+    2. Uses LLM to semantically match agents to tasks based on the full context
+    3. Falls back to vector similarity search if LLM fails
+    
+    Benefits:
+    - Respects explicit user preferences (e.g., "use browser automation agent")
+    - Better semantic understanding of task requirements
+    - More accurate agent selection for complex/ambiguous tasks
     """
     parsed_tasks = state.get('parsed_tasks', [])
+    original_prompt = state.get('original_prompt', '')
     logger.info(f"Searching for agents for tasks: {[t.task_name for t in parsed_tasks]}")
     
     if not parsed_tasks:
@@ -913,39 +1062,213 @@ async def agent_directory_search(state: State):
     user_expectations = state.get('user_expectations') or {}
     candidate_agents_map = {}
     
-    # OPTIMIZATION: Direct DB queries instead of HTTP calls
     db = SessionLocal()
     try:
         from models import Agent, AgentCapability
-        from sqlalchemy import and_, or_
+        from sqlalchemy.orm import joinedload
         
+        # Fetch ALL active agents with their full details
+        query = db.query(Agent).options(
+            joinedload(Agent.endpoints).joinedload(AgentEndpoint.parameters)
+        ).filter(Agent.status == 'active')
+        
+        # Apply user expectations filters
+        if 'price' in user_expectations:
+            max_price = user_expectations['price']
+            query = query.filter(Agent.price_per_call_usd <= max_price)
+        
+        if 'rating' in user_expectations:
+            min_rating = user_expectations['rating']
+            query = query.filter(Agent.rating >= min_rating)
+        
+        all_agents = query.all()
+        logger.info(f"Fetched {len(all_agents)} active agents for LLM-based selection")
+        
+        if not all_agents:
+            logger.warning("No active agents found in database")
+            return {"candidate_agents": {}, "parsing_error_feedback": "No active agents available in the system."}
+        
+        # Build agent catalog for LLM (lightweight: id, name, description, capabilities only)
+        agent_catalog = []
+        agent_lookup = {}  # For quick lookup after LLM selection
+        
+        for agent in all_agents:
+            agent_info = {
+                "id": agent.id,
+                "name": agent.name,
+                "description": agent.description,
+                "capabilities": agent.capabilities,
+                "rating": agent.rating,
+                "price_per_call_usd": agent.price_per_call_usd
+            }
+            agent_catalog.append(agent_info)
+            agent_lookup[agent.id] = agent
+        
+        # Use LLM to select agents for each task
+        primary_llm = ChatGroq(model="llama-3.3-70b-versatile") if os.getenv("GROQ_API_KEY") else ChatCerebras(model="llama-3.3-70b")
+        fallback_llm = ChatNVIDIA(model="meta/llama-3.3-70b-instruct") if os.getenv("NVIDIA_API_KEY") else None
+        
+        # Build task list for the prompt
+        tasks_info = []
         for task in parsed_tasks:
-            task_name = task.task_name
-            logger.info(f"Searching DB for agents with capability: {task_name}")
-            
-            # Build query with filters
-            query = db.query(Agent).join(Agent.capability_vectors).filter(
-                and_(
-                    AgentCapability.capability_text.ilike(f"%{task_name}%"),
-                    Agent.status == 'active'
-                )
+            tasks_info.append({
+                "task_name": task.task_name,
+                "task_description": task.task_description
+            })
+        
+        # LLM prompt for semantic agent selection
+        prompt = f'''
+You are an expert at matching tasks to the most appropriate agents based on their capabilities.
+
+**ORIGINAL USER REQUEST:**
+"{original_prompt}"
+
+**TASKS TO ASSIGN:**
+{json.dumps(tasks_info, indent=2)}
+
+**AVAILABLE AGENTS:**
+{json.dumps(agent_catalog, indent=2)}
+
+**INSTRUCTIONS:**
+For each task, select ALL agents that could potentially handle it, ranked from best to worst match.
+
+**CRITICAL RULES:**
+1. **Respect Explicit User Preferences**: If the user explicitly mentions wanting to use a specific type of agent (e.g., "use browser automation", "use the browser agent", "automate with browser"), you MUST prioritize agents that match that preference.
+2. **Semantic Matching**: Match based on the meaning and intent, not just keyword overlap. For example:
+   - "browse a website" → browser automation agent (NOT just web search)
+   - "search for information" → web search agent
+   - "automate clicking on a page" → browser automation agent
+3. **Capability Depth**: Prefer agents with more specific/relevant capabilities over generic ones.
+4. **Include Multiple Candidates**: Include 2-4 candidate agents per task when possible, so the ranking step can make the final choice.
+
+**OUTPUT FORMAT:**
+Return a JSON object where keys are task names and values are arrays of agent IDs (ordered best to worst):
+{{
+    "task_name_1": ["best_agent_id", "second_best_agent_id", ...],
+    "task_name_2": ["best_agent_id", ...]
+}}
+
+Only include agents that are genuinely capable of handling the task. If no agent can handle a task, use an empty array.
+'''
+        
+        # Schema for LLM response
+        class AgentSelectionResult(BaseModel):
+            selections: Dict[str, List[str]] = Field(
+                description="Map of task names to ordered list of agent IDs"
             )
+        
+        try:
+            logger.info("Using LLM for semantic agent selection...")
+            response = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, AgentSelectionResult)
             
-            # Apply user expectations filters
-            if 'price' in user_expectations:
-                max_price = user_expectations['price']
-                query = query.filter(Agent.price_per_call_usd <= max_price)
+            # Process LLM selections
+            for task in parsed_tasks:
+                task_name = task.task_name
+                selected_agent_ids = response.selections.get(task_name, [])
+                
+                if not selected_agent_ids:
+                    logger.warning(f"LLM selected no agents for task '{task_name}'")
+                    candidate_agents_map[task_name] = []
+                    continue
+                
+                # Convert selected agent IDs to full AgentCard objects
+                validated_agents = []
+                for agent_id in selected_agent_ids:
+                    agent = agent_lookup.get(agent_id)
+                    if not agent:
+                        logger.warning(f"Agent ID '{agent_id}' not found in lookup")
+                        continue
+                    
+                    try:
+                        agent_card = AgentCard(
+                            id=agent.id,
+                            owner_id=agent.owner_id,
+                            name=agent.name,
+                            description=agent.description,
+                            capabilities=agent.capabilities,
+                            price_per_call_usd=agent.price_per_call_usd,
+                            status=agent.status.value if hasattr(agent.status, 'value') else agent.status,
+                            rating=agent.rating,
+                            public_key_pem=agent.public_key_pem,
+                            agent_type=agent.agent_type if hasattr(agent, 'agent_type') else 'http_rest',
+                            connection_config=agent.connection_config if hasattr(agent, 'connection_config') else None,
+                            endpoints=[
+                                EndpointDetail(
+                                    endpoint=ep.endpoint,
+                                    http_method=ep.http_method,
+                                    description=ep.description,
+                                    parameters=[
+                                        EndpointParameterDetail(
+                                            name=p.name,
+                                            description=p.description,
+                                            param_type=p.param_type,
+                                            required=p.required,
+                                            default_value=p.default_value
+                                        ) for p in ep.parameters
+                                    ]
+                                ) for ep in agent.endpoints
+                            ]
+                        )
+                        validated_agents.append(agent_card.model_dump(mode='json'))
+                    except Exception as e:
+                        logger.error(f"Failed to convert agent {agent.id} to AgentCard: {e}")
+                        continue
+                
+                candidate_agents_map[task_name] = validated_agents
+                logger.info(f"LLM selected {len(validated_agents)} agents for task '{task_name}': {[a['name'] for a in validated_agents]}")
             
-            if 'rating' in user_expectations:
-                min_rating = user_expectations['rating']
-                query = query.filter(Agent.rating >= min_rating)
+            logger.info("LLM-based agent selection complete.")
             
-            # Execute query and convert to AgentCard format
-            agents = query.distinct().all()
+        except Exception as e:
+            logger.error(f"LLM-based agent selection failed: {e}. Falling back to text-based search.")
+            # Fallback to simple text-based matching
+            candidate_agents_map = await _fallback_text_search(parsed_tasks, all_agents, agent_lookup)
+        
+        # Check for tasks with no agents found
+        for task in parsed_tasks:
+            if not candidate_agents_map.get(task.task_name):
+                error_feedback = (
+                    f"The previous attempt to parse the prompt resulted in the task description "
+                    f"'{task.task_description}', which was matched to the capability '{task.task_name}'. "
+                    f"However, no agents were found that could perform this task. Please generate a new, "
+                    f"more detailed and specific task description that better captures the user's intent."
+                )
+                logger.warning(f"No agents found for task '{task.task_name}'. Looping back to re-parse.")
+                return {"candidate_agents": {}, "parsing_error_feedback": error_feedback}
+        
+        return {"candidate_agents": candidate_agents_map, "parsing_error_feedback": None}
+        
+    except Exception as e:
+        logger.error(f"Agent directory search failed: {e}")
+        return {"candidate_agents": {}, "parsing_error_feedback": f"Agent search failed: {str(e)}"}
+        
+    finally:
+        db.close()
+
+
+async def _fallback_text_search(parsed_tasks, all_agents, agent_lookup):
+    """
+    Fallback text-based search when LLM selection fails.
+    Uses simple keyword matching on capabilities.
+    """
+    from models import AgentEndpoint
+    candidate_agents_map = {}
+    
+    for task in parsed_tasks:
+        task_name = task.task_name.lower()
+        task_desc = task.task_description.lower()
+        
+        matched_agents = []
+        for agent in all_agents:
+            # Check if any capability matches the task
+            capabilities_str = " ".join(agent.capabilities).lower() if agent.capabilities else ""
+            description_str = (agent.description or "").lower()
             
-            # Convert SQLAlchemy models to AgentCard Pydantic models
-            validated_agents = []
-            for agent in agents:
+            # Simple keyword matching
+            if (task_name in capabilities_str or 
+                task_name in description_str or
+                any(cap.lower() in task_desc for cap in (agent.capabilities or []))):
+                
                 try:
                     agent_card = AgentCard(
                         id=agent.id,
@@ -976,55 +1299,16 @@ async def agent_directory_search(state: State):
                             ) for ep in agent.endpoints
                         ]
                     )
-                    validated_agents.append(agent_card.model_dump(mode='json'))
+                    matched_agents.append(agent_card.model_dump(mode='json'))
                 except Exception as e:
-                    logger.error(f"Failed to convert agent {agent.id} to AgentCard: {e}")
+                    logger.error(f"Failed to convert agent {agent.id} in fallback: {e}")
                     continue
-            
-            candidate_agents_map[task_name] = validated_agents
-            logger.info(f"Found {len(validated_agents)} agents for task '{task_name}'")
         
-        logger.info("Internal DB search complete.")
-        
-        # Check for tasks with no agents found
-        for task in parsed_tasks:
-            if not candidate_agents_map.get(task.task_name):
-                error_feedback = (
-                    f"The previous attempt to parse the prompt resulted in the task description "
-                    f"'{task.task_description}', which was matched to the capability '{task.task_name}'. "
-                    f"However, no agents were found that could perform this task. Please generate a new, "
-                    f"more detailed and specific task description that better captures the user's intent."
-                )
-                logger.warning(f"Semantic failure for task '{task.task_name}'. Looping back to re-parse.")
-                return {"candidate_agents": {}, "parsing_error_feedback": error_feedback}
-        
-        return {"candidate_agents": candidate_agents_map, "parsing_error_feedback": None}
-        
-    except Exception as e:
-        logger.error(f"Internal search failed: {e}. Falling back to HTTP search.")
-        # Fallback to original HTTP-based search if DB query fails
-        urls_to_fetch = []
-        base_url = "http://127.0.0.1:8000/api/agents/search"
-        
-        for task in parsed_tasks:
-            params: Dict[str, Any] = {'capabilities': task.task_name}
-            if 'price' in user_expectations:
-                params['max_price'] = user_expectations['price']
-            if 'rating' in user_expectations:
-                params['min_rating'] = user_expectations['rating']
-            
-            request = httpx.Request("GET", base_url, params=params)
-            urls_to_fetch.append((task.task_name, str(request.url), task.task_description))
-        
-        logger.info(f"Dispatching {len(urls_to_fetch)} HTTP agent search requests (fallback).")
-        async with httpx.AsyncClient() as client:
-            results = await asyncio.gather(*(fetch_agents_for_task(client, name, url) for name, url, desc in urls_to_fetch))
-        
-        candidate_agents_map = {res['task_name']: res['agents'] for res in results}
-        return {"candidate_agents": candidate_agents_map, "parsing_error_feedback": None}
-        
-    finally:
-        db.close()
+        candidate_agents_map[task.task_name] = matched_agents
+        logger.info(f"Fallback search found {len(matched_agents)} agents for task '{task.task_name}'")
+    
+    return candidate_agents_map
+
 
 # Removed - now defined inline in rank_agents for enhanced reasoning
 
@@ -1398,6 +1682,39 @@ def validate_plan_for_execution(state: State):
     print(f"!!! VALIDATION ENTRY !!!")
     logger.info("Performing dynamic validation of the execution plan...")
     
+    # --- ARTIFACT INTEGRATION: Summarize completed tasks to reduce context size ---
+    completed_tasks_for_context = state.get('completed_tasks', [])
+    if ARTIFACT_INTEGRATION_ENABLED and completed_tasks_for_context:
+        # Create summarized version of completed tasks for context
+        summarized_tasks = []
+        for task in completed_tasks_for_context:
+            task_summary = {
+                "task_name": task.get("task_name", "unknown"),
+                "status": "completed"
+            }
+            # Extract key result info without full data
+            result = task.get("result", {})
+            if isinstance(result, str):
+                task_summary["result_preview"] = result[:500] if len(result) > 500 else result
+            elif isinstance(result, dict):
+                # Keep only essential keys
+                if "status" in result:
+                    task_summary["result_status"] = result["status"]
+                if "summary" in result:
+                    task_summary["result_summary"] = result["summary"][:500]
+                elif "task_summary" in result:
+                    task_summary["result_summary"] = result["task_summary"][:500]
+                # For browser results, extract key data
+                if "extracted_data" in result:
+                    extracted = result["extracted_data"]
+                    if isinstance(extracted, dict):
+                        task_summary["extracted_keys"] = list(extracted.keys())[:10]
+                    elif isinstance(extracted, list):
+                        task_summary["extracted_count"] = len(extracted)
+            summarized_tasks.append(task_summary)
+        completed_tasks_for_context = summarized_tasks
+        logger.info(f"Summarized {len(completed_tasks_for_context)} completed tasks for validation context")
+    
     # Rehydrate the plan
     task_plan_dicts = state.get("task_plan", [])
     if not task_plan_dicts or not task_plan_dicts[0]:
@@ -1477,7 +1794,7 @@ def validate_plan_for_execution(state: State):
     - Original User Prompt: "{state['original_prompt']}"
     - Conversation History:
     {history}
-    - Previously Completed Tasks: {json.dumps(state.get('completed_tasks', []), indent=2, default=str)}
+    - Previously Completed Tasks: {json.dumps(completed_tasks_for_context, indent=2, default=str)}
     - Task to Validate: "{task_to_validate.task_description}"
     - Required Parameters for this Task: {required_params}
     {file_context}
@@ -1549,57 +1866,62 @@ async def execute_mcp_agent(planned_task: PlannedTask, agent_details: AgentCard,
             }
         
         # Fetch user credentials for this agent
+        from services.credential_service import get_agent_credentials
         db = SessionLocal()
         try:
-            headers = {}
-            credentials = db.query(AgentCredential).filter_by(
-                agent_id=agent_details.id,
-                user_id=user_id
-            ).all()
+            credentials = get_agent_credentials(db, agent_details.id, user_id)
             
-            for cred in credentials:
-                # Decrypt token
-                token = decrypt(cred.encrypted_access_token)
-                headers[cred.auth_header_name] = token
+            # Build headers from credentials
+            headers = {}
+            if 'composio_api_key' in credentials:
+                headers['x-api-key'] = credentials['composio_api_key']
+            elif 'api_key' in credentials:
+                headers['x-api-key'] = credentials['api_key']
+            
+            # Override URL if provided in credentials
+            if 'gmail_mcp_url' in credentials:
+                url = credentials['gmail_mcp_url']
+            elif 'mcp_url' in credentials:
+                url = credentials['mcp_url']
             
             logger.info(f"Connecting to MCP server: {url} with {len(headers)} auth headers")
             
             # Connect to MCP server
             sse_url = f"{url}/sse" if not url.endswith("/sse") else url
             
-            async with httpx.AsyncClient(headers=headers, timeout=60.0) as http_client:
-                async with mcp.client.sse.sse_client(sse_url, http_client=http_client) as (read, write):
-                    async with ClientSession(read, write) as session:
-                        # Initialize session
-                        await session.initialize()
+            # Use sse_client with headers parameter (newer MCP SDK version)
+            async with mcp.client.sse.sse_client(sse_url, headers=headers, timeout=60.0) as (read, write):
+                async with ClientSession(read, write) as session:
+                    # Initialize session
+                    await session.initialize()
+                    
+                    # Call the tool
+                    tool_name = planned_task.primary.endpoint
+                    logger.info(f"Calling MCP tool: {tool_name} with payload: {payload}")
+                    
+                    result = await session.call_tool(tool_name, payload)
+                    
+                    # Extract result content
+                    if hasattr(result, 'content') and result.content:
+                        # MCP returns content as a list of content items
+                        content_items = []
+                        for item in result.content:
+                            if hasattr(item, 'text'):
+                                content_items.append(item.text)
+                            elif hasattr(item, 'data'):
+                                content_items.append(str(item.data))
                         
-                        # Call the tool
-                        tool_name = planned_task.primary.endpoint
-                        logger.info(f"Calling MCP tool: {tool_name} with payload: {payload}")
-                        
-                        result = await session.call_tool(tool_name, payload)
-                        
-                        # Extract result content
-                        if hasattr(result, 'content') and result.content:
-                            # MCP returns content as a list of content items
-                            content_items = []
-                            for item in result.content:
-                                if hasattr(item, 'text'):
-                                    content_items.append(item.text)
-                                elif hasattr(item, 'data'):
-                                    content_items.append(str(item.data))
-                            
-                            result_text = "\n".join(content_items) if content_items else str(result)
-                        else:
-                            result_text = str(result)
-                        
-                        logger.info(f"MCP tool call successful for task '{planned_task.task_name}'")
-                        
-                        return {
-                            "task_name": planned_task.task_name,
-                            "result": result_text,
-                            "raw_response": result_text
-                        }
+                        result_text = "\n".join(content_items) if content_items else str(result)
+                    else:
+                        result_text = str(result)
+                    
+                    logger.info(f"MCP tool call successful for task '{planned_task.task_name}'")
+                    
+                    return {
+                        "task_name": planned_task.task_name,
+                        "result": result_text,
+                        "raw_response": result_text
+                    }
                         
         finally:
             db.close()
@@ -1623,10 +1945,25 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
     '''
     logger.info(f"Running agent '{agent_details.name}' for task: '{planned_task.task_name}'")
     
-    endpoint_url = str(planned_task.primary.endpoint)
+    # Construct full URL from base_url + endpoint
+    endpoint_path = str(planned_task.primary.endpoint)
+    # CRITICAL FIX: Safely access connection_config which may be None or not a dict
+    connection_config = agent_details.connection_config
+    if connection_config and isinstance(connection_config, dict):
+        base_url = connection_config.get('base_url', '')
+    else:
+        base_url = ''
+    
+    # If endpoint is already a full URL, use it as-is; otherwise prepend base_url
+    if endpoint_path.startswith('http://') or endpoint_path.startswith('https://'):
+        endpoint_url = endpoint_path
+    else:
+        endpoint_url = f"{base_url}{endpoint_path}" if base_url else endpoint_path
+    
     http_method = planned_task.primary.http_method.upper()
     
-    selected_endpoint = next((ep for ep in agent_details.endpoints if str(ep.endpoint) == endpoint_url), None)
+    # Match endpoint by path only (not full URL)
+    selected_endpoint = next((ep for ep in agent_details.endpoints if str(ep.endpoint) == endpoint_path), None)
 
     if not selected_endpoint:
         error_msg = f"Critical Error: Could not find endpoint details for '{endpoint_url}' on agent '{agent_details.name}'."
@@ -1653,7 +1990,8 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
     if params_match and pre_extracted_params:
         logger.info(f"OPTIMIZATION: All required parameters pre-extracted. Skipping LLM payload generation.")
         logger.info(f"Using parameters: {pre_extracted_params}")
-        payload = pre_extracted_params
+        # Transform pre-extracted parameters to match expected types
+        payload = transform_payload_types(pre_extracted_params, selected_endpoint.parameters)
         skip_llm_generation = True
     else:
         logger.info(f"Required params: {required_params}, Pre-extracted: {list(pre_extracted_params.keys())}")
@@ -1703,19 +2041,45 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
 
             http_error_context = f"\nIMPORTANT: The last API call failed with a client error. Please correct the payload based on this feedback:\n<error>\n{last_error}\n</error>\n" if last_error else ""
 
+            # Build parameter schema with explicit type requirements
+            param_schema_str = "**Parameter Schema (STRICT TYPE REQUIREMENTS):**\n"
+            for p in selected_endpoint.parameters:
+                required_str = "REQUIRED" if p.required else "optional"
+                type_example = ""
+                if p.param_type == "array":
+                    type_example = ' (MUST be a JSON array like ["value1", "value2"], even for single items like ["single@email.com"])'
+                elif p.param_type == "string":
+                    type_example = ' (MUST be a JSON string like "value")'
+                elif p.param_type == "integer":
+                    type_example = ' (MUST be a JSON number like 42)'
+                elif p.param_type == "boolean":
+                    type_example = ' (MUST be a JSON boolean: true or false)'
+                
+                param_schema_str += f"- {p.name}: {p.param_type}{type_example} - {required_str} - {p.description}\n"
+            
             payload_prompt = f'''
             You are an expert at creating API requests. Your task is to generate a valid JSON payload for the following endpoint, based on all the provided context.
 
             Endpoint Description: "{selected_endpoint.description}"
-            Endpoint Parameters: {[p.model_dump_json() for p in selected_endpoint.parameters]}
+            
+            {param_schema_str}
+            
+            **CRITICAL TYPE RULES:**
+            1. If param_type is "array", the value MUST be a JSON array [], even for single items
+            2. If param_type is "string", the value MUST be a JSON string ""
+            3. If param_type is "integer", the value MUST be a JSON number
+            4. If param_type is "boolean", the value MUST be true or false (no quotes)
+            
             High-Level Task: "{planned_task.task_description}"
             Conversation History:
             {history}
-            Historical Context (previous task results): {json.dumps(state.get('completed_tasks', []), indent=2, default=str)}
+            Historical Context (previous task results): {json.dumps(_summarize_completed_tasks_for_context(state.get('completed_tasks', [])), indent=2, default=str)}
             {file_context}
             {http_error_context}
             {failed_attempts_context}
+            
             Your response MUST be only the JSON payload object, with no extra text or markdown.
+            Ensure all parameter types match the schema exactly.
             '''
             
             # Add exponential backoff for rate limit handling when generating payloads
@@ -1731,6 +2095,11 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                     if not json_str:
                         raise json.JSONDecodeError("No JSON found in LLM response", cleaned_payload_str, 0)
                     payload = json.loads(json_str)
+                    
+                    # CRITICAL FIX: Transform payload parameters to match expected types
+                    # This fixes issues like "to" being a string instead of array
+                    payload = transform_payload_types(payload, selected_endpoint.parameters)
+                    
                     logger.info(f"LLM generated payload for task '{planned_task.task_name}': {payload}")
                     payload_generated = True
                     break  # Success, exit retry loop
@@ -1760,9 +2129,21 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
             return await execute_mcp_agent(planned_task, agent_details, state, config, payload)
         
         # --- HTTP REST EXECUTION PATH ---
-        headers = {}
-        if api_key := os.getenv(f"{agent_details.id.upper().replace('-', '_')}_API_KEY"):
-            headers["Authorization"] = f"Bearer {api_key}"
+        # Load credentials from database (new unified system)
+        user_id = config.get("configurable", {}).get("user_id", "system")
+        
+        from services.credential_service import get_credentials_for_headers
+        db = SessionLocal()
+        try:
+            headers = get_credentials_for_headers(db, agent_details.id, user_id, agent_details.agent_type)
+        finally:
+            db.close()
+        
+        # Fallback to .env for backward compatibility (will be deprecated)
+        if not headers:
+            if api_key := os.getenv(f"{agent_details.id.upper().replace('-', '_')}_API_KEY"):
+                headers["Authorization"] = f"Bearer {api_key}"
+                logger.warning(f"Using .env API key for {agent_details.id} - please migrate to credential management UI")
 
         # Wait for agent to be ready if it's still starting
         agent_name = f"{agent_details.id}_agent"
@@ -2045,6 +2426,9 @@ async def execute_batch(state: State, config: RunnableConfig):
     print(f"!!! EXECUTE_BATCH: Got {len(batch_results)} results !!!")
     logger.info(f"Got {len(batch_results)} batch results")
     
+    # Get thread_id for artifact storage
+    thread_id_for_artifacts = config.get("configurable", {}).get("thread_id") if config else None
+    
     completed_tasks_with_desc = []
     for res in batch_results:
         task_name = res['task_name']
@@ -2056,10 +2440,26 @@ async def execute_batch(state: State, config: RunnableConfig):
         print(f"!!! EXECUTE_BATCH: Task '{task_name}' {status} in {execution_time}s with {agent_used} !!!")
         logger.info(f"Task '{task_name}' {status} in {execution_time}s - Result preview: {result_preview}")
         
+        # --- ARTIFACT INTEGRATION: Compress large task results ---
+        task_result = res.get('result', {})
+        raw_response = res.get('raw_response', {})
+        
+        if ARTIFACT_INTEGRATION_ENABLED and artifact_hooks and thread_id_for_artifacts:
+            try:
+                # Check if result is large enough to compress
+                result_size = len(json.dumps(task_result, default=str))
+                if result_size > 2000:  # Compress results > 2KB
+                    compressed = artifact_hooks.on_task_complete(task_name, task_result, thread_id_for_artifacts)
+                    if '_artifact_ref' in compressed:
+                        logger.info(f"Compressed task result '{task_name}' to artifact ({result_size} bytes)")
+                        task_result = compressed
+            except Exception as artifact_err:
+                logger.warning(f"Failed to compress task result: {artifact_err}")
+        
         completed_tasks_with_desc.append(CompletedTask(
             task_name=task_name,
-            result=res.get('result', {}),
-            raw_response=res.get('raw_response', {})
+            result=task_result,
+            raw_response=raw_response
         ))
 
     completed_tasks = state.get('completed_tasks', []) + completed_tasks_with_desc
@@ -2770,27 +3170,9 @@ def generate_text_answer(state: State):
         else:
             # If canvas is needed, generate a more concise text response that references the canvas
             if needs_canvas and canvas_type:
-                # Extract detailed information from raw_response if available
-                detailed_results = []
-                for task in completed_tasks:
-                    task_info = {
-                        'task_name': task.get('task_name'),
-                        'result': task.get('result'),
-                    }
-                    # Include raw_response data if available (contains extracted_data, actions, etc.)
-                    if 'raw_response' in task and task['raw_response'] and isinstance(task['raw_response'], dict):
-                        raw = task['raw_response']
-                        task_info['extracted_data'] = raw.get('extracted_data')
-                        task_info['actions_taken'] = raw.get('actions_taken', [])
-                        task_info['task_summary'] = raw.get('task_summary')
-                        logger.info(f"📊 Task '{task.get('task_name')}' extracted_data: {raw.get('extracted_data')}")
-                    elif 'raw_response' in task and task['raw_response']:
-                        logger.warning(f"⚠️  Task '{task.get('task_name')}' has raw_response as string (likely an error): {task['raw_response'][:100]}")
-                    else:
-                        logger.warning(f"⚠️  Task '{task.get('task_name')}' has no raw_response data")
-                    detailed_results.append(task_info)
-                
-                logger.info(f"📋 Detailed results for LLM: {json.dumps(detailed_results, indent=2)[:500]}...")
+                # Use summarized results to avoid token limit issues
+                summarized_results = _summarize_completed_tasks_for_context(completed_tasks)
+                logger.info(f"📋 Summarized results for LLM (canvas mode): {json.dumps(summarized_results, indent=2)[:500]}...")
                 
                 prompt = f'''
                 You are an expert project manager's assistant. Your job is to synthesize the results from a team of AI agents into a single, clean, and coherent final report for the user.
@@ -2802,7 +3184,7 @@ def generate_text_answer(state: State):
                 
                 The following tasks were completed, with these DETAILED results:
                 ---
-                {json.dumps(detailed_results, indent=2)}
+                {json.dumps(summarized_results, indent=2)}
                 ---
                 
                 A {canvas_type} visualization has been prepared to display this information. 
@@ -2835,27 +3217,9 @@ def generate_text_answer(state: State):
                 - If actions_taken show the agent looked for something but didn't find it, report that accurately
                 '''
             else:
-                # Extract detailed information from raw_response if available
-                detailed_results = []
-                for task in completed_tasks:
-                    task_info = {
-                        'task_name': task.get('task_name'),
-                        'result': task.get('result'),
-                    }
-                    # Include raw_response data if available (contains extracted_data, actions, etc.)
-                    if 'raw_response' in task and task['raw_response'] and isinstance(task['raw_response'], dict):
-                        raw = task['raw_response']
-                        task_info['extracted_data'] = raw.get('extracted_data')
-                        task_info['actions_taken'] = raw.get('actions_taken', [])
-                        task_info['task_summary'] = raw.get('task_summary')
-                        logger.info(f"📊 Task '{task.get('task_name')}' extracted_data: {raw.get('extracted_data')}")
-                    elif 'raw_response' in task and task['raw_response']:
-                        logger.warning(f"⚠️  Task '{task.get('task_name')}' has raw_response as string (likely an error): {task['raw_response'][:100]}")
-                    else:
-                        logger.warning(f"⚠️  Task '{task.get('task_name')}' has no raw_response data")
-                    detailed_results.append(task_info)
-                
-                logger.info(f"📋 Detailed results for LLM: {json.dumps(detailed_results, indent=2)[:500]}...")
+                # Use summarized results to avoid token limit issues
+                summarized_results = _summarize_completed_tasks_for_context(completed_tasks)
+                logger.info(f"📋 Summarized results for LLM: {json.dumps(summarized_results, indent=2)[:500]}...")
                 
                 prompt = f'''
                 You are an expert project manager's assistant. Your job is to synthesize the results from a team of AI agents into a single, clean, and coherent final report for the user.
@@ -2867,7 +3231,7 @@ def generate_text_answer(state: State):
                 
                 The following tasks were completed, with these DETAILED results:
                 ---
-                {json.dumps(detailed_results, indent=2)}
+                {json.dumps(summarized_results, indent=2)}
                 ---
                 
                 Please generate a final, human-readable response that directly answers the user's original request based on the collected results.
@@ -3012,19 +3376,14 @@ def generate_final_response(state: State):
     logger.info("Complex request - using unified text + canvas generation")
     
     # UNIFIED PROMPT: Generate text response + canvas decision + canvas content in ONE call
-    # Extract detailed information from completed tasks
-    detailed_results = []
-    for task in completed_tasks:
-        task_info = {
-            'task_name': task.get('task_name'),
-            'result': task.get('result'),
-        }
-        if 'raw_response' in task and task['raw_response'] and isinstance(task['raw_response'], dict):
-            raw = task['raw_response']
-            task_info['extracted_data'] = raw.get('extracted_data')
-            task_info['actions_taken'] = raw.get('actions_taken', [])
-            task_info['task_summary'] = raw.get('task_summary')
-        detailed_results.append(task_info)
+    # Use summarized completed tasks to avoid token limit issues
+    # The _summarize_completed_tasks_for_context function extracts key info while removing bloat
+    summarized_results = _summarize_completed_tasks_for_context(completed_tasks)
+    
+    # Log the summarization for debugging
+    original_size = len(json.dumps(completed_tasks, default=str))
+    summarized_size = len(json.dumps(summarized_results, default=str))
+    logger.info(f"📊 Context optimization: {original_size} chars -> {summarized_size} chars ({100 - (summarized_size/original_size*100):.1f}% reduction)")
     
     prompt = f'''
     You are the Orbimesh Orchestrator. Generate a UNIFIED response with both text and optional canvas content.
@@ -3032,7 +3391,7 @@ def generate_final_response(state: State):
     **USER'S REQUEST:** "{state['original_prompt']}"
     
     **COMPLETED TASKS:**
-    {json.dumps(detailed_results, indent=2)}
+    {json.dumps(summarized_results, indent=2)}
     
     **YOUR JOB: Generate a complete response in ONE output**
     
@@ -3106,12 +3465,32 @@ def generate_final_response(state: State):
         
         if response.canvas_required and response.canvas_content:
             logger.info(f"Canvas generated: type={response.canvas_type}, content_length={len(response.canvas_content)}")
+            
+            # --- ARTIFACT INTEGRATION: Store canvas as artifact ---
+            canvas_content = response.canvas_content
+            canvas_artifact_ref = None
+            if ARTIFACT_INTEGRATION_ENABLED and artifact_hooks:
+                try:
+                    # Get thread_id from state or generate one
+                    thread_id = state.get("thread_id") or f"canvas_{int(time.time())}"
+                    compressed = artifact_hooks.on_canvas_generated(
+                        canvas_content=response.canvas_content,
+                        canvas_type=response.canvas_type or "html",
+                        thread_id=thread_id
+                    )
+                    if '_artifact_ref' in compressed:
+                        canvas_artifact_ref = compressed['_artifact_ref']
+                        logger.info(f"Stored canvas as artifact: {canvas_artifact_ref['id']}")
+                except Exception as artifact_err:
+                    logger.warning(f"Failed to store canvas as artifact: {artifact_err}")
+            
             return {
                 "final_response": response.response_text,
                 "messages": updated_messages,
                 "has_canvas": True,
                 "canvas_type": response.canvas_type,
-                "canvas_content": response.canvas_content
+                "canvas_content": canvas_content,  # Keep full content for immediate display
+                "_canvas_artifact_ref": canvas_artifact_ref  # Store reference for later retrieval
             }
         else:
             logger.info("Text-only response generated")
@@ -3172,6 +3551,14 @@ def load_conversation_history(state: State, config: RunnableConfig):
         if not isinstance(data, dict):
             logger.error(f"Conversation data is not a dictionary: {type(data)}")
             return {"messages": []}
+        
+        # --- ARTIFACT INTEGRATION: Expand artifact references after loading ---
+        if ARTIFACT_INTEGRATION_ENABLED and artifact_hooks:
+            try:
+                data = artifact_hooks.after_load(data)
+                logger.info(f"Expanded artifacts for thread {thread_id}")
+            except Exception as artifact_err:
+                logger.warning(f"Artifact expansion failed: {artifact_err}")
 
         messages = data.get("messages", [])
         if not isinstance(messages, list):
@@ -3490,6 +3877,14 @@ def save_conversation_history(state: State, config: RunnableConfig):
         
         # Create the fully serializable state object
         serializable_state = get_serializable_state(state_dict, thread_id)
+        
+        # --- ARTIFACT INTEGRATION: Compress large fields before saving ---
+        if ARTIFACT_INTEGRATION_ENABLED and artifact_hooks:
+            try:
+                serializable_state = artifact_hooks.before_save(serializable_state, thread_id)
+                logger.info(f"Applied artifact compression for thread {thread_id}")
+            except Exception as artifact_err:
+                logger.warning(f"Artifact compression failed, saving uncompressed: {artifact_err}")
 
         # Write to file in a consistent JSON format
         with open(history_path, "w", encoding="utf-8") as f:

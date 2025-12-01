@@ -39,7 +39,15 @@
     "look at images on websites",
     "analyze images on web pages",
     "pick images from websites",
-    "select images from web pages"
+    "select images from web pages",
+    "get contest dates",
+    "find upcoming contests",
+    "check contest schedule",
+    "leetcode contests",
+    "coding contests",
+    "programming contests",
+    "get event dates",
+    "check event schedule"
   ],
   "price_per_call_usd": 0.01,
   "status": "active",

@@ -58,7 +58,6 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
     // State for viewing specific canvas content from messages
     const [viewedCanvasContent, setViewedCanvasContent] = useState<string | undefined>(undefined);
     const [viewedCanvasType, setViewedCanvasType] = useState<'html' | 'markdown' | undefined>(undefined);
-    const [canvasView, setCanvasView] = useState<'browser' | 'plan'>('browser');
     
     // Get conversation state from Zustand store
     const conversationState = useConversationStore();
@@ -70,17 +69,12 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
     const canvasContent = conversationState.canvas_content;
     const canvasType = conversationState.canvas_type;
     const browserView = (conversationState as any).browser_view;
-    const planView = (conversationState as any).plan_view;
     const taskStatuses = conversationState.task_statuses || {};
     
-    // Determine which canvas to display - viewed canvas takes precedence, then toggle view
-    let displayCanvasContent = viewedCanvasContent || canvasContent;
+    // Determine which canvas to display - viewed canvas takes precedence
+    // Browser view is now shown in chat interface, not in canvas
+    const displayCanvasContent = viewedCanvasContent || canvasContent;
     const displayCanvasType = viewedCanvasType || canvasType;
-    
-    // If we have both views and no viewed canvas, use the toggle
-    if (!viewedCanvasContent && browserView && planView) {
-        displayCanvasContent = canvasView === 'browser' ? browserView : planView;
-    }
 
     // Process plan data from conversation store
     useEffect(() => {
@@ -349,7 +343,7 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                             <div className="flex items-center gap-2">
                                 <h3 className="text-xl font-semibold">Workflow Visualization</h3>
                                 {plan.pendingTasks.length > 0 && (() => {
-                                    const completedCount = Object.values(taskStatuses).filter((status: any) => status === 'completed').length;
+                                    const completedCount = Object.values(taskStatuses).filter((t: any) => t.status === 'completed').length;
                                     const totalTasks = plan.pendingTasks.length;
                                     return (
                                         <span className="text-xs px-2 py-1 bg-gray-100 text-gray-700 rounded-full font-medium">
@@ -459,52 +453,10 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                     )}
                 </TabsContent>
                 <TabsContent value="canvas" className="flex-1 overflow-y-auto mt-4">
-                    {(hasCanvas || viewedCanvasContent) && displayCanvasContent ? (
+                    {/* Canvas now only shows non-browser content (HTML/Markdown from LLM responses) */}
+                    {/* Browser live stream is shown in the chat interface instead */}
+                    {(hasCanvas || viewedCanvasContent) && displayCanvasContent && !browserView ? (
                         <div className="h-full flex flex-col">
-                            {/* Toggle buttons for browser/plan view */}
-                            {!viewedCanvasContent && browserView && planView && (
-                                <div className="bg-gradient-to-r from-gray-800 via-gray-850 to-gray-900 dark:from-gray-900 dark:via-gray-925 dark:to-gray-950 border-b border-gray-700/50 dark:border-gray-800/50 px-6 py-4 shadow-xl backdrop-blur-sm">
-                                    <div className="flex items-center justify-between max-w-4xl mx-auto">
-                                        <div className="flex items-center gap-3">
-                                            <div className="relative">
-                                                <div className="w-2.5 h-2.5 bg-green-500 rounded-full animate-pulse"></div>
-                                                <div className="absolute inset-0 w-2.5 h-2.5 bg-green-500 rounded-full animate-ping opacity-75"></div>
-                                            </div>
-                                            <span className="text-sm font-bold text-white uppercase tracking-wider">Live View</span>
-                                        </div>
-                                        <div className="flex gap-2.5">
-                                            <button
-                                                onClick={() => setCanvasView('browser')}
-                                                className={cn(
-                                                    "px-5 py-2.5 text-sm font-semibold rounded-lg transition-all duration-200 transform hover:scale-105 active:scale-95 shadow-md",
-                                                    canvasView === 'browser'
-                                                        ? "bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-lg ring-2 ring-white/30 dark:ring-gray-500"
-                                                        : "bg-gray-700/50 dark:bg-gray-800/50 text-gray-300 dark:text-gray-400 hover:bg-gray-600/70 dark:hover:bg-gray-700/70 border border-gray-600/50 dark:border-gray-700/50 backdrop-blur-sm"
-                                                )}
-                                            >
-                                                <span className="flex items-center gap-2">
-                                                    <span className="text-base">🖥️</span>
-                                                    <span>Browser</span>
-                                                </span>
-                                            </button>
-                                            <button
-                                                onClick={() => setCanvasView('plan')}
-                                                className={cn(
-                                                    "px-5 py-2.5 text-sm font-semibold rounded-lg transition-all duration-200 transform hover:scale-105 active:scale-95 shadow-md",
-                                                    canvasView === 'plan'
-                                                        ? "bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-lg ring-2 ring-white/30 dark:ring-gray-500"
-                                                        : "bg-gray-700/50 dark:bg-gray-800/50 text-gray-300 dark:text-gray-400 hover:bg-gray-600/70 dark:hover:bg-gray-700/70 border border-gray-600/50 dark:border-gray-700/50 backdrop-blur-sm"
-                                                )}
-                                            >
-                                                <span className="flex items-center gap-2">
-                                                    <span className="text-base">📋</span>
-                                                    <span>Plan</span>
-                                                </span>
-                                            </button>
-                                        </div>
-                                    </div>
-                                </div>
-                            )}
                             {viewedCanvasContent && (
                                 <div className="bg-gray-800 dark:bg-gray-900 border-b border-gray-700 dark:border-gray-800 px-6 py-3 shadow-md">
                                     <div className="flex items-center justify-between max-w-4xl mx-auto">
@@ -546,7 +498,8 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                     ) : (
                         <div className="text-center text-gray-500 py-8">
                             <p className="font-semibold">No Canvas Content</p>
-                            <p className="text-sm mt-2">Canvas content will appear here when available.</p>
+                            <p className="text-sm mt-2">Interactive content from responses will appear here.</p>
+                            <p className="text-xs mt-1 text-gray-400">Browser live view is shown in the chat area.</p>
                         </div>
                     )}
                 </TabsContent>

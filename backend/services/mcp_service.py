@@ -141,23 +141,23 @@ async def ingest_mcp_agent(
             # Use SSE transport for MCP HTTP
             sse_url = f"{url}/sse" if not url.endswith("/sse") else url
             
-            async with httpx.AsyncClient(headers=headers, timeout=30.0) as http_client:
-                async with mcp.client.sse.sse_client(sse_url, http_client=http_client) as (read, write):
-                    async with ClientSession(read, write) as session:
-                        # Initialize the session
-                        init_result = await session.initialize()
-                        server_info = {
-                            "name": init_result.serverInfo.name if hasattr(init_result, 'serverInfo') else "Unknown",
-                            "version": init_result.serverInfo.version if hasattr(init_result, 'serverInfo') else "Unknown"
-                        }
-                        
-                        logger.info(f"Connected to MCP server: {server_info}")
-                        
-                        # List available tools
-                        tools_response = await session.list_tools()
-                        tools_list = tools_response.tools if hasattr(tools_response, 'tools') else []
-                        
-                        logger.info(f"Discovered {len(tools_list)} tools from MCP server")
+            # Create SSE client with headers (newer MCP SDK version)
+            async with mcp.client.sse.sse_client(sse_url, headers=headers, timeout=30.0) as (read, write):
+                async with ClientSession(read, write) as session:
+                    # Initialize the session
+                    init_result = await session.initialize()
+                    server_info = {
+                        "name": init_result.serverInfo.name if hasattr(init_result, 'serverInfo') else "Unknown",
+                        "version": init_result.serverInfo.version if hasattr(init_result, 'serverInfo') else "Unknown"
+                    }
+                    
+                    logger.info(f"Connected to MCP server: {server_info}")
+                    
+                    # List available tools
+                    tools_response = await session.list_tools()
+                    tools_list = tools_response.tools if hasattr(tools_response, 'tools') else []
+                    
+                    logger.info(f"Discovered {len(tools_list)} tools from MCP server")
                         
         except Exception as e:
             logger.error(f"Failed to connect to MCP server: {e}")

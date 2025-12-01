@@ -3,17 +3,15 @@
 import { UserProfile } from "@clerk/nextjs"
 import AppSidebar from "@/components/app-sidebar"
 import Navbar from "@/components/navbar"
-import { SidebarProvider, SidebarInset, SidebarTrigger } from "@/components/ui/sidebar"
+import { SidebarProvider, SidebarInset, SidebarTrigger, useSidebar } from "@/components/ui/sidebar"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 
-export default function ProfilePage() {
+function ProfileContent() {
+  const { open } = useSidebar()
+  
   return (
-    <>
-      <Navbar />
-      <SidebarProvider>
-        <AppSidebar />
-        <SidebarInset>
+    <SidebarInset className={!open ? "ml-16" : ""}>
           <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50 dark:from-gray-900 dark:to-gray-800">
             {/* Header */}
             <div className="bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm border-b dark:border-gray-700 px-6 py-4">
@@ -39,7 +37,7 @@ export default function ProfilePage() {
                 </TabsList>
 
                 <TabsContent value="profile">
-                  <Card>
+                  <Card className="bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700">
                     <CardHeader>
                       <CardTitle>Account Profile</CardTitle>
                       <CardDescription>
@@ -48,6 +46,7 @@ export default function ProfilePage() {
                     </CardHeader>
                     <CardContent className="flex justify-center">
                       <UserProfile 
+                        routing="hash"
                         appearance={{
                           elements: {
                             rootBox: "w-full",
@@ -60,7 +59,7 @@ export default function ProfilePage() {
                 </TabsContent>
 
                 <TabsContent value="preferences">
-                  <Card>
+                  <Card className="bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700">
                     <CardHeader>
                       <CardTitle>Application Preferences</CardTitle>
                       <CardDescription>
@@ -97,6 +96,16 @@ export default function ProfilePage() {
             </main>
           </div>
         </SidebarInset>
+  )
+}
+
+export default function ProfilePage() {
+  return (
+    <>
+      <Navbar />
+      <SidebarProvider>
+        <AppSidebar />
+        <ProfileContent />
       </SidebarProvider>
     </>
   )

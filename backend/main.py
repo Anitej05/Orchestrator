@@ -31,7 +31,8 @@ from fastapi import FastAPI, HTTPException, Depends, status, Query, Response, We
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_, cast, String, select
-from sentence_transformers import SentenceTransformer
+# Lazy import SentenceTransformer to avoid jaxlib dependency issues
+# from sentence_transformers import SentenceTransformer
 
 # --- Local Application Imports ---
 CONVERSATION_HISTORY_DIR = "conversation_history"
@@ -42,6 +43,7 @@ from orchestrator.graph import ForceJsonSerializer, graph, create_graph_with_che
 from orchestrator.state import State
 from langgraph.checkpoint.memory import MemorySaver
 from routers import connect_router
+from routers import credentials_router
 
 # --- App Initialization and Configuration ---
 app = FastAPI(
@@ -119,6 +121,11 @@ app.add_middleware(
 
 # Include routers
 app.include_router(connect_router.router)
+app.include_router(credentials_router.router)
+
+# Import and include artifacts router for context management
+from routers import artifacts_router
+app.include_router(artifacts_router.router)
 
 # --- Static Files for Screenshots ---
 from fastapi.staticfiles import StaticFiles
@@ -134,7 +141,20 @@ app.mount("/storage", StaticFiles(directory=str(storage_path)), name="storage")
 logger.info(f"Mounted /storage for serving screenshot files from {storage_path}")
 
 # --- Sentence Transformer Model Loading ---
-model = SentenceTransformer('all-mpnet-base-v2')
+# Lazy load to avoid jaxlib dependency issues at startup
+model = None
+
+def get_sentence_transformer_model():
+    """Lazy load the sentence transformer model only when needed"""
+    global model
+    if model is None:
+        # Disable JAX to avoid jaxlib dependency issues
+        os.environ['TRANSFORMERS_NO_ADVISORY_WARNINGS'] = '1'
+        os.environ['JAX_PLATFORMS'] = ''  # Disable JAX backend
+        
+        from sentence_transformers import SentenceTransformer
+        model = SentenceTransformer('all-mpnet-base-v2')
+    return model
 
 # --- Interactive Conversation Models ---
 class UserResponse(BaseModel):
@@ -2751,8 +2771,9 @@ def register_or_update_agent(agent_data: AgentCard, response: Response, db: Sess
         response.status_code = status.HTTP_201_CREATED
 
     if agent_data.capabilities:
+        sentence_model = get_sentence_transformer_model()
         for cap_text in agent_data.capabilities:
-            embedding_vector = model.encode(cap_text)
+            embedding_vector = sentence_model.encode(cap_text)
             new_capability = AgentCapability(
                 agent=db_agent,
                 capability_text=cap_text,
@@ -2807,9 +2828,10 @@ def search_agents(
         return []
 
     try:
+        sentence_model = get_sentence_transformer_model()
         conditions = []
         for task_name in capabilities:
-            query_vector = model.encode(task_name)
+            query_vector = sentence_model.encode(task_name)
             # Subquery to find agent_ids for this one task
             subquery = select(AgentCapability.agent_id).where(
                 AgentCapability.embedding.cosine_distance(query_vector) < similarity_threshold
@@ -2910,12 +2932,16 @@ def health_check():
 
 @app.get("/api/metrics/dashboard")
 async def get_dashboard_metrics(request: Request, db: Session = Depends(get_db)):
-    """Get dashboard metrics for the current user"""
+    """Get comprehensive dashboard metrics for the current user"""
     try:
         # Get user ID from request headers
         user_id = request.headers.get("X-User-ID")
         if not user_id:
             raise HTTPException(status_code=401, detail="User ID not provided")
+        
+        from datetime import datetime, timedelta
+        import os
+        import json
         
         # Get conversation count
         conversation_count = db.query(UserThread).filter(UserThread.user_id == user_id).count()
@@ -2926,9 +2952,14 @@ async def get_dashboard_metrics(request: Request, db: Session = Depends(get_db))
         # Get total agents
         agent_count = db.query(Agent).filter(Agent.status == StatusEnum.active).count()
         
+        # Time periods
+        now = datetime.utcnow()
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        week_start = now - timedelta(days=7)
+        month_start = now - timedelta(days=30)
+        yesterday = now - timedelta(days=1)
+        
         # Get recent activity (last 24 hours)
-        from datetime import datetime, timedelta
-        yesterday = datetime.utcnow() - timedelta(days=1)
         recent_activity = db.query(UserThread).filter(
             UserThread.user_id == user_id,
             UserThread.created_at >= yesterday
@@ -2937,7 +2968,7 @@ async def get_dashboard_metrics(request: Request, db: Session = Depends(get_db))
         # Get conversation trend (last 7 days)
         conversation_trend = []
         for i in range(6, -1, -1):
-            date = datetime.utcnow() - timedelta(days=i)
+            date = now - timedelta(days=i)
             date_str = date.strftime('%Y-%m-%d')
             count = db.query(UserThread).filter(
                 UserThread.user_id == user_id,
@@ -2980,19 +3011,169 @@ async def get_dashboard_metrics(request: Request, db: Session = Depends(get_db))
             for conv in recent_conversations
         ]
         
+        # === NEW METRICS ===
+        
+        # 1. Cost Tracking - Parse conversation history files to calculate costs
+        cost_today = 0.0
+        cost_week = 0.0
+        cost_month = 0.0
+        total_cost = 0.0
+        total_tasks = 0
+        successful_tasks = 0
+        failed_tasks = 0
+        total_response_time = 0.0
+        response_time_count = 0
+        agent_usage = {}
+        agent_costs = {}
+        hourly_usage = [0] * 24
+        
+        # Get all user conversations
+        all_conversations = db.query(UserThread).filter(
+            UserThread.user_id == user_id
+        ).all()
+        
+        for conv in all_conversations:
+            # Try to load conversation history file
+            history_file = os.path.join(CONVERSATION_HISTORY_DIR, f"{conv.thread_id}.json")
+            if os.path.exists(history_file):
+                try:
+                    with open(history_file, 'r') as f:
+                        history_data = json.load(f)
+                        
+                        # Extract task_agent_pairs if available
+                        task_pairs = history_data.get('task_agent_pairs', [])
+                        
+                        for pair in task_pairs:
+                            agent_name = pair.get('primary', {}).get('name', 'Unknown')
+                            agent_id = pair.get('primary', {}).get('id')
+                            
+                            # Get agent cost
+                            if agent_id:
+                                agent = db.query(Agent).filter(Agent.id == agent_id).first()
+                                if agent:
+                                    cost = agent.price_per_call_usd
+                                    total_cost += cost
+                                    
+                                    # Track agent usage and costs
+                                    if agent_name not in agent_usage:
+                                        agent_usage[agent_name] = 0
+                                        agent_costs[agent_name] = 0.0
+                                    agent_usage[agent_name] += 1
+                                    agent_costs[agent_name] += cost
+                                    
+                                    # Time-based cost tracking
+                                    if conv.created_at >= today_start:
+                                        cost_today += cost
+                                    if conv.created_at >= week_start:
+                                        cost_week += cost
+                                    if conv.created_at >= month_start:
+                                        cost_month += cost
+                            
+                            total_tasks += 1
+                        
+                        # Track completed tasks (simplified - assume all tasks in history are completed)
+                        if history_data.get('final_response'):
+                            successful_tasks += len(task_pairs)
+                        
+                        # Track hourly usage
+                        hour = conv.created_at.hour
+                        hourly_usage[hour] += 1
+                        
+                except Exception as e:
+                    logger.warning(f"Could not parse history file {history_file}: {e}")
+        
+        # Calculate success rate
+        success_rate = (successful_tasks / total_tasks * 100) if total_tasks > 0 else 0
+        
+        # Calculate average response time (mock for now - would need actual timing data)
+        avg_response_time = 2.5  # minutes (placeholder)
+        
+        # Get top agents by usage
+        top_agents = sorted(agent_usage.items(), key=lambda x: x[1], reverse=True)[:5]
+        top_agents_list = [
+            {
+                "name": name,
+                "calls": calls,
+                "cost": agent_costs.get(name, 0.0),
+                "cost_per_call": agent_costs.get(name, 0.0) / calls if calls > 0 else 0
+            }
+            for name, calls in top_agents
+        ]
+        
+        # Hourly usage pattern
+        hourly_pattern = [
+            {"hour": f"{i:02d}:00", "count": hourly_usage[i]}
+            for i in range(24)
+        ]
+        
+        # Cost trend (last 7 days)
+        cost_trend = []
+        for i in range(6, -1, -1):
+            date = now - timedelta(days=i)
+            day_cost = 0.0
+            
+            day_conversations = db.query(UserThread).filter(
+                UserThread.user_id == user_id,
+                UserThread.created_at >= date,
+                UserThread.created_at < date + timedelta(days=1)
+            ).all()
+            
+            for conv in day_conversations:
+                history_file = os.path.join(CONVERSATION_HISTORY_DIR, f"{conv.thread_id}.json")
+                if os.path.exists(history_file):
+                    try:
+                        with open(history_file, 'r') as f:
+                            history_data = json.load(f)
+                            task_pairs = history_data.get('task_agent_pairs', [])
+                            for pair in task_pairs:
+                                agent_id = pair.get('primary', {}).get('id')
+                                if agent_id:
+                                    agent = db.query(Agent).filter(Agent.id == agent_id).first()
+                                    if agent:
+                                        day_cost += agent.price_per_call_usd
+                    except:
+                        pass
+            
+            cost_trend.append({
+                "date": date.strftime('%b %d'),
+                "cost": round(day_cost, 4)
+            })
+        
         return {
+            # Existing metrics
             "total_conversations": conversation_count,
             "total_workflows": workflow_count,
             "total_agents": agent_count,
             "recent_activity": recent_activity,
             "conversation_trend": conversation_trend,
             "workflow_status": workflow_status,
-            "recent_conversations": recent_conv_list
+            "recent_conversations": recent_conv_list,
+            
+            # New metrics
+            "cost_metrics": {
+                "today": round(cost_today, 4),
+                "week": round(cost_week, 4),
+                "month": round(cost_month, 4),
+                "total": round(total_cost, 4),
+                "avg_per_conversation": round(total_cost / conversation_count, 4) if conversation_count > 0 else 0
+            },
+            "cost_trend": cost_trend,
+            "performance_metrics": {
+                "total_tasks": total_tasks,
+                "successful_tasks": successful_tasks,
+                "failed_tasks": failed_tasks,
+                "success_rate": round(success_rate, 2),
+                "avg_response_time": avg_response_time,
+                "avg_tasks_per_conversation": round(total_tasks / conversation_count, 2) if conversation_count > 0 else 0
+            },
+            "top_agents": top_agents_list,
+            "hourly_usage": hourly_pattern
         }
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error fetching dashboard metrics: {e}")
+        logger.exception("Full traceback:")
         raise HTTPException(status_code=500, detail=f"Failed to fetch metrics: {str(e)}")
 
 @app.get("/api/agent-servers/status")
@@ -3038,7 +3219,8 @@ async def wait_for_agent_ready(agent_name: str, port: int, timeout: float = 30.0
     import time
     
     start_time = time.time()
-    health_url = f"http://localhost:{port}/"
+    # Try /health first (standard), then fall back to / for legacy agents
+    health_endpoints = [f"http://localhost:{port}/health", f"http://localhost:{port}/"]
     
     while time.time() - start_time < timeout:
         async with agent_status_lock:
@@ -3048,17 +3230,18 @@ async def wait_for_agent_ready(agent_name: str, port: int, timeout: float = 30.0
             elif status == 'failed':
                 return False
         
-        # Try to connect to the agent
-        try:
-            async with httpx.AsyncClient(timeout=2.0) as client:
-                response = await client.get(health_url)
-                if response.status_code == 200:
-                    async with agent_status_lock:
-                        if agent_name in agent_status:
-                            agent_status[agent_name]['status'] = 'ready'
-                    return True
-        except:
-            pass
+        # Try to connect to the agent using multiple endpoints
+        for health_url in health_endpoints:
+            try:
+                async with httpx.AsyncClient(timeout=2.0) as client:
+                    response = await client.get(health_url)
+                    if response.status_code == 200:
+                        async with agent_status_lock:
+                            if agent_name in agent_status:
+                                agent_status[agent_name]['status'] = 'ready'
+                        return True
+            except:
+                pass
         
         await asyncio.sleep(0.5)
     
@@ -3072,7 +3255,7 @@ async def check_agent_health_background():
     import httpx
     
     while True:
-        await asyncio.sleep(2)  # Check every 2 seconds
+        await asyncio.sleep(3)  # Check every 3 seconds (reduced frequency)
         
         async with agent_status_lock:
             agents_to_check = list(agent_status.items())
@@ -3080,16 +3263,19 @@ async def check_agent_health_background():
         for agent_name, info in agents_to_check:
             if info['status'] == 'starting':
                 port = info['port']
-                health_url = f"http://localhost:{port}/"
+                # Try /health first (standard), then fall back to / for legacy agents
+                health_endpoints = [f"http://localhost:{port}/health", f"http://localhost:{port}/"]
                 
-                try:
-                    async with httpx.AsyncClient(timeout=1.0) as client:
-                        response = await client.get(health_url)
-                        if response.status_code == 200:
-                            async with agent_status_lock:
-                                agent_status[agent_name]['status'] = 'ready'
-                except:
-                    pass
+                for health_url in health_endpoints:
+                    try:
+                        async with httpx.AsyncClient(timeout=1.0) as client:
+                            response = await client.get(health_url)
+                            if response.status_code == 200:
+                                async with agent_status_lock:
+                                    agent_status[agent_name]['status'] = 'ready'
+                                break  # Stop checking other endpoints once ready
+                    except:
+                        pass
 
 def start_agents_async():
     """Start agents asynchronously without blocking main.py startup"""
@@ -3171,20 +3357,35 @@ def start_agents_async():
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize database, start agents, health checker, and workflow scheduler on app startup"""
-    logger.info("=" * 60)
-    logger.info("APPLICATION STARTUP INITIATED")
-    logger.info("=" * 60)
-    
-    # Initialize database tables
+    """Start agents, background health checker, and workflow scheduler on app startup"""
+    # Run database migrations automatically
     try:
-        from database import engine
-        from db_init import init_database
-        init_database(engine)
-        logger.info("✓ Database initialized successfully")
+        logger.info("🔄 Checking for pending database migrations...")
+        import subprocess
+        result = subprocess.run(
+            ["alembic", "upgrade", "head"],
+            capture_output=True,
+            text=True,
+            cwd=os.path.dirname(os.path.abspath(__file__))
+        )
+        if result.returncode == 0:
+            logger.info("✅ Database migrations applied successfully")
+        else:
+            logger.warning(f"⚠️  Migration warning: {result.stderr}")
     except Exception as e:
-        logger.error(f"✗ Database initialization failed: {str(e)}", exc_info=True)
-        # Don't exit - let the app continue, it might still work
+        logger.error(f"❌ Failed to run migrations: {str(e)}", exc_info=True)
+    
+    # Sync agent definitions from Agent_entries/*.json to database
+    try:
+        from manage import sync_agent_entries
+        logger.info("Syncing agent definitions to database...")
+        result = sync_agent_entries(verbose=True)
+        if result.get('errors'):
+            logger.warning(f"Agent sync completed with {len(result['errors'])} error(s)")
+        else:
+            logger.info("✅ Agent sync completed successfully")
+    except Exception as e:
+        logger.error(f"Failed to sync agent entries: {str(e)}", exc_info=True)
     
     # Start agents in background
     start_agents_async()
