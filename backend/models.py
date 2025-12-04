@@ -138,6 +138,7 @@ class WorkflowSchedule(Base):
     cron_expression = Column(String, nullable=False)
     input_template = Column(JSON)
     is_active = Column(Boolean, default=True)
+    conversation_thread_id = Column(String, nullable=True)  # Thread ID for scheduled execution results
     last_run_at = Column(DateTime, nullable=True)
     next_run_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)

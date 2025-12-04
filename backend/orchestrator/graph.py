@@ -147,6 +147,7 @@ def _summarize_completed_tasks_for_context(completed_tasks: List[Dict]) -> List[
     Summarize completed tasks to reduce context size for LLM calls.
     Keeps essential information while removing large data payloads.
     Specifically handles browser agent responses to extract useful content.
+    For structured data results (dicts with numeric/simple values), preserves the full result.
     """
     if not completed_tasks:
         return []
@@ -165,13 +166,19 @@ def _summarize_completed_tasks_for_context(completed_tasks: List[Dict]) -> List[
             # Truncate long string results
             summary["result_preview"] = result[:500] + "..." if len(result) > 500 else result
         elif isinstance(result, dict):
-            # Extract key information from dict results
-            if "status" in result:
-                summary["result_status"] = result["status"]
-            if "summary" in result:
-                summary["result_summary"] = str(result["summary"])[:500]
-            elif "task_summary" in result:
-                summary["result_summary"] = str(result["task_summary"])[:500]
+            # Check if result is structured data (small dict with simple values like numbers, bools, short strings)
+            # This preserves API responses, stock data, weather data, etc.
+            result_str = json.dumps(result, default=str)
+            if len(result_str) < 2000:  # Small structured data - keep it all
+                summary["result"] = result
+            else:
+                # Large result - extract key information
+                if "status" in result:
+                    summary["result_status"] = result["status"]
+                if "summary" in result:
+                    summary["result_summary"] = str(result["summary"])[:500]
+                elif "task_summary" in result:
+                    summary["result_summary"] = str(result["task_summary"])[:500]
         
         # Handle browser agent raw_response specially - extract the useful content
         if raw_response and isinstance(raw_response, dict):

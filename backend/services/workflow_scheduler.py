@@ -140,10 +140,11 @@ class WorkflowScheduler:
         """Actually execute the workflow asynchronously using the orchestrator"""
         try:
             from database import SessionLocal
-            from models import WorkflowExecution
+            from models import WorkflowExecution, WorkflowSchedule, UserThread
             from orchestrator.graph import graph
-            from langgraph.checkpoint.memory import MemorySaver
             import uuid
+            import os
+            import json
             
             db = SessionLocal()
             
@@ -162,24 +163,105 @@ class WorkflowScheduler:
                 task_agent_pairs = blueprint.get("task_agent_pairs", [])
                 original_prompt = blueprint.get("original_prompt", "")
                 
-                if not task_plan or not task_agent_pairs:
-                    raise Exception("Workflow has no saved execution plan")
+                if not task_agent_pairs:
+                    raise Exception("Workflow has no saved task agent pairs")
                 
-                # Create a new thread for this execution
-                thread_id = str(uuid.uuid4())
-                memory = MemorySaver()
+                # Check if schedule already has a conversation thread
+                schedule = db.query(WorkflowSchedule).filter(
+                    WorkflowSchedule.workflow_id == workflow_id,
+                    WorkflowSchedule.user_id == user_id,
+                    WorkflowSchedule.is_active == True
+                ).first()
                 
-                # Pre-seed the thread state with the saved plan
+                thread_id = None
+                if schedule and schedule.conversation_thread_id:
+                    # Reuse existing conversation thread
+                    thread_id = schedule.conversation_thread_id
+                    logger.info(f"Reusing conversation thread {thread_id} for scheduled workflow {workflow_id}")
+                else:
+                    # Create a new conversation thread for this schedule
+                    thread_id = str(uuid.uuid4())
+                    
+                    # Get workflow name for conversation title
+                    from models import Workflow
+                    workflow = db.query(Workflow).filter(Workflow.workflow_id == workflow_id).first()
+                    workflow_name = workflow.name if workflow else "Scheduled Workflow"
+                    
+                    # Create UserThread record
+                    user_thread = UserThread(
+                        thread_id=thread_id,
+                        user_id=user_id,
+                        title=f"Scheduled: {workflow_name}"
+                    )
+                    db.add(user_thread)
+                    
+                    # Store thread_id in schedule for future runs
+                    if schedule:
+                        schedule.conversation_thread_id = thread_id
+                    
+                    db.commit()
+                    logger.info(f"Created new conversation thread {thread_id} for scheduled workflow {workflow_id}")
+                
+                # Save/update conversation JSON file
+                conversation_history_dir = "conversation_history"
+                os.makedirs(conversation_history_dir, exist_ok=True)
+                history_path = os.path.join(conversation_history_dir, f"{thread_id}.json")
+                
+                # Load existing conversation if it exists (to preserve message history)
+                existing_messages = []
+                if os.path.exists(history_path):
+                    try:
+                        with open(history_path, "r", encoding="utf-8") as f:
+                            existing_conv = json.load(f)
+                            existing_messages = existing_conv.get("messages", [])
+                    except Exception as e:
+                        logger.warning(f"Could not load existing conversation: {e}")
+                
+                # Add execution start message
+                execution_start_message = {
+                    "type": "system",
+                    "content": f"Scheduled execution started at {datetime.utcnow().isoformat()}",
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+                existing_messages.append(execution_start_message)
+                
+                # Pre-seed conversation with plan_approved=True for automatic execution
+                conversation_json = {
+                    "thread_id": thread_id,
+                    "original_prompt": original_prompt,
+                    "task_agent_pairs": task_agent_pairs,
+                    "task_plan": task_plan,
+                    "messages": existing_messages,
+                    "completed_tasks": [],
+                    "final_response": None,
+                    "pending_user_input": False,
+                    "needs_approval": False,
+                    "plan_approved": True,  # Auto-approve for scheduled execution
+                    "status": "executing",
+                    "metadata": {
+                        "from_workflow": workflow_id,
+                        "execution_id": execution_id,
+                        "scheduled": True,
+                        "last_execution": datetime.utcnow().isoformat()
+                    },
+                    "uploaded_files": []
+                }
+                
+                with open(history_path, "w", encoding="utf-8") as f:
+                    json.dump(conversation_json, f, ensure_ascii=False, indent=2)
+                
+                # Execute the workflow through the orchestrator graph
                 initial_state = {
                     "thread_id": thread_id,
                     "original_prompt": original_prompt,
                     "task_plan": task_plan,
                     "task_agent_pairs": task_agent_pairs,
-                    "user_inputs": inputs,  # Pass any input parameters
-                    "messages": [{"type": "user", "content": original_prompt}],
+                    "user_inputs": inputs,
+                    "messages": existing_messages,
                     "status": "executing",
                     "planning_mode": False,
-                    "plan_approved": True,  # Skip approval for scheduled runs
+                    "plan_approved": True,  # Skip approval - execute directly
+                    "needs_approval": False,
                     "completed_tasks": [],
                     "task_events": [],
                     "owner": {"user_id": user_id}
@@ -195,12 +277,19 @@ class WorkflowScheduler:
                 
                 # Execute the workflow through the orchestrator graph
                 final_state = None
+                completed_tasks = []
+                
                 async for event in graph.astream(
                     initial_state,
                     config,
                     stream_mode="values"
                 ):
                     final_state = event
+                    
+                    # Collect completed tasks
+                    if event.get("completed_tasks"):
+                        completed_tasks = event.get("completed_tasks", [])
+                    
                     # Log progress
                     if event.get("status"):
                         logger.info(f"Execution {execution_id} status: {event.get('status')}")
@@ -208,7 +297,6 @@ class WorkflowScheduler:
                 # Extract results from final state
                 final_response = None
                 if final_state:
-                    # Get the final response from messages or final_response field
                     messages = final_state.get("messages", [])
                     if messages:
                         last_message = messages[-1]
@@ -219,28 +307,45 @@ class WorkflowScheduler:
                     
                     if not final_response:
                         final_response = final_state.get("final_response", "")
+                    
+                    # Update completed tasks
+                    completed_tasks = final_state.get("completed_tasks", completed_tasks)
+                
+                # Update conversation JSON with final results
+                conversation_json["messages"] = final_state.get("messages", existing_messages) if final_state else existing_messages
+                conversation_json["completed_tasks"] = completed_tasks
+                conversation_json["final_response"] = final_response or "Workflow completed"
+                conversation_json["status"] = "completed"
+                conversation_json["metadata"]["completed_at"] = datetime.utcnow().isoformat()
+                
+                with open(history_path, "w", encoding="utf-8") as f:
+                    json.dump(conversation_json, f, ensure_ascii=False, indent=2)
                 
                 # Update execution with results
                 if execution:
                     execution.status = 'completed'
                     execution.outputs = {
                         "response": final_response or "Workflow completed",
-                        "completed_tasks": final_state.get("completed_tasks", []) if final_state else []
+                        "completed_tasks": completed_tasks,
+                        "thread_id": thread_id
                     }
                     execution.completed_at = datetime.utcnow()
                     db.commit()
                 
-                logger.info(f"Scheduled workflow execution {execution_id} completed successfully")
+                logger.info(f"Scheduled workflow execution {execution_id} completed successfully. Results saved to thread {thread_id}")
                 
             except Exception as e:
                 # Update execution with error
+                execution = db.query(WorkflowExecution).filter(
+                    WorkflowExecution.execution_id == execution_id
+                ).first()
                 if execution:
                     execution.status = 'failed'
                     execution.error = str(e)
                     execution.completed_at = datetime.utcnow()
                     db.commit()
                 
-                logger.error(f"Scheduled workflow execution {execution_id} failed: {str(e)}")
+                logger.error(f"Scheduled workflow execution {execution_id} failed: {str(e)}", exc_info=True)
                 raise
                 
             finally:
