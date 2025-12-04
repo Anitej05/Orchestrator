@@ -1570,6 +1570,21 @@ async def list_workflows(request: Request, db: Session = Depends(get_db)):
             if isinstance(task, dict):
                 estimated_cost += task.get("cost", 0.0)
         
+        # Get active schedules for this workflow
+        from models import WorkflowSchedule
+        active_schedules = db.query(WorkflowSchedule).filter_by(
+            workflow_id=w.workflow_id, 
+            is_active=True
+        ).all()
+        schedule_count = len(active_schedules)
+        
+        # Get next scheduled run time
+        next_scheduled_run = None
+        if active_schedules:
+            next_schedule = min(active_schedules, key=lambda s: s.next_run_at or datetime.utcnow())
+            if next_schedule.next_run_at:
+                next_scheduled_run = next_schedule.next_run_at.isoformat()
+        
         result.append({
             "workflow_id": w.workflow_id,
             "workflow_name": w.name,
@@ -1579,7 +1594,9 @@ async def list_workflows(request: Request, db: Session = Depends(get_db)):
             "task_count": task_count,
             "estimated_cost": estimated_cost,
             "has_plan_graph": w.plan_graph is not None,
-            "is_public": False  # Add public flag support later
+            "is_public": False,  # Add public flag support later
+            "active_schedules": schedule_count,
+            "next_scheduled_run": next_scheduled_run
         })
     
     return result
@@ -1796,12 +1813,19 @@ async def schedule_workflow(workflow_id: str, body: ScheduleWorkflowRequest, req
     if not workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
     
+    # Check if workflow has a saved execution plan
+    if not workflow.blueprint or not workflow.blueprint.get("task_plan"):
+        raise HTTPException(
+            status_code=400, 
+            detail="Workflow has no saved execution plan. Please complete a conversation and save the workflow again to capture the execution plan."
+        )
+    
     schedule_id = str(uuid.uuid4())
     schedule = WorkflowSchedule(
         schedule_id=schedule_id,
         workflow_id=workflow_id,
         user_id=user_id,
-        cron_expression=body.cron_expression,
+        cron_expression=body.cron_expression,  # Already in UTC format from frontend
         input_template=body.input_template
     )
     db.add(schedule)
@@ -2029,6 +2053,7 @@ async def reload_schedules(
     Reload all active schedules from database into the scheduler.
     Useful for debugging or recovering from scheduler initialization issues.
     """
+    from services.workflow_scheduler import get_scheduler
     scheduler = get_scheduler()
     
     try:
@@ -2157,7 +2182,7 @@ async def get_agent_plan(thread_id: str):
         )
 
 @app.websocket("/ws/workflow/{workflow_id}/execute")
-async def websocket_workflow_execute(websocket: WebSocket, workflow_id: str):
+async def websocket_workflow_execute(websocket: WebSocket, workflow_id: str, token: str = None):
     """Execute workflow via WebSocket with streaming - uses WorkflowExecutor"""
     await websocket.accept()
     thread_id = None
@@ -2166,18 +2191,29 @@ async def websocket_workflow_execute(websocket: WebSocket, workflow_id: str):
     
     try:
         from orchestrator.workflow_executor import WorkflowExecutor
+        from auth import verify_clerk_token
+        
+        # Verify token from query params
+        if not token:
+            await websocket.send_json({"node": "__error__", "error": "Missing authentication token"})
+            return
+        
+        # verify_clerk_token expects "Bearer <token>" format
+        user = verify_clerk_token(f"Bearer {token}")
+        if not user:
+            await websocket.send_json({"node": "__error__", "error": "Invalid authentication token"})
+            return
+        
+        user_id = user.get("sub") or user.get("user_id") or user.get("id")
         
         data = await websocket.receive_json()
         inputs = data.get("inputs", {})
-        owner = data.get("owner")
         
-        if not owner:
-            await websocket.send_json({"node": "__error__", "error": "Owner required"})
-            return
+        # Create owner object for orchestrator
+        owner = {"user_id": user_id, "sub": user_id}
         
         # Get workflow
         db = SessionLocal()
-        user_id = owner.get("user_id") or owner.get("sub") or owner
         workflow = db.query(Workflow).filter_by(workflow_id=workflow_id, user_id=user_id).first()
         
         if not workflow:

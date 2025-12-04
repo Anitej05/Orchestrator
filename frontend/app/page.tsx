@@ -80,15 +80,6 @@ function HomeContent() {
       localStorage.removeItem('thread_id');
       console.log('Cleared thread_id from localStorage');
     }
-    
-    // Only navigate if we have a VALID thread_id and we're on home page
-    if (conversationState.thread_id && 
-        typeof window !== 'undefined' && 
-        window.location.pathname === '/' &&
-        !isRestoring) {
-      console.log('New thread_id detected, navigating to:', conversationState.thread_id);
-      router.push(`/${conversationState.thread_id}`);
-    }
   }, [conversationState.thread_id, clerkLoaded, router, isRestoring, isResetting]);
 
   // On initial load, if there's a saved thread_id in localStorage and we're on home page,
@@ -242,8 +233,8 @@ function HomeContent() {
 
 
   const handleConversationSelect = async (threadId: string) => {
-    // Navigate to the conversation URL
-    router.push(`/${threadId}`);
+    // Navigate to home page with threadId query param
+    router.push(`/?threadId=${threadId}`);
   };
 
   const handleNewConversation = () => {
@@ -309,10 +300,8 @@ function HomeContent() {
   const handleThreadIdUpdate = (threadId: string) => {
     setCurrentThreadId(threadId)
     
-    // Navigate to the new conversation URL when a thread is created
-    if (threadId && typeof window !== 'undefined' && window.location.pathname === '/') {
-      router.push(`/${threadId}`)
-    }
+    // Don't navigate - just update state
+    // The home page already handles displaying the conversation
   }
 
   const handleExecutionResultsUpdate = (results: ExecutionResult[]) => {

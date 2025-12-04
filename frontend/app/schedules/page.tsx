@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@clerk/nextjs";
+import Navbar from "@/components/navbar";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -192,7 +193,7 @@ export default function SchedulesPage() {
   const formatDateTime = (dateString: string | null) => {
     if (!dateString) return "Never";
     const date = new Date(dateString);
-    return date.toLocaleString();
+    return date.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) + ' IST';
   };
 
   const getRelativeTime = (dateString: string | null) => {
@@ -215,18 +216,23 @@ export default function SchedulesPage() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center min-h-[400px]">
-        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-      </div>
+      <>
+        <Navbar />
+        <div className="flex items-center justify-center min-h-screen pt-16">
+          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+        </div>
+      </>
     );
   }
 
   return (
-    <div className="container mx-auto py-8 px-4">
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">Scheduled Workflows</h1>
-          <p className="text-muted-foreground mt-1">
+    <>
+      <Navbar />
+      <div className="container mx-auto py-8 px-4 pt-16">
+        <div className="flex items-center justify-between mb-6">
+          <div>
+            <h1 className="text-3xl font-bold tracking-tight">Scheduled Workflows</h1>
+            <p className="text-muted-foreground mt-1">
             Manage automated workflow executions
           </p>
         </div>
@@ -377,6 +383,7 @@ export default function SchedulesPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </div>
+      </div>
+    </>
   );
 }

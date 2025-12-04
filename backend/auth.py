@@ -5,6 +5,7 @@ import os
 from typing import Optional, Dict, Any, Tuple
 from fastapi import Request,HTTPException, status
 from jose import jwt, JWTError
+from jose.backends import RSAKey
 import requests
 import httpx
 import logging
@@ -44,82 +45,60 @@ def _extract_bearer_token(authorization_header: Optional[str]) -> str:
 def verify_clerk_token(authorization_header: Optional[str]) -> Dict[str, Any]:
     """
     Verify the Clerk JWT and return claims.
-    Prefers JWKS verification if CLERK_JWKS_URL is set; falls back to PEM.
+    Uses the same working JWKS verification as get_user_from_request.
     """
     token = _extract_bearer_token(authorization_header)
-
-    # Try JWKS path first
-    if CLERK_JWKS_URL:
-        try:
-            header = jwt.get_unverified_header(token)
-            kid = header.get("kid")
-            if not kid:
-                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing kid in token header")
-
-            jwks = _JWKS_CACHE.get(CLERK_JWKS_URL)
-            if not jwks:
-                with httpx.Client(timeout=5.0) as client:
-                    resp = client.get(CLERK_JWKS_URL)
-                    resp.raise_for_status()
-                    jwks = resp.json()
-                _JWKS_CACHE[CLERK_JWKS_URL] = jwks
-
-            keys = jwks.get("keys", [])
-            public_key = None
-            algorithm = None
-            for key in keys:
-                if key.get("kid") == kid:
-                    public_key = jwt.algorithms.RSAAlgorithm.from_jwk(key)
-                    algorithm = key.get("alg") or "RS256"
-                    break
-            if not public_key:
-                # refresh once in case of rotation
-                _JWKS_CACHE.pop(CLERK_JWKS_URL, None)
-                with httpx.Client(timeout=5.0) as client:
-                    resp = client.get(CLERK_JWKS_URL)
-                    resp.raise_for_status()
-                    jwks = resp.json()
-                _JWKS_CACHE[CLERK_JWKS_URL] = jwks
-                for key in jwks.get("keys", []):
-                    if key.get("kid") == kid:
-                        public_key = jwt.algorithms.RSAAlgorithm.from_jwk(key)
-                        algorithm = key.get("alg") or "RS256"
-                        break
-            if not public_key:
-                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Signing key not found")
-
-            options = {"verify_aud": bool(CLERK_JWT_AUDIENCE)}
-            claims = jwt.decode(
-                token,
-                public_key,
-                algorithms=[algorithm],
-                issuer=CLERK_JWT_ISSUER if CLERK_JWT_ISSUER else None,
-                audience=CLERK_JWT_AUDIENCE if CLERK_JWT_AUDIENCE else None,
-                options=options,
+    
+    try:
+        # Fetch JWKS
+        jwks_response = requests.get(os.getenv("CLERK_JWKS_URL"))
+        jwks = jwks_response.json()
+        public_key = None
+        from jose.utils import base64url_decode
+        
+        def jwk_to_pem(jwk):
+            # Only supports RSA keys
+            if jwk["kty"] != "RSA":
+                raise ValueError("Only RSA keys are supported")
+            n = int.from_bytes(base64url_decode(jwk["n"].encode()), "big")
+            e = int.from_bytes(base64url_decode(jwk["e"].encode()), "big")
+            from cryptography.hazmat.primitives.asymmetric import rsa
+            from cryptography.hazmat.primitives import serialization
+            pubkey = rsa.RSAPublicNumbers(e, n).public_key()
+            return pubkey.public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo
             )
-            return claims
-        except HTTPException:
-            raise
-        except Exception:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
-
-    # Fallback to PEM if provided
-    if CLERK_JWT_PUBLIC_KEY:
-        try:
-            options = {"verify_aud": bool(CLERK_JWT_AUDIENCE)}
-            claims = jwt.decode(
-                token,
-                CLERK_JWT_PUBLIC_KEY,
-                algorithms=["RS256"],
-                issuer=CLERK_JWT_ISSUER if CLERK_JWT_ISSUER else None,
-                audience=CLERK_JWT_AUDIENCE if CLERK_JWT_AUDIENCE else None,
-                options=options,
-            )
-            return claims
-        except Exception:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
-
-    raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Server missing CLERK_JWKS_URL or CLERK_JWT_PUBLIC_KEY")
+        
+        for key in jwks["keys"]:
+            if key["kid"] == jwt.get_unverified_header(token)["kid"]:
+                public_key = jwk_to_pem(key)
+                break
+        
+        if not public_key:
+            logger.error("Invalid token: No matching key")
+            raise HTTPException(status_code=401, detail="Invalid token: No matching key")
+        
+        # Decode and verify
+        payload = jwt.decode(
+            token,
+            public_key,
+            algorithms=["RS256"],
+            audience=os.getenv("CLERK_JWT_AUDIENCE"),
+            issuer=os.getenv("CLERK_JWT_ISSUER")
+        )
+        logger.info(f"User authenticated via verify_clerk_token: user_id={payload.get('sub')}")
+        return payload
+        
+    except jwt.ExpiredSignatureError:
+        logger.error("JWT expired")
+        raise HTTPException(status_code=401, detail="Token expired")
+    except JWTError as e:
+        logger.error(f"JWT error: {e}")
+        raise HTTPException(status_code=401, detail=f"JWT error: {str(e)}")
+    except Exception as e:
+        logger.error(f"Token verification error: {e}")
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 
 def get_user_from_request(request: Request):

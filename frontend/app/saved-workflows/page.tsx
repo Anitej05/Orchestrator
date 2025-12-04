@@ -80,8 +80,8 @@ function SavedWorkflowsContent() {
       
       toast.success('Workflow loaded! Review the plan and click to execute.');
       
-      // Navigate to the conversation URL with the pre-seeded plan
-      router.push(`/${threadId}`);
+      // Navigate to home page with threadId to show the pre-seeded plan
+      router.push(`/?threadId=${threadId}`);
       
     } catch (err) {
       console.error('Failed to execute workflow:', err);

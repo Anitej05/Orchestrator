@@ -58,19 +58,39 @@ export function ScheduleWorkflowDialog({
   const [nextRuns, setNextRuns] = useState<string[]>([]);
 
   // Generate cron expression from user-friendly inputs
+  // Convert IST (UTC+5:30) to UTC for cron scheduling
   const generateCronExpression = (): string => {
-    const m = minute.padStart(2, '0');
-    const h = hour.padStart(2, '0');
+    const userHour = parseInt(hour) || 9;
+    const userMinute = parseInt(minute) || 0;
+    
+    // Convert IST time to UTC
+    // IST is UTC+5:30, so subtract 5:30 from user's IST time to get UTC time
+    let utcHour = userHour - 5;
+    let utcMinute = userMinute - 30;
+    
+    // Handle minute underflow
+    if (utcMinute < 0) {
+      utcHour -= 1;
+      utcMinute += 60;
+    }
+    
+    // Handle hour underflow (previous day)
+    if (utcHour < 0) {
+      utcHour += 24;
+    }
+    
+    const m = utcMinute.toString().padStart(2, '0');
+    const h = utcHour.toString().padStart(2, '0');
     
     switch (scheduleType) {
       case "hourly":
-        return `${m} * * * *`; // Every hour at specified minute
+        return `${m} * * * *`; // Every hour at specified minute (UTC)
       case "daily":
-        return `${m} ${h} * * *`; // Every day at specified time
+        return `${m} ${h} * * *`; // Every day at specified UTC time (user's IST time)
       case "weekly":
-        return `${m} ${h} * * ${dayOfWeek}`; // Specific day of week at specified time
+        return `${m} ${h} * * ${dayOfWeek}`; // Specific day of week at specified UTC time
       case "monthly":
-        return `${m} ${h} ${dayOfMonth} * *`; // Specific day of month at specified time
+        return `${m} ${h} ${dayOfMonth} * *`; // Specific day of month at specified UTC time
       default:
         return `0 9 * * *`;
     }
@@ -251,10 +271,10 @@ export function ScheduleWorkflowDialog({
           {/* Time Selection */}
           {scheduleType !== "hourly" && (
             <div className="space-y-2">
-              <Label>What time should it run? (in UTC timezone)</Label>
+              <Label>What time should it run? (IST - Asia/Kolkata)</Label>
               <div className="flex items-center gap-3">
                 <div className="flex-1">
-                  <Label htmlFor="hour" className="text-xs text-muted-foreground">Hour (0-23)</Label>
+                  <Label htmlFor="hour" className="text-xs text-muted-foreground">Hour (0-23 IST)</Label>
                   <Input
                     id="hour"
                     type="number"
@@ -280,12 +300,12 @@ export function ScheduleWorkflowDialog({
                 </div>
                 <div className="flex-1 flex items-end">
                   <div className="text-muted-foreground text-sm px-3 py-2 border rounded-md bg-muted">
-                    {hour.padStart(2, '0')}:{minute.padStart(2, '0')} UTC
+                    {hour.padStart(2, '0')}:{minute.padStart(2, '0')} IST
                   </div>
                 </div>
               </div>
               <p className="text-xs text-muted-foreground">
-                💡 Your local time is currently {new Date().toLocaleTimeString()} (UTC offset: {new Date().getTimezoneOffset() / -60} hours)
+                ✓ All times are in IST (UTC+5:30). Times are automatically converted to UTC for backend scheduling.
               </p>
             </div>
           )}
