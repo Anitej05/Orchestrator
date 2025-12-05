@@ -312,8 +312,28 @@ class WorkflowScheduler:
                     completed_tasks = final_state.get("completed_tasks", completed_tasks)
                 
                 # Update conversation JSON with final results
-                conversation_json["messages"] = final_state.get("messages", existing_messages) if final_state else existing_messages
-                conversation_json["completed_tasks"] = completed_tasks
+                # Use get_serializable_state to properly serialize messages and other complex objects
+                from orchestrator.graph import get_serializable_state
+                
+                # Get messages from final state or use existing
+                raw_messages = final_state.get("messages", existing_messages) if final_state else existing_messages
+                
+                # Create a minimal state dict for serialization
+                temp_state = {
+                    "messages": raw_messages,
+                    "completed_tasks": completed_tasks,
+                    "final_response": final_response or "Workflow completed",
+                    "task_agent_pairs": final_state.get("task_agent_pairs", []) if final_state else [],
+                    "task_plan": final_state.get("task_plan", []) if final_state else [],
+                    "original_prompt": conversation_json.get("metadata", {}).get("original_prompt", ""),
+                }
+                
+                # Serialize the state properly
+                serialized = get_serializable_state(temp_state, thread_id)
+                
+                # Update conversation JSON with serialized data
+                conversation_json["messages"] = serialized.get("messages", [])
+                conversation_json["completed_tasks"] = serialized.get("metadata", {}).get("completed_tasks", completed_tasks)
                 conversation_json["final_response"] = final_response or "Workflow completed"
                 conversation_json["status"] = "completed"
                 conversation_json["metadata"]["completed_at"] = datetime.utcnow().isoformat()

@@ -1814,7 +1814,17 @@ async def schedule_workflow(workflow_id: str, body: ScheduleWorkflowRequest, req
         raise HTTPException(status_code=404, detail="Workflow not found")
     
     # Check if workflow has a saved execution plan
-    if not workflow.blueprint or not workflow.blueprint.get("task_plan"):
+    # Accept either task_plan (preferred) or task_agent_pairs (fallback)
+    if not workflow.blueprint:
+        raise HTTPException(
+            status_code=400, 
+            detail="Workflow has no blueprint data."
+        )
+    
+    has_task_plan = workflow.blueprint.get("task_plan") and len(workflow.blueprint.get("task_plan", [])) > 0
+    has_task_agent_pairs = workflow.blueprint.get("task_agent_pairs") and len(workflow.blueprint.get("task_agent_pairs", [])) > 0
+    
+    if not has_task_plan and not has_task_agent_pairs:
         raise HTTPException(
             status_code=400, 
             detail="Workflow has no saved execution plan. Please complete a conversation and save the workflow again to capture the execution plan."

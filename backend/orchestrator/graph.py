@@ -3387,6 +3387,23 @@ def generate_final_response(state: State):
     # The _summarize_completed_tasks_for_context function extracts key info while removing bloat
     summarized_results = _summarize_completed_tasks_for_context(completed_tasks)
     
+    # ARTIFACT EXPANSION: Restore compressed results for LLM context
+    if ARTIFACT_INTEGRATION_ENABLED and artifact_hooks:
+        thread_id = state.get('thread_id')
+        if thread_id:
+            for task in summarized_results:
+                result = task.get('result', {})
+                if isinstance(result, dict) and '_artifact_ref' in result:
+                    artifact_id = result['_artifact_ref'].get('id')
+                    if artifact_id:
+                        try:
+                            expanded = artifact_hooks.expand_artifact(artifact_id, thread_id)
+                            if expanded:
+                                task['result'] = expanded
+                                logger.info(f"Expanded artifact {artifact_id} for LLM context")
+                        except Exception as e:
+                            logger.warning(f"Failed to expand artifact {artifact_id}: {e}")
+    
     # Log the summarization for debugging
     original_size = len(json.dumps(completed_tasks, default=str))
     summarized_size = len(json.dumps(summarized_results, default=str))
