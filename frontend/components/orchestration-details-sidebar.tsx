@@ -361,27 +361,7 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                             </p>
                         </div>
                         
-                        {/* Show approval buttons when plan is ready for execution */}
-                        {(conversationState.metadata?.currentStage === 'validating' || 
-                          conversationState.status === 'planning_complete') && 
-                         onAcceptPlan && onRejectPlan && (
-                            <div className="flex gap-2">
-                                <Button
-                                    variant="outline"
-                                    size="sm"
-                                    onClick={onRejectPlan}
-                                >
-                                    Modify Plan
-                                </Button>
-                                <Button
-                                    size="sm"
-                                    onClick={() => onAcceptPlan()}
-                                    className="bg-green-600 hover:bg-green-700"
-                                >
-                                    Accept & Execute
-                                </Button>
-                            </div>
-                        )}
+                        {/* Approval buttons have been moved to the interactive chat interface */}
                         
                         {/* Show save button after execution completes */}
                         {conversationState.status === 'completed' && (

@@ -398,6 +398,7 @@ function HomeContent() {
                   onExecutionResultsUpdate={handleExecutionResultsUpdate}
                   onViewCanvas={handleViewCanvas}
                   owner={user?.id}
+                  onAcceptPlan={handleAcceptPlan}
                 />
               </main>
             </ResizablePanel>

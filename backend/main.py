@@ -554,12 +554,45 @@ async def execute_orchestration(
                 initial_state["final_response"] = "Execution cancelled by user."
                 return initial_state
             else:
-                # Invalid response
-                logger.warning(f"Invalid approval response: '{user_response_lower}'")
-                print(f"!!! INVALID APPROVAL RESPONSE: '{user_response_lower}' !!!")
-                initial_state["pending_user_input"] = True
-                initial_state["question_for_user"] = "Please respond with 'approve' to proceed or 'cancel' to stop."
-                return initial_state
+                # User wants to modify the plan - treat as a new prompt with modifications
+                logger.info(f"User wants to MODIFY plan with: '{user_response}'")
+                print(f"!!! USER MODIFICATION REQUEST - Replanning with modifications !!!")
+                print(f"!!! CURRENT STATE HAS original_prompt: {'original_prompt' in initial_state}")
+                if "original_prompt" in initial_state:
+                    print(f"!!! ORIGINAL PROMPT VALUE: '{initial_state['original_prompt'][:200]}...'")
+                
+                # Add user's modification message to the conversation history
+                from orchestrator.message_manager import MessageManager
+                existing_messages = initial_state.get("messages", [])
+                modification_message = HumanMessage(content=user_response)
+                updated_messages = MessageManager.add_message(
+                    existing_messages, 
+                    modification_message
+                )
+                initial_state["messages"] = updated_messages
+                
+                # Combine original prompt with the modification in a way that makes the intent clear
+                if "original_prompt" in initial_state and initial_state["original_prompt"]:
+                    # Make it clear this is a modification/addition to the existing workflow
+                    initial_state["original_prompt"] = f"{initial_state['original_prompt']}\n\n{user_response}"
+                    print(f"!!! COMBINED PROMPT: '{initial_state['original_prompt'][:300]}...'")
+                else:
+                    initial_state["original_prompt"] = user_response
+                    print(f"!!! NO ORIGINAL PROMPT - USING USER RESPONSE AS NEW PROMPT !!!")
+                
+                # Clear the plan and restart planning with the modified prompt
+                initial_state["task_plan"] = []
+                initial_state["task_agent_pairs"] = []
+                initial_state["needs_approval"] = False
+                initial_state["approval_required"] = False
+                initial_state["pending_user_input"] = False
+                initial_state["question_for_user"] = None
+                initial_state["planning_mode"] = True  # Keep in planning mode to regenerate plan
+                initial_state["plan_approved"] = False
+                # Also clear completed tasks to start fresh
+                initial_state["completed_tasks"] = []
+                initial_state["latest_completed_tasks"] = []
+                logger.info(f"Restarting planning with modified prompt: '{initial_state['original_prompt']}'")
         else:
             # Regular user response - add to context
             if "original_prompt" in initial_state:
