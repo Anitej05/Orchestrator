@@ -2,7 +2,7 @@
 "use client"
 
 import { useState, useRef, useEffect } from "react"
-import { useRouter } from "next/navigation"
+import { useRouter, useSearchParams } from "next/navigation"
 import AppSidebar from "@/components/app-sidebar"
 import TaskBuilder from "@/components/task-builder"
 import { SidebarProvider, SidebarInset, SidebarTrigger, useSidebar } from "@/components/ui/sidebar"
@@ -41,6 +41,7 @@ interface ApiResponse {
 function HomeContent() {
   const { open } = useSidebar()
   const router = useRouter()
+  const searchParams = useSearchParams()
   const { user, isLoaded: clerkLoaded } = useUser()
   const [taskAgentPairs, setTaskAgentPairs] = useState<TaskAgentPair[]>([])
   const [selectedAgents, setSelectedAgents] = useState<Record<string, string>>({})
@@ -163,35 +164,21 @@ function HomeContent() {
     }
   }, [conversationState.status, conversationState.final_response, conversationState.thread_id, isRestoring]);
 
-  // Handle URL parameters for auto-executing saved workflows or pre-seeded threads
+  // Handle URL parameters for auto-executing saved workflows
   useEffect(() => {
-    if (typeof window === 'undefined' || !clerkLoaded) return;
+    if (!clerkLoaded) return;
     
-    const params = new URLSearchParams(window.location.search);
-    const threadId = params.get('threadId');
-    const promptParam = params.get('prompt');
-    const executeNow = params.get('executeNow');
+    const promptParam = searchParams.get('prompt');
+    const executeNow = searchParams.get('executeNow');
+    const threadId = searchParams.get('threadId');
     
-    // Priority 1: Pre-seeded workflow thread (from workflow execute endpoint)
+    // If threadId is in query params, redirect to proper route
     if (threadId) {
-      // Clear the URL parameters
-      window.history.replaceState({}, '', window.location.pathname);
-      
-      console.log('Loading pre-seeded workflow thread:', threadId);
-      // Load this thread - it already has the plan pre-seeded
-      // The plan will automatically show in the sidebar with approval buttons
-      loadConversation(threadId).catch((error) => {
-        console.error('Failed to load workflow:', error);
-        toast({
-          title: "Error",
-          description: "Failed to load workflow. Please try again.",
-          variant: "destructive"
-        });
-      });
+      router.replace(`/c/${threadId}`);
       return;
     }
     
-    // Priority 2: Auto-execute with prompt (legacy)
+    // Auto-execute with prompt (for saved workflows)
     if (promptParam && executeNow === 'true') {
       // Clear the URL parameters
       window.history.replaceState({}, '', window.location.pathname);
@@ -206,7 +193,7 @@ function HomeContent() {
       });
       window.dispatchEvent(event);
     }
-  }, [clerkLoaded]);
+  }, [clerkLoaded, searchParams, router]);
 
   const handleInteractiveWorkflowComplete = (result: ProcessResponse) => {
     setApiResponseData(result as ApiResponse);
@@ -233,8 +220,28 @@ function HomeContent() {
 
 
   const handleConversationSelect = async (threadId: string) => {
-    // Navigate to home page with threadId query param
-    router.push(`/?threadId=${threadId}`);
+    // Don't navigate - just load the conversation into the store
+    // This gives us ChatGPT-like behavior: update content without full page reload
+    console.log('Loading conversation:', threadId);
+    setIsRestoring(true);
+    
+    try {
+      const { loadConversation: loadConv } = useConversationStore.getState().actions;
+      await loadConv(threadId);
+      
+      // Update URL without navigation (for sharing/bookmarking)
+      window.history.replaceState({}, '', `/c/${threadId}`);
+      
+    } catch (error) {
+      console.error('Failed to load conversation:', error);
+      toast({
+        title: "Error",
+        description: "Failed to load conversation. Please try again.",
+        variant: "destructive"
+      });
+    } finally {
+      setIsRestoring(false);
+    }
   };
 
   const handleNewConversation = () => {

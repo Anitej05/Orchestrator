@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import { useConversationStore } from '@/lib/conversation-store';
 import AppSidebar from "@/components/app-sidebar"
 import Navbar from "@/components/navbar"
 import { SidebarProvider, SidebarInset, SidebarTrigger, useSidebar } from "@/components/ui/sidebar"
@@ -80,8 +81,16 @@ function SavedWorkflowsContent() {
       
       toast.success('Workflow loaded! Review the plan and click to execute.');
       
-      // Navigate to home page with threadId to show the pre-seeded plan
-      router.push(`/?threadId=${threadId}`);
+      // Load conversation and navigate to home (ChatGPT-style)
+      // Update URL for sharing/bookmarking but don't full-page reload
+      const { loadConversation } = useConversationStore.getState().actions;
+      await loadConversation(threadId);
+      
+      // Update URL without navigation
+      window.history.replaceState({}, '', `/c/${threadId}`);
+      
+      // Navigate to home where conversation is already loaded
+      router.push('/');
       
     } catch (err) {
       console.error('Failed to execute workflow:', err);

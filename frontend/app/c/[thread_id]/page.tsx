@@ -2,19 +2,39 @@
 
 import { useEffect } from 'react'
 import { useParams, useRouter } from 'next/navigation'
+import { useConversationStore } from '@/lib/conversation-store'
+import { useToast } from '@/hooks/use-toast'
 
 export default function ConversationPage() {
   const params = useParams()
   const router = useRouter()
   const threadId = params?.thread_id as string
+  const { toast } = useToast()
 
   useEffect(() => {
-    if (threadId) {
-      // Redirect to home page with threadId as query parameter
-      // This allows shareable /c/{thread_id} URLs while keeping all logic in one place
-      router.replace(`/?threadId=${threadId}`)
-    }
-  }, [threadId, router])
+    if (!threadId) return
+
+    // Load conversation into store
+    console.log('Loading conversation from URL:', threadId)
+    const { loadConversation } = useConversationStore.getState().actions
+    
+    loadConversation(threadId)
+      .then(() => {
+        // Redirect to home page - conversation will be loaded in the store
+        // This gives us the ChatGPT-like experience where content updates without full reload
+        router.replace('/')
+      })
+      .catch((error) => {
+        console.error('Failed to load conversation:', error)
+        toast({
+          title: "Error",
+          description: "Failed to load conversation. Please try again.",
+          variant: "destructive"
+        })
+        // Redirect to home on error
+        setTimeout(() => router.replace('/'), 1000)
+      })
+  }, [threadId, router, toast])
 
   // Show minimal loading state during redirect
   return (
