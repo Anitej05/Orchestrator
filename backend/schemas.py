@@ -222,3 +222,36 @@ class FinalResponse(BaseModel):
     canvas_required: bool = Field(..., description="Whether canvas visualization is needed")
     canvas_type: Optional[Literal["html", "markdown"]] = Field(None, description="Type of canvas content")
     canvas_content: Optional[str] = Field(None, description="The actual canvas content (HTML or Markdown)")
+
+# --- Plan Modification Models (NEW) ---
+
+class PlanModification(BaseModel):
+    """Tracks a single modification made to the plan."""
+    modification_type: Literal['add_task', 'update_task', 'remove_task', 'reorder_tasks'] = Field(..., description="Type of modification")
+    affected_tasks: List[str] = Field(..., description="Task names affected by this modification")
+    reasoning: str = Field(..., description="Why this modification was made")
+    timestamp: str = Field(..., description="ISO timestamp of modification")
+    user_instruction: str = Field(..., description="The user's actual request that triggered this")
+
+class UserUpdateAnalysis(BaseModel):
+    """Result of analyzing user's update request in context of existing plan."""
+    request_type: Literal['add_task', 'update_task', 'update_specific_task', 'clarification_only', 'execution_question'] = Field(...)
+    confidence: float = Field(..., description="Confidence in this analysis (0.0-1.0)")
+    reasoning: str = Field(...)
+    affected_tasks: List[str] = Field(default_factory=list, description="Existing tasks affected")
+    new_task_description: Optional[str] = Field(None, description="If add_task, the new task description")
+    specific_task_to_update: Optional[str] = Field(None, description="If update_specific_task, which task")
+    update_reason: Optional[str] = Field(None, description="Why the task should be updated")
+    requires_new_agent: bool = Field(default=False)
+    suggested_agent: Optional[str] = Field(None, description="Suggested agent for new task")
+    next_action: Literal['add_node', 'update_node', 'modify_node', 'ask_clarification', 'proceed_with_execution'] = Field(...)
+
+class PlanState(BaseModel):
+    """Complete state of the plan including history of modifications."""
+    version: int = Field(default=1, description="Plan version number")
+    original_plan: List[List[PlannedTask]] = Field(default_factory=list, description="Original plan before any modifications")
+    current_plan: List[List[PlannedTask]] = Field(default_factory=list, description="Current plan state after modifications")
+    modifications: List[PlanModification] = Field(default_factory=list, description="All modifications made to the plan")
+    is_editable: bool = Field(default=True, description="Whether plan can still be edited")
+    last_modification: Optional[str] = Field(None, description="ISO timestamp of last modification")
+
