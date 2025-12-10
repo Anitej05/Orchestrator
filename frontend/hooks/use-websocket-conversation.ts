@@ -370,31 +370,53 @@ export function useWebSocketManager({
             const currentMessages = useConversationStore.getState().messages;
             const question = eventData.data?.question_for_user || eventData.data?.question || 'Please provide additional information';
             
-            console.log('📨 ask_user event received:', question);
+            // Check if this is an approval request (has needs_approval or approval_required flag)
+            const isApprovalRequest = eventData.data?.needs_approval === true || eventData.data?.approval_required === true;
             
-            // Add the question as a system message so user can see it
-            const questionMessage: Message = {
-              id: Date.now().toString(),
-              type: 'system',
-              content: question,
-              timestamp: new Date()
-            };
-            
-            _setConversationState({
-              messages: [...currentMessages, questionMessage],
-              status: 'waiting_for_user',
-              isWaitingForUser: true,
-              isLoading: false,  // IMPORTANT: Stop loading so user can respond
-              currentQuestion: question,
-              metadata: {
-                ...useConversationStore.getState().metadata,
-                currentStage: 'waiting',
-                stageMessage: 'Waiting for your input...',
-                progress: 100
-              }
-            });
-            
-            console.log('Ask user - question:', question);
+            if (isApprovalRequest) {
+              // This is a plan approval request - set approval state WITHOUT adding message
+              const currentState = useConversationStore.getState();
+              
+              _setConversationState({
+                // Don't add the approval message to chat - user can see the plan in the Plan tab
+                isWaitingForUser: true,
+                currentQuestion: question,
+                approval_required: true,
+                estimated_cost: eventData.data?.estimated_cost || 0,
+                task_count: eventData.data?.task_count || 0,
+                task_plan: eventData.data?.task_plan || currentState.task_plan || [],
+                task_agent_pairs: eventData.data?.task_agent_pairs || currentState.task_agent_pairs || [],
+                isLoading: false,
+                metadata: {
+                  ...currentState.metadata,
+                  currentStage: 'validating',
+                  stageMessage: 'Waiting for plan approval...',
+                  progress: 50
+                }
+              });
+            } else {
+              // Regular user input required - add as system message
+              const questionMessage: Message = {
+                id: Date.now().toString(),
+                type: 'system',
+                content: question,
+                timestamp: new Date()
+              };
+
+              _setConversationState({
+                messages: [...currentMessages, questionMessage],
+                status: 'waiting_for_user',
+                isWaitingForUser: true,
+                isLoading: false,  // IMPORTANT: Stop loading so user can respond
+                currentQuestion: question,
+                metadata: {
+                  ...useConversationStore.getState().metadata,
+                  currentStage: 'waiting',
+                  stageMessage: 'Waiting for your input...',
+                  progress: 100
+                }
+              });
+            }
           }
           else if (eventData.node === 'save_history') {
             _setConversationState({

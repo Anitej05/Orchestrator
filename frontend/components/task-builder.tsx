@@ -45,6 +45,7 @@ interface TaskBuilderProps {
     onExecutionResultsUpdate?: (results: ExecutionResult[]) => void;
     onViewCanvas?: (canvasContent: string, canvasType: 'html' | 'markdown') => void;
     owner?: string;
+    onAcceptPlan?: (modifiedPrompt?: string) => Promise<void>;
 }
 
 export default function TaskBuilder({
@@ -57,7 +58,8 @@ export default function TaskBuilder({
     onThreadIdUpdate,
     onExecutionResultsUpdate,
     onViewCanvas,
-    owner
+    owner,
+    onAcceptPlan
 }: TaskBuilderProps) {
   const { toast } = useToast()
   const { user } = useUser()
@@ -103,6 +105,7 @@ export default function TaskBuilder({
         resetConversation={resetConversation}
         onViewCanvas={onViewCanvas}
         owner={owner}
+        onAcceptPlan={onAcceptPlan}
       />
 
       {/* Hidden component to handle execution logic */}

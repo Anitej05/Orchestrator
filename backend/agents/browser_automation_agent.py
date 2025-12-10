@@ -14,7 +14,13 @@ import uuid
 from datetime import datetime
 import json
 import base64
-from playwright.async_api import async_playwright, Browser, Page, BrowserContext
+try:
+    from playwright.async_api import async_playwright, Browser, Page, BrowserContext
+except ImportError as exc:
+    raise RuntimeError(
+        "Playwright is required for browser automation; install it with `pip install playwright` "
+        "and run `playwright install` before starting the agent."
+    ) from exc
 import re
 
 # Import standardized file manager

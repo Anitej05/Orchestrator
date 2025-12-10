@@ -22,6 +22,7 @@ interface InteractiveChatInterfaceProps {
   resetConversation: () => void;
   onViewCanvas?: (canvasContent: string, canvasType: 'html' | 'markdown') => void;
   owner?: string;
+  onAcceptPlan?: (modifiedPrompt?: string) => Promise<void>;
 }
 
 export function InteractiveChatInterface({
@@ -40,7 +41,8 @@ export function InteractiveChatInterface({
   continueConversation,
   resetConversation,
   onViewCanvas,
-  owner
+  owner,
+  onAcceptPlan
 }: InteractiveChatInterfaceProps) {
   useEffect(() => {
     if (!state) {
@@ -99,14 +101,31 @@ export function InteractiveChatInterface({
 
   const handleModifyPlan = async () => {
     console.log('User wants to modify plan');
-    // DON'T clear isWaitingForUser yet - continueConversation needs to see it's true
-    // Only clear approval_required to close the modal
+    // Just close the approval modal and let user type modifications
+    // The modify logic will be handled in handleSubmit when they click "Modify" button
     useConversationStore.setState({ 
       approval_required: false
     });
-    // For now, just cancel and let user provide new instructions
-    // continueConversation will capture isWaitingForUser=true and send user_response
-    await continueConversation('cancel', [], false);
+  };
+
+  // Handler for Accept & Execute button (uses parent's logic)
+  const handleAcceptAndExecute = async () => {
+    console.log('User accepts and executes plan');
+    
+    // Check if this is from planning mode (approval_required) or saved workflow
+    if (state.approval_required) {
+      // Planning mode - send 'approve' to backend to continue execution
+      useConversationStore.setState({ 
+        approval_required: false
+      });
+      await continueConversation('approve', [], false, owner);
+    } else if (onAcceptPlan) {
+      // Saved workflow - use parent's logic
+      useConversationStore.setState({ 
+        approval_required: false
+      });
+      await onAcceptPlan();
+    }
   };
 
   useEffect(() => {
@@ -168,6 +187,14 @@ export function InteractiveChatInterface({
         await continueConversation(userResponse, attachedFiles, planningMode, owner);
         setUserResponse('');
         setAttachedFiles([]); // Clear files after submission
+      }
+    } else if (state.metadata?.currentStage === 'validating' || state.status === 'planning_complete') {
+      // User is modifying a saved workflow plan
+      if (inputValue.trim() || attachedFiles.length > 0) {
+        // Send the modification as a regular user message - backend will handle combining it with original prompt
+        await continueConversation(inputValue, attachedFiles, false, owner);
+        setInputValue('');
+        setAttachedFiles([]);
       }
     } else {
       // Check if this is a continuation of an existing conversation or a new one
@@ -458,7 +485,7 @@ export function InteractiveChatInterface({
         )}
 
         {/* Hide input form when browser is running - only show progress bar */}
-        {!state.approval_required && !isBrowserRunning && (
+        {!isBrowserRunning && (
         <form onSubmit={handleSubmit} className="space-y-4">
           {state.isWaitingForUser ? (
             <div className="space-y-3">
@@ -552,6 +579,34 @@ export function InteractiveChatInterface({
               />
             </div>
             <div className="flex space-x-2">
+              {/* Plan Approval Buttons - Show for both planning mode and saved workflows */}
+              {(state.approval_required || ((state.metadata?.currentStage === 'validating' || state.status === 'planning_complete') && onAcceptPlan)) ? (
+                <>
+                  {/* Only show Modify button for non-saved workflows and not in planning mode */}
+                  {!state.metadata?.from_workflow && !state.approval_required && (
+                    <Button 
+                      type="button"
+                      variant="outline" 
+                      size="sm" 
+                      onClick={handleModifyPlan}
+                      className="border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-800"
+                    >
+                      Modify Plan
+                    </Button>
+                  )}
+                  
+                  {/* Always show Accept button when approval is needed */}
+                  <Button 
+                    type="button"
+                    size="sm" 
+                    onClick={handleAcceptAndExecute}
+                    className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white shadow-md"
+                  >
+                    Accept & Execute
+                  </Button>
+                </>
+              ) : null}
+              
               <Button 
                 type="submit" 
                 disabled={
@@ -559,7 +614,13 @@ export function InteractiveChatInterface({
                   (state.isWaitingForUser ? !userResponse.trim() : (!inputValue.trim() && attachedFiles.length === 0))
                 }
               >
-                {isLoading ? 'Processing...' : state.isWaitingForUser ? 'Send Response' : 'Start Workflow'}
+                {isLoading 
+                  ? 'Processing...' 
+                  : (state.metadata?.currentStage === 'validating' || state.status === 'planning_complete')
+                  ? 'Modify'
+                  : state.isWaitingForUser 
+                  ? 'Send Response' 
+                  : 'Start Workflow'}
               </Button>
               
               {state.messages.length > 0 && (
@@ -578,9 +639,9 @@ export function InteractiveChatInterface({
         )}
       </div>
 
-      {/* Plan Approval Modal */}
+      {/* Plan Approval Modal - Disabled, now using chat interface buttons */}
       <PlanApprovalModal
-        isOpen={state.approval_required === true}
+        isOpen={false}
         onClose={() => {}}
         onApprove={handleApprovePlan}
         onModify={handleModifyPlan}
