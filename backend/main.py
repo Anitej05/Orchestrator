@@ -123,9 +123,9 @@ app.add_middleware(
 app.include_router(connect_router.router)
 app.include_router(credentials_router.router)
 
-# Import and include artifacts router for context management
-from routers import artifacts_router
-app.include_router(artifacts_router.router)
+# Import and include unified content router for standardized content management
+from routers import content_router
+app.include_router(content_router.router)
 
 # --- Static Files for Screenshots ---
 from fastapi.staticfiles import StaticFiles
@@ -378,8 +378,17 @@ async def upload_files(files: List[UploadFile] = File(...)):
         if not file.filename:
             continue  # Or raise an HTTPException for files without names
 
-        # **FIX 2: Handle potential None for content_type**
-        file_type = 'image' if file.content_type and file.content_type.startswith('image/') else 'document'
+        # **FIX 2: Handle potential None for content_type and detect file type by extension**
+        file_extension = os.path.splitext(file.filename)[1].lower()
+        
+        # Determine file type based on extension and content type
+        if file.content_type and file.content_type.startswith('image/'):
+            file_type = 'image'
+        elif file_extension in ['.csv', '.xlsx', '.xls']:
+            file_type = 'spreadsheet'
+        else:
+            file_type = 'document'
+        
         save_dir = f"storage/{file_type}s"  # Path relative to project root
         file_path = os.path.join(save_dir, file.filename)
 
@@ -592,6 +601,7 @@ async def execute_orchestration(
         logger.info(f"Continuing conversation. Total messages: {len(updated_messages)}")
         
         # Check if this is a plan approval - if so, preserve the plan
+        needs_approval = current_conversation.get("needs_approval", False)
         is_plan_approval = needs_approval and user_response and user_response.lower().strip() in ["approve", "yes", "proceed", "continue", "execute", "go", "ok"]
         
         initial_state = {
@@ -666,11 +676,40 @@ async def execute_orchestration(
 
     # --- File Merging Logic ---
     # This block runs for EVERY turn, ensuring new files are always added to the state
+    # CRITICAL: Preserve file_id from previous turns to maintain spreadsheet agent state
     if files:
         # Use a dictionary keyed by file_path to merge lists and avoid duplicates
         file_map = {f['file_path']: f for f in initial_state.get("uploaded_files", [])}
+        
+        # IMPORTANT: Reset is_current_turn for all existing files
+        # This ensures only newly uploaded files are marked as current
+        for file_path in file_map:
+            file_map[file_path]['is_current_turn'] = False
+        
         for new_file in files:
-            file_map[new_file.file_path] = new_file.model_dump()
+            new_file_dict = new_file.model_dump()
+            file_path = new_file.file_path
+            
+            # Mark this file as uploaded in the current turn
+            new_file_dict['is_current_turn'] = True
+            logger.info(f"📎 Marking file as current turn: {new_file.file_name}")
+            
+            # CRITICAL FIX: If we already have this file with a file_id, preserve it
+            # This ensures modifications made by the spreadsheet agent are not lost
+            if file_path in file_map:
+                existing_file = file_map[file_path]
+                existing_file_id = existing_file.get('file_id') or existing_file.get('content_id')
+                new_file_id = new_file_dict.get('file_id') or new_file_dict.get('content_id')
+                
+                # If new file doesn't have a file_id but existing one does, preserve it
+                if existing_file_id and not new_file_id:
+                    logger.info(f"📝 Preserving existing file_id '{existing_file_id}' for file: {file_path}")
+                    new_file_dict['file_id'] = existing_file_id
+                    # Also preserve content_id if that was the identifier
+                    if existing_file.get('content_id') and not new_file_dict.get('content_id'):
+                        new_file_dict['content_id'] = existing_file.get('content_id')
+            
+            file_map[file_path] = new_file_dict
         
         initial_state["uploaded_files"] = list(file_map.values())
         logger.info(f"File context updated. Total unique files in state: {len(initial_state['uploaded_files'])}")
@@ -872,6 +911,7 @@ async def find_agents(request: ProcessRequest):
     """
     thread_id = request.thread_id or str(uuid.uuid4())
     logger.info(f"Starting agent search with thread_id: {thread_id}")
+    logger.info(f"🔍 /api/chat RECEIVED: files={request.files}, files_count={len(request.files) if request.files else 0}")
 
     try:
         final_state = await execute_orchestration(
@@ -2393,6 +2433,112 @@ async def websocket_chat(websocket: WebSocket):
                     logger.error(f"Failed to retrieve owner for thread {thread_id}: {db_err}")
                     # Continue anyway - proceed without owner for existing thread
 
+            # Handle canvas confirmation messages
+            message_type = data.get("type")
+            
+            # Check if user typed a confirmation word while confirmation is pending
+            if not message_type and prompt:
+                # Check if there's a pending confirmation
+                try:
+                    from orchestrator.graph import graph
+                    config = {"configurable": {"thread_id": thread_id}}
+                    current_state = graph.get_state(config)
+                    
+                    if current_state and current_state.values and current_state.values.get("pending_confirmation"):
+                        # Check if the prompt is a confirmation word
+                        confirmation_words = ["yes", "confirm", "ok", "okay", "sure", "proceed", "do it", "apply", "go ahead"]
+                        cancel_words = ["no", "cancel", "abort", "stop", "don't", "nevermind"]
+                        
+                        prompt_lower = prompt.lower().strip()
+                        
+                        if any(word in prompt_lower for word in confirmation_words):
+                            logger.info(f"📝 User typed confirmation: '{prompt}' - treating as canvas confirmation")
+                            # Convert to canvas_confirmation message
+                            message_type = "canvas_confirmation"
+                            data["type"] = "canvas_confirmation"
+                            data["action"] = "confirm"
+                            pending_task = current_state.values.get("pending_confirmation_task")
+                            data["task_name"] = pending_task.get("task_name") if pending_task else None
+                        elif any(word in prompt_lower for word in cancel_words):
+                            logger.info(f"📝 User typed cancellation: '{prompt}' - treating as canvas cancellation")
+                            # Convert to canvas_confirmation message with cancel action
+                            message_type = "canvas_confirmation"
+                            data["type"] = "canvas_confirmation"
+                            data["action"] = "cancel"
+                            pending_task = current_state.values.get("pending_confirmation_task")
+                            data["task_name"] = pending_task.get("task_name") if pending_task else None
+                except Exception as check_err:
+                    logger.error(f"Error checking for pending confirmation: {check_err}")
+            
+            if message_type == "canvas_confirmation":
+                action = data.get("action")  # 'confirm' or 'cancel'
+                task_name = data.get("task_name")
+                
+                logger.info(f"📊 Received canvas {action} for task '{task_name}' on thread {thread_id}")
+                
+                # Send acknowledgment
+                await websocket.send_json({
+                    "node": "canvas_confirmation_received",
+                    "thread_id": thread_id,
+                    "data": {
+                        "action": action,
+                        "task_name": task_name,
+                        "status": "acknowledged"
+                    },
+                    "timestamp": time.time()
+                })
+                
+                if action == "cancel":
+                    # User cancelled - abort the action
+                    logger.info(f"❌ User cancelled task '{task_name}'")
+                    await websocket.send_json({
+                        "node": "__end__",
+                        "thread_id": thread_id,
+                        "data": {
+                            "status": "cancelled",
+                            "message": f"Task '{task_name}' was cancelled by user",
+                            "final_response": f"Action cancelled. The task '{task_name}' was not executed."
+                        },
+                        "timestamp": time.time()
+                    })
+                    continue
+                
+                # User confirmed - resume execution
+                logger.info(f"✅ User confirmed task '{task_name}' - resuming execution")
+                
+                # For canvas confirmation, we'll just re-run the orchestration with the confirmation
+                # The simpler approach is to send a new message that triggers the actual edit
+                try:
+                    logger.info(f"🔄 User confirmed canvas action for task '{task_name}'")
+                    
+                    # Send update to frontend
+                    await websocket.send_json({
+                        "node": "canvas_confirmation_processed",
+                        "thread_id": thread_id,
+                        "data": {
+                            "action": action,
+                            "task_name": task_name,
+                            "status": "resuming_execution",
+                            "message": f"Applying changes..."
+                        },
+                        "timestamp": time.time()
+                    })
+                    
+                    # The confirmation is acknowledged
+                    # The frontend will send a follow-up message to trigger the actual edit
+                    logger.info(f"✅ Confirmation acknowledged for thread {thread_id}. Waiting for follow-up message.")
+                    
+                except Exception as resume_err:
+                    logger.error(f"Failed to resume execution after confirmation: {resume_err}", exc_info=True)
+                    await websocket.send_json({
+                        "node": "__error__",
+                        "error": f"Failed to resume execution: {str(resume_err)}",
+                        "thread_id": thread_id,
+                        "timestamp": time.time()
+                    })
+                
+                continue  # Continue waiting for messages
+            
             if not prompt and not user_response:
                 await websocket.send_json({
                     "node": "__error__",
@@ -3331,6 +3477,12 @@ def start_agents_async():
     logs_dir = "logs"
     os.makedirs(logs_dir, exist_ok=True)
 
+    # Check for SKIP_AGENTS environment variable (comma-separated list)
+    skip_agents_env = os.getenv("SKIP_AGENTS", "")
+    skip_agents = [a.strip().lower() for a in skip_agents_env.split(",") if a.strip()]
+    if skip_agents:
+        logger.info(f"SKIP_AGENTS configured: {skip_agents}")
+
     agent_files = [f for f in os.listdir(agents_dir) if f.endswith("_agent.py")]
     logger.info(f"Starting {len(agent_files)} agent server(s)...")
 
@@ -3338,6 +3490,11 @@ def start_agents_async():
         agent_path = os.path.join(agents_dir, agent_file)
         agent_name = agent_file.replace('.py', '')
         port = None
+        
+        # Check if this agent should be skipped (for running in separate terminal)
+        if agent_name.lower() in skip_agents or agent_file.lower() in skip_agents:
+            logger.info(f"Skipping {agent_name} (in SKIP_AGENTS, run it separately)")
+            continue
         
         try:
             # Extract port from agent file
@@ -3463,7 +3620,7 @@ if __name__ == "__main__":
         host="0.0.0.0",  # Changed from 127.0.0.1 to support both IPv4 and IPv6
         port=8000, 
         reload=True,
-        reload_includes=["*.py"],  # Watch all Python files including agents
+        reload_includes=["*.py", "orchestrator/*.py", "agents/*.py", "services/*.py", "routers/*.py"],  # Watch all Python files
         ws_ping_interval=20,  # Send ping every 20 seconds
         ws_ping_timeout=20,   # Wait 20 seconds for pong
         log_level="info"

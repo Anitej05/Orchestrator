@@ -23,6 +23,7 @@ class EndpointDetail(BaseModel):
     http_method: str
     description: Optional[str] = None
     parameters: List[EndpointParameterDetail] = []
+    request_format: Optional[str] = None  # 'json' or 'form', defaults to agent's connection_config
 
     class Config:
         from_attributes = True
@@ -158,19 +159,57 @@ class PriorityMappingResponse(BaseModel):
     mappings: List[PriorityMapper]
 
 class FileObject(BaseModel):
-    """Represents a file uploaded by the user (legacy - for backward compatibility)."""
+    """
+    Represents a file in the orchestrator system.
+    
+    This schema is compatible with both the legacy file system and the new
+    unified content management system.
+    """
     file_name: str
     file_path: str
-    file_type: Literal['image', 'document']
+    file_type: Literal['image', 'document', 'spreadsheet', 'code', 'data', 'archive', 'other'] = 'document'
+    
+    # Optional fields for unified content system
+    file_id: Optional[str] = Field(None, description="Unified content ID")
+    content_id: Optional[str] = Field(None, description="Alias for file_id (unified content system)")
+    mime_type: Optional[str] = Field(None, description="MIME type of the file")
+    size: Optional[int] = Field(None, description="File size in bytes")
+    source: Optional[str] = Field(None, description="Source of the file (user_upload, agent_output, etc.)")
+    thread_id: Optional[str] = Field(None, description="Associated conversation thread")
+    
+    # Legacy fields for backward compatibility
     base64_content: Optional[str] = None
     vector_store_path: Optional[str] = None
+    
+    @classmethod
+    def from_unified_metadata(cls, metadata) -> 'FileObject':
+        """Create FileObject from UnifiedContentMetadata"""
+        return cls(
+            file_name=metadata.name,
+            file_path=metadata.storage_path,
+            file_type=metadata.content_type.value if hasattr(metadata.content_type, 'value') else str(metadata.content_type),
+            file_id=metadata.id,
+            content_id=metadata.id,
+            mime_type=metadata.mime_type,
+            size=metadata.size_bytes,
+            source=metadata.source.value if hasattr(metadata.source, 'value') else str(metadata.source),
+            thread_id=metadata.thread_id
+        )
+
 
 class EnrichedFileObject(BaseModel):
     """File with semantic content understanding for orchestrator context."""
     # Basic metadata
     file_name: str
     file_path: str
-    file_type: Literal['image', 'document']
+    file_type: Literal['image', 'document', 'spreadsheet', 'code', 'data', 'archive', 'other'] = 'document'
+    
+    # Unified content system fields
+    file_id: Optional[str] = Field(None, description="Unified content ID")
+    content_id: Optional[str] = Field(None, description="Alias for file_id")
+    mime_type: Optional[str] = Field(None, description="MIME type")
+    size: Optional[int] = Field(None, description="File size in bytes")
+    source: Optional[str] = Field(None, description="Source of the file")
     
     # Semantic content (KEY FEATURE - orchestrator understands file contents)
     content_summary: str = Field(..., description="AI-generated description/summary of file content")
@@ -222,3 +261,107 @@ class FinalResponse(BaseModel):
     canvas_required: bool = Field(..., description="Whether canvas visualization is needed")
     canvas_type: Optional[Literal["html", "markdown"]] = Field(None, description="Type of canvas content")
     canvas_content: Optional[str] = Field(None, description="The actual canvas content (HTML or Markdown)")
+
+
+# --- Canvas Display Schemas ---
+
+class CanvasDisplay(BaseModel):
+    """
+    Standardized schema for agents to send visual content to the canvas.
+    
+    Two modes:
+    1. Structured data (preferred): Send canvas_data, frontend templates it
+    2. Custom HTML (when needed): Send canvas_content with raw HTML
+    """
+    canvas_type: Literal['email_preview', 'spreadsheet', 'document', 'pdf', 'image', 'json', 'html', 'markdown'] = Field(
+        ...,
+        description="Type of content being displayed in canvas"
+    )
+    canvas_data: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Structured data for the canvas (frontend will template it) - PREFERRED"
+    )
+    canvas_content: Optional[str] = Field(
+        None,
+        description="Raw HTML/markdown content (use when custom rendering needed)"
+    )
+    canvas_title: Optional[str] = Field(
+        None,
+        description="Optional title for the canvas display"
+    )
+    requires_confirmation: bool = Field(
+        False,
+        description="If True, user must confirm before agent proceeds (for critical actions)"
+    )
+    confirmation_message: Optional[str] = Field(
+        None,
+        description="Message to show when confirmation is required"
+    )
+    
+    class Config:
+        json_schema_extra = {
+            "examples": [
+                {
+                    "canvas_type": "email_preview",
+                    "canvas_data": {
+                        "to": ["user@example.com"],
+                        "cc": [],
+                        "bcc": [],
+                        "subject": "Meeting Reminder",
+                        "body": "Don't forget our meeting tomorrow",
+                        "is_html": False,
+                        "attachments": []
+                    },
+                    "requires_confirmation": True,
+                    "confirmation_message": "Review and confirm to send this email"
+                },
+                {
+                    "canvas_type": "spreadsheet",
+                    "canvas_data": {
+                        "headers": ["Name", "Age", "City"],
+                        "rows": [
+                            ["Alice", 30, "NYC"],
+                            ["Bob", 25, "LA"]
+                        ],
+                        "filename": "data.csv"
+                    }
+                }
+            ]
+        }
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "canvas_type": "email_preview",
+                "canvas_content": "<html><body><h1>Email Preview</h1>...</body></html>",
+                "canvas_title": "Email to be sent",
+                "requires_confirmation": True,
+                "confirmation_message": "Please review the email before sending"
+            }
+        }
+
+
+class AgentResponseWithCanvas(BaseModel):
+    """
+    Standard response format for agents that want to display content in canvas.
+    Agents should include this in their response when they want to show visual content.
+    """
+    success: bool
+    result: Optional[Any] = None
+    error: Optional[str] = None
+    canvas_display: Optional[CanvasDisplay] = None
+    message: Optional[str] = None
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "success": True,
+                "result": {"email_id": "123"},
+                "canvas_display": {
+                    "canvas_type": "email_preview",
+                    "canvas_content": "<html>...</html>",
+                    "requires_confirmation": True
+                },
+                "message": "Email prepared and ready to send"
+            }
+        }

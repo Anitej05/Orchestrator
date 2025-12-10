@@ -17,6 +17,12 @@ import base64
 from playwright.async_api import async_playwright, Browser, Page, BrowserContext
 import re
 
+# Import standardized file manager
+try:
+    from agents.agent_file_manager import AgentFileManager, FileType, FileStatus
+except ImportError:
+    from agent_file_manager import AgentFileManager, FileType, FileStatus
+
 # Import SOTA improvements
 try:
     from agents.browser_agent_improvements import (
@@ -112,6 +118,23 @@ DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
 UPLOADS_DIR = Path("storage/browser_uploads")
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Initialize standardized file managers for screenshots and downloads
+screenshot_file_manager = AgentFileManager(
+    agent_id="browser_agent_screenshots",
+    storage_dir=str(STORAGE_DIR),
+    default_ttl_hours=24,  # Screenshots expire after 24 hours
+    auto_cleanup=True,
+    cleanup_interval_hours=6
+)
+
+download_file_manager = AgentFileManager(
+    agent_id="browser_agent_downloads",
+    storage_dir=str(DOWNLOADS_DIR),
+    default_ttl_hours=72,  # Downloads expire after 3 days
+    auto_cleanup=True,
+    cleanup_interval_hours=12
+)
 
 # Live streaming storage - for canvas updates
 live_screenshots: Dict[str, Dict[str, Any]] = {}
@@ -756,17 +779,37 @@ class BrowserAgent:
             logger.info(f"🔒 Browser cleanup complete (Active: {len(active_browsers)})")
     
     async def _handle_download(self, download):
-        """Handle file downloads automatically"""
+        """Handle file downloads automatically using standardized file manager"""
         try:
-            # Generate unique filename
-            filename = f"{self.task_id}_{download.suggested_filename}"
-            filepath = DOWNLOADS_DIR / filename
+            # Get the download content
+            temp_path = await download.path()
+            if not temp_path:
+                logger.warning("Download path not available")
+                return
             
-            # Save the download
-            await download.save_as(str(filepath))
-            self.downloads.append(str(filepath))
+            # Read the downloaded content
+            with open(temp_path, 'rb') as f:
+                content = f.read()
             
-            logger.info(f"📥 Downloaded file: {filename} ({download.suggested_filename})")
+            # Register with standardized file manager
+            metadata = await download_file_manager.register_file(
+                content=content,
+                filename=download.suggested_filename,
+                file_type=FileType.DOWNLOAD,
+                thread_id=self.thread_id,
+                custom_metadata={
+                    "task_id": self.task_id,
+                    "url": download.url,
+                    "source_page": self.page.url if self.page else "",
+                    "task": self.task
+                },
+                tags=["download", "browser", f"task:{self.task_id}"]
+            )
+            
+            # Store file path for backward compatibility
+            self.downloads.append(metadata.storage_path)
+            
+            logger.info(f"📥 Downloaded file: {metadata.file_id} ({download.suggested_filename})")
         except Exception as e:
             logger.warning(f"Failed to save download: {e}")
     
@@ -786,17 +829,31 @@ class BrowserAgent:
         return None
     
     async def capture_screenshot(self, name: str = "screenshot") -> str:
-        """Capture and save screenshot with robust error handling"""
+        """Capture and save screenshot using standardized file manager"""
         filename = f"{self.task_id}_{name}_{len(self.screenshots)}.png"
-        filepath = STORAGE_DIR / filename
         
         screenshot_bytes = await self._capture_screenshot_robust()
         if screenshot_bytes:
-            with open(filepath, 'wb') as f:
-                f.write(screenshot_bytes)
-            self.screenshots.append(str(filepath))
-            logger.info(f"📸 Screenshot saved: {filename}")
-            return str(filepath)
+            # Register with standardized file manager
+            metadata = await screenshot_file_manager.register_file(
+                content=screenshot_bytes,
+                filename=filename,
+                file_type=FileType.SCREENSHOT,
+                mime_type="image/png",
+                thread_id=self.thread_id,
+                custom_metadata={
+                    "task_id": self.task_id,
+                    "step": len(self.screenshots),
+                    "name": name,
+                    "url": self.page.url if self.page else "",
+                    "task": self.task
+                },
+                tags=["screenshot", "browser", f"task:{self.task_id}"]
+            )
+            
+            self.screenshots.append(metadata.storage_path)
+            logger.info(f"📸 Screenshot saved: {metadata.file_id} ({filename})")
+            return metadata.storage_path
         
         logger.warning(f"⚠️  Screenshot failed, continuing without it")
         return ""
@@ -3860,6 +3917,176 @@ async def health():
 @app.get("/info")
 async def info():
     return AGENT_DEFINITION
+
+
+# ============== STANDARDIZED FILE MANAGEMENT ENDPOINTS ==============
+
+class FileListResponse(BaseModel):
+    success: bool
+    files: List[Dict[str, Any]]
+    count: int
+    error: Optional[str] = None
+
+class FileStatsResponse(BaseModel):
+    success: bool
+    screenshots: Dict[str, Any]
+    downloads: Dict[str, Any]
+    error: Optional[str] = None
+
+@app.get("/files/screenshots", response_model=FileListResponse)
+async def list_screenshots(
+    status: Optional[str] = None,
+    thread_id: Optional[str] = None
+):
+    """
+    List all screenshot files managed by this agent.
+    """
+    try:
+        file_status = FileStatus(status) if status else FileStatus.ACTIVE
+        files = screenshot_file_manager.list_files(
+            status=file_status,
+            thread_id=thread_id
+        )
+        
+        return FileListResponse(
+            success=True,
+            files=[f.to_orchestrator_format() for f in files],
+            count=len(files)
+        )
+    except Exception as e:
+        logger.error(f"Failed to list screenshots: {e}")
+        return FileListResponse(success=False, files=[], count=0, error=str(e))
+
+
+@app.get("/files/downloads", response_model=FileListResponse)
+async def list_downloads(
+    status: Optional[str] = None,
+    thread_id: Optional[str] = None
+):
+    """
+    List all downloaded files managed by this agent.
+    """
+    try:
+        file_status = FileStatus(status) if status else FileStatus.ACTIVE
+        files = download_file_manager.list_files(
+            status=file_status,
+            thread_id=thread_id
+        )
+        
+        return FileListResponse(
+            success=True,
+            files=[f.to_orchestrator_format() for f in files],
+            count=len(files)
+        )
+    except Exception as e:
+        logger.error(f"Failed to list downloads: {e}")
+        return FileListResponse(success=False, files=[], count=0, error=str(e))
+
+
+@app.get("/files/{file_type}/{file_id}")
+async def get_file_info(file_type: str, file_id: str):
+    """
+    Get detailed information about a specific file.
+    
+    Parameters:
+        file_type: Either 'screenshots' or 'downloads'
+        file_id: The file ID
+    """
+    try:
+        if file_type == "screenshots":
+            metadata = screenshot_file_manager.get_file(file_id)
+        elif file_type == "downloads":
+            metadata = download_file_manager.get_file(file_id)
+        else:
+            raise HTTPException(status_code=400, detail="Invalid file_type. Use 'screenshots' or 'downloads'")
+        
+        if not metadata:
+            raise HTTPException(status_code=404, detail="File not found or expired")
+        
+        return {"success": True, "file": metadata.to_orchestrator_format()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get file info: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.delete("/files/{file_type}/{file_id}")
+async def delete_file(file_type: str, file_id: str):
+    """
+    Delete a file from the agent's storage.
+    """
+    try:
+        if file_type == "screenshots":
+            success = screenshot_file_manager.delete_file(file_id)
+        elif file_type == "downloads":
+            success = download_file_manager.delete_file(file_id)
+        else:
+            raise HTTPException(status_code=400, detail="Invalid file_type. Use 'screenshots' or 'downloads'")
+        
+        if not success:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        return {"success": True, "message": f"File {file_id} deleted"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete file: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/cleanup")
+async def cleanup_files(max_age_hours: int = 24):
+    """
+    Clean up old/expired files from both screenshots and downloads.
+    """
+    try:
+        # Cleanup screenshots
+        screenshot_expired = screenshot_file_manager.cleanup_expired()
+        screenshot_old = screenshot_file_manager.cleanup_old(max_age_hours=max_age_hours)
+        
+        # Cleanup downloads (use longer default for downloads)
+        download_expired = download_file_manager.cleanup_expired()
+        download_old = download_file_manager.cleanup_old(max_age_hours=max_age_hours * 3)
+        
+        return {
+            "success": True,
+            "screenshots": {
+                "expired_removed": screenshot_expired,
+                "old_removed": screenshot_old
+            },
+            "downloads": {
+                "expired_removed": download_expired,
+                "old_removed": download_old
+            }
+        }
+    except Exception as e:
+        logger.error(f"Cleanup failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/stats", response_model=FileStatsResponse)
+async def get_file_stats():
+    """
+    Get file management statistics for both screenshots and downloads.
+    """
+    try:
+        screenshot_stats = screenshot_file_manager.get_stats()
+        download_stats = download_file_manager.get_stats()
+        
+        return FileStatsResponse(
+            success=True,
+            screenshots=screenshot_stats,
+            downloads=download_stats
+        )
+    except Exception as e:
+        logger.error(f"Failed to get stats: {e}")
+        return FileStatsResponse(
+            success=False,
+            screenshots={},
+            downloads={},
+            error=str(e)
+        )
 
 @app.get("/live/{task_id}", include_in_schema=False)
 async def get_live_screenshot(task_id: str):

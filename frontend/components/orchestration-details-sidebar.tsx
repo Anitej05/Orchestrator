@@ -13,6 +13,7 @@ import { useEffect, useState } from "react"
 import { InteractiveStarRating, StarRating } from "@/components/ui/star-rating"
 import { useConversationStore } from "@/lib/conversation-store"
 import Markdown from '@/components/ui/markdown'
+import { CanvasRenderer } from '@/components/canvas-renderer'
 import type { Agent, Message, TaskAgentPair } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
@@ -67,13 +68,25 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
     const planData = conversationState.plan || [];
     const hasCanvas = conversationState.has_canvas;
     const canvasContent = conversationState.canvas_content;
+    const canvasData = (conversationState as any).canvas_data;
     const canvasType = conversationState.canvas_type;
     const browserView = (conversationState as any).browser_view;
     const taskStatuses = conversationState.task_statuses || {};
     
+    // Debug logging for canvas state
+    console.log('🎨 Sidebar canvas state:', {
+        hasCanvas,
+        canvasType,
+        hasCanvasContent: !!canvasContent,
+        hasCanvasData: !!canvasData,
+        canvasDataKeys: canvasData ? Object.keys(canvasData) : [],
+        hasBrowserView: !!browserView
+    });
+    
     // Determine which canvas to display - viewed canvas takes precedence
     // Browser view is now shown in chat interface, not in canvas
-    const displayCanvasContent = viewedCanvasContent || canvasContent;
+    // Support both canvas_content (string) and canvas_data (structured object)
+    const displayCanvasContent = viewedCanvasContent || canvasContent || canvasData;
     const displayCanvasType = viewedCanvasType || canvasType;
 
     // Process plan data from conversation store
@@ -137,21 +150,34 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
     // Auto-switch to canvas tab when NEW canvas content is created
     useEffect(() => {
         // Only switch if:
-        // 1. We have canvas content
-        // 2. The canvas content is different from what we've seen before (NEW content)
+        // 1. We have canvas content OR canvas data
+        // 2. The canvas content/data is different from what we've seen before (NEW content)
         // 3. Not currently executing (don't override plan view during execution)
         const currentStage = conversationState.metadata?.currentStage;
         const isExecuting = currentStage === 'executing' || currentStage === 'validating';
+        const canvasData = (conversationState as any).canvas_data;
         
-        if (hasCanvas && canvasContent && canvasContent !== lastCanvasContent && !isExecuting) {
-            console.log('Auto-switching to canvas tab due to NEW canvas content');
+        // Check if we have either canvas content or canvas data
+        const hasCanvasData = canvasContent || canvasData;
+        
+        // Create a unique identifier for the current canvas state
+        // This handles both canvas_content (string) and canvas_data (object) changes
+        const currentCanvasIdentifier = canvasContent || (canvasData ? JSON.stringify(canvasData) : undefined);
+        
+        if (hasCanvas && hasCanvasData && currentCanvasIdentifier !== lastCanvasContent && !isExecuting) {
+            console.log('Auto-switching to canvas tab due to NEW canvas content/data', {
+                hasCanvas,
+                hasCanvasContent: !!canvasContent,
+                hasCanvasData: !!canvasData,
+                canvasType: conversationState.canvas_type
+            });
             setActiveTab('canvas');
-            setLastCanvasContent(canvasContent);
+            setLastCanvasContent(currentCanvasIdentifier);
             // Clear any viewed canvas content to show the latest
             setViewedCanvasContent(undefined);
             setViewedCanvasType(undefined);
         }
-    }, [hasCanvas, canvasContent, lastCanvasContent, conversationState.metadata?.currentStage]);
+    }, [hasCanvas, canvasContent, (conversationState as any).canvas_data, lastCanvasContent, conversationState.metadata?.currentStage]);
 
     useEffect(() => {
         const uniqueAgentsFromPairs = Array.from(new Set(taskAgentPairs.map((pair: TaskAgentPair) => pair.primary.id)))
@@ -480,19 +506,75 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                                 </div>
                             )}
                             <div className="flex-1 overflow-auto">
-                                {displayCanvasType === 'html' ? (
-                                    <iframe
-                                        key={displayCanvasContent?.substring(0, 100)}
-                                        srcDoc={displayCanvasContent}
-                                        className="w-full h-full min-h-[300px] border-0"
-                                        title="Canvas HTML Content"
-                                        sandbox="allow-scripts allow-same-origin"
-                                    />
-                                ) : (
-                                    <div className="prose prose-sm max-w-none p-4">
-                                        <Markdown content={displayCanvasContent} />
-                                    </div>
-                                )}
+                                {(() => {
+                                    // Check if canvas_data has status='preview' which indicates confirmation is needed
+                                    const canvasData = (conversationState as any).canvas_data;
+                                    const isPreview = canvasData && canvasData.status === 'preview';
+                                    const requiresConf = isPreview || ((conversationState as any).canvas_requires_confirmation && (conversationState as any).pending_confirmation);
+                                    console.log('🔘 Sidebar confirmation check:', {
+                                        canvas_requires_confirmation: (conversationState as any).canvas_requires_confirmation,
+                                        pending_confirmation: (conversationState as any).pending_confirmation,
+                                        canvasDataStatus: canvasData?.status,
+                                        isPreview,
+                                        requiresConfirmation: requiresConf,
+                                        pending_confirmation_task: (conversationState as any).pending_confirmation_task
+                                    });
+                                    return (
+                                        <CanvasRenderer
+                                            canvasType={displayCanvasType as any}
+                                            canvasContent={typeof displayCanvasContent === 'string' ? displayCanvasContent : undefined}
+                                            canvasData={typeof displayCanvasContent === 'object' ? displayCanvasContent : (conversationState as any).canvas_data}
+                                            canvasTitle={conversationState.canvas_title}
+                                            canvasMetadata={conversationState.canvas_metadata}
+                                            requiresConfirmation={requiresConf}
+                                            confirmationMessage={(conversationState as any).canvas_confirmation_message}
+                                            onConfirm={async () => {
+                                                // User confirmed - send confirmation to continue execution
+                                                const taskName = (conversationState as any).pending_confirmation_task?.task_name;
+                                                console.log('User confirmed canvas action for task:', taskName);
+                                                const { sendCanvasConfirmation } = useConversationStore.getState().actions;
+                                                await sendCanvasConfirmation('confirm', taskName);
+                                            }}
+                                            onCancel={async () => {
+                                                // User cancelled - abort the action
+                                                const taskName = (conversationState as any).pending_confirmation_task?.task_name;
+                                                console.log('User cancelled canvas action for task:', taskName);
+                                                const { sendCanvasConfirmation } = useConversationStore.getState().actions;
+                                                await sendCanvasConfirmation('cancel', taskName);
+                                            }}
+                                            onUndo={async () => {
+                                                // User clicked undo - send undo command
+                                                const canvasData = typeof displayCanvasContent === 'object' ? displayCanvasContent : (conversationState as any).canvas_data;
+                                                const filePath = canvasData?.file_path;
+                                                if (filePath) {
+                                                    console.log('User requested undo for document:', filePath);
+                                                    const { sendMessage } = useConversationStore.getState().actions;
+                                                    await sendMessage(`Undo the last edit to ${filePath}`, []);
+                                                }
+                                            }}
+                                            onRedo={async () => {
+                                                // User clicked redo - send redo command
+                                                const canvasData = typeof displayCanvasContent === 'object' ? displayCanvasContent : (conversationState as any).canvas_data;
+                                                const filePath = canvasData?.file_path;
+                                                if (filePath) {
+                                                    console.log('User requested redo for document:', filePath);
+                                                    const { sendMessage } = useConversationStore.getState().actions;
+                                                    await sendMessage(`Redo the last undone edit to ${filePath}`, []);
+                                                }
+                                            }}
+                                            onShowHistory={async () => {
+                                                // User clicked history - show version history
+                                                const canvasData = typeof displayCanvasContent === 'object' ? displayCanvasContent : (conversationState as any).canvas_data;
+                                                const filePath = canvasData?.file_path;
+                                                if (filePath) {
+                                                    console.log('User requested version history for document:', filePath);
+                                                    const { sendMessage } = useConversationStore.getState().actions;
+                                                    await sendMessage(`Show version history for ${filePath}`, []);
+                                                }
+                                            }}
+                                        />
+                                    );
+                                })()}
                             </div>
                         </div>
                     ) : (

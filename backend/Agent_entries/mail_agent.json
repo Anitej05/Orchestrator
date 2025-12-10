@@ -56,7 +56,24 @@
     "search emails with attachments",
     "find attachments",
     "download email attachments",
-    "get attachment files"
+    "get attachment files",
+    "send html emails",
+    "format emails",
+    "professional email templates",
+    "newsletter emails",
+    "styled emails",
+    "rich text emails",
+    "email formatting",
+    "markdown to html",
+    "bullet point emails",
+    "formatted email content",
+    "attach files to email",
+    "send files via email",
+    "email with documents",
+    "email with images",
+    "sophisticated emails",
+    "business emails",
+    "marketing emails"
   ],
   "price_per_call_usd": 0.005,
   "status": "active",
@@ -99,7 +116,7 @@
     {
       "endpoint": "/send_email",
       "http_method": "POST",
-      "description": "Send a new email via Gmail",
+      "description": "Send a new email via Gmail with optional attachments and HTML formatting. Supports plain text, HTML emails, and file attachments.",
       "parameters": [
         {
           "name": "to",
@@ -117,7 +134,7 @@
           "name": "body",
           "param_type": "string",
           "required": true,
-          "description": "Email body content"
+          "description": "Email body content (plain text or HTML)"
         },
         {
           "name": "cc",
@@ -132,10 +149,34 @@
           "description": "Array of BCC email addresses (optional)"
         },
         {
+          "name": "is_html",
+          "param_type": "boolean",
+          "required": false,
+          "description": "Whether body is HTML formatted (default: false)"
+        },
+        {
+          "name": "attachment_file_ids",
+          "param_type": "array",
+          "required": false,
+          "description": "Array of file IDs from file manager to attach"
+        },
+        {
+          "name": "attachment_paths",
+          "param_type": "array",
+          "required": false,
+          "description": "Array of local file paths to attach"
+        },
+        {
           "name": "user_id",
           "param_type": "string",
           "required": false,
           "description": "Gmail user ID (default: 'me')"
+        },
+        {
+          "name": "show_preview",
+          "param_type": "boolean",
+          "required": false,
+          "description": "Show email preview in canvas before sending (optional, for user confirmation)"
         }
       ]
     },
@@ -308,6 +349,98 @@
           "description": "Maximum number of emails to return (default: 10)"
         }
       ]
+    },
+    {
+      "endpoint": "/compose_html_email",
+      "http_method": "POST",
+      "description": "Compose and send a professionally formatted HTML email using templates. Supports multiple templates (basic, professional, newsletter) and automatic formatting with attachments.",
+      "parameters": [
+        {
+          "name": "to",
+          "param_type": "array",
+          "required": true,
+          "description": "Array of recipient email addresses"
+        },
+        {
+          "name": "subject",
+          "param_type": "string",
+          "required": true,
+          "description": "Email subject line"
+        },
+        {
+          "name": "content",
+          "param_type": "string",
+          "required": true,
+          "description": "Main email content (will be formatted according to template)"
+        },
+        {
+          "name": "template",
+          "param_type": "string",
+          "required": false,
+          "description": "Template style: basic, professional, newsletter (default: basic)"
+        },
+        {
+          "name": "header_text",
+          "param_type": "string",
+          "required": false,
+          "description": "Optional header text for the email"
+        },
+        {
+          "name": "footer_text",
+          "param_type": "string",
+          "required": false,
+          "description": "Optional footer text for the email"
+        },
+        {
+          "name": "cc",
+          "param_type": "array",
+          "required": false,
+          "description": "Array of CC email addresses"
+        },
+        {
+          "name": "bcc",
+          "param_type": "array",
+          "required": false,
+          "description": "Array of BCC email addresses"
+        },
+        {
+          "name": "attachment_file_ids",
+          "param_type": "array",
+          "required": false,
+          "description": "Array of file IDs to attach"
+        },
+        {
+          "name": "attachment_paths",
+          "param_type": "array",
+          "required": false,
+          "description": "Array of file paths to attach"
+        }
+      ]
+    },
+    {
+      "endpoint": "/format_email_content",
+      "http_method": "POST",
+      "description": "Format email content with various styles (markdown to HTML, bullet points, numbered lists). Returns formatted HTML for use in send_email.",
+      "parameters": [
+        {
+          "name": "content",
+          "param_type": "string",
+          "required": true,
+          "description": "Raw email content to format"
+        },
+        {
+          "name": "format_type",
+          "param_type": "string",
+          "required": false,
+          "description": "Format type: markdown, bullet_points, numbered_list (default: markdown)"
+        }
+      ]
+    },
+    {
+      "endpoint": "/email_templates",
+      "http_method": "GET",
+      "description": "List available email templates and their descriptions",
+      "parameters": []
     }
   ]
 }

@@ -61,10 +61,31 @@ const Markdown: FC<MarkdownProps> = ({ content }) => {
             <h6 className="text-sm font-semibold mt-2 mb-1 text-gray-700 dark:text-gray-300" {...props} />
           ),
           
-          // Paragraphs
-          p: ({ node, ...props }) => (
-            <p className="my-3 leading-relaxed text-gray-800 dark:text-gray-200" {...props} />
-          ),
+          // Paragraphs - check for block-level children to avoid nesting errors
+          p: ({ node, children, ...props }) => {
+            // Recursively check if any descendant contains block-level elements
+            const hasBlockDescendant = (n: any): boolean => {
+              if (!n?.children) return false;
+              return n.children.some((child: any) => {
+                if (child.type === 'element') {
+                  // Check for block-level elements or code elements (which become divs)
+                  if (['div', 'pre', 'table', 'code'].includes(child.tagName)) {
+                    return true;
+                  }
+                  // Recursively check children
+                  return hasBlockDescendant(child);
+                }
+                return false;
+              });
+            };
+            
+            // If it has block descendants, render as div to avoid HTML nesting errors
+            if (hasBlockDescendant(node)) {
+              return <div className="my-3 leading-relaxed text-gray-800 dark:text-gray-200" {...props}>{children}</div>;
+            }
+            
+            return <p className="my-3 leading-relaxed text-gray-800 dark:text-gray-200" {...props}>{children}</p>;
+          },
           
           // Lists
           ul: ({ node, ...props }) => (
@@ -147,13 +168,13 @@ const Markdown: FC<MarkdownProps> = ({ content }) => {
             const language = className ? className.replace('language-', '') : '';
             const isInline = props.inline;
             return !isInline ? (
-              <div className="my-4">
+              <div className="my-2">
                 {language && (
-                  <div className="bg-gray-800 dark:bg-gray-900 text-gray-400 text-xs px-4 py-2 rounded-t-lg border-b border-gray-700">
+                  <div className="bg-gray-800 dark:bg-gray-900 text-gray-400 text-xs px-3 py-1.5 rounded-t-lg border-b border-gray-700">
                     {language}
                   </div>
                 )}
-                <pre className={`overflow-x-auto max-w-full ${language ? 'rounded-b-lg' : 'rounded-lg'} bg-gray-900 dark:bg-black text-gray-100 p-4 text-sm leading-relaxed`}>
+                <pre className={`overflow-x-auto max-w-full ${language ? 'rounded-b-lg' : 'rounded-lg'} bg-gray-900 dark:bg-black text-gray-100 p-3 text-sm leading-snug`}>
                   <code className={className} {...props}>
                     {children}
                   </code>

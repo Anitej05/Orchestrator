@@ -42,6 +42,7 @@ interface ConversationStore extends ConversationState {
     continueConversation: (input: string, files?: File[], planningMode?: boolean, owner?: string) => Promise<void>;
     loadConversation: (threadId: string) => Promise<void>;
     resetConversation: () => void;
+    sendCanvasConfirmation: (action: 'confirm' | 'cancel', taskName?: string) => Promise<void>;
     // Internal action to set the full state from an API response
     _setConversationState: (newState: Partial<ConversationStore>) => void;
   };
@@ -69,6 +70,11 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
   approval_required: false,
   estimated_cost: 0,
   task_count: 0,
+  // Canvas confirmation fields
+  pending_confirmation: false,
+  pending_confirmation_task: undefined,
+  canvas_requires_confirmation: false,
+  canvas_confirmation_message: undefined,
   // Real-time task tracking
   task_statuses: {},
   current_executing_task: null,
@@ -465,6 +471,83 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
         localStorage.removeItem('thread_id');
       }
       console.log('Conversation reset complete - all state cleared');
+    },
+
+    sendCanvasConfirmation: async (action: 'confirm' | 'cancel', taskName?: string) => {
+      const thread_id = get().thread_id;
+      const pending_task = get().pending_confirmation_task;
+      
+      if (!thread_id) {
+        console.error('Cannot send confirmation without thread_id');
+        return;
+      }
+      
+      console.log(`📤 Sending canvas ${action} for task: ${taskName || pending_task?.task_name}`);
+      
+      // Send confirmation message via WebSocket
+      const sendConfirmation = async () => {
+        const maxAttempts = 30;
+        const delayMs = 500;
+        
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+          const ws = (window as any).__websocket;
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            try {
+              const message = {
+                type: 'canvas_confirmation',
+                thread_id: thread_id,
+                action: action,
+                task_name: taskName || pending_task?.task_name
+              };
+              
+              ws.send(JSON.stringify(message));
+              console.log(`✅ Canvas ${action} sent successfully`);
+              
+              // Clear pending confirmation state
+              set({
+                pending_confirmation: false,
+                pending_confirmation_task: undefined,
+                isLoading: true,
+                status: 'processing'
+              });
+              
+              // Automatically send a follow-up message to trigger the actual action
+              if (action === 'confirm') {
+                // Wait a moment for the confirmation to be processed
+                await new Promise(resolve => setTimeout(resolve, 500));
+                
+                // Send the actual command to apply changes WITHOUT preview
+                const followUpMessage = {
+                  thread_id: thread_id,
+                  prompt: 'Apply the changes to the document without showing preview',
+                  planning_mode: false
+                };
+                
+                ws.send(JSON.stringify(followUpMessage));
+                console.log('✅ Sent follow-up message to apply changes without preview');
+              } else {
+                // For cancel, just acknowledge
+                set({
+                  isLoading: false,
+                  status: 'idle'
+                });
+              }
+              
+              return;
+            } catch (sendErr) {
+              console.error(`Failed to send confirmation: ${sendErr instanceof Error ? sendErr.message : String(sendErr)}`);
+            }
+          }
+          
+          if (attempt < maxAttempts - 1) {
+            await new Promise(resolve => setTimeout(resolve, delayMs));
+          }
+        }
+        
+        console.error('Failed to send canvas confirmation - WebSocket not connected');
+      };
+      
+      await sendConfirmation();
     },
 
     _setConversationState: (newState: Partial<ConversationStore>) => {

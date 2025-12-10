@@ -72,6 +72,7 @@ class AgentEndpoint(Base):
     endpoint = Column(String, nullable=False)
     http_method = Column(String, nullable=False, default="POST")
     description = Column(Text)
+    request_format = Column(String, nullable=True)  # 'json' or 'form', overrides agent default
 
     agent = relationship("Agent", back_populates="endpoints")
     parameters = relationship("EndpointParameter", back_populates="endpoint", cascade="all, delete-orphan")

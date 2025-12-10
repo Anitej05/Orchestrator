@@ -1,0 +1,207 @@
+{
+  "id": "spreadsheet_agent",
+  "owner_id": "orbimesh-vendor",
+  "name": "Spreadsheet Agent",
+  "description": "PRIORITY AGENT for ALL CSV and Excel files (.csv, .xlsx, .xls). Use this agent EXCLUSIVELY for any spreadsheet file. Handles display, analysis, and modification. DO NOT use Document Agent for CSV files.",
+  "requires_credentials": false,
+  "capabilities": [
+    "analyze csv and excel files",
+    "display spreadsheet data",
+    "show spreadsheet",
+    "view csv file",
+    "modify spreadsheet data",
+    "add columns to spreadsheet",
+    "rename columns",
+    "calculate totals",
+    "execute pandas operations"
+  ],
+  "price_per_call_usd": 0.002,
+  "status": "active",
+  "agent_type": "http_rest",
+  "connection_config": {
+    "base_url": "http://localhost:8041",
+    "request_format": "form"
+  },
+  "endpoints": [
+    {
+      "endpoint": "/upload",
+      "http_method": "POST",
+      "request_format": "form",
+      "description": "STEP 1: Upload a spreadsheet file. This MUST be called first before any other endpoint. Returns a file_id that is required for all subsequent operations.",
+      "when_to_use": "Always call this first when the user provides a CSV or Excel file.",
+      "parameters": [
+        {
+          "name": "file",
+          "param_type": "file",
+          "required": true,
+          "description": "The CSV or Excel file to upload."
+        }
+      ]
+    },
+    {
+      "endpoint": "/display",
+      "http_method": "POST",
+      "request_format": "form",
+      "description": "DISPLAY ONLY: Shows the spreadsheet data in a visual canvas. Does NOT modify data. Use this when user just wants to VIEW or SEE the spreadsheet.",
+      "when_to_use": "When user says 'show me', 'display', 'view', or wants to see the current state of the spreadsheet WITHOUT making changes.",
+      "parameters": [
+        {
+          "name": "file_id",
+          "param_type": "string",
+          "required": true,
+          "description": "The file_id from /upload endpoint."
+        },
+        {
+          "name": "display_mode",
+          "param_type": "string",
+          "required": false,
+          "description": "Display mode: 'full' (all rows), 'head' (first 10), 'tail' (last 10), 'sample' (random 10). Default: 'full'."
+        },
+        {
+          "name": "max_rows",
+          "param_type": "integer",
+          "required": false,
+          "description": "Maximum rows to display. Default: 100."
+        }
+      ]
+    },
+    {
+      "endpoint": "/execute_pandas",
+      "http_method": "POST",
+      "request_format": "form",
+      "description": "PRIMARY MODIFICATION ENDPOINT: Use this for ALL data modifications. Supports: adding columns (Sl.No., Total, averages), renaming columns, deleting columns, filtering, sorting, grouping, calculations, and ANY data transformation. The agent generates pandas code from natural language and executes it.",
+      "when_to_use": "When user wants to CHANGE, ADD, REMOVE, RENAME, CALCULATE, FILTER, SORT, or TRANSFORM data. Keywords: 'add column', 'rename', 'delete', 'calculate', 'sum', 'average', 'filter', 'sort', 'group by'.",
+      "parameters": [
+        {
+          "name": "file_id",
+          "param_type": "string",
+          "required": true,
+          "description": "The file_id from /upload endpoint."
+        },
+        {
+          "name": "instruction",
+          "param_type": "string",
+          "required": true,
+          "description": "Natural language instruction. Examples: 'add a Sl.No. column starting from 1', 'rename Feature1 to Subject1', 'add a Total column that sums each row', 'filter rows where value > 100', 'sort by column X descending'."
+        },
+        {
+          "name": "show_result",
+          "param_type": "boolean",
+          "required": false,
+          "description": "Whether to show the result in canvas. Default: true."
+        }
+      ]
+    },
+    {
+      "endpoint": "/query",
+      "http_method": "POST",
+      "request_format": "form",
+      "description": "FILTER OR SIMPLE ASSIGNMENT: Filters data (e.g., 'age > 30') OR creates new columns from expressions (e.g., 'Total = A + B'). For complex transformations, use /execute_pandas instead.",
+      "when_to_use": "When user wants to filter rows using conditions OR add a calculated column using simple arithmetic on existing columns.",
+      "parameters": [
+        {
+          "name": "file_id",
+          "param_type": "string",
+          "required": true,
+          "description": "The file_id from /upload endpoint."
+        },
+        {
+          "name": "query",
+          "param_type": "string",
+          "required": true,
+          "description": "Pandas query string for filtering (e.g., 'age > 28') OR assignment expression (e.g., 'Total = Feature1 + Feature2')."
+        }
+      ]
+    },
+    {
+      "endpoint": "/nl_query",
+      "http_method": "POST",
+      "request_format": "json",
+      "description": "NATURAL LANGUAGE QUESTIONS: Ask questions about the data in plain English. The agent interprets your question and returns an answer. Use this for analytical questions, NOT for modifications.",
+      "when_to_use": "When user asks analytical questions like 'What is the average?', 'How many rows have X?', 'Who has the highest value?', 'Show me all people older than 30'.",
+      "parameters": [
+        {
+          "name": "file_id",
+          "param_type": "string",
+          "required": true,
+          "description": "The file_id from /upload endpoint."
+        },
+        {
+          "name": "question",
+          "param_type": "string",
+          "required": true,
+          "description": "Natural language question about the data."
+        },
+        {
+          "name": "max_iterations",
+          "param_type": "integer",
+          "required": false,
+          "description": "Maximum reasoning iterations for complex queries. Default: 5."
+        }
+      ]
+    },
+    {
+      "endpoint": "/get_summary",
+      "http_method": "POST",
+      "request_format": "form",
+      "description": "GET METADATA: Returns spreadsheet metadata including headers, data types, row count, and a preview of first 5 rows. Does NOT display the full data.",
+      "when_to_use": "When you need to understand the structure of the spreadsheet before performing operations.",
+      "parameters": [
+        {
+          "name": "file_id",
+          "param_type": "string",
+          "required": true,
+          "description": "The file_id from /upload endpoint."
+        }
+      ]
+    },
+    {
+      "endpoint": "/get_column_stats",
+      "http_method": "POST",
+      "request_format": "form",
+      "description": "COLUMN STATISTICS: Returns descriptive statistics for a specific numeric column (min, max, mean, std, etc.).",
+      "when_to_use": "When user wants statistics about a specific column.",
+      "parameters": [
+        {
+          "name": "file_id",
+          "param_type": "string",
+          "required": true,
+          "description": "The file_id from /upload endpoint."
+        },
+        {
+          "name": "column_name",
+          "param_type": "string",
+          "required": true,
+          "description": "The name of the column to get statistics for."
+        }
+      ]
+    },
+    {
+      "endpoint": "/transform",
+      "http_method": "POST",
+      "request_format": "form",
+      "description": "STRUCTURED TRANSFORMATIONS: Apply predefined transformations with explicit parameters. For flexibility, prefer /execute_pandas.",
+      "when_to_use": "When you need a specific transformation with explicit control over parameters.",
+      "parameters": [
+        {
+          "name": "file_id",
+          "param_type": "string",
+          "required": true,
+          "description": "The file_id from /upload endpoint."
+        },
+        {
+          "name": "operation",
+          "param_type": "string",
+          "required": true,
+          "description": "Operation: 'filter', 'sort', 'group', 'drop_duplicates', 'fillna'."
+        },
+        {
+          "name": "params",
+          "param_type": "string",
+          "required": true,
+          "description": "JSON string with operation parameters."
+        }
+      ]
+    }
+  ]
+}

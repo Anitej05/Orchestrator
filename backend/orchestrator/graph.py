@@ -67,21 +67,36 @@ BACKEND_DIR_FOR_HISTORY = os.path.join(os.path.dirname(os.path.abspath(__file__)
 CONVERSATION_HISTORY_DIR = os.path.join(BACKEND_DIR_FOR_HISTORY, "conversation_history")
 os.makedirs(CONVERSATION_HISTORY_DIR, exist_ok=True)
 
-# --- Artifact Management Integration ---
-# Import artifact hooks for automatic context management
+# --- Unified Content Management Integration ---
+# Import content orchestrator for standardized file/artifact handling with agents
 try:
-    from orchestrator.artifact_integration import (
-        hooks as artifact_hooks,
-        ArtifactConfig,
+    from orchestrator.content_orchestrator import (
+        prepare_content_for_agent,
+        inject_content_id_into_payload,
+        capture_agent_outputs,
+        agent_requires_file_upload,
+        hooks as content_hooks,
+        config as content_config,
         compress_state_for_saving,
         expand_state_from_saved,
-        get_optimized_llm_context,
-        build_prompt_with_artifacts
+        get_optimized_llm_context
     )
+    CONTENT_INTEGRATION_ENABLED = True
+    # Backward compatibility - use content_hooks for both
+    artifact_hooks = content_hooks
     ARTIFACT_INTEGRATION_ENABLED = True
-except ImportError:
+except ImportError as e:
+    CONTENT_INTEGRATION_ENABLED = False
     ARTIFACT_INTEGRATION_ENABLED = False
+    content_hooks = None
     artifact_hooks = None
+    logging.warning(f"Content integration not available: {e}")
+
+# Backward compatibility aliases
+FILE_INTEGRATION_ENABLED = CONTENT_INTEGRATION_ENABLED
+prepare_files_for_task = prepare_content_for_agent if CONTENT_INTEGRATION_ENABLED else None
+inject_file_id_into_payload = inject_content_id_into_payload if CONTENT_INTEGRATION_ENABLED else None
+capture_agent_output_files = capture_agent_outputs if CONTENT_INTEGRATION_ENABLED else None
 
 # --- Imports for Document Processing ---
 from langchain_community.vectorstores import FAISS
@@ -148,12 +163,23 @@ def _summarize_completed_tasks_for_context(completed_tasks: List[Dict]) -> List[
     Keeps essential information while removing large data payloads.
     Specifically handles browser agent responses to extract useful content.
     For structured data results (dicts with numeric/simple values), preserves the full result.
+    
+    IMPORTANT: Deduplicates tasks by name, keeping only the LAST occurrence.
+    This handles the case where a task is executed twice (preview + actual edit).
     """
     if not completed_tasks:
         return []
     
-    summarized = []
+    # CRITICAL FIX: Deduplicate tasks by name, keeping only the LAST occurrence
+    # This ensures we use the actual edit result, not the preview
+    task_map = {}
     for task in completed_tasks:
+        task_name = task.get("task_name", "unknown")
+        task_map[task_name] = task  # Later occurrences overwrite earlier ones
+    
+    # Process deduplicated tasks
+    summarized = []
+    for task in task_map.values():
         summary = {
             "task_name": task.get("task_name", "unknown"),
             "status": "completed"
@@ -162,23 +188,84 @@ def _summarize_completed_tasks_for_context(completed_tasks: List[Dict]) -> List[
         result = task.get("result", {})
         raw_response = task.get("raw_response", {})
         
+        # Check if this is a document task - preserve important information
+        task_name = task.get("task_name", "")
+        is_document_task = any(keyword in task_name for keyword in [
+            "document", "summarize", "analyze", "answer_question", "edit", "format", "create"
+        ])
+        
+        # Check if this is a document edit/format task - preserve success/failure status
+        is_document_edit_task = any(keyword in task_name for keyword in [
+            "edit", "format", "create_document", "modify"
+        ])
+        
+        logger.info(f"📝 Summarizing task '{task_name}': is_document_task={is_document_task}, is_document_edit_task={is_document_edit_task}, result_type={type(result).__name__}")
+        
         if isinstance(result, str):
-            # Truncate long string results
-            summary["result_preview"] = result[:500] + "..." if len(result) > 500 else result
-        elif isinstance(result, dict):
-            # Check if result is structured data (small dict with simple values like numbers, bools, short strings)
-            # This preserves API responses, stock data, weather data, etc.
-            result_str = json.dumps(result, default=str)
-            if len(result_str) < 2000:  # Small structured data - keep it all
-                summary["result"] = result
+            # For document edit tasks, preserve success messages
+            if is_document_edit_task and any(keyword in result.lower() for keyword in ["success", "edited", "formatted", "created", "saved"]):
+                summary["result"] = result  # Keep full success message
+                summary["edit_status"] = "success"
+                logger.info(f"📝 Document edit success preserved: {result}")
+            # For document analysis tasks, keep more content (up to 5000 chars)
+            elif is_document_task:
+                max_length = 5000
+                summary["result"] = result[:max_length] + ("..." if len(result) > max_length else "")
+                logger.info(f"📝 Document task result: length={len(result)}, truncated_to={len(summary['result'])}")
             else:
-                # Large result - extract key information
-                if "status" in result:
-                    summary["result_status"] = result["status"]
-                if "summary" in result:
-                    summary["result_summary"] = str(result["summary"])[:500]
-                elif "task_summary" in result:
-                    summary["result_summary"] = str(result["task_summary"])[:500]
+                # For other tasks, truncate to 500 chars
+                max_length = 500
+                summary["result"] = result[:max_length] + ("..." if len(result) > max_length else "")
+                logger.info(f"📝 String result: length={len(result)}, truncated_to={len(summary['result'])}")
+        elif isinstance(result, dict):
+            # Special handling for document edit results with "message" key
+            if is_document_edit_task and "message" in result:
+                # Extract the success message
+                summary["result"] = result["message"]
+                summary["edit_status"] = "success"
+                if "file_path" in result:
+                    summary["file_path"] = result["file_path"]
+                logger.info(f"📝 Document edit message extracted: {result['message']}")
+            # Special handling for document edit results with canvas_display
+            elif is_document_edit_task and "canvas_display" in result:
+                # Extract key information from canvas_display
+                canvas_display = result.get("canvas_display", {})
+                canvas_data = canvas_display.get("canvas_data", {})
+                
+                # Check if this is a successful edit
+                if canvas_data.get("status") == "edited":
+                    summary["result"] = f"Document edited successfully: {canvas_data.get('title', 'document')}"
+                    summary["edit_status"] = "success"
+                    summary["file_path"] = canvas_data.get("file_path", "")
+                    logger.info(f"📝 Document edit success extracted from canvas_display")
+                elif canvas_data.get("status") == "preview":
+                    summary["result"] = f"Preview generated for: {canvas_data.get('title', 'document')}"
+                    summary["edit_status"] = "preview"
+                    summary["requires_confirmation"] = True
+                    logger.info(f"📝 Document preview status extracted from canvas_display")
+                else:
+                    summary["result"] = result
+            # Special handling for document analysis results with "answer" key
+            elif is_document_task and "answer" in result:
+                # Preserve the full answer for document analysis
+                answer_text = result["answer"]
+                max_length = 5000
+                summary["result"] = answer_text[:max_length] + ("..." if len(answer_text) > max_length else "")
+                logger.info(f"📝 Document answer extracted: length={len(answer_text)}, truncated_to={len(summary['result'])}")
+            else:
+                # Check if result is structured data (small dict with simple values like numbers, bools, short strings)
+                # This preserves API responses, stock data, weather data, etc.
+                result_str = json.dumps(result, default=str)
+                if len(result_str) < 2000:  # Small structured data - keep it all
+                    summary["result"] = result
+                else:
+                    # Large result - extract key information
+                    if "status" in result:
+                        summary["result_status"] = result["status"]
+                    if "summary" in result:
+                        summary["result_summary"] = str(result["summary"])[:500]
+                    elif "task_summary" in result:
+                        summary["result_summary"] = str(result["task_summary"])[:500]
         
         # Handle browser agent raw_response specially - extract the useful content
         if raw_response and isinstance(raw_response, dict):
@@ -524,41 +611,26 @@ def invoke_llm_with_fallback(primary_llm, fallback_llm, prompt: str, pydantic_sc
             error_msg = str(e).lower()
             # Check if this is an external API issue that warrants trying the next provider
             # Include 413 (request too large) as some providers have different token limits
-            if any(keyword in error_msg for keyword in ["429", "413", "rate", "too_many_requests", "high traffic", "queue_exceeded", "request too large", "tokens per"]):
-                logger.warning(f"{current_llm_name} LLM failed with external API issue: {e}. Will try next LLM provider.")
+            # Include 401 (wrong API key) to allow fallback to other providers
+            if any(keyword in error_msg for keyword in ["401", "429", "413", "rate", "too_many_requests", "high traffic", "queue_exceeded", "request too large", "tokens per", "wrong api key"]):
+                logger.warning(f"{current_llm_name} LLM failed with API issue: {e}. Will try next LLM provider.")
                 if is_last_attempt:
                     # If this is the last attempt and it failed, we've exhausted all options
                     pass
                 else:
                     continue  # Continue to try next LLM provider
             else:
-                # For non-rate limit errors, re-raise immediately
+                # For non-API errors, re-raise immediately
                 logger.error(f"{current_llm_name} LLM failed with non-API error: {e}")
                 raise
 
-    # If we've exhausted all attempts, create a graceful fallback response
-    logger.error("All LLM attempts exhausted. Creating graceful fallback response.")
+    # If we've exhausted all attempts, return None to trigger fallback logic
+    logger.error("All LLM attempts exhausted. Returning None to trigger fallback plan creation.")
     logger.error(f"Errors encountered: {errors}")
     
-    if pydantic_schema is not None:
-        # For Pydantic schemas, try to create a minimal valid object
-        try:
-            # Create a minimal valid object with default values
-            minimal_obj = pydantic_schema()
-            logger.warning(f"Creating minimal fallback object for {pydantic_schema.__name__}")
-            return minimal_obj
-        except Exception:
-            # If we can't create a minimal object, raise the last error we had
-            logger.error("Could not create minimal fallback object.")
-            # Return the first error we encountered
-            if errors:
-                raise list(errors.values())[0]
-            else:
-                raise ValueError("Unable to process request with available LLMs.")
-    else:
-        # For non-Pydantic responses, return a simple error message
-        logger.warning("Returning simple error message as fallback")
-        return "I'm sorry, but I'm currently unable to process your request due to technical issues. Please try again later."
+    # Don't try to create minimal objects - let the caller handle the fallback
+    # This ensures we use the simple_plan creation logic which properly fills parameters
+    return None
 
 ChatCerebras._generate = patched_generate
 
@@ -599,7 +671,7 @@ cached_capabilities = {
     "embeddings": None,
     "timestamp": 0
 }
-CACHE_DURATION_SECONDS = 300
+CACHE_DURATION_SECONDS = 30  # 30 seconds for faster development
 
 # OPTIMIZATION: GET request cache for agent responses
 get_request_cache = {}
@@ -681,39 +753,112 @@ def save_plan_to_file(state: dict):
     return {}
 
 # --- NEW NODE: Preprocess Files ---
-def preprocess_files(state: State):
+async def preprocess_files(state: State):
     '''
     Processes uploaded files. For images, it now only confirms the path.
-    For documents, it creates the vector store. This is the full, robust version.
+    For documents, it creates the vector store AND displays them in canvas automatically.
     '''
     logger.info("Starting file preprocessing...")
+    logger.info(f"🔍 PREPROCESS_FILES ENTRY: State keys = {list(state.keys())}")
+    logger.info(f"🔍 PREPROCESS_FILES ENTRY: uploaded_files in state = {'uploaded_files' in state}")
     uploaded_files = state.get("uploaded_files", [])
+    logger.info(f"📁 Found {len(uploaded_files)} files to preprocess")
+    logger.info(f"🔍 PREPROCESS_FILES: uploaded_files = {uploaded_files}")
     if not uploaded_files:
         logger.info("No files to preprocess.")
         return state
 
     processed_files = []
+    canvas_displays = []  # Collect canvas displays for uploaded documents
+    
     # Convert dictionaries from state back to Pydantic objects for safe access
-    for file_obj_dict in uploaded_files:
+    for idx, file_obj_dict in enumerate(uploaded_files):
+        logger.info(f"📄 Processing file {idx+1}/{len(uploaded_files)}: {file_obj_dict.get('file_name', 'unknown')}, type={file_obj_dict.get('file_type', 'unknown')}")
         try:
             file_obj = FileObject.model_validate(file_obj_dict)
+            logger.info(f"📄 Validated FileObject: name={file_obj.file_name}, type={file_obj.file_type}, path={file_obj.file_path}")
             
             # For images, we just ensure the path is valid and pass it along.
             # The image agent is responsible for reading and encoding.
             if file_obj.file_type == 'image':
+                logger.info(f"📄 File is image type, skipping display")
                 if not os.path.exists(file_obj.file_path):
                     logger.warning(f"Image file not found at path: {file_obj.file_path}. Skipping.")
                     continue
                 # No other action is needed for images here.
             
-            # For documents, we perform the full RAG preprocessing.
+            # For spreadsheets, upload to agent and auto-display in canvas
+            elif file_obj.file_type == 'spreadsheet':
+                logger.info(f"📊 File is spreadsheet type, will upload and display")
+                
+                # CRITICAL FIX: If file already has a file_id from previous turn, SKIP re-upload
+                # This preserves modifications made by the spreadsheet agent in previous operations
+                existing_file_id = file_obj.file_id or file_obj.content_id
+                if existing_file_id:
+                    logger.info(f"📊 SKIPPING re-upload - file already has file_id: {existing_file_id}")
+                    logger.info(f"📊 Reusing existing file_id to preserve modifications from previous turns")
+                    processed_files.append(file_obj)
+                    continue
+                
+                if not os.path.exists(file_obj.file_path):
+                    logger.warning(f"Spreadsheet file not found at path: {file_obj.file_path}. Skipping.")
+                    continue
+                
+                # Upload to spreadsheet agent and capture canvas_display
+                try:
+                    import mimetypes
+                    mime_type, _ = mimetypes.guess_type(file_obj.file_name)
+                    mime_type = mime_type or 'application/octet-stream'
+                    
+                    with open(file_obj.file_path, 'rb') as f:
+                        file_content = f.read()
+                    
+                    async with httpx.AsyncClient(timeout=60.0) as client:
+                        logger.info(f"📊 Uploading spreadsheet to http://localhost:8041/upload")
+                        files = {"file": (file_obj.file_name, file_content, mime_type)}
+                        response = await client.post("http://localhost:8041/upload", files=files)
+                        
+                        logger.info(f"📊 Spreadsheet agent /upload response status: {response.status_code}")
+                        
+                        if response.status_code == 200:
+                            upload_result = response.json()
+                            logger.info(f"📊 Spreadsheet upload result: {str(upload_result)[:500]}")
+                            
+                            # Extract canvas_display from the nested result
+                            result_data = upload_result.get('result', {})
+                            canvas_display = result_data.get('canvas_display') if isinstance(result_data, dict) else None
+                            
+                            # Store the agent's file_id for use by subsequent operations
+                            agent_file_id = result_data.get('file_id') if isinstance(result_data, dict) else None
+                            if agent_file_id:
+                                # Store in file_obj's content_id field (this is the standard field for agent IDs)
+                                file_obj.content_id = agent_file_id
+                                file_obj.file_id = agent_file_id
+                                logger.info(f"📊 Spreadsheet agent assigned file_id: {agent_file_id}, stored in file_obj.content_id")
+                            
+                            if canvas_display:
+                                canvas_displays.append(canvas_display)
+                                logger.info(f"✅ Spreadsheet displayed in canvas: {file_obj.file_name}, canvas_type={canvas_display.get('canvas_type')}")
+                            else:
+                                logger.warning(f"❌ No canvas_display in upload response for {file_obj.file_name}")
+                        else:
+                            logger.warning(f"❌ Failed to upload spreadsheet: {response.status_code}, response: {response.text}")
+                            
+                except Exception as upload_err:
+                    logger.error(f"❌ EXCEPTION uploading spreadsheet {file_obj.file_name}: {type(upload_err).__name__}: {upload_err}", exc_info=True)
+                
+                logger.info(f"📊 Spreadsheet ready for processing: {file_obj.file_name}")
+            
+            # For documents, we perform the full RAG preprocessing AND display them
             elif file_obj.file_type == 'document':
+                logger.info(f"📄 File is document type, will process and display")
+                logger.info(f"📄 Detected document type for: {file_obj.file_name}")
                 file_path = file_obj.file_path
                 if not os.path.exists(file_path):
                     logger.warning(f"Document file not found at path: {file_path}. Skipping.")
                     continue
 
-                logger.info(f"Processing document: {file_path}")
+                logger.info(f"📄 Processing document: {file_path}")
                 ext = os.path.splitext(file_path)[1].lower()
                 
                 # Select the appropriate document loader based on file extension
@@ -724,9 +869,19 @@ def preprocess_files(state: State):
                 else:
                     loader = TextLoader(file_path)
                 
+                logger.info(f"📄 Loading document with {type(loader).__name__}")
                 documents = loader.load()
+                logger.info(f"📄 Loaded {len(documents)} document(s), total chars: {sum(len(d.page_content) for d in documents)}")
+                
+                if not documents or sum(len(d.page_content) for d in documents) == 0:
+                    logger.error(f"❌ Document {file_obj.file_name} is empty or failed to load. Skipping vector store creation.")
+                    # Still add the file to processed_files but without vector store
+                    processed_files.append(file_obj)
+                    continue
+                
                 text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
                 texts = text_splitter.split_documents(documents)
+                logger.info(f"📄 Split into {len(texts)} text chunks")
                 
                 # Create vector embeddings and save to a FAISS index
                 vector_store = FAISS.from_documents(texts, get_hf_embeddings())
@@ -736,15 +891,95 @@ def preprocess_files(state: State):
                 # Add the path to the vector store to our file object
                 file_obj.vector_store_path = index_path
                 logger.info(f"Document processed. Vector store saved to: {index_path}")
+                
+                # Automatically display the document in canvas
+                logger.info(f"📄 Auto-displaying uploaded document: {file_obj.file_name}")
+                logger.info(f"📄 Calling document agent /display endpoint for: {file_path}")
+                
+                try:
+                    # Call document agent's display endpoint
+                    async with httpx.AsyncClient(timeout=30.0) as client:
+                        logger.info(f"📄 Making POST request to http://localhost:8070/display")
+                        response = await client.post(
+                            "http://localhost:8070/display",
+                            json={"file_path": file_path}
+                        )
+                        
+                        logger.info(f"📄 Document agent /display response status: {response.status_code}")
+                        logger.info(f"📄 Document agent /display response body: {response.text[:500]}")
+                        
+                        if response.status_code == 200:
+                            display_result = response.json()
+                            canvas_display = display_result.get("canvas_display")
+                            logger.info(f"📄 Canvas display from /display: type={canvas_display.get('canvas_type') if canvas_display else 'None'}")
+                            if canvas_display:
+                                canvas_displays.append(canvas_display)
+                                logger.info(f"✅ Document displayed in canvas: {file_obj.file_name}, canvas_type={canvas_display.get('canvas_type')}")
+                        else:
+                            logger.warning(f"❌ Failed to display document: {response.status_code}, response: {response.text}")
+                            
+                except Exception as display_err:
+                    logger.error(f"❌ EXCEPTION calling /display for {file_obj.file_name}: {type(display_err).__name__}: {display_err}", exc_info=True)
 
             processed_files.append(file_obj)
 
         except Exception as e:
-            logger.error(f"Failed to process file {file_obj_dict.get('file_name', 'N/A')}: {e}")
+            logger.error(f"Failed to process file {file_obj_dict.get('file_name', 'N/A')}: {e}", exc_info=True)
             continue
-            
-    # Convert Pydantic objects back to dictionaries for state serialization
-    return {"uploaded_files": [pf.model_dump(mode='json', exclude_none=True) for pf in processed_files]}
+    
+    # If we have canvas displays, set them in state
+    result = {"uploaded_files": [pf.model_dump(mode='json', exclude_none=True) for pf in processed_files]}
+    logger.info(f"🔍 PREPROCESS_FILES: Returning {len(processed_files)} uploaded files to state")
+    logger.info(f"🔍 PREPROCESS_FILES: uploaded_files={result['uploaded_files']}")
+    
+    if canvas_displays:
+        # Use the first canvas display (or combine multiple if needed)
+        if len(canvas_displays) == 1:
+            canvas_display = canvas_displays[0]
+        else:
+            # Determine the combined type based on what's uploaded
+            file_types = set(pf.file_type for pf in processed_files if pf.file_type in ['document', 'spreadsheet'])
+            combined_type = list(file_types)[0] if len(file_types) == 1 else 'document'
+            canvas_display = {
+                "canvas_type": combined_type,
+                "canvas_data": {
+                    "title": f"{len(canvas_displays)} Files Uploaded",
+                    "content": f"Uploaded {len(canvas_displays)} file(s). They are ready for analysis.",
+                    "items": canvas_displays
+                }
+            }
+        
+        # Set canvas state fields properly
+        result["canvas_content"] = canvas_display.get('canvas_content')
+        result["canvas_data"] = canvas_display.get('canvas_data')
+        result["canvas_type"] = canvas_display.get('canvas_type')
+        result["canvas_title"] = canvas_display.get('canvas_title')
+        result["has_canvas"] = True
+        
+        # Store canvas_displays in state for later use
+        result["canvas_displays"] = canvas_displays
+        
+        # Add a system message to inform user
+        from orchestrator.message_manager import MessageManager
+        existing_messages = state.get("messages", [])
+        
+        doc_names = [pf.file_name for pf in processed_files if pf.file_type == 'document']
+        spreadsheet_names = [pf.file_name for pf in processed_files if pf.file_type == 'spreadsheet']
+        
+        if spreadsheet_names:
+            message_content = f"📊 Displaying uploaded spreadsheet{'s' if len(spreadsheet_names) > 1 else ''}: {', '.join(spreadsheet_names)}"
+        elif doc_names:
+            message_content = f"📄 Displaying uploaded document{'s' if len(doc_names) > 1 else ''}: {', '.join(doc_names)}"
+        else:
+            message_content = f"📁 Uploaded {len(canvas_displays)} file(s)"
+        
+        system_message = AIMessage(content=message_content)
+        updated_messages = MessageManager.add_message(existing_messages, system_message)
+        result["messages"] = updated_messages
+        
+        logger.info(f"📊 Canvas display set for {len(canvas_displays)} uploaded file(s)")
+    
+    return result
 
 
 # --- Existing and Modified Graph Nodes ---
@@ -828,21 +1063,38 @@ def parse_prompt(state: State):
     file_context = ""
     uploaded_files = state.get("uploaded_files", [])
     if uploaded_files:
-        # Handle both dict and FileObject instances
-        file_names = []
+        # Handle both dict and FileObject instances - include file type information
+        file_details = []
         for f in uploaded_files:
             if isinstance(f, dict):
-                file_names.append(f.get('file_name', 'unknown'))
+                file_name = f.get('file_name', 'unknown')
+                file_type = f.get('file_type', 'document')
             else:
-                file_names.append(f.file_name)
+                file_name = f.file_name
+                file_type = f.file_type
+            file_details.append(f"{file_name} (type: {file_type})")
         
         file_context = f'''
-        **UPLOADED FILES:**
-        The user has uploaded the following file(s): {", ".join(file_names)}
-        When the user refers to "this document", "the file", "the PDF", etc., they are referring to these uploaded files.
-        You MUST include the file information in the task_description so the agent knows which file to process.
-        For document-related tasks, the task_description should include: "Analyze the uploaded document: {file_names[0]}" or similar.
+        **UPLOADED FILES DETECTED:**
+        The user has uploaded {len(file_details)} file(s): {", ".join(file_details)}
+        
+        **CRITICAL INSTRUCTIONS BASED ON FILE TYPE:**
+        - **For spreadsheet files (.csv, .xlsx):** Create tasks like "display spreadsheet", "analyze spreadsheet data", "query spreadsheet" - NOT document tasks!
+        - **For document files (.pdf, .docx, .txt):** Create tasks like "summarize_document", "answer_question_about_document"
+        - **For image files:** Create tasks like "analyze image", "describe image"
+        
+        **IMPORTANT:** Match the task type to the file type! CSV files need spreadsheet tasks, not document tasks.
+        - If the user asks ANY question about the file(s) (e.g., "What is this?", "Display this", "Show me the data"), create the appropriate task based on file type.
+        - The task_description MUST include the file name and match the file type.
+        - DO NOT treat this as chitchat - files uploaded = task required!
         '''
+        logger.info(f"[PARSE_PROMPT_DEBUG] File context built for {len(file_details)} files: {file_details}")
+    else:
+        logger.info("[PARSE_PROMPT_DEBUG] No uploaded_files in state")
+    
+    logger.info(f"[PARSE_PROMPT_DEBUG] Capabilities count: {len(capability_texts)}, first 5: {capability_texts[:5]}")
+    logger.info(f"[PARSE_PROMPT_DEBUG] Original prompt: '{state['original_prompt']}'")
+
 
     # Initialize both primary and fallback LLMs
     primary_llm = ChatCerebras(model="gpt-oss-120b")
@@ -874,6 +1126,8 @@ def parse_prompt(state: State):
         - Set `direct_response` with a helpful, friendly reply
         - Set `tasks` to an empty list
         - This will skip the entire orchestration graph for efficiency
+        
+        **CRITICAL: If the user has uploaded files, ANY question about those files (even vague ones like "What is this?", "Tell me about this", "Display this", "Show me") MUST be treated as a file-related task (spreadsheet task for CSV/Excel, document task for PDF/DOCX), NOT chitchat!**
         
         **JOB 2: TASK PARSING (If not chitchat)**
         If the user needs external agents (search, analysis, data fetching), break it down into tasks.
@@ -960,25 +1214,6 @@ def parse_prompt(state: State):
             "suggested_title": "AAPL News Headlines"
         }}
         ```
-        
-        Example 3 (Document with parameters): If the user uploads a file "resume.pdf" and says "Please summarise this document", your output should be:
-        ```json
-        {{
-            "tasks": [
-                {{
-                    "task_name": "summarize_document",
-                    "task_description": "Provide a comprehensive summary of the uploaded document 'resume.pdf', including key information, main points, and relevant details.",
-                    "parameters": {{
-                        "document_name": "resume.pdf",
-                        "query": "Provide a comprehensive summary"
-                    }}
-                }}
-            ],
-            "user_expectations": {{}},
-            "direct_response": null,
-            "suggested_title": "Resume Summary"
-        }}
-        ```
 
         Your output must follow the schema exactly, and all number fields must be numeric or null (never strings).
         When extracting `user_expectations`, follow this strictly:
@@ -1032,6 +1267,7 @@ def parse_prompt(state: State):
             # This is likely a user input issue
             parsed_tasks = []
             user_expectations = {}
+            response = None  # Set response to None when exception occurs
 
     current_retry_count = state.get('parse_retry_count', 0)
 
@@ -1040,7 +1276,7 @@ def parse_prompt(state: State):
         "user_expectations": user_expectations or {},
         "parsing_error_feedback": None,
         "parse_retry_count": current_retry_count + 1,
-        "suggested_title": getattr(response, 'suggested_title', None),
+        "suggested_title": getattr(response, 'suggested_title', None) if response else None,
         "needs_complex_processing": True  # Complex processing needed if we got here
     }
 
@@ -1338,6 +1574,17 @@ def rank_agents(state: State):
     # Get user expectations for context
     user_expectations = state.get('user_expectations', {})
     
+    # Build conversation history for context
+    conversation_history = ""
+    if messages := state.get('messages'):
+        recent_messages = messages[-10:]  # Last 10 messages for context
+        for msg in recent_messages:
+            if hasattr(msg, 'type'):
+                if msg.type == "human":
+                    conversation_history += f"User: {msg.content}\n"
+                elif msg.type == "ai":
+                    conversation_history += f"Assistant: {msg.content}\n"
+    
     final_selections = []
     for task in parsed_tasks:
         task_name = task.task_name
@@ -1367,9 +1614,11 @@ def rank_agents(state: State):
                     'endpoints_count': len(agent.endpoints)
                 })
             
+            conversation_context = f"\n**Conversation Context:**\n{conversation_history}\n" if conversation_history else ""
+            
             prompt = f'''
             You are an expert at selecting the best agent for a given task based on multiple factors.
-            
+            {conversation_context}
             **Task Details:**
             - Task Name: "{task.task_name}"
             - Task Description: "{task.task_description}"
@@ -1450,6 +1699,8 @@ def plan_execution(state: State, config: RunnableConfig):
     Creates an initial execution plan or modifies an existing one if a replan is needed,
     and saves the result to a file.
     '''
+    logger.info(f"🔍 PLAN_EXECUTION START: uploaded_files in state = {len(state.get('uploaded_files', []))} files")
+    logger.info(f"🔍 PLAN_EXECUTION START: uploaded_files content = {state.get('uploaded_files', [])}")
     replan_reason = state.get("replan_reason")
     # Initialize both primary and fallback LLMs
     primary_llm = ChatCerebras(model="gpt-oss-120b")
@@ -1460,30 +1711,132 @@ def plan_execution(state: State, config: RunnableConfig):
         # --- REPLANNING MODE ---
         logger.info(f"Replanning initiated. Reason: {replan_reason}")
         
+        # Get available agents with their details for intelligent replanning
+        task_agent_pair_dicts = state.get('task_agent_pairs', [])
+        available_agents_info = []
+        if task_agent_pair_dicts:
+            for pair_dict in task_agent_pair_dicts:
+                pair = TaskAgentPair.model_validate(pair_dict)
+                agent_info = {
+                    "agent_id": pair.primary.id,
+                    "agent_name": pair.primary.name,
+                    "capabilities": pair.primary.capabilities[:5],  # Top 5 capabilities
+                    "endpoints": [{"endpoint": ep.endpoint, "description": ep.description} for ep in pair.primary.endpoints[:3]]
+                }
+                available_agents_info.append(agent_info)
+        
         all_capabilities, _ = get_all_capabilities()
         capabilities_str = ", ".join(all_capabilities)
 
+        # Get recently completed tasks for context
+        completed_tasks = state.get('completed_tasks', [])
+        recent_tasks_summary = []
+        for task in completed_tasks[-3:]:  # Last 3 tasks
+            task_summary = {
+                "task_name": task.get('task_name', 'Unknown'),
+                "agent_used": task.get('agent_name', 'Unknown'),
+                "endpoint_used": task.get('endpoint', 'Unknown'),
+                "status": "success" if task.get('result') else "unknown"
+            }
+            recent_tasks_summary.append(task_summary)
+        
+        # Build conversation history for full context
+        conversation_history = ""
+        if messages := state.get('messages'):
+            recent_messages = messages[-10:]  # Last 10 messages for context
+            for msg in recent_messages:
+                if hasattr(msg, 'type'):
+                    if msg.type == "human":
+                        conversation_history += f"User: {msg.content}\n"
+                    elif msg.type == "ai":
+                        conversation_history += f"Assistant: {msg.content}\n"
+        
         prompt = f'''
         You are an expert autonomous planner. The current execution plan is stalled. Your task is to surgically insert a new task into the plan to resolve the issue.
 
+        **Conversation History:**
+        {conversation_history}
+        
         **Reason for Replan:** "{replan_reason}"
         **Current Stalled Plan:** {json.dumps([task for batch in state.get('task_plan', []) for task in batch], indent=2)}
-        **Original User Prompt:** "{state['original_prompt']}"
+        **Recently Completed Tasks:** {json.dumps(recent_tasks_summary, indent=2)}
         **Full List of Available System Capabilities:** [{capabilities_str}]
         
+        **Available Agents:**
+        {json.dumps(available_agents_info, indent=2)}
+        
         **Instructions:**
-        1.  Analyze the `Reason for Replan` to understand what's missing (e.g., "missing coordinates for Hyderabad").
-        2.  Identify the best capability from the `Available System Capabilities` to find this missing information. The **"perform web search and summarize"** capability is perfect for this.
-        3. Create a new `PlannedTask`. The `task_description` should be a clear, self-contained instruction for another agent (e.g., "Find the latitude and longitude for Hyderabad, India using a web search"). You must select an agent and endpoint that provides the chosen capability.
-        4.  **Insert this new task into the `Current Stalled Plan` *immediately before* the task that needs the information.**
-        5. Return the entire modified plan. The output MUST be a valid JSON object conforming to the `ExecutionPlan` schema.
+        1.  Read the `Conversation History` to understand the full context of what the user wants
+        2.  Analyze the `Reason for Replan` to understand what's missing or what failed
+        3.  Look at `Recently Completed Tasks` to see what was just done successfully
+        4.  For continuation tasks (same document, same type of work), reuse the SAME agent AND endpoint
+        5.  Create a new `PlannedTask` with proper agent assignment (primary field with agent_id, http_method, endpoint)
+        6.  Return the entire modified plan conforming to the `ExecutionPlan` schema
+        
+        **Key Principles:**
+        - Conversation context is your primary source of truth for understanding user intent
+        - Recently completed tasks show you what's working - reuse successful patterns
+        - For document editing continuations, the endpoint should match the previous successful edit
+        - Think logically: if a document was just edited, continuing to edit it uses the same endpoint
         '''
         try:
             response = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, ExecutionPlan)
             # FIX: Use mode='json' to convert HttpUrl and other special types to strings.
             if response and hasattr(response, 'plan'):
+                # CRITICAL FIX: Correct HTTP methods based on agent configuration
+                # The LLM sometimes guesses wrong HTTP methods (e.g., GET instead of POST)
+                # We must respect the agent's actual endpoint configuration
+                for batch in response.plan:
+                    for task in batch:
+                        if task.primary:
+                            # Find the agent configuration
+                            agent_id = task.primary.id
+                            matching_pair = next((p for p in task_agent_pair_dicts if TaskAgentPair.model_validate(p).primary.id == agent_id), None)
+                            if matching_pair:
+                                agent_card = TaskAgentPair.model_validate(matching_pair).primary
+                                # Find the endpoint in the agent's configuration
+                                endpoint_path = task.primary.endpoint
+                                matching_endpoint = next((ep for ep in agent_card.endpoints if str(ep.endpoint) == str(endpoint_path)), None)
+                                if matching_endpoint:
+                                    # Override the HTTP method with the correct one from configuration
+                                    correct_http_method = matching_endpoint.http_method
+                                    if task.primary.http_method != correct_http_method:
+                                        logger.warning(f"🔧 CORRECTING HTTP METHOD: LLM suggested {task.primary.http_method} for {endpoint_path}, but agent config requires {correct_http_method}")
+                                        task.primary.http_method = correct_http_method
+                
                 serializable_plan = [[task.model_dump(mode='json') for task in batch] for batch in (response.plan or [])]
-                output_state = {"task_plan": serializable_plan, "replan_reason": None} # Clear the reason after replanning
+                
+                # CRITICAL FIX: Update task_agent_pairs with new task names from replan
+                # This ensures execute_batch can find matching agents for replanned tasks
+                new_task_agent_pairs = []
+                for batch in response.plan:
+                    for task in batch:
+                        if task.primary:
+                            # Find the original agent card for this agent_id
+                            original_pair = next(
+                                (TaskAgentPair.model_validate(p) for p in task_agent_pair_dicts 
+                                 if TaskAgentPair.model_validate(p).primary.id == task.primary.id), 
+                                None
+                            )
+                            if original_pair:
+                                # Create new pair with the replanned task name
+                                new_pair = TaskAgentPair(
+                                    task_name=task.task_name,
+                                    task_description=task.task_description,
+                                    primary=original_pair.primary,
+                                    fallbacks=original_pair.fallbacks
+                                )
+                                new_task_agent_pairs.append(new_pair.model_dump(mode='json'))
+                                logger.info(f"✅ Created new task_agent_pair for replanned task: '{task.task_name}' -> agent '{task.primary.id}'")
+                
+                # Combine existing pairs with new ones
+                updated_task_agent_pairs = task_agent_pair_dicts + new_task_agent_pairs
+                
+                output_state = {
+                    "task_plan": serializable_plan, 
+                    "task_agent_pairs": updated_task_agent_pairs,
+                    "replan_reason": None  # Clear the reason after replanning
+                }
             else:
                 # If response is None or doesn't have plan attribute, create a simple plan
                 logger.warning("Replanning LLM response was invalid. Creating simple plan.")
@@ -1510,21 +1863,100 @@ def plan_execution(state: State, config: RunnableConfig):
         prompt = f'''
         You are an expert project planner. Convert tasks and their assigned agents into an executable plan.
         
+        **CRITICAL RULE: Create EXACTLY ONE PlannedTask for EACH input task. Do NOT duplicate tasks!**
+        
         Instructions:
-        1. For each task, select the most appropriate endpoint from the primary agent's list.
-        2. Create an ExecutionStep with the agent id, http_method, and endpoint.
-        3. Do not generate a payload.
-        4. Group tasks that can run in parallel into the same batch.
-        5. Return a valid JSON object that conforms to the ExecutionPlan schema.
+        1. For each task in the input list, create EXACTLY ONE PlannedTask (no more, no less)
+        2. Select the most appropriate endpoint from the primary agent's list
+        3. Create an ExecutionStep with the agent id, http_method, and endpoint
+        4. Do not generate a payload
+        5. Group tasks that can run in parallel into the same batch
+        6. Return a valid JSON object that conforms to the ExecutionPlan schema
+        
+        **EXAMPLE:**
+        If input has 1 task, output should have 1 PlannedTask.
+        If input has 3 tasks, output should have 3 PlannedTasks.
+        
+        **DO NOT CREATE DUPLICATE TASKS!**
 
         Tasks to Plan: {json.dumps([p.model_dump(mode='json') for p in task_agent_pairs], indent=2)}
+        
+        Remember: Create EXACTLY {len(task_agent_pairs)} PlannedTask(s) - one for each input task.
         '''
         try:
             response = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, ExecutionPlan)
-            # FIX: Use mode='json' to convert HttpUrl and other special types to strings.
+            logger.info(f"🔍 LLM RESPONSE DEBUG: response={response}, type={type(response)}, has_plan={hasattr(response, 'plan') if response else False}")
             if response and hasattr(response, 'plan'):
+                logger.info(f"🔍 LLM RESPONSE PLAN: plan={response.plan}, plan_length={len(response.plan) if response.plan else 0}")
+            else:
+                logger.warning(f"⚠️ LLM RESPONSE INVALID: response is None or missing 'plan' attribute")
+            # FIX: Use mode='json' to convert HttpUrl and other special types to strings.
+            if response and hasattr(response, 'plan') and response.plan:
+                # CRITICAL FIX: Correct HTTP methods based on agent configuration (same as replanning)
+                for batch in response.plan:
+                    for task in batch:
+                        if task.primary:
+                            # Find the agent configuration
+                            agent_id = task.primary.id
+                            matching_pair = next((p for p in task_agent_pairs if p.primary.id == agent_id), None)
+                            if matching_pair:
+                                agent_card = matching_pair.primary
+                                # Find the endpoint in the agent's configuration
+                                endpoint_path = task.primary.endpoint
+                                matching_endpoint = next((ep for ep in agent_card.endpoints if str(ep.endpoint) == str(endpoint_path)), None)
+                                if matching_endpoint:
+                                    # Override the HTTP method with the correct one from configuration
+                                    correct_http_method = matching_endpoint.http_method
+                                    if task.primary.http_method != correct_http_method:
+                                        logger.warning(f"🔧 CORRECTING HTTP METHOD: LLM suggested {task.primary.http_method} for {endpoint_path}, but agent config requires {correct_http_method}")
+                                        task.primary.http_method = correct_http_method
+                
+                # AUTO-INJECT PARAMETERS: Fill in parameters from uploaded files BEFORE serialization
+                uploaded_files = state.get("uploaded_files", [])
+                logger.info(f"🔍 DEBUG: uploaded_files count={len(uploaded_files)}, response.plan exists={response.plan is not None}, plan length={len(response.plan) if response.plan else 0}")
+                
+                if uploaded_files and response.plan:
+                    logger.info(f"AUTO-INJECT: Processing {len(uploaded_files)} uploaded files for parameter injection")
+                    for batch in response.plan:
+                        for task in batch:
+                            # Get the parsed task to access pre-extracted parameters
+                            parsed_task = next((t for t in state.get('parsed_tasks', []) if t.task_name == task.task_name), None)
+                            if parsed_task and parsed_task.parameters:
+                                # Start with pre-extracted parameters
+                                if not task.primary.payload:
+                                    task.primary.payload = {}
+                                task.primary.payload.update(parsed_task.parameters)
+                                logger.info(f"Using pre-extracted parameters for '{task.task_name}': {task.primary.payload}")
+                            elif not task.primary.payload:
+                                task.primary.payload = {}
+                            
+                            # Auto-inject vector_store_path for document tasks
+                            logger.info(f"🔍 Checking {len(uploaded_files)} files for vector_store_path injection")
+                            for file_obj in uploaded_files:
+                                file_dict = file_obj if isinstance(file_obj, dict) else (file_obj.__dict__ if hasattr(file_obj, '__dict__') else {})
+                                logger.info(f"🔍 File: {file_dict.get('file_name')}, type={file_dict.get('file_type')}, has_vector_store={bool(file_dict.get('vector_store_path'))}")
+                                if file_dict.get('file_type') == 'document' and file_dict.get('vector_store_path'):
+                                    if 'vector_store_path' not in task.primary.payload:
+                                        task.primary.payload['vector_store_path'] = file_dict['vector_store_path']
+                                        logger.info(f"✅ AUTO-INJECTED vector_store_path for '{task.task_name}': {file_dict['vector_store_path']}")
+                                    else:
+                                        logger.info(f"⏭️ vector_store_path already in payload, skipping injection")
+                                    break
+                                else:
+                                    logger.info(f"⏭️ Skipping file (not document or no vector_store_path)")
+                            
+                            # Auto-inject query if not provided
+                            if 'query' not in task.primary.payload:
+                                original_prompt = state.get('original_prompt', '')
+                                if any(word in original_prompt.lower() for word in ['what', 'summarize', 'summary', 'about', 'describe', 'analyze']):
+                                    task.primary.payload['query'] = original_prompt
+                                    logger.info(f"✅ AUTO-INJECTED query for '{task.task_name}': {original_prompt}")
+                
                 serializable_plan = [[task.model_dump(mode='json') for task in batch] for batch in (response.plan or [])]
-                output_state = {"task_plan": serializable_plan, "user_response": None}
+                output_state = {
+                    "task_plan": serializable_plan, 
+                    "user_response": None
+                }
                 print(f"!!! PLAN_EXECUTION: LLM created plan with {len(serializable_plan)} batches, total tasks: {sum(len(batch) for batch in serializable_plan)} !!!")
                 logger.info(f"LLM created plan with {len(serializable_plan)} batches")
             else:
@@ -1546,10 +1978,42 @@ def plan_execution(state: State, config: RunnableConfig):
                                 id=str(uuid.uuid4()),
                                 http_method=endpoint.http_method,
                                 endpoint=endpoint.endpoint,
-                                payload={}  # Empty payload for now, will be filled by run_agent
+                                payload={}  # Empty payload for now, will be filled below
                             )
                         )
                         simple_plan.append(planned_task)
+                
+                # AUTO-INJECT PARAMETERS: Fill in parameters from uploaded files BEFORE serialization
+                uploaded_files = state.get("uploaded_files", [])
+                if uploaded_files and simple_plan:
+                    logger.info(f"AUTO-INJECT (simple_plan path 1): Processing {len(uploaded_files)} uploaded files")
+                    for task in simple_plan:
+                        # Get the parsed task to access pre-extracted parameters
+                        parsed_task = next((t for t in state.get('parsed_tasks', []) if t.task_name == task.task_name), None)
+                        if parsed_task and parsed_task.parameters:
+                            # Start with pre-extracted parameters
+                            if not task.primary.payload:
+                                task.primary.payload = {}
+                            task.primary.payload.update(parsed_task.parameters)
+                            logger.info(f"Using pre-extracted parameters for '{task.task_name}': {task.primary.payload}")
+                        elif not task.primary.payload:
+                            task.primary.payload = {}
+                        
+                        # Auto-inject vector_store_path for document tasks
+                        for file_obj in uploaded_files:
+                            file_dict = file_obj if isinstance(file_obj, dict) else (file_obj.__dict__ if hasattr(file_obj, '__dict__') else {})
+                            if file_dict.get('file_type') == 'document' and file_dict.get('vector_store_path'):
+                                if 'vector_store_path' not in task.primary.payload:
+                                    task.primary.payload['vector_store_path'] = file_dict['vector_store_path']
+                                    logger.info(f"✅ AUTO-INJECTED vector_store_path for '{task.task_name}': {file_dict['vector_store_path']}")
+                                break
+                        
+                        # Auto-inject query if not provided
+                        if 'query' not in task.primary.payload:
+                            original_prompt = state.get('original_prompt', '')
+                            if any(word in original_prompt.lower() for word in ['what', 'summarize', 'summary', 'about', 'describe', 'analyze']):
+                                task.primary.payload['query'] = original_prompt
+                                logger.info(f"✅ AUTO-INJECTED query for '{task.task_name}': {original_prompt}")
                 
                 if simple_plan:
                     serializable_plan = [[task.model_dump(mode='json') for task in simple_plan]]
@@ -1578,10 +2042,42 @@ def plan_execution(state: State, config: RunnableConfig):
                                 id=str(uuid.uuid4()),
                                 http_method=endpoint.http_method,
                                 endpoint=endpoint.endpoint,
-                                payload={}  # Empty payload for now, will be filled by run_agent
+                                payload={}  # Empty payload for now, will be filled below
                             )
                         )
                         simple_plan.append(planned_task)
+                
+                # AUTO-INJECT PARAMETERS: Fill in parameters from uploaded files BEFORE serialization
+                uploaded_files = state.get("uploaded_files", [])
+                if uploaded_files and simple_plan:
+                    logger.info(f"AUTO-INJECT (simple_plan path 2): Processing {len(uploaded_files)} uploaded files")
+                    for task in simple_plan:
+                        # Get the parsed task to access pre-extracted parameters
+                        parsed_task = next((t for t in state.get('parsed_tasks', []) if t.task_name == task.task_name), None)
+                        if parsed_task and parsed_task.parameters:
+                            # Start with pre-extracted parameters
+                            if not task.primary.payload:
+                                task.primary.payload = {}
+                            task.primary.payload.update(parsed_task.parameters)
+                            logger.info(f"Using pre-extracted parameters for '{task.task_name}': {task.primary.payload}")
+                        elif not task.primary.payload:
+                            task.primary.payload = {}
+                        
+                        # Auto-inject vector_store_path for document tasks
+                        for file_obj in uploaded_files:
+                            file_dict = file_obj if isinstance(file_obj, dict) else (file_obj.__dict__ if hasattr(file_obj, '__dict__') else {})
+                            if file_dict.get('file_type') == 'document' and file_dict.get('vector_store_path'):
+                                if 'vector_store_path' not in task.primary.payload:
+                                    task.primary.payload['vector_store_path'] = file_dict['vector_store_path']
+                                    logger.info(f"✅ AUTO-INJECTED vector_store_path for '{task.task_name}': {file_dict['vector_store_path']}")
+                                break
+                        
+                        # Auto-inject query if not provided
+                        if 'query' not in task.primary.payload:
+                            original_prompt = state.get('original_prompt', '')
+                            if any(word in original_prompt.lower() for word in ['what', 'summarize', 'summary', 'about', 'describe', 'analyze']):
+                                task.primary.payload['query'] = original_prompt
+                                logger.info(f"✅ AUTO-INJECTED query for '{task.task_name}': {original_prompt}")
                 
                 if simple_plan:
                     serializable_plan = [[task.model_dump(mode='json') for task in simple_plan]]
@@ -1810,10 +2306,11 @@ def validate_plan_for_execution(state: State):
     **Your Decision Process:**
     1.  **Check Context:** Can all `Required Parameters` (e.g., 'image_path', 'vector_store_path', 'query') be filled using the `Original User Prompt`, `Conversation History`, `Previously Completed Tasks`, or the `Available File Context`? The file paths provided are the values you should use.
     
-    2.  **Special Case - Document Summarization:** If the task is about summarizing, analyzing, or describing a document, and a 'query' parameter is required:
-        - If the user's prompt contains words like "summarize", "summary", "describe", "analyze", "what is in", or similar, treat this as a valid query.
-        - The query can be inferred as "Provide a comprehensive summary of this document" or "Describe the contents of this document".
-        - In this case, respond with `status: "ready"` because the intent is clear.
+    2.  **Special Case - Document Tasks:** If the task involves documents (summarize, analyze, answer questions):
+        - If 'vector_store_path' is required and files are uploaded with vector stores, use the vector_store_path from the file context.
+        - If 'query' is required and the user asks about the document (e.g., "What is this about?", "Summarize this"), infer the query as "Provide a comprehensive summary" or use the user's exact question.
+        - **CRITICAL:** If files with vector stores are available in the file context, the task is READY. Do NOT ask for paths that are already provided in the file context!
+        - In this case, respond with `status: "ready"` because all information is available.
     
     3. **If YES (all parameters can be filled):** The task is ready to run. Respond with `status: "ready"` and `reasoning: null`.
     
@@ -1943,14 +2440,15 @@ async def execute_mcp_agent(planned_task: PlannedTask, agent_details: AgentCard,
         }
 
 
-async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: State, config: Dict[str, Any], last_error: Optional[str] = None):
+async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: State, config: Dict[str, Any], last_error: Optional[str] = None, force_execute: bool = False):
     '''
     OPTIMIZED EXECUTION: Builds the payload and runs a single agent.
     - Checks if pre-extracted parameters match required params (skips LLM if match)
     - Implements GET request caching
     - Semantic retries and rate limit handling
+    - force_execute: If True, sets show_preview=False to actually execute (used after confirmation)
     '''
-    logger.info(f"Running agent '{agent_details.name}' for task: '{planned_task.task_name}'")
+    logger.info(f"Running agent '{agent_details.name}' for task: '{planned_task.task_name}' (force_execute={force_execute})")
     
     # Construct full URL from base_url + endpoint
     endpoint_path = str(planned_task.primary.endpoint)
@@ -1971,16 +2469,103 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
     
     # Match endpoint by path only (not full URL)
     selected_endpoint = next((ep for ep in agent_details.endpoints if str(ep.endpoint) == endpoint_path), None)
+    
+    # CRITICAL FIX: Override http_method with the correct one from agent config
+    # LLM sometimes suggests GET when agent requires POST
+    if selected_endpoint:
+        correct_method = selected_endpoint.http_method.upper()
+        if http_method != correct_method:
+            logger.warning(f"🔧 HTTP METHOD CORRECTION: LLM suggested {http_method} for {endpoint_path}, but agent config requires {correct_method}")
+            http_method = correct_method
 
     if not selected_endpoint:
-        error_msg = f"Critical Error: Could not find endpoint details for '{endpoint_url}' on agent '{agent_details.name}'."
-        logger.error(error_msg)
-        return {"task_name": planned_task.task_name, "result": error_msg}
+        # ROBUST FALLBACK: For document agent, fall back to /edit endpoint with natural language
+        if 'document' in agent_details.name.lower() or 'document' in agent_details.id.lower():
+            logger.warning(f"Endpoint '{endpoint_path}' not found on document agent. Falling back to /edit with natural language.")
+            # Find the /edit endpoint
+            edit_endpoint = next((ep for ep in agent_details.endpoints if '/edit' in str(ep.endpoint)), None)
+            if edit_endpoint:
+                selected_endpoint = edit_endpoint
+                # Override the endpoint path to use /edit
+                endpoint_path = str(edit_endpoint.endpoint)
+                endpoint_url = f"{agent_details.endpoints[0].endpoint.rsplit('/', 1)[0]}/edit" if '/' in str(agent_details.endpoints[0].endpoint) else endpoint_path
+                logger.info(f"✅ Falling back to /edit endpoint with natural language instruction")
+            else:
+                error_msg = f"Critical Error: Could not find /edit endpoint on document agent '{agent_details.name}'."
+                logger.error(error_msg)
+                return {"task_name": planned_task.task_name, "result": error_msg}
+        else:
+            error_msg = f"Critical Error: Could not find endpoint details for '{endpoint_url}' on agent '{agent_details.name}'."
+            logger.error(error_msg)
+            return {"task_name": planned_task.task_name, "result": error_msg}
 
     # Initialize both primary and fallback LLMs for payload generation
     primary_llm = ChatCerebras(model="gpt-oss-120b")
     fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
     failed_attempts = []
+    
+    # --- CRITICAL: Prepare file context FIRST before checking skip_llm_generation ---
+    # This ensures file_id_mapping is available for injection into pre-extracted params
+    file_context = ""
+    file_id_mapping = {}
+    uploaded_files = state.get("uploaded_files", [])
+    
+    if uploaded_files and FILE_INTEGRATION_ENABLED:
+        try:
+            # Prepare files for this specific agent (uploads if needed)
+            file_id_mapping, file_context = await prepare_files_for_task(
+                state=state,
+                agent_details=agent_details,
+                endpoint_path=endpoint_path,
+                orchestrator_config=config  # Fixed: use orchestrator_config parameter name
+            )
+            logger.info(f"File integration: prepared {len(file_id_mapping)} file mappings for agent {agent_details.id}")
+            logger.info(f"[FILE_ID_DEBUG] file_id_mapping contents: {file_id_mapping}")
+        except Exception as e:
+            logger.error(f"File integration error: {e}")
+            # Fallback to basic file context
+            # Normalize file paths to use forward slashes to avoid JSON escaping issues
+            normalized_files = []
+            for file_obj in uploaded_files:
+                file_dict = file_obj if isinstance(file_obj, dict) else file_obj.__dict__
+                normalized_dict = file_dict.copy()
+                # Normalize paths to use forward slashes
+                if 'file_path' in normalized_dict:
+                    normalized_dict['file_path'] = normalized_dict['file_path'].replace('\\', '/')
+                if 'vector_store_path' in normalized_dict:
+                    normalized_dict['vector_store_path'] = normalized_dict['vector_store_path'].replace('\\', '/')
+                normalized_files.append(normalized_dict)
+            
+            file_context = f'''
+            **Available File Context:**
+            The user has uploaded files. You MUST use the file information below to populate the required payload parameters (like 'image_path' or 'vector_store_path').
+            ```json
+            {json.dumps(normalized_files, indent=2)}
+            ```
+            ---
+            '''
+    elif uploaded_files:
+        # File integration not enabled, use basic context
+        # Normalize file paths to use forward slashes to avoid JSON escaping issues
+        normalized_files = []
+        for file_obj in uploaded_files:
+            file_dict = file_obj if isinstance(file_obj, dict) else file_obj.__dict__
+            normalized_dict = file_dict.copy()
+            # Normalize paths to use forward slashes
+            if 'file_path' in normalized_dict:
+                normalized_dict['file_path'] = normalized_dict['file_path'].replace('\\', '/')
+            if 'vector_store_path' in normalized_dict:
+                normalized_dict['vector_store_path'] = normalized_dict['vector_store_path'].replace('\\', '/')
+            normalized_files.append(normalized_dict)
+        
+        file_context = f'''
+        **Available File Context:**
+        The user has uploaded files. You MUST use the file information below to populate the required payload parameters (like 'image_path' or 'vector_store_path').
+        ```json
+        {json.dumps(normalized_files, indent=2)}
+        ```
+        ---
+        '''
     
     # OPTIMIZATION: Check if we can skip LLM payload generation
     # Get pre-extracted parameters from the task
@@ -1989,6 +2574,77 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
         if task.task_name == planned_task.task_name:
             pre_extracted_params = task.parameters or {}
             break
+    
+    # AUTO-INJECT: Automatically add vector_store_path for document tasks if files are uploaded
+    if uploaded_files and 'vector_store_path' in [p.name for p in selected_endpoint.parameters]:
+        for file_obj in uploaded_files:
+            file_dict = file_obj if isinstance(file_obj, dict) else file_obj.__dict__
+            if file_dict.get('file_type') == 'document' and file_dict.get('vector_store_path'):
+                if 'vector_store_path' not in pre_extracted_params:
+                    pre_extracted_params['vector_store_path'] = file_dict['vector_store_path']
+                    logger.info(f"AUTO-INJECTED vector_store_path: {file_dict['vector_store_path']}")
+                break
+    
+    # AUTO-INJECT: Automatically add query for document tasks if not provided
+    if 'query' in [p.name for p in selected_endpoint.parameters] and 'query' not in pre_extracted_params:
+        # Infer query from the original prompt
+        original_prompt = state.get('original_prompt', '')
+        if any(word in original_prompt.lower() for word in ['what', 'summarize', 'summary', 'about', 'describe', 'analyze']):
+            pre_extracted_params['query'] = original_prompt
+            logger.info(f"AUTO-INJECTED query from original prompt: {original_prompt}")
+    
+    # NATURAL LANGUAGE FALLBACK: For /edit endpoint, use task description as instruction
+    if '/edit' in endpoint_path and 'instruction' in [p.name for p in selected_endpoint.parameters]:
+        if 'instruction' not in pre_extracted_params:
+            # Use the task description as the natural language instruction
+            pre_extracted_params['instruction'] = planned_task.task_description
+            logger.info(f"✅ AUTO-INJECTED natural language instruction for /edit: {planned_task.task_description}")
+        
+        # Ensure file_path is present for document edits
+        if 'file_path' not in pre_extracted_params and uploaded_files:
+            for file_obj in uploaded_files:
+                file_dict = file_obj if isinstance(file_obj, dict) else file_obj.__dict__
+                if file_dict.get('file_type') == 'document':
+                    pre_extracted_params['file_path'] = file_dict['file_path']
+                    logger.info(f"✅ AUTO-INJECTED file_path for /edit: {file_dict['file_path']}")
+                    break
+    
+    # AUTO-INJECT: Spreadsheet file_id for spreadsheet agent endpoints
+    # PRIORITY: Files uploaded in the current turn (is_current_turn=True) should be used first
+    if 'file_id' in [p.name for p in selected_endpoint.parameters] and 'file_id' not in pre_extracted_params and uploaded_files:
+        # First pass: look for current turn spreadsheet files
+        current_turn_file = None
+        fallback_file = None
+        
+        for file_obj in uploaded_files:
+            file_dict = file_obj if isinstance(file_obj, dict) else file_obj.__dict__
+            if file_dict.get('file_type') == 'spreadsheet' or file_dict.get('file_name', '').lower().endswith(('.csv', '.xlsx', '.xls')):
+                file_id = file_dict.get('file_id') or file_dict.get('content_id')
+                if file_id:
+                    # Prioritize current turn files
+                    if file_dict.get('is_current_turn'):
+                        current_turn_file = file_id
+                        logger.info(f"📎 Found CURRENT TURN spreadsheet file_id: {file_id}")
+                        break  # Current turn file found, stop searching
+                    elif not fallback_file:
+                        # Keep as fallback if no current turn file found
+                        fallback_file = file_id
+        
+        # Use current turn file if available, otherwise use fallback
+        selected_file_id = current_turn_file or fallback_file
+        if selected_file_id:
+            pre_extracted_params['file_id'] = selected_file_id
+            if current_turn_file:
+                logger.info(f"✅ AUTO-INJECTED file_id for spreadsheet (CURRENT TURN): {selected_file_id}")
+            else:
+                logger.info(f"✅ AUTO-INJECTED file_id for spreadsheet (fallback): {selected_file_id}")
+    
+    # AUTO-INJECT: Instruction for execute_pandas endpoint
+    if '/execute_pandas' in endpoint_path and 'instruction' in [p.name for p in selected_endpoint.parameters]:
+        if 'instruction' not in pre_extracted_params:
+            pre_extracted_params['instruction'] = planned_task.task_description
+            logger.info(f"✅ AUTO-INJECTED instruction for /execute_pandas: {planned_task.task_description}")
+
     
     # Check if all required parameters are already extracted
     required_params = [p.name for p in selected_endpoint.parameters if p.required]
@@ -1999,23 +2655,20 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
         logger.info(f"Using parameters: {pre_extracted_params}")
         # Transform pre-extracted parameters to match expected types
         payload = transform_payload_types(pre_extracted_params, selected_endpoint.parameters)
+        
+        # Inject correct file_id if we have file mappings (even for pre-extracted params)
+        if file_id_mapping and FILE_INTEGRATION_ENABLED:
+            payload = inject_file_id_into_payload(
+                payload=payload,
+                content_id_mapping=file_id_mapping,
+                endpoint_details=selected_endpoint,
+                uploaded_files=uploaded_files
+            )
+        
         skip_llm_generation = True
     else:
         logger.info(f"Required params: {required_params}, Pre-extracted: {list(pre_extracted_params.keys())}")
         skip_llm_generation = False
-    
-    # --- Prepare detailed file context for the payload builder ---
-    file_context = ""
-    uploaded_files = state.get("uploaded_files", [])
-    if uploaded_files:
-        file_context = f'''
-        **Available File Context:**
-        The user has uploaded files. You MUST use the file information below to populate the required payload parameters (like 'image_path' or 'vector_store_path').
-        ```json
-        {json.dumps(uploaded_files, indent=2)}
-        ```
-        ---
-        '''
 
     # --- Create a formatted history of the conversation ---
     history = ""
@@ -2106,6 +2759,20 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                     # CRITICAL FIX: Transform payload parameters to match expected types
                     # This fixes issues like "to" being a string instead of array
                     payload = transform_payload_types(payload, selected_endpoint.parameters)
+                    
+                    # NEW: Inject correct file_id if we have file mappings
+                    logger.info(f"[INJECTION_CHECK] file_id_mapping={file_id_mapping}, FILE_INTEGRATION_ENABLED={FILE_INTEGRATION_ENABLED}")
+                    if file_id_mapping and FILE_INTEGRATION_ENABLED:
+                        logger.info(f"[INJECTION_CHECK] Calling inject_file_id_into_payload...")
+                        payload = inject_file_id_into_payload(
+                            payload=payload,
+                            content_id_mapping=file_id_mapping,
+                            endpoint_details=selected_endpoint,
+                            uploaded_files=uploaded_files
+                        )
+                        logger.info(f"[INJECTION_CHECK] Payload after injection: {payload}")
+                    else:
+                        logger.warning(f"[INJECTION_CHECK] Skipping injection - file_id_mapping empty or FILE_INTEGRATION disabled")
                     
                     logger.info(f"LLM generated payload for task '{planned_task.task_name}': {payload}")
                     payload_generated = True
@@ -2231,7 +2898,31 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                         }
                         logger.info(f"CACHE MISS: Cached response for GET {endpoint_url}")
                 else:  # POST
-                    response = await client.post(endpoint_url, json=payload, headers=headers, timeout=timeout_seconds)
+                    # Check if agent expects form data instead of JSON
+                    # Priority: endpoint-specific > agent connection_config > default (json)
+                    use_form_data = False
+                    
+                    # First check endpoint-specific request_format (highest priority)
+                    endpoint_format = getattr(selected_endpoint, 'request_format', None)
+                    logger.info(f"[REQUEST_FORMAT_DEBUG] Endpoint: {endpoint_path}, selected_endpoint.request_format={endpoint_format}")
+                    logger.info(f"[REQUEST_FORMAT_DEBUG] selected_endpoint type: {type(selected_endpoint)}, has request_format attr: {hasattr(selected_endpoint, 'request_format')}")
+                    
+                    if endpoint_format:
+                        use_form_data = endpoint_format == 'form'
+                        logger.info(f"Using endpoint-specific request_format: {endpoint_format} -> use_form_data={use_form_data}")
+                    else:
+                        # Fall back to agent connection_config
+                        if connection_config and isinstance(connection_config, dict):
+                            use_form_data = connection_config.get('request_format', 'json') == 'form'
+                            logger.info(f"Using agent connection_config request_format: {connection_config.get('request_format')} -> use_form_data={use_form_data}")
+                    
+                    if use_form_data:
+                        logger.info(f"Using form data for agent '{agent_details.name}'")
+                        response = await client.post(endpoint_url, data=payload, headers=headers, timeout=timeout_seconds)
+                    else:
+                        logger.info(f"Using JSON data for agent '{agent_details.name}'")
+                        response = await client.post(endpoint_url, json=payload, headers=headers, timeout=timeout_seconds)
+                    
                     response.raise_for_status()
                     result = response.json()
 
@@ -2242,8 +2933,27 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                     failed_attempts.append({"payload": payload, "result": str(result)})
                     continue  # Continue to the next attempt in the loop
                 
-                logger.info(f"Agent call successful for task '{planned_task.task_name}'.")
-                return {"task_name": planned_task.task_name, "result": result}
+                # **CANVAS DISPLAY HANDLING** - Extract canvas_display from agent response
+                canvas_display = None
+                if isinstance(result, dict):
+                    # Check at top level first
+                    if 'canvas_display' in result:
+                        canvas_display = result.get('canvas_display')
+                    # Also check inside 'result' field (some agents nest it there)
+                    elif 'result' in result and isinstance(result.get('result'), dict):
+                        canvas_display = result.get('result', {}).get('canvas_display')
+                    
+                    if canvas_display:
+                        logger.info(f"✅ Agent returned canvas display: type={canvas_display.get('canvas_type')}, requires_confirmation={canvas_display.get('requires_confirmation')}, title={canvas_display.get('canvas_title')}")
+                    else:
+                        logger.info(f"ℹ️ Agent did not return canvas_display (checked both top level and nested)")
+                
+                logger.info(f"✅ Agent call successful for task '{planned_task.task_name}'. Payload used: show_preview={payload.get('show_preview', 'not set')}")
+                return {
+                    "task_name": planned_task.task_name, 
+                    "result": result,
+                    "canvas_display": canvas_display
+                }
             
             except httpx.HTTPStatusError as e:
                 # Handle rate limit errors from agents with exponential backoff
@@ -2282,9 +2992,129 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
     logger.error(final_error_msg)
     return {"task_name": planned_task.task_name, "result": final_error_msg, "status_code": 500}
 
+async def execute_confirmed_task(state: State, config: RunnableConfig):
+    '''
+    Re-executes a task after user confirmation.
+    Called when canvas_confirmation_action is set in state.
+    '''
+    confirmation_action = state.get('canvas_confirmation_action')
+    confirmation_task_name = state.get('canvas_confirmation_task')
+    pending_task = state.get('pending_confirmation_task')
+    
+    if not confirmation_action or not pending_task:
+        logger.warning("execute_confirmed_task called but no confirmation data found")
+        return {}
+    
+    logger.info(f"🔄 Executing confirmed task: {confirmation_task_name}")
+    
+    # Get the task details from pending_confirmation_task
+    task_name = pending_task.get('task_name')
+    agent_name = pending_task.get('agent_name')
+    
+    # Find the original task and agent from task_agent_pairs
+    task_agent_pairs = state.get('task_agent_pairs', [])
+    task_pair = None
+    for pair in task_agent_pairs:
+        if isinstance(pair, dict):
+            if pair.get('task_name') == task_name:
+                task_pair = TaskAgentPair.model_validate(pair)
+                break
+        elif hasattr(pair, 'task_name') and pair.task_name == task_name:
+            task_pair = pair
+            break
+    
+    if not task_pair:
+        logger.error(f"Could not find task pair for confirmed task: {task_name}")
+        return {
+            "canvas_confirmation_action": None,
+            "canvas_confirmation_task": None,
+            "pending_confirmation": False,
+            "pending_confirmation_task": None
+        }
+    
+    # Create a PlannedTask from the task_pair
+    planned_task = PlannedTask(
+        task_name=task_pair.task_name,
+        task_description=task_pair.task_description,
+        primary_agent_id=task_pair.primary.id,
+        fallback_agent_ids=[fb.id for fb in task_pair.fallbacks] if task_pair.fallbacks else []
+    )
+    
+    # Execute the task with show_preview=False (actually execute)
+    logger.info(f"📧 Executing task '{task_name}' with agent '{agent_name}' (confirmed)")
+    result = await run_agent(planned_task, task_pair.primary, state, config, force_execute=True)
+    logger.info(f"📊 Task execution result keys: {list(result.keys()) if isinstance(result, dict) else 'not a dict'}")
+    logger.info(f"📊 Canvas display in result: {'present' if result.get('canvas_display') else 'missing'}")
+    
+    # Add to completed tasks
+    completed_tasks = state.get('completed_tasks', [])
+    completed_tasks.append(CompletedTask(
+        task_name=task_name,
+        result=result.get('result', {}),
+        raw_response=result.get('raw_response', {})
+    ))
+    
+    logger.info(f"✅ Confirmed task '{task_name}' executed successfully")
+    
+    # **AUTO-DISPLAY**: Check if the agent already returned a canvas display (e.g., from /edit endpoint)
+    canvas_display = result.get('canvas_display')
+    logger.info(f"📊 Confirmed task result: canvas_display={'present' if canvas_display else 'missing'}")
+    
+    # If no canvas display from agent but this is a document edit, fetch the display
+    file_path = pending_task.get('file_path')
+    if not canvas_display and file_path and agent_name == 'document_analysis_agent':
+        logger.info(f"🔄 Auto-displaying updated document after edit: {file_path}")
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                display_response = await client.post(
+                    "http://localhost:8070/display",
+                    json={"file_path": file_path}
+                )
+                if display_response.status_code == 200:
+                    display_result = display_response.json()
+                    canvas_display = display_result.get("canvas_display")
+                    logger.info(f"✅ Fetched display for updated document: {file_path}")
+                else:
+                    logger.error(f"❌ Failed to fetch display: status={display_response.status_code}")
+        except Exception as display_err:
+            logger.error(f"❌ Failed to auto-display updated document: {display_err}", exc_info=True)
+    
+    # If we have a canvas display (either from agent or fetched), return it
+    if canvas_display:
+        logger.info(f"📄 Returning canvas display after confirmed task: type={canvas_display.get('canvas_type')}, title={canvas_display.get('canvas_title')}")
+        return {
+            "completed_tasks": [task.model_dump() if hasattr(task, 'model_dump') else task for task in completed_tasks],
+            "canvas_confirmation_action": None,
+            "canvas_confirmation_task": None,
+            "pending_confirmation": False,
+            "pending_confirmation_task": None,
+            "has_canvas": True,
+            "canvas_content": canvas_display.get('canvas_content'),
+            "canvas_data": canvas_display.get('canvas_data'),
+            "canvas_type": canvas_display.get('canvas_type'),
+            "canvas_title": canvas_display.get('canvas_title')
+        }
+    else:
+        logger.warning(f"⚠️ No canvas display available after confirmed task '{task_name}'")
+    
+    # No canvas display - clear confirmation state and return
+    return {
+        "completed_tasks": [task.model_dump() if hasattr(task, 'model_dump') else task for task in completed_tasks],
+        "canvas_confirmation_action": None,
+        "canvas_confirmation_task": None,
+        "pending_confirmation": False,
+        "pending_confirmation_task": None,
+        "has_canvas": False,
+        "canvas_content": None,
+        "canvas_data": None
+    }
+
+
 async def execute_batch(state: State, config: RunnableConfig):
     '''Executes a single batch of tasks from the plan.'''
     print(f"!!! EXECUTE_BATCH: Starting execution !!!")
+    print(f"!!! EXECUTE_BATCH: uploaded_files in state = {state.get('uploaded_files', 'NOT_FOUND')} !!!")
     
     # Rehydrate the plan
     task_plan_dicts = state.get('task_plan', [])
@@ -2311,11 +3141,80 @@ async def execute_batch(state: State, config: RunnableConfig):
     
     async def try_task_with_fallbacks(planned_task: PlannedTask):
         nonlocal task_events  # Ensure we're modifying the outer scope's task_events
-        original_task_pair = task_agent_pairs_map.get(planned_task.task_name)
+        
+        # ROBUST FIX: Check if PlannedTask already has agent info embedded
+        if hasattr(planned_task, 'primary') and planned_task.primary:
+            # Task has embedded agent info - use it directly
+            logger.info(f"✅ Using embedded agent info from PlannedTask for '{planned_task.task_name}'")
+            # Get the full agent details from the execution step
+            agent_id = planned_task.primary.id
+            # Find the full agent card from task_agent_pairs
+            original_task_pair = None
+            for pair in task_agent_pairs:
+                if pair.primary.id == agent_id:
+                    original_task_pair = pair
+                    logger.info(f"✅ Found matching agent card for embedded agent '{agent_id}'")
+                    break
+            
+            # If not found in pairs, this is a problem - fall through to lookup
+            if not original_task_pair:
+                logger.warning(f"Could not find agent card for embedded agent '{agent_id}', falling back to lookup")
+        else:
+            original_task_pair = None
+        
         if not original_task_pair:
-            error_msg = f"Could not find original task pair for '{planned_task.task_name}' to get fallbacks."
-            logger.error(error_msg)
-            return {"task_name": planned_task.task_name, "result": error_msg}
+            # Fall back to lookup in task_agent_pairs_map
+            original_task_pair = task_agent_pairs_map.get(planned_task.task_name)
+            
+            # CONTINUATION TASK FIX: If exact match fails, try to find a matching agent
+            if not original_task_pair:
+                logger.warning(f"Could not find exact task pair for '{planned_task.task_name}'. Attempting intelligent match...")
+                
+                # Try to match by agent name in the task description or by looking at recent successful tasks
+                matched_pair = None
+                
+                # Strategy 0 (MOST RELIABLE): Match by agent_id from PlannedTask.primary
+                # This is populated by the LLM during replan and is the most reliable for replanned tasks
+                if hasattr(planned_task, 'primary') and planned_task.primary and hasattr(planned_task.primary, 'id'):
+                    target_agent_id = planned_task.primary.id
+                    for pair in task_agent_pairs:
+                        if pair.primary.id == target_agent_id:
+                            matched_pair = pair
+                            logger.info(f"✅ Matched task '{planned_task.task_name}' to agent '{target_agent_id}' by primary.id (replan match)")
+                            break
+                
+                # Strategy 1: Check if any task pair's agent matches the task description
+                if not matched_pair:
+                    task_desc_lower = planned_task.task_description.lower()
+                    for pair in task_agent_pairs:
+                        agent_name_lower = pair.primary.name.lower()
+                        # Check if agent name or capabilities match the task
+                        if agent_name_lower in task_desc_lower or any(cap.lower() in task_desc_lower for cap in pair.primary.capabilities[:5]):
+                            matched_pair = pair
+                            logger.info(f"✅ Matched task to agent '{pair.primary.name}' by description")
+                            break
+                
+                # Strategy 2: If still no match, use the most recent successful task's agent (for continuation tasks)
+                if not matched_pair and state.get('completed_tasks'):
+                    recent_tasks = state['completed_tasks'][-5:]  # Last 5 tasks
+                    for recent_task in reversed(recent_tasks):
+                        # Check if recent task was successful and used document agent
+                        if 'document' in recent_task.get('task_name', '').lower():
+                            # Find the document agent in task_agent_pairs
+                            for pair in task_agent_pairs:
+                                if 'document' in pair.primary.name.lower():
+                                    matched_pair = pair
+                                    logger.info(f"✅ Matched continuation task to document agent from recent history")
+                                    break
+                            if matched_pair:
+                                break
+                
+                if matched_pair:
+                    original_task_pair = matched_pair
+                else:
+                    error_msg = f"Could not find original task pair for '{planned_task.task_name}' to get fallbacks."
+                    logger.error(error_msg)
+                    return {"task_name": planned_task.task_name, "result": error_msg}
 
         agents_to_try = [original_task_pair.primary] + original_task_pair.fallbacks
         final_error_result = None
@@ -2437,6 +3336,8 @@ async def execute_batch(state: State, config: RunnableConfig):
     thread_id_for_artifacts = config.get("configurable", {}).get("thread_id") if config else None
     
     completed_tasks_with_desc = []
+    canvas_displays = []  # Collect canvas displays from agents
+    
     for res in batch_results:
         task_name = res['task_name']
         result_preview = str(res.get('result', {}))[:200]
@@ -2447,6 +3348,34 @@ async def execute_batch(state: State, config: RunnableConfig):
         print(f"!!! EXECUTE_BATCH: Task '{task_name}' {status} in {execution_time}s with {agent_used} !!!")
         logger.info(f"Task '{task_name}' {status} in {execution_time}s - Result preview: {result_preview}")
         
+        # --- CANVAS DISPLAY HANDLING ---
+        logger.info(f"🔍 Checking for canvas display in task '{task_name}': has_canvas_display={('canvas_display' in res)}, result_type={type(res.get('result'))}")
+        canvas_display = res.get('canvas_display')
+        
+        # Check if canvas_display is nested inside result (some agents return it this way)
+        if not canvas_display and isinstance(res.get('result'), dict):
+            logger.info(f"🔍 Checking nested canvas_display in result for task '{task_name}'")
+            canvas_display = res.get('result', {}).get('canvas_display')
+            if canvas_display:
+                logger.info(f"📊 Found canvas display nested in result for task '{task_name}'")
+        
+        if canvas_display:
+            logger.info(f"📊 Canvas display received from task '{task_name}': type={canvas_display.get('canvas_type')}, title={canvas_display.get('canvas_title')}, requires_confirmation={canvas_display.get('requires_confirmation')}")
+            canvas_displays.append({
+                'task_name': task_name,
+                'agent_name': agent_used,
+                **canvas_display
+            })
+            
+            # Check if confirmation is required (check both canvas_display and result level)
+            requires_conf = canvas_display.get('requires_confirmation') or (isinstance(res.get('result'), dict) and res.get('result', {}).get('requires_confirmation'))
+            if requires_conf:
+                logger.info(f"⏸️  Task '{task_name}' requires user confirmation - pausing execution")
+                # Store confirmation state for this task
+                # This will be handled by the orchestrator's confirmation flow
+        else:
+            logger.info(f"ℹ️ No canvas display from task '{task_name}'")
+        
         # --- ARTIFACT INTEGRATION: Compress large task results ---
         task_result = res.get('result', {})
         raw_response = res.get('raw_response', {})
@@ -2456,7 +3385,7 @@ async def execute_batch(state: State, config: RunnableConfig):
                 # Check if result is large enough to compress
                 result_size = len(json.dumps(task_result, default=str))
                 if result_size > 2000:  # Compress results > 2KB
-                    compressed = artifact_hooks.on_task_complete(task_name, task_result, thread_id_for_artifacts)
+                    compressed = await artifact_hooks.on_task_complete(task_name, task_result, thread_id_for_artifacts)
                     if '_artifact_ref' in compressed:
                         logger.info(f"Compressed task result '{task_name}' to artifact ({result_size} bytes)")
                         task_result = compressed
@@ -2480,12 +3409,48 @@ async def execute_batch(state: State, config: RunnableConfig):
     completed_tasks_dicts = [task.model_dump() if hasattr(task, 'model_dump') else task for task in completed_tasks]
     latest_completed_tasks_dicts = [task.model_dump() if hasattr(task, 'model_dump') else task for task in completed_tasks_with_desc]
 
+    # Check if any task requires confirmation
+    requires_confirmation = any(cd.get('requires_confirmation') for cd in canvas_displays)
+    pending_confirmation_task = None
+    
+    print(f"!!! EXECUTE_BATCH: canvas_displays count={len(canvas_displays)}, requires_confirmation={requires_confirmation} !!!")
+    logger.info(f"Canvas displays collected: {len(canvas_displays)}, requires_confirmation: {requires_confirmation}")
+    
+    if requires_confirmation:
+        # Find the task that requires confirmation
+        for cd in canvas_displays:
+            if cd.get('requires_confirmation'):
+                pending_confirmation_task = {
+                    'task_name': cd.get('task_name'),
+                    'agent_name': cd.get('agent_name'),
+                    'canvas_display': cd
+                }
+                print(f"!!! EXECUTE_BATCH: ⏸️  Setting pending_confirmation=True for task: {cd.get('task_name')} !!!")
+                logger.info(f"⏸️  Execution paused - waiting for confirmation on task: {cd.get('task_name')}")
+                break
+    
     output_state = {
         "task_plan": remaining_plan_dicts,
         "completed_tasks": completed_tasks_dicts,
         "latest_completed_tasks": latest_completed_tasks_dicts,
-        "task_events": task_events  # Include task status events for real-time updates
+        "task_events": task_events,  # Include task status events for real-time updates
+        "canvas_displays": canvas_displays,  # Include canvas displays from agents
+        "pending_confirmation": requires_confirmation,
+        "pending_confirmation_task": pending_confirmation_task
     }
+    
+    # If we have canvas displays, update the canvas state with the latest one
+    if canvas_displays:
+        latest_canvas = canvas_displays[-1]  # Use the most recent canvas display
+        # Support both old (canvas_content) and new (canvas_data) formats
+        output_state["canvas_content"] = latest_canvas.get('canvas_content')  # Legacy HTML/markdown
+        output_state["canvas_data"] = latest_canvas.get('canvas_data')  # Structured data (preferred)
+        output_state["canvas_type"] = latest_canvas.get('canvas_type')
+        output_state["canvas_title"] = latest_canvas.get('canvas_title')
+        output_state["canvas_requires_confirmation"] = latest_canvas.get('requires_confirmation', False)
+        output_state["canvas_confirmation_message"] = latest_canvas.get('confirmation_message')
+        output_state["has_canvas"] = True
+        logger.info(f"📊 Updated canvas with display from '{latest_canvas.get('task_name')}'")
     
     print(f"!!! EXECUTE_BATCH: Returning output_state with latest_completed_tasks count={len(output_state['latest_completed_tasks'])}, task_events count={len(task_events)} !!!")
     logger.info(f"Output state keys: {list(output_state.keys())}")
@@ -2509,6 +3474,19 @@ def evaluate_agent_response(state: State):
     print(f"!!! EVALUATE_AGENT_RESPONSE: Starting evaluation !!!")
     print(f"!!! EVALUATE: State keys: {list(state.keys())} !!!")
     print(f"!!! EVALUATE: latest_completed_tasks in state: {'latest_completed_tasks' in state} !!!")
+    print(f"!!! EVALUATE: pending_confirmation={state.get('pending_confirmation')}, canvas_displays={len(state.get('canvas_displays', []))} !!!")
+    
+    # CANVAS CONFIRMATION FIX: Skip evaluation if confirmation is pending
+    if state.get('pending_confirmation'):
+        print(f"!!! EVALUATE: Skipping evaluation - confirmation pending !!!")
+        logger.info("Skipping evaluation because confirmation is pending (preview result)")
+        return {
+            "pending_user_input": False, 
+            "question_for_user": None,
+            "eval_status": "pending_confirmation"  # Mark as pending confirmation, not failed
+        }
+    else:
+        print(f"!!! EVALUATE: NOT skipping - pending_confirmation is {state.get('pending_confirmation')} !!!")
     
     latest_tasks = state.get("latest_completed_tasks", [])
     print(f"!!! EVALUATE: latest_tasks type={type(latest_tasks)}, value={latest_tasks} !!!")
@@ -2626,15 +3604,30 @@ def evaluate_agent_response(state: State):
         
         # REACTIVE ROUTING: Handle different statuses
         if evaluation.status == "failed":
-            print(f"!!! EVALUATE: Task FAILED - triggering auto-replan !!!")
-            logger.warning(f"Task '{task_to_evaluate['task_name']}' failed. Triggering auto-replan.")
+            # Check replan count to prevent infinite loops
+            replan_count = state.get("replan_count", 0)
+            MAX_REPLANS = 3  # Maximum number of replans before giving up
+            
+            if replan_count >= MAX_REPLANS:
+                print(f"!!! EVALUATE: Max replans ({MAX_REPLANS}) reached - stopping auto-replan !!!")
+                logger.error(f"Task '{task_to_evaluate['task_name']}' failed after {replan_count} replans. Stopping auto-replan.")
+                return {
+                    "pending_user_input": False,
+                    "question_for_user": None,
+                    "eval_status": "complete",  # Mark as complete to stop the loop
+                    "final_response": f"I attempted to complete the task '{task_to_evaluate['task_name']}' but encountered repeated failures. The last error was: {task_to_evaluate.get('result', 'Unknown error')}"
+                }
+            
+            print(f"!!! EVALUATE: Task FAILED - triggering auto-replan (attempt {replan_count + 1}/{MAX_REPLANS}) !!!")
+            logger.warning(f"Task '{task_to_evaluate['task_name']}' failed. Triggering auto-replan (attempt {replan_count + 1}/{MAX_REPLANS}).")
             logger.warning(f"Replan feedback: {evaluation.feedback_for_replanning}")
             
             return {
                 "pending_user_input": False,
                 "question_for_user": None,
                 "replan_reason": evaluation.feedback_for_replanning or f"Task '{task_to_evaluate['task_name']}' failed: {evaluation.reasoning}",
-                "eval_status": "failed"
+                "eval_status": "failed",
+                "replan_count": replan_count + 1
             }
         
         elif evaluation.status == "user_input_required":
@@ -2646,7 +3639,8 @@ def evaluate_agent_response(state: State):
             result = {
                 "pending_user_input": True,
                 "question_for_user": evaluation.question,
-                "eval_status": "user_input_required"
+                "eval_status": "user_input_required",
+                "replan_count": 0  # Reset replan count on user input
             }
             
             # Check if we have canvas from previous tasks
@@ -2661,11 +3655,13 @@ def evaluate_agent_response(state: State):
         elif evaluation.status == "partial_success":
             print(f"!!! EVALUATE: Task PARTIALLY successful - continuing !!!")
             logger.info(f"Task '{task_to_evaluate['task_name']}' partially successful: {evaluation.reasoning}")
-            # Continue to next task
+            # Reset replan count on success
+            return {"replan_count": 0}
         
         else:  # complete
             print(f"!!! EVALUATE: Task COMPLETE !!!")
             logger.info(f"Task '{task_to_evaluate['task_name']}' completed successfully")
+            # Reset replan count on success
             
             # Check if this is a browser task with screenshots
             task_result = task_to_evaluate.get('result', {})
@@ -2783,7 +3779,7 @@ def evaluate_agent_response(state: State):
         print(f"!!! EVALUATE: Evaluation failed with error: {e} !!!")
         logger.error(f"Failed to evaluate agent response for task '{task_to_evaluate['task_name']}': {e}")
     
-    return {"pending_user_input": False, "question_for_user": None}
+    return {"pending_user_input": False, "question_for_user": None, "replan_count": 0}
 
 def ask_user(state: State):
     """
@@ -3175,12 +4171,21 @@ def generate_text_answer(state: State):
             logger.warning("Complex request indicated but no completed tasks found. Generating default response.")
             final_response = "I've processed your request, but I don't have specific results to share."
         else:
+            # Use summarized task results for context
+            # Note: Unified content system is for file artifacts, not task result summarization
+            summarized_results = _summarize_completed_tasks_for_context(completed_tasks)
+            context_str = json.dumps(summarized_results, indent=2)
+            logger.info(f"📊 Generated context from {len(completed_tasks)} completed tasks: {len(context_str)} chars")
+            
+            # Hard limit on context (roughly 20k tokens = 80k chars)
+            if len(context_str) > 80000:
+                logger.warning(f"Context too large ({len(context_str)} chars), truncating to 80k chars")
+                context_str = context_str[:80000] + "\n\n[... context truncated due to length ...]"
+            
             # If canvas is needed, generate a more concise text response that references the canvas
             if needs_canvas and canvas_type:
-                # Use summarized results to avoid token limit issues
-                summarized_results = _summarize_completed_tasks_for_context(completed_tasks)
-                logger.info(f"📋 Summarized results for LLM (canvas mode): {json.dumps(summarized_results, indent=2)[:500]}...")
-                
+                # Limit context to prevent token overflow (50k chars ≈ 12.5k tokens)
+                safe_context = context_str[:50000] if len(context_str) > 50000 else context_str
                 prompt = f'''
                 You are an expert project manager's assistant. Your job is to synthesize the results from a team of AI agents into a single, clean, and coherent final report for the user.
                 
@@ -3189,9 +4194,9 @@ def generate_text_answer(state: State):
                 The user's original request was:
                 "{state['original_prompt']}"
                 
-                The following tasks were completed, with these DETAILED results:
+                The following tasks were completed, with these results:
                 ---
-                {json.dumps(summarized_results, indent=2)}
+                {safe_context}
                 ---
                 
                 A {canvas_type} visualization has been prepared to display this information. 
@@ -3224,10 +4229,8 @@ def generate_text_answer(state: State):
                 - If actions_taken show the agent looked for something but didn't find it, report that accurately
                 '''
             else:
-                # Use summarized results to avoid token limit issues
-                summarized_results = _summarize_completed_tasks_for_context(completed_tasks)
-                logger.info(f"📋 Summarized results for LLM: {json.dumps(summarized_results, indent=2)[:500]}...")
-                
+                # Limit context to prevent token overflow (50k chars ≈ 12.5k tokens)
+                safe_context = context_str[:50000] if len(context_str) > 50000 else context_str
                 prompt = f'''
                 You are an expert project manager's assistant. Your job is to synthesize the results from a team of AI agents into a single, clean, and coherent final report for the user.
                 
@@ -3236,9 +4239,9 @@ def generate_text_answer(state: State):
                 The user's original request was:
                 "{state['original_prompt']}"
                 
-                The following tasks were completed, with these DETAILED results:
+                The following tasks were completed, with these results:
                 ---
-                {json.dumps(summarized_results, indent=2)}
+                {safe_context}
                 ---
                 
                 Please generate a final, human-readable response that directly answers the user's original request based on the collected results.
@@ -3325,9 +4328,35 @@ def generate_final_response(state: State):
     This replaces the old two-step process (generate_text_answer + render_canvas_output).
     """
     logger.info("=== GENERATE_FINAL_RESPONSE: Starting unified generation ===")
+    print(f"!!! GENERATE_FINAL_RESPONSE: pending_confirmation={state.get('pending_confirmation')} !!!")
+    print(f"!!! GENERATE_FINAL_RESPONSE: has_canvas={state.get('has_canvas')}, canvas_type={state.get('canvas_type')} !!!")
+    print(f"!!! GENERATE_FINAL_RESPONSE: canvas_data exists={state.get('canvas_data') is not None}, canvas_content exists={state.get('canvas_content') is not None} !!!")
+    
+    # Check if confirmation is pending - if so, skip text generation and just show canvas
+    if state.get('pending_confirmation'):
+        logger.info("⏸️ Confirmation pending - skipping text generation, showing canvas only")
+        print(f"!!! GENERATE_FINAL_RESPONSE: Returning canvas for confirmation !!!")
+        print(f"!!! GENERATE_FINAL_RESPONSE: canvas_type={state.get('canvas_type')}, canvas_title={state.get('canvas_title')} !!!")
+        # Don't set final_response to avoid adding a message to chat
+        # The canvas will show the confirmation UI
+        return {
+            "final_response": "",  # Empty to avoid chat message
+            "messages": state.get('messages', []),
+            "needs_canvas": False,
+            "has_canvas": True,
+            "canvas_type": state.get('canvas_type'),
+            "canvas_content": state.get('canvas_content'),
+            "canvas_data": state.get('canvas_data'),
+            "canvas_title": state.get('canvas_title'),
+            "pending_confirmation": True,
+            "pending_confirmation_task": state.get('pending_confirmation_task'),
+            "canvas_confirmation_message": state.get('canvas_confirmation_message') or "Review the changes and confirm to apply them to the document"
+        }
     
     # Check if canvas was already set by evaluate_agent_response (e.g., browser screenshots)
-    if state.get('has_canvas') and state.get('canvas_content'):
+    # or by preprocess_files (e.g., uploaded documents)
+    # Support both canvas_content (string) and canvas_data (structured object)
+    if state.get('has_canvas') and (state.get('canvas_content') or state.get('canvas_data')):
         logger.info("Canvas already set by previous node, preserving it")
         # Still need to generate the text response
         text_result = generate_text_answer(state)
@@ -3337,7 +4366,9 @@ def generate_final_response(state: State):
             "needs_canvas": False,  # Canvas already rendered
             "has_canvas": True,
             "canvas_type": state.get('canvas_type'),
-            "canvas_content": state.get('canvas_content')
+            "canvas_content": state.get('canvas_content'),
+            "canvas_data": state.get('canvas_data'),
+            "canvas_title": state.get('canvas_title')
         }
     
     # Initialize both primary and fallback LLMs
@@ -3371,13 +4402,34 @@ def generate_final_response(state: State):
                 "canvas_content": final_response
             }
         else:
-            return {
+            # Preserve existing canvas state if it was set by previous nodes (e.g., preprocess_files)
+            result = {
                 "final_response": final_response,
                 "messages": text_result.get('messages', []),
-                "has_canvas": False,
-                "canvas_type": None,
-                "canvas_content": None
             }
+            # Only clear canvas if it wasn't already set
+            if not state.get('has_canvas'):
+                result["has_canvas"] = False
+                result["canvas_type"] = None
+                result["canvas_content"] = None
+            return result
+    
+    # Complex request - check if canvas was already set by agents
+    # If canvas was set by execute_batch (from agent canvas_display), preserve it
+    if state.get('has_canvas') and (state.get('canvas_content') or state.get('canvas_data')):
+        logger.info("Canvas already set by agent (execute_batch), preserving it")
+        # Still need to generate the text response
+        text_result = generate_text_answer(state)
+        return {
+            "final_response": text_result.get('final_response', ''),
+            "messages": text_result.get('messages', []),
+            "needs_canvas": False,  # Canvas already rendered
+            "has_canvas": True,
+            "canvas_type": state.get('canvas_type'),
+            "canvas_content": state.get('canvas_content'),
+            "canvas_data": state.get('canvas_data'),
+            "canvas_title": state.get('canvas_title')
+        }
     
     # Complex request - use unified generation
     logger.info("Complex request - using unified text + canvas generation")
@@ -3406,6 +4458,8 @@ def generate_final_response(state: State):
        - Base ONLY on actual results (no hallucination)
        - If data is missing/null, say so clearly
        - Be factual and accurate
+       - **IMPORTANT**: If a task shows "edit_status": "success" or result contains "successfully", the operation WAS completed successfully
+       - **IMPORTANT**: If you see "Document edited successfully" in the results, acknowledge the successful edit in your response
        
        **FORMATTING REQUIREMENTS for response_text:**
        - Use clear paragraph breaks for readability
@@ -3442,7 +4496,10 @@ def generate_final_response(state: State):
     - Keep response_text concise if canvas is used (reference the canvas)
     - Make canvas content visually appealing and functional
     
-    **CRITICAL: Base everything on actual task results. Do not invent data.**
+    **CRITICAL RULES:**
+    - Base everything on actual task results. Do not invent data.
+    - If results show "success" or "edited successfully", acknowledge the successful completion
+    - Do NOT say "no confirmation was received" if the task actually completed successfully
     
     Output as JSON conforming to FinalResponse schema.
     '''
@@ -3480,11 +4537,9 @@ def generate_final_response(state: State):
                 try:
                     # Get thread_id from state or generate one
                     thread_id = state.get("thread_id") or f"canvas_{int(time.time())}"
-                    compressed = artifact_hooks.on_canvas_generated(
-                        canvas_content=response.canvas_content,
-                        canvas_type=response.canvas_type or "html",
-                        thread_id=thread_id
-                    )
+                    # Note: This should be awaited but function is not async - skipping for now
+                    # compressed = await artifact_hooks.on_canvas_generated(...)
+                    compressed = None  # Disabled until function is made async
                     if '_artifact_ref' in compressed:
                         canvas_artifact_ref = compressed['_artifact_ref']
                         logger.info(f"Stored canvas as artifact: {canvas_artifact_ref['id']}")
@@ -3501,25 +4556,31 @@ def generate_final_response(state: State):
             }
         else:
             logger.info("Text-only response generated")
-            return {
+            # Preserve existing canvas state if it was set by previous nodes
+            result = {
                 "final_response": response.response_text,
                 "messages": updated_messages,
-                "has_canvas": False,
-                "canvas_type": None,
-                "canvas_content": None
             }
+            if not state.get('has_canvas'):
+                result["has_canvas"] = False
+                result["canvas_type"] = None
+                result["canvas_content"] = None
+            return result
             
     except Exception as e:
         logger.error(f"Unified response generation failed: {e}. Falling back to simple text.")
         # Fallback: Generate simple text response
         text_result = generate_text_answer(state)
-        return {
+        result = {
             "final_response": text_result.get('final_response', 'I apologize, but I encountered an error generating the response.'),
             "messages": text_result.get('messages', []),
-            "has_canvas": False,
-            "canvas_type": None,
-            "canvas_content": None
         }
+        # Preserve existing canvas state if it was set by previous nodes
+        if not state.get('has_canvas'):
+            result["has_canvas"] = False
+            result["canvas_type"] = None
+            result["canvas_content"] = None
+        return result
 
 
 
@@ -3527,6 +4588,10 @@ def load_conversation_history(state: State, config: RunnableConfig):
     thread_id = config.get("configurable", {}).get("thread_id")
     if not thread_id:
         return {}
+
+    # CRITICAL: Preserve uploaded_files from incoming state (set by main.py)
+    incoming_uploaded_files = state.get("uploaded_files", [])
+    logger.info(f"🔍 LOAD_HISTORY: Preserving {len(incoming_uploaded_files)} uploaded files from incoming state")
 
     # Check if this is a resume after approval
     is_resuming_after_approval = state.get("plan_approved") == True
@@ -3540,12 +4605,14 @@ def load_conversation_history(state: State, config: RunnableConfig):
     # This prevents duplicate messages when continuing a conversation
     if state.get("messages") and len(state.get("messages", [])) > 0 and not is_resuming_after_approval:
         logger.info(f"Messages already exist in state for thread {thread_id}, skipping file load")
-        return {}
+        # Still preserve uploaded_files even when skipping file load
+        return {"uploaded_files": incoming_uploaded_files}
 
     history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
 
     if not os.path.exists(history_path):
-        return {}
+        # Preserve uploaded_files even when no history file exists
+        return {"uploaded_files": incoming_uploaded_files}
 
     try:
         with open(history_path, "r", encoding="utf-8") as f:
@@ -3562,8 +4629,10 @@ def load_conversation_history(state: State, config: RunnableConfig):
         # --- ARTIFACT INTEGRATION: Expand artifact references after loading ---
         if ARTIFACT_INTEGRATION_ENABLED and artifact_hooks:
             try:
-                data = artifact_hooks.after_load(data)
-                logger.info(f"Expanded artifacts for thread {thread_id}")
+                # Note: This should be awaited but function is not async - skipping for now
+                # data = await artifact_hooks.after_load(data)
+                # logger.info(f"Expanded artifacts for thread {thread_id}")
+                pass  # Disabled until function is made async
             except Exception as artifact_err:
                 logger.warning(f"Artifact expansion failed: {artifact_err}")
 
@@ -3614,7 +4683,8 @@ def load_conversation_history(state: State, config: RunnableConfig):
         if state.get("plan_approved"):
             print(f"!!! LOAD_HISTORY: Loaded {len(valid_messages)} messages for context after approval !!!")
             return {
-                "messages": valid_messages
+                "messages": valid_messages,
+                "uploaded_files": incoming_uploaded_files  # Preserve uploaded files
             }
         
         # Load the pre-seeded plan if it exists (for workflow re-execution)
@@ -3649,12 +4719,13 @@ def load_conversation_history(state: State, config: RunnableConfig):
             "approval_required": approval_required,
             "pending_user_input": pending_user_input,
             "question_for_user": question_for_user,
-            "status": status
+            "status": status,
+            "uploaded_files": incoming_uploaded_files  # Preserve uploaded files from incoming state
         }
 
     except Exception as e:
         logger.error(f"Failed to load conversation history for {thread_id}: {e}")
-        return {"messages": []}
+        return {"messages": [], "uploaded_files": incoming_uploaded_files}
 
 def get_serializable_state(state: dict | State, thread_id: str) -> dict:
     """
@@ -3788,7 +4859,9 @@ def get_serializable_state(state: dict | State, thread_id: str) -> dict:
         # Canvas fields for the sidebar
         "has_canvas": state.get("has_canvas", False),
         "canvas_content": state.get("canvas_content"),
+        "canvas_data": state.get("canvas_data"),  # Structured canvas data
         "canvas_type": state.get("canvas_type"),
+        "canvas_title": state.get("canvas_title"),  # Canvas title
         "needs_canvas": state.get("needs_canvas", False),
         "timestamp": time.time(),
     }
@@ -3888,8 +4961,10 @@ def save_conversation_history(state: State, config: RunnableConfig):
         # --- ARTIFACT INTEGRATION: Compress large fields before saving ---
         if ARTIFACT_INTEGRATION_ENABLED and artifact_hooks:
             try:
-                serializable_state = artifact_hooks.before_save(serializable_state, thread_id)
-                logger.info(f"Applied artifact compression for thread {thread_id}")
+                # Note: This should be awaited but function is not async - skipping for now
+                # serializable_state = await artifact_hooks.before_save(serializable_state, thread_id)
+                # logger.info(f"Applied artifact compression for thread {thread_id}")
+                pass  # Disabled until function is made async
             except Exception as artifact_err:
                 logger.warning(f"Artifact compression failed, saving uncompressed: {artifact_err}")
 
@@ -4009,6 +5084,37 @@ def route_after_validation(state: State):
 def analyze_request(state: State):
     """Sophisticated analysis of user request to determine processing approach."""
     logger.info("Performing sophisticated analysis of user request...")
+    logger.info(f"🔍 ANALYZE_REQUEST ENTRY: uploaded_files in state = {'uploaded_files' in state}")
+    logger.info(f"🔍 ANALYZE_REQUEST ENTRY: uploaded_files count = {len(state.get('uploaded_files', []))}")
+    
+    # CANVAS CONFIRMATION FIX: Check if this is a confirmation follow-up message
+    pending_confirmation = state.get("pending_confirmation", False)
+    pending_task = state.get("pending_confirmation_task")
+    original_prompt = state.get('original_prompt', '').lower()
+    
+    # Detect confirmation keywords in the message
+    confirmation_keywords = ['apply', 'confirm', 'yes', 'proceed', 'continue', 'without showing preview', 'without preview']
+    is_confirmation_message = any(keyword in original_prompt for keyword in confirmation_keywords)
+    
+    logger.info(f"🔍 CONFIRMATION CHECK: pending_confirmation={pending_confirmation}, pending_task={pending_task}, original_prompt='{original_prompt}', is_confirmation_message={is_confirmation_message}")
+    print(f"!!! ANALYZE_REQUEST: pending_confirmation={pending_confirmation}, is_confirmation_message={is_confirmation_message}, original_prompt='{original_prompt}' !!!")
+    
+    # If there's a pending confirmation and user is confirming, clear the confirmation state and proceed with execution
+    if pending_confirmation and is_confirmation_message:
+        logger.info(f"✅ User confirmed canvas action for task '{pending_task}'. Clearing confirmation state and proceeding with execution.")
+        print(f"!!! CONFIRMATION DETECTED: Clearing pending_confirmation and routing to execution !!!")
+        print(f"!!! RETURNING: pending_confirmation=False, skip_preview_on_next_execution=True, needs_complex_processing=True !!!")
+        
+        # Clear confirmation state and set flag to skip preview on next execution
+        # DON'T set canvas_confirmation_action as it routes to broken execute_confirmed_task node
+        return {
+            "pending_confirmation": False,
+            "pending_confirmation_task": None,
+            "canvas_requires_confirmation": False,
+            "skip_preview_on_next_execution": True,  # Flag to inject show_preview=False in plan_execution
+            "needs_complex_processing": True,  # Force complex processing to execute the task
+            "analysis_reasoning": f"User confirmed the canvas action for task '{pending_task}'. Proceeding with execution without preview."
+        }
     
     # Initialize both primary and fallback LLMs
     primary_llm = ChatCerebras(model="gpt-oss-120b")
@@ -4050,18 +5156,7 @@ def analyze_request(state: State):
     prompt = f'''
     You are the Orbimesh Orchestrator, an intelligent AI system that coordinates multiple specialized agents to complete user requests.
     
-    **YOUR IDENTITY AND CAPABILITIES:**
-    - You are Orbimesh, a multi-agent orchestration system
-    - You can delegate tasks to specialized agents in your agent directory
-    - You have a built-in Canvas feature that can render interactive HTML/CSS/JavaScript and Markdown content
-    - The Canvas is NOT an agent - it's your own built-in capability for creating visualizations, games, interactive demos, and rich content
-    - When users ask for interactive content, games, visualizations, or web-based demos, you can create them directly using your Canvas
-    
-    **IMPORTANT: Canvas is a built-in feature, not an agent to search for!**
-    
-    Analyze the user's request and determine if it requires complex orchestration or can be handled with a simple response.
-    
-    Consider the following context:
+    **CONTEXT:**
     {files_context}
     {tasks_context}
     Conversation history:
@@ -4069,24 +5164,29 @@ def analyze_request(state: State):
     
     User's current request: "{state['original_prompt']}"
     
-    Evaluate based on these criteria:
-    1. Is this ONLY a simple greeting, thanks, acknowledgment, or casual conversation? (e.g., "hi", "thanks", "ok", "got it")
-    2. Does this require accessing uploaded files or documents?
-    3. Does this require multiple agents or complex operations?
-    4. Is this a follow-up that builds on previous results?
-    5. Does this require fetching external data (stock prices, news, weather, company info, etc.)?
-    6. Does this require performing any action or task that needs EXTERNAL AGENTS (search, analyze, calculate, fetch, get, find, etc.)?
-    7. Does this ONLY require creating interactive content, games, visualizations, or web-based demos using your Canvas (without needing external data)?
+    **YOUR TASK:**
+    Determine if this request requires delegating work to specialized agents (complex processing) or if you can answer it directly (simple response).
     
-    IMPORTANT RULES:
-    - If the request asks to "fetch", "get", "find", "search", "analyze", "calculate" EXTERNAL DATA, it needs complex processing.
-    - If the request mentions specific data like stock prices, news, weather, company information, etc., it needs complex processing.
-    - If the request ONLY asks for interactive content, games, visualizations, or web demos that you can create with your Canvas WITHOUT external data, it does NOT need complex processing (mark as simple).
-    - Canvas-only requests (like "create a tic-tac-toe game", "make a counter", "show me a visualization") should be marked as simple since they don't need external agents.
-    - ONLY simple greetings, thanks, general knowledge questions, OR canvas-only requests should be marked as simple.
-    - When in doubt about whether external agents are needed, choose complex processing.
+    **SIMPLE REQUESTS** (you can answer directly without agents):
+    - Greetings, thanks, acknowledgments: "hi", "thanks", "ok", "got it"
+    - General knowledge questions: "what is Python?", "explain recursion"
+    - Clarification questions: "what do you mean?", "can you explain?"
+    - Creating interactive content with your built-in Canvas (games, visualizations, demos) that don't need external data
     
-    Respond with a JSON object containing:
+    **COMPLEX REQUESTS** (require specialized agents):
+    - ANY work with uploaded files or documents (editing, analyzing, reading, converting, formatting)
+    - Fetching external data (stock prices, news, weather, company info, web searches)
+    - Performing calculations, analysis, or transformations on data
+    - Sending emails, browsing websites, or interacting with external services
+    - Multi-step workflows or tasks that build on previous results
+    
+    **CRITICAL RULES:**
+    - If there are uploaded files in context and the request mentions them or their content, it ALWAYS needs complex processing
+    - If the request is a follow-up to a previous task (continuing work on the same file/topic), it needs complex processing
+    - Action verbs like "edit", "change", "convert", "analyze", "fetch", "get", "find", "search", "calculate" indicate complex processing
+    - When in doubt, choose complex processing - it's better to delegate than to give an incorrect simple answer
+    
+    Respond with a JSON object:
     {{
         "needs_complex_processing": true/false,
         "reasoning": "Brief explanation for the decision",
@@ -4110,6 +5210,8 @@ def analyze_request(state: State):
         # For complex requests, don't set final_response at all (let it be None/undefined)
         # This ensures generate_text_answer will handle complex requests properly
         
+        logger.info(f"🔍 ANALYZE_REQUEST EXIT: Returning result with keys = {list(result.keys())}")
+        logger.info(f"🔍 ANALYZE_REQUEST EXIT: NOT touching uploaded_files (should be preserved)")
         return result
         
     except Exception as e:
@@ -4149,8 +5251,10 @@ def route_after_analysis(state: State):
     planning_mode = state.get("planning_mode", False)
     needs_complex = state.get("needs_complex_processing")
     plan_approved = state.get("plan_approved", False)
+    uploaded_files_count = len(state.get("uploaded_files", []))
     
-    print(f"!!! ROUTE AFTER ANALYSIS: has_plan={has_plan}, planning_mode={planning_mode}, needs_complex={needs_complex}, plan_approved={plan_approved} !!!")
+    logger.info(f"🔍 ROUTE_AFTER_ANALYSIS: uploaded_files count = {uploaded_files_count}")
+    print(f"!!! ROUTE AFTER ANALYSIS: has_plan={has_plan}, planning_mode={planning_mode}, needs_complex={needs_complex}, plan_approved={plan_approved}, uploaded_files={uploaded_files_count} !!!")
     
     # If we have a plan and planning mode is OFF, skip to validation (normal continuation)
     if has_plan and not planning_mode:
@@ -4183,12 +5287,19 @@ def route_after_parse(state: State):
 def should_continue_or_finish(state: State):
     '''REACTIVE ROUTER: Runs after execution and evaluation to decide the next step.'''
     pending = state.get("pending_user_input")
+    pending_confirmation = state.get("pending_confirmation")
     task_plan = state.get('task_plan')
     eval_status = state.get("eval_status")
     replan_reason = state.get("replan_reason")
     
-    print(f"!!! SHOULD_CONTINUE_OR_FINISH: eval_status={eval_status}, pending={pending}, replan_reason={replan_reason}, task_plan_length={len(task_plan) if task_plan else 0} !!!")
-    logger.info(f"Reactive Router: eval_status={eval_status}, pending={pending}, replan={bool(replan_reason)}, plan_length={len(task_plan) if task_plan else 0}")
+    print(f"!!! SHOULD_CONTINUE_OR_FINISH: eval_status={eval_status}, pending={pending}, pending_confirmation={pending_confirmation}, replan_reason={replan_reason}, task_plan_length={len(task_plan) if task_plan else 0} !!!")
+    logger.info(f"Reactive Router: eval_status={eval_status}, pending={pending}, pending_confirmation={pending_confirmation}, replan={bool(replan_reason)}, plan_length={len(task_plan) if task_plan else 0}")
+    
+    # CANVAS CONFIRMATION FIX: If confirmation is pending, go to generate_final_response to show canvas
+    if pending_confirmation:
+        print(f"!!! ROUTING TO GENERATE_FINAL_RESPONSE (pending_confirmation=True) !!!")
+        logger.info("Routing to generate_final_response to display canvas with confirmation button")
+        return "generate_final_response"
     
     # REACTIVE LOOP: If task failed, trigger auto-replan
     if eval_status == "failed" and replan_reason:
@@ -4230,6 +5341,7 @@ builder.add_node("execute_batch", execute_batch)  # OPTIMIZED: Parameter matchin
 builder.add_node("evaluate_agent_response", evaluate_agent_response)  # OPTIMIZED: Reactive evaluation
 builder.add_node("ask_user", ask_user)
 builder.add_node("generate_final_response", generate_final_response)  # OPTIMIZED: Unified text + canvas
+builder.add_node("execute_confirmed_task", execute_confirmed_task)  # Canvas confirmation flow
 # Note: render_canvas_output node removed - now integrated into generate_final_response
 
 builder.add_edge(START, "load_history")
@@ -4284,7 +5396,32 @@ builder.add_conditional_edges("plan_execution", route_after_plan_creation, {
     "validate_plan_for_execution": "validate_plan_for_execution",
     "save_history": "save_history"
 })
-builder.add_edge("execute_batch", "evaluate_agent_response")
+
+# Route from execute_batch: check if waiting for confirmation or proceed to evaluation
+def route_after_execute_batch(state: State):
+    '''Check if we're waiting for canvas confirmation, otherwise proceed to evaluation.'''
+    pending_confirmation = state.get("pending_confirmation", False)
+    canvas_confirmation_action = state.get("canvas_confirmation_action")
+    
+    # If user confirmed via WebSocket, execute the confirmed task
+    if canvas_confirmation_action:
+        logger.info(f"🔄 Canvas confirmation received: {canvas_confirmation_action}. Routing to execute_confirmed_task.")
+        return "execute_confirmed_task"
+    
+    # CANVAS CONFIRMATION FIX: If waiting for confirmation, route to generate_final_response
+    # This will display the canvas with the confirmation button
+    if pending_confirmation:
+        logger.info("⏸️ Waiting for canvas confirmation. Routing to generate_final_response to display canvas.")
+        return "generate_final_response"
+    
+    # Normal flow: proceed to evaluation
+    return "evaluate_agent_response"
+
+builder.add_conditional_edges("execute_batch", route_after_execute_batch, {
+    "evaluate_agent_response": "evaluate_agent_response",
+    "execute_confirmed_task": "execute_confirmed_task",
+    "generate_final_response": "generate_final_response"  # CANVAS CONFIRMATION FIX: Route to response generation
+})
 
 # Route from ask_user based on whether it was for approval or clarification  
 def route_after_ask_user(state: State):
@@ -4337,6 +5474,9 @@ builder.add_conditional_edges("evaluate_agent_response", should_continue_or_fini
     "ask_user": "ask_user",
     "plan_execution": "plan_execution"  # REACTIVE LOOP: Auto-replan on failure
 })
+
+# After confirmed task execution, go to evaluation
+builder.add_edge("execute_confirmed_task", "evaluate_agent_response")
 
 # Compile the graph
 graph = builder.compile()

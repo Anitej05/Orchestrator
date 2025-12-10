@@ -71,7 +71,9 @@ class State(TypedDict):
     # Canvas feature fields
     needs_canvas: Annotated[bool, overwrite_reducer]
     canvas_content: Annotated[Optional[str], overwrite_reducer]
-    canvas_type: Annotated[Optional[Literal["html", "markdown"]], overwrite_reducer]
+    canvas_data: Annotated[Optional[Dict], overwrite_reducer]  # Structured canvas data
+    canvas_type: Annotated[Optional[str], overwrite_reducer]  # Changed from Literal to str to support more types
+    canvas_title: Annotated[Optional[str], overwrite_reducer]  # Canvas title
     has_canvas: Annotated[bool, overwrite_reducer]
     
     # Planning mode flag
@@ -83,3 +85,18 @@ class State(TypedDict):
     task_count: Annotated[Optional[int], overwrite_reducer]
     plan_approved: Annotated[bool, overwrite_reducer]
     needs_approval: Annotated[bool, overwrite_reducer]
+    
+    # Canvas confirmation fields
+    pending_confirmation: Annotated[bool, overwrite_reducer]
+    pending_confirmation_task: Annotated[Optional[Dict], overwrite_reducer]
+    canvas_displays: Annotated[List[Dict], overwrite_reducer]
+    canvas_confirmation_action: Annotated[Optional[str], overwrite_reducer]
+    canvas_confirmation_message: Annotated[Optional[str], overwrite_reducer]
+    canvas_requires_confirmation: Annotated[bool, overwrite_reducer]
+    skip_preview_on_next_execution: Annotated[bool, overwrite_reducer]
+    
+    # Evaluation fields
+    eval_status: Annotated[Optional[str], overwrite_reducer]
+    replan_reason: Annotated[Optional[str], overwrite_reducer]
+    replan_count: Annotated[int, overwrite_reducer]  # Track number of replans to prevent infinite loops
+    task_events: Annotated[List[Dict], overwrite_reducer]

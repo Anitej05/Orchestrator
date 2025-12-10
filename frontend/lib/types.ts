@@ -76,9 +76,14 @@ export interface ConversationState {
   task_statuses?: Record<string, TaskStatus>;
   current_executing_task?: string | null;
   // Canvas feature fields
-  canvas_content?: string;
-  canvas_type?: 'html' | 'markdown';
+  canvas_content?: string;  // Legacy: HTML/markdown string
+  canvas_data?: Record<string, any>;  // Preferred: Structured data
+  canvas_type?: 'html' | 'markdown' | 'pdf' | 'spreadsheet' | 'email_preview' | 'document' | 'image' | 'json';
   has_canvas?: boolean;
+  canvas_title?: string;
+  canvas_metadata?: Record<string, any>;
+  canvas_requires_confirmation?: boolean;
+  canvas_confirmation_message?: string;
   browser_view?: string;
   plan_view?: string;
   current_view?: 'browser' | 'plan';
@@ -87,6 +92,13 @@ export interface ConversationState {
   estimated_cost?: number;
   task_count?: number;
   task_plan?: any[];
+  // Canvas confirmation fields
+  pending_confirmation?: boolean;
+  pending_confirmation_task?: {
+    task_name: string;
+    agent_name: string;
+    canvas_display: any;
+  };
 }
 
 export interface Attachment {

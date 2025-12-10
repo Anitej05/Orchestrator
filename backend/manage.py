@@ -74,7 +74,7 @@ def is_agent_changed(db_agent: Agent, file_agent: AgentCard) -> bool:
     if db_capabilities != file_capabilities:
         return True
 
-    # Compare endpoints and parameters
+    # Compare endpoints and parameters (including request_format)
     file_endpoints_set = set()
     for ep in file_agent.endpoints:
         params_tuple = tuple(
@@ -83,7 +83,9 @@ def is_agent_changed(db_agent: Agent, file_agent: AgentCard) -> bool:
                 for p in ep.parameters
             )
         )
-        file_endpoints_set.add((str(ep.endpoint), ep.http_method, ep.description, params_tuple))
+        # Include request_format in comparison
+        request_format = getattr(ep, 'request_format', None)
+        file_endpoints_set.add((str(ep.endpoint), ep.http_method, ep.description, request_format, params_tuple))
 
     db_endpoints_set = set()
     for ep in db_agent.endpoints:
@@ -93,7 +95,8 @@ def is_agent_changed(db_agent: Agent, file_agent: AgentCard) -> bool:
                 for p in ep.parameters
             )
         )
-        db_endpoints_set.add((ep.endpoint, ep.http_method, ep.description, params_tuple))
+        # Include request_format in comparison
+        db_endpoints_set.add((ep.endpoint, ep.http_method, ep.description, ep.request_format, params_tuple))
 
     if db_endpoints_set != file_endpoints_set:
         return True
@@ -171,7 +174,8 @@ def sync_agent_to_db(db: Session, agent_data: dict, is_new: bool = False):
             agent_id=agent_id,
             endpoint=endpoint_data['endpoint'],
             http_method=endpoint_data['http_method'],
-            description=endpoint_data.get('description', '')
+            description=endpoint_data.get('description', ''),
+            request_format=endpoint_data.get('request_format')  # 'json' or 'form'
         )
         db.add(endpoint)
         db.flush()
