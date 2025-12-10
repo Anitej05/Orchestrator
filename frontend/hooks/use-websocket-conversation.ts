@@ -619,6 +619,18 @@ export function useWebSocketManager({
             // Preserve existing data that might be missing from finalState
             const currentState = useConversationStore.getState();
 
+            // Debug: Log canvas data
+            console.log('🎨 CANVAS DEBUG - Final State:', {
+              has_canvas: finalState.has_canvas,
+              canvas_type: finalState.canvas_type,
+              canvas_data: (finalState as any).canvas_data,
+              canvas_content: finalState.canvas_content,
+              canvas_title: (finalState as any).canvas_title,
+              pending_confirmation: (finalState as any).pending_confirmation,
+              canvas_requires_confirmation: (finalState as any).canvas_requires_confirmation,
+              pending_confirmation_task: (finalState as any).pending_confirmation_task
+            });
+            
             _setConversationState({
               ...finalState,
               messages: finalMessages,
@@ -636,11 +648,18 @@ export function useWebSocketManager({
               uploaded_files: finalState.uploaded_files || currentState.uploaded_files || [],
               // Handle canvas data
               canvas_content: finalState.canvas_content !== undefined ? finalState.canvas_content : currentState.canvas_content,
+              canvas_data: (finalState as any).canvas_data !== undefined ? (finalState as any).canvas_data : (currentState as any).canvas_data,
               canvas_type: finalState.canvas_type !== undefined ? finalState.canvas_type : currentState.canvas_type,
+              canvas_title: (finalState as any).canvas_title !== undefined ? (finalState as any).canvas_title : (currentState as any).canvas_title,
               has_canvas: finalState.has_canvas !== undefined ? finalState.has_canvas : currentState.has_canvas,
               browser_view: (finalState as any).browser_view !== undefined ? (finalState as any).browser_view : (currentState as any).browser_view,
               plan_view: (finalState as any).plan_view !== undefined ? (finalState as any).plan_view : (currentState as any).plan_view,
-              current_view: (finalState as any).current_view !== undefined ? (finalState as any).current_view : (currentState as any).current_view
+              current_view: (finalState as any).current_view !== undefined ? (finalState as any).current_view : (currentState as any).current_view,
+              // Canvas confirmation fields
+              pending_confirmation: (finalState as any).pending_confirmation !== undefined ? (finalState as any).pending_confirmation : (currentState as any).pending_confirmation,
+              canvas_requires_confirmation: (finalState as any).canvas_requires_confirmation !== undefined ? (finalState as any).canvas_requires_confirmation : (currentState as any).canvas_requires_confirmation,
+              pending_confirmation_task: (finalState as any).pending_confirmation_task !== undefined ? (finalState as any).pending_confirmation_task : (currentState as any).pending_confirmation_task,
+              canvas_confirmation_message: (finalState as any).canvas_confirmation_message !== undefined ? (finalState as any).canvas_confirmation_message : (currentState as any).canvas_confirmation_message
             });
             // Explicitly set isLoading to false in the store
             console.debug('Setting isLoading to false after __end__ event');

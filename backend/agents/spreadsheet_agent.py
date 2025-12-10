@@ -1,0 +1,1670 @@
+import os
+import uuid
+import logging
+import json
+import asyncio
+from pathlib import Path
+from typing import Dict, Any, Optional, List
+
+import pandas as pd
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from pydantic import BaseModel, Field
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Import standardized file manager
+try:
+    from agents.agent_file_manager import AgentFileManager, FileType, FileStatus
+except ImportError:
+    from agent_file_manager import AgentFileManager, FileType, FileStatus
+
+# Import canvas utilities for display
+try:
+    from agents.canvas_utils import create_spreadsheet_display
+except ImportError:
+    from canvas_utils import create_spreadsheet_display
+
+# Import session manager for operation tracking
+try:
+    from agents.spreadsheet_session_manager import spreadsheet_session_manager
+except ImportError:
+    from spreadsheet_session_manager import spreadsheet_session_manager
+
+app = FastAPI(title="Spreadsheet Agent")
+
+# In-memory storage for dataframes (kept for pandas processing)
+dataframes: Dict[str, pd.DataFrame] = {}
+file_paths: Dict[str, str] = {}  # Backward compatibility alias
+
+# Create a directory to store uploaded files
+STORAGE_DIR = Path("storage/spreadsheets")
+STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+
+# Initialize standardized file manager
+file_manager = AgentFileManager(
+    agent_id="spreadsheet_agent",
+    storage_dir=str(STORAGE_DIR),
+    default_ttl_hours=None,  # No expiration for spreadsheets by default
+    auto_cleanup=True,
+    cleanup_interval_hours=24
+)
+
+# LLM Configuration
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY")
+
+
+# Pydantic Models
+class SummaryResponse(BaseModel):
+    filename: str
+    headers: list
+    rows: list
+    dtypes: dict
+
+
+class QueryResponse(BaseModel):
+    query_result: list
+
+
+class StatsResponse(BaseModel):
+    column_stats: dict
+
+
+class ApiResponse(BaseModel):
+    success: bool
+    result: Optional[Any] = None
+    error: Optional[str] = None
+
+
+class NaturalLanguageQueryRequest(BaseModel):
+    """Request model for natural language queries"""
+    file_id: str = Field(..., description="ID of the uploaded file")
+    question: str = Field(..., description="Natural language question about the data")
+    max_iterations: int = Field(default=5, description="Maximum reasoning iterations")
+
+
+class QueryPlan(BaseModel):
+    """A single step in the query plan"""
+    step: int
+    description: str
+    pandas_code: str
+    reasoning: str
+
+
+class QueryResult(BaseModel):
+    """Result of a natural language query"""
+    question: str
+    answer: str
+    steps_taken: List[Dict[str, Any]]
+    final_data: Optional[List[Dict]] = None
+    success: bool
+    error: Optional[str] = None
+    
+    class Config:
+        arbitrary_types_allowed = True
+    
+    # Not a pydantic field to avoid serialization issues, but carries the state
+    final_dataframe: Any = None
+
+
+# --- LLM Query Sub-Agent ---
+class SpreadsheetQueryAgent:
+    """
+    LLM-powered sub-agent that converts natural language queries to pandas operations.
+    Uses a ReAct-style reasoning loop to iteratively query and analyze data.
+    """
+    
+    def __init__(self):
+        self.providers = []
+        self._init_providers()
+    
+    def _init_providers(self):
+        """Initialize LLM providers with fallback chain"""
+        try:
+            from openai import OpenAI
+        except ImportError:
+            logger.warning("openai package not installed. LLM features disabled.")
+            return
+        
+        # Build provider chain: Cerebras → Groq
+        if CEREBRAS_API_KEY:
+            self.providers.append({
+                "name": "cerebras",
+                "client": OpenAI(api_key=CEREBRAS_API_KEY, base_url="https://api.cerebras.ai/v1"),
+                "model": "gpt-oss-120b",
+                "max_tokens": 2000
+            })
+
+        if GROQ_API_KEY:
+            self.providers.append({
+                "name": "groq",
+                "client": OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1"),
+                "model": "openai/gpt-oss-120b",
+                "max_tokens": 2000
+            })
+        
+        if self.providers:
+            logger.info(f"🔧 Query Agent initialized with providers: {' → '.join([p['name'] for p in self.providers])}")
+        else:
+            logger.warning("⚠️ No LLM providers available for Query Agent")
+    
+    def _get_completion(self, messages: List[Dict], temperature: float = 0.1) -> str:
+        """Get LLM completion with fallback"""
+        if not self.providers:
+            raise RuntimeError("No LLM providers available")
+        
+        last_error = None
+        for provider in self.providers:
+            try:
+                logger.info(f"🤖 Using {provider['name'].upper()} for query analysis")
+                response = provider["client"].chat.completions.create(
+                    model=provider["model"],
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=provider["max_tokens"]
+                )
+                return response.choices[0].message.content.strip()
+            except Exception as e:
+                logger.warning(f"⚠️ {provider['name'].upper()} failed: {str(e)[:100]}")
+                last_error = e
+                continue
+        
+        raise RuntimeError(f"All LLM providers failed. Last error: {last_error}")
+    
+    def _get_dataframe_context(self, df: pd.DataFrame) -> str:
+        """Generate context about the dataframe for the LLM"""
+        context = f"""DataFrame Information:
+- Shape: {df.shape[0]} rows × {df.shape[1]} columns
+- Columns: {list(df.columns)}
+- Data Types:
+{df.dtypes.to_string()}
+
+Sample Data (first 5 rows):
+{df.head().to_string()}
+
+Column Statistics:
+"""
+        for col in df.columns:
+            if df[col].dtype in ['int64', 'float64']:
+                context += f"\n{col}: min={df[col].min()}, max={df[col].max()}, mean={df[col].mean():.2f}"
+            else:
+                unique_count = df[col].nunique()
+                context += f"\n{col}: {unique_count} unique values"
+                if unique_count <= 10:
+                    context += f", values: {df[col].unique().tolist()}"
+        
+        return context
+    
+    def _build_system_prompt(self, df_context: str, session_context: str = "") -> str:
+        """Build the system prompt for the query agent"""
+        return f"""You are a powerful data analysis assistant that helps users query and analyze spreadsheet data using pandas.
+
+=== CURRENT DATAFRAME STATE ===
+{df_context}
+
+=== SESSION HISTORY (Previous Operations) ===
+{session_context}
+
+=== YOUR CAPABILITIES ===
+You can perform ANY pandas operation including:
+- FILTERING: Select rows matching conditions (df.query(), boolean indexing)
+- AGGREGATION: Calculate statistics (sum, mean, count, max, min, std)
+- GROUPING: Group by columns and aggregate (df.groupby())
+- SORTING: Sort by one or more columns (df.sort_values())
+- ANALYSIS: Find patterns, outliers, trends
+
+=== IMPORTANT RULES ===
+1. ALWAYS respond with valid JSON in the exact format specified below
+2. Use the DataFrame variable 'df' for all operations
+3. Handle column names with spaces using backticks in query() OR bracket notation df['col name']
+4. If the question is unclear, make reasonable assumptions and explain them
+5. For multi-step analysis, break it down clearly with needs_more_steps=true
+6. ALWAYS provide a helpful, human-readable final_answer
+
+=== RESPONSE FORMAT (JSON) ===
+{{
+    "thinking": "Your step-by-step reasoning about what the user wants",
+    "needs_more_steps": true/false,
+    "pandas_code": "df.query('column > value')",
+    "explanation": "Clear explanation of what this code does",
+    "is_final_answer": true/false,
+    "final_answer": "Human-readable answer (REQUIRED if is_final_answer is true)"
+}}
+
+=== EXAMPLES ===
+
+User: "Show me all people older than 30"
+Response: {{"thinking": "User wants to filter rows where age > 30", "needs_more_steps": false, "pandas_code": "df.query('age > 30')", "explanation": "Filtering to show only rows where age column exceeds 30", "is_final_answer": true, "final_answer": "Here are all people older than 30"}}
+
+User: "What's the average salary by department?"
+Response: {{"thinking": "User wants a grouped aggregation - group by department and calculate mean salary", "needs_more_steps": false, "pandas_code": "df.groupby('department')['salary'].mean()", "explanation": "Grouping by department and calculating the average salary for each", "is_final_answer": true, "final_answer": "Here is the average salary broken down by department"}}
+
+User: "Who earns the most in the sales department?"
+Response: {{"thinking": "Need to filter to Sales department first, then find the row with maximum salary", "needs_more_steps": false, "pandas_code": "df[df['department'] == 'Sales'].nlargest(1, 'salary')", "explanation": "Filter to Sales department only, then get the row with the highest salary", "is_final_answer": true, "final_answer": "The highest earner in the Sales department is shown above"}}
+
+User: "How many rows have Feature1 greater than 50?"
+Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": false, "pandas_code": "len(df[df['Feature1'] > 50])", "explanation": "Counting rows where Feature1 exceeds 50", "is_final_answer": true, "final_answer": "There are X rows where Feature1 is greater than 50"}}
+"""
+    
+    def _safe_execute_pandas(self, df: pd.DataFrame, code: str) -> tuple[Any, pd.DataFrame, Optional[str]]:
+        """Safely execute pandas code and return result or error"""
+        try:
+            # Create a safe execution environment
+            # Make a copy so we don't accidentally mutate the original if we crash (optional, but here we want mutation)
+            # Actually, for state persistence, we WANT to mutate.
+            local_vars = {"df": df, "pd": pd}
+            
+            # Execute the code
+            # Use exec allows for statements like "df['new_col'] = ..."
+            exec(code, {"__builtins__": {}}, local_vars)
+            
+            # Retrieve the (possibly modified) dataframe
+            updated_df = local_vars.get("df", df)
+            
+            # Try to get the result of the LAST expression if it wasn't an assignment
+            # This is tricky with exec. We can assume if 'result' var isn't set, we might default to something.
+            # But the agent is instructed to just write code.
+            # Often we want to see the output.
+            # Let's try to eval the last line if it's an expression.
+            # For now, we will inspect local_vars to see if a 'result' variable was defined? 
+            # Or we can just return the updated_df as the primary result if no explicit return.
+            
+            # Simple approach: If the code is an expression, 'eval' would have worked.
+            # Since we switched to 'exec', we don't get a return value automatically.
+            # Let's check if the code ends with an expression.
+            # A common pattern is that the agent assigns to a variable 'result' or just modifies 'df'.
+            
+            # If the specific variable 'result' exists, return it.
+            if "result" in local_vars:
+                return local_vars["result"], updated_df, None
+                
+            # Otherwise, return the df itself as the result (e.g. after filtering)
+            return updated_df, updated_df, None
+            
+        except Exception as e:
+            return None, df, str(e)
+    
+    async def query(self, df: pd.DataFrame, question: str, max_iterations: int = 5, session_context: str = "") -> QueryResult:
+        """
+        Process a natural language query against the dataframe.
+        Uses a ReAct-style loop to iteratively reason and execute.
+        """
+        if not self.providers:
+            return QueryResult(
+                question=question,
+                answer="LLM providers not available. Please check API keys.",
+                steps_taken=[],
+                success=False,
+                error="No LLM providers configured"
+            )
+        
+        # Working copy of dataframe for this session
+        current_df = df.copy()
+        
+        df_context = self._get_dataframe_context(current_df)
+        system_prompt = self._build_system_prompt(df_context, session_context)
+        
+        steps_taken = []
+        conversation = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Question: {question}"}
+        ]
+        
+        current_result = None
+        iteration = 0
+        
+        while iteration < max_iterations:
+            iteration += 1
+            logger.info(f"📊 Query iteration {iteration}/{max_iterations}")
+            
+            try:
+                # Get LLM response
+                response_text = self._get_completion(conversation)
+                
+                # Parse JSON response
+                try:
+                    # Handle potential markdown code blocks
+                    if "```json" in response_text:
+                        response_text = response_text.split("```json")[1].split("```")[0]
+                    elif "```" in response_text:
+                        response_text = response_text.split("```")[1].split("```")[0]
+                    
+                    response = json.loads(response_text.strip())
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Failed to parse LLM response as JSON: {e}")
+                    steps_taken.append({
+                        "iteration": iteration,
+                        "error": f"JSON parse error: {e}",
+                        "raw_response": response_text[:500]
+                    })
+                    # Ask LLM to fix the response
+                    conversation.append({"role": "assistant", "content": response_text})
+                    conversation.append({"role": "user", "content": "Please respond with valid JSON only, no markdown or extra text."})
+                    continue
+                
+                # Extract fields
+                thinking = response.get("thinking", "")
+                pandas_code = response.get("pandas_code", "")
+                explanation = response.get("explanation", "")
+                is_final = response.get("is_final_answer", False)
+                final_answer = response.get("final_answer", "")
+                
+                step_info = {
+                    "iteration": iteration,
+                    "thinking": thinking,
+                    "code": pandas_code,
+                    "explanation": explanation
+                }
+                
+                # Execute pandas code if provided
+                if pandas_code:
+                    result, updated_df, error = self._safe_execute_pandas(current_df, pandas_code)
+                    
+                    if error:
+                        step_info["error"] = error
+                        step_info["success"] = False
+                        steps_taken.append(step_info)
+                        
+                        # Feed error back to LLM
+                        conversation.append({"role": "assistant", "content": response_text})
+                        conversation.append({
+                            "role": "user", 
+                            "content": f"The code raised an error: {error}\nPlease fix the code and try again."
+                        })
+                        continue
+                        
+                    # Update our working dataframe
+                    current_df = updated_df
+                    
+                    # Convert result to serializable format
+                    if isinstance(result, pd.DataFrame):
+                        # Convert to records and ensure native types
+                        records = result.head(10).to_dict(orient="records")
+                        # Sanitize records
+                        safe_records = json.loads(json.dumps(records, default=str))
+                        step_info["result_preview"] = safe_records
+                        step_info["result_shape"] = result.shape
+                        current_result = result.to_dict(orient="records")
+                    elif isinstance(result, pd.Series):
+                        # Convert to dict and ensure native types
+                        series_dict = result.head(10).to_dict()
+                        # Sanitize dict
+                        safe_dict = json.loads(json.dumps(series_dict, default=str))
+                        step_info["result_preview"] = safe_dict
+                        current_result = result.to_dict()
+                    else:
+                        step_info["result_preview"] = str(result)
+                        current_result = result
+                    
+                    step_info["success"] = True
+                
+                steps_taken.append(step_info)
+                
+                # Check if we have a final answer
+                if is_final:
+                    # Format the final answer with data
+                    if current_result:
+                        if isinstance(current_result, list) and len(current_result) > 0:
+                            final_data = current_result[:50]  # Limit to 50 rows
+                        elif isinstance(current_result, dict):
+                            final_data = [current_result]
+                        else:
+                            final_data = None
+                    else:
+                        final_data = None
+                    
+                    return QueryResult(
+                        question=question,
+                        answer=final_answer,
+                        steps_taken=steps_taken,
+                        final_data=final_data,
+                        success=True,
+                        final_dataframe=current_df  # Return the modified dataframe
+                    )
+                
+                # Continue conversation for multi-step queries
+                conversation.append({"role": "assistant", "content": response_text})
+                
+                # Provide result context for next iteration
+                if current_result:
+                    result_summary = f"Previous step result: {str(current_result)[:500]}"
+                    conversation.append({"role": "user", "content": f"{result_summary}\n\nContinue analysis or provide final answer."})
+                
+            except Exception as e:
+                logger.error(f"Query iteration failed: {e}", exc_info=True)
+                steps_taken.append({
+                    "iteration": iteration,
+                    "error": str(e),
+                    "success": False
+                })
+                break
+        
+        # Max iterations reached
+        return QueryResult(
+            question=question,
+            answer="Could not complete the query within the maximum iterations.",
+            steps_taken=steps_taken,
+            final_data=current_result if isinstance(current_result, list) else None,
+            success=False,
+            error="Max iterations reached"
+        )
+
+
+def ensure_file_loaded(file_id: str) -> bool:
+    """
+    Ensure a file is loaded into the dataframes dict.
+    If not, attempt to reload from file_manager.
+    Returns True if file is available, False otherwise.
+    """
+    logger.info(f"[ENSURE_LOADED] Checking file_id={file_id}")
+    logger.info(f"[ENSURE_LOADED] Current dataframes keys: {list(dataframes.keys())}")
+    logger.info(f"[ENSURE_LOADED] Current file_paths keys: {list(file_paths.keys())}")
+    
+    if file_id in dataframes:
+        df = dataframes[file_id]
+        logger.info(f"[ENSURE_LOADED] ✅ file_id {file_id} FOUND in memory")
+        logger.info(f"[ENSURE_LOADED] DataFrame shape: {df.shape}, columns: {df.columns.tolist()}")
+        return True
+    
+    logger.info(f"[ENSURE_LOADED] ❌ file_id {file_id} NOT in memory, attempting reload from file_manager...")
+    
+    # First try file_paths (our modified version)
+    if file_id in file_paths:
+        file_path = file_paths[file_id]
+        logger.info(f"[ENSURE_LOADED] Found in file_paths: {file_path}")
+        try:
+            file_ext = Path(file_path).suffix.lower()
+            if file_ext == ".csv":
+                df = pd.read_csv(file_path)
+            else:
+                df = pd.read_excel(file_path)
+            dataframes[file_id] = df
+            logger.info(f"[ENSURE_LOADED] ✅ Reloaded from file_paths. Shape: {df.shape}, columns: {df.columns.tolist()}")
+            return True
+        except Exception as e:
+            logger.error(f"[ENSURE_LOADED] Failed to reload from file_paths: {e}")
+    
+    # Fallback to file_manager
+    metadata = file_manager.get_file(file_id)
+    if metadata and metadata.storage_path:
+        logger.info(f"[ENSURE_LOADED] Found in file_manager: {metadata.storage_path}")
+        try:
+            file_ext = Path(metadata.original_name).suffix.lower()
+            if file_ext == ".csv":
+                df = pd.read_csv(metadata.storage_path)
+            else:
+                df = pd.read_excel(metadata.storage_path)
+            dataframes[file_id] = df
+            file_paths[file_id] = metadata.storage_path
+            logger.info(f"[ENSURE_LOADED] ✅ Reloaded from file_manager. Shape: {df.shape}, columns: {df.columns.tolist()}")
+            return True
+        except Exception as e:
+            logger.error(f"[ENSURE_LOADED] Failed to reload from file_manager: {e}")
+    
+    logger.error(f"[ENSURE_LOADED] ❌ Could not find file_id {file_id} anywhere")
+    return False
+
+
+# Helper function to get dataframe state for session tracking
+def get_dataframe_state(df: pd.DataFrame, filename: str = "unknown") -> Dict[str, Any]:
+    """Get current state of dataframe for session tracking."""
+    return {
+        'filename': filename,
+        'shape': df.shape,
+        'columns': df.columns.tolist(),
+        'dtypes': {k: str(v) for k, v in df.dtypes.to_dict().items()},
+        'memory_usage': int(df.memory_usage(deep=True).sum()),
+        'has_nulls': bool(df.isnull().any().any()),
+        'null_counts': {k: int(v) for k, v in df.isnull().sum().to_dict().items()}
+    }
+
+
+# Global query agent instance
+query_agent = SpreadsheetQueryAgent()
+
+
+async def generate_modification_code(df: pd.DataFrame, instruction: str) -> Optional[str]:
+    """
+    Simple direct code generation for data modifications.
+    Returns pandas code string or None if generation fails.
+    """
+    # Get dataframe info for context
+    columns = df.columns.tolist()
+    dtypes = {k: str(v) for k, v in df.dtypes.to_dict().items()}
+    sample_row = df.head(1).to_dict('records')[0] if len(df) > 0 else {}
+    
+    prompt = f"""You are an expert pandas code generator. Your job is to generate ONLY executable Python code to modify a DataFrame.
+
+=== DATAFRAME INFORMATION ===
+- Columns: {columns}
+- Data types: {dtypes}
+- Sample row: {sample_row}
+- Total rows: {len(df)}
+
+=== USER'S INSTRUCTION ===
+{instruction}
+
+=== STRICT RULES ===
+1. Output ONLY valid Python code - NO explanations, NO comments, NO markdown
+2. The DataFrame is named 'df'
+3. Your code MUST return/result in the modified DataFrame
+4. Use proper pandas methods
+
+=== COMMON OPERATIONS (Use these patterns) ===
+
+**Adding Serial Number (Sl.No.) Column:**
+df.insert(0, 'Sl.No.', range(1, len(df) + 1))
+df
+
+**Adding Total Column (sum of all numeric columns per row):**
+df['Total'] = df.select_dtypes(include='number').sum(axis=1)
+df
+
+**Adding Total of SPECIFIC columns:**
+df['Total'] = df['Col1'] + df['Col2'] + df['Col3']
+df
+
+**Renaming Columns:**
+df.rename(columns={{'OldName1': 'NewName1', 'OldName2': 'NewName2'}}, inplace=True)
+df
+
+**Adding a Calculated Column:**
+df['NewCol'] = df['ExistingCol'] * 2
+df
+
+**Filtering Rows:**
+df = df[df['Col'] > 50]
+df
+
+**Sorting:**
+df = df.sort_values('Col', ascending=False)
+df
+
+**Dropping a Column:**
+df = df.drop(columns=['ColName'])
+df
+
+=== OUTPUT YOUR CODE NOW ==="""
+
+    # Use query_agent's providers
+    providers = query_agent.providers
+    if not providers:
+        logger.error("No LLM providers available for code generation")
+        return None
+    
+    for provider in providers:
+        try:
+            provider_name = provider['name']
+            client = provider['client']
+            model = provider['model']
+            
+            logger.info(f"🤖 Using {provider_name.upper()} for code generation")
+            
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=500
+            )
+            
+            code = response.choices[0].message.content.strip()
+            
+            # Clean up code - remove markdown if present
+            if code.startswith("```python"):
+                code = code[9:]
+            if code.startswith("```"):
+                code = code[3:]
+            if code.endswith("```"):
+                code = code[:-3]
+            code = code.strip()
+            
+            logger.info(f"Generated code: {code}")
+            return code
+            
+        except Exception as e:
+            logger.warning(f"⚠️ {provider_name.upper()} failed: {e}")
+            continue
+    
+    return None
+
+
+# Helper function to create canvas from dataframe
+def dataframe_to_canvas(
+    df: pd.DataFrame,
+    title: str,
+    filename: str,
+    display_mode: str = 'full',
+    max_rows: int = 100,
+    file_id: Optional[str] = None,
+    metadata: Optional[Dict] = None
+) -> Dict[str, Any]:
+    """Convert dataframe to canvas display."""
+    # Limit rows for display
+    display_df = df.head(max_rows) if len(df) > max_rows else df
+    
+    # Convert to 2D array: [headers, row1, row2, ...]
+    data = [display_df.columns.tolist()] + display_df.values.tolist()
+    
+    # Add metadata
+    full_metadata = {
+        'rows_total': len(df),
+        'rows_shown': len(display_df),
+        'columns': len(df.columns),
+        'truncated': len(df) > max_rows
+    }
+    if metadata:
+        full_metadata.update(metadata)
+    
+    return create_spreadsheet_display(
+        data=data,
+        title=title,
+        filename=filename,
+        display_mode=display_mode,
+        metadata=full_metadata,
+        file_id=file_id
+    )
+
+
+# --- API Endpoints ---
+
+@app.post("/upload", response_model=ApiResponse)
+async def upload_file(
+    file: UploadFile = File(...),
+    thread_id: Optional[str] = Form(None),
+    user_id: Optional[str] = Form(None),
+    orchestrator_content_id: Optional[str] = Form(None)
+):
+    """
+    Uploads a CSV or Excel file, stores it using standardized file manager, and returns a file_id.
+    
+    Parameters:
+        file: The spreadsheet file to upload
+        thread_id: Optional conversation thread ID for orchestrator integration
+        user_id: Optional user ID for tracking
+        orchestrator_content_id: Optional ID from orchestrator's unified content system
+    """
+    try:
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="Invalid file: filename is required")
+
+        file_ext = Path(file.filename).suffix.lower()
+
+        if file_ext not in [".csv", ".xlsx", ".xls"]:
+            raise HTTPException(status_code=400, detail="Invalid file type. Please upload a .csv, .xlsx, or .xls file.")
+
+        # Read file content
+        file_content = await file.read()
+        
+        # Register file with standardized file manager
+        metadata = await file_manager.register_file(
+            content=file_content,
+            filename=file.filename,
+            file_type=FileType.SPREADSHEET,
+            thread_id=thread_id,
+            user_id=user_id,
+            orchestrator_content_id=orchestrator_content_id,
+            custom_metadata={
+                "original_filename": file.filename,
+                "content_type": file.content_type
+            },
+            tags=["spreadsheet", "uploaded"]
+        )
+        
+        file_id = metadata.file_id
+        file_location = metadata.storage_path
+
+        # Load into pandas for processing
+        if file_ext == ".csv":
+            df = pd.read_csv(file_location)
+        else:
+            df = pd.read_excel(file_location)
+
+        # Store in memory for pandas operations
+        dataframes[file_id] = df
+        file_paths[file_id] = file_location  # Backward compatibility
+
+        # Mark as processed with row/column info
+        file_manager.mark_as_processed(
+            file_id=file_id,
+            processing_result={
+                "rows": len(df),
+                "columns": len(df.columns),
+                "column_names": df.columns.tolist(),
+                "dtypes": {k: str(v) for k, v in df.dtypes.to_dict().items()}
+            }
+        )
+
+        logger.info(f"File '{file.filename}' uploaded with file_id: {file_id}")
+
+        # Generate canvas display for uploaded file
+        canvas_display = dataframe_to_canvas(
+            df=df,
+            title=f"Uploaded: {file.filename}",
+            filename=file.filename,
+            display_mode='full',
+            max_rows=50,
+            file_id=file_id,
+            metadata={'operation': 'upload'}
+        )
+
+        return ApiResponse(success=True, result={
+            "file_id": file_id,
+            "filename": file.filename,
+            "file_path": file_location,
+            "rows": len(df),
+            "columns": len(df.columns),
+            "orchestrator_format": metadata.to_orchestrator_format(),
+            "canvas_display": canvas_display
+        })
+
+    except Exception as e:
+        logger.error(f"File upload failed: {e}", exc_info=True)
+        return ApiResponse(success=False, error=str(e))
+
+
+@app.post("/get_summary", response_model=ApiResponse)
+async def get_summary(file_id: str = Form(...), show_preview: bool = Form(False)):
+    """
+    Provides a summary of the spreadsheet, including headers, first 5 rows, and data types.
+    Optionally displays a preview in canvas.
+    """
+    if not ensure_file_loaded(file_id):
+        raise HTTPException(status_code=404, detail="File not found.")
+    try:
+        df = dataframes[file_id]
+
+        summary = SummaryResponse(
+            filename=Path(file_paths[file_id]).name,
+            headers=df.columns.tolist(),
+            rows=df.head().to_dict(orient="records"),
+            dtypes={k: str(v) for k, v in df.dtypes.to_dict().items()}
+        )
+
+        # Generate canvas display if requested
+        canvas_display = None
+        if show_preview:
+            try:
+                from agents.canvas_utils import create_spreadsheet_display
+                # Prepare data for canvas (headers + first 10 rows)
+                preview_data = [df.columns.tolist()] + df.head(10).values.tolist()
+                canvas_display = create_spreadsheet_display(
+                    data=preview_data,
+                    title=f"Spreadsheet Preview",
+                    filename=Path(file_paths[file_id]).name
+                )
+                logger.info(f"Generated canvas preview for {file_id}")
+            except Exception as canvas_err:
+                logger.warning(f"Failed to generate canvas preview: {canvas_err}")
+
+        response_data = summary.dict()
+        if canvas_display:
+            response_data["canvas_display"] = canvas_display
+
+        return ApiResponse(success=True, result=response_data)
+
+    except Exception as e:
+        logger.error(f"Failed to get summary for file_id {file_id}: {e}", exc_info=True)
+        return ApiResponse(success=False, error=str(e))
+
+
+@app.post("/query", response_model=ApiResponse)
+async def query_data(file_id: str = Form(...), query: str = Form(...)):
+    """
+    Queries or modifies the spreadsheet data.
+    
+    - For filter queries (e.g., 'age > 30'), uses pandas query()
+    - For assignments (e.g., 'Total = A + B'), uses exec() to modify the dataframe
+    
+    For complex natural language queries, use the /nl_query endpoint instead.
+    """
+    import re
+    
+    if not ensure_file_loaded(file_id):
+        raise HTTPException(status_code=404, detail="File not found.")
+    
+    try:
+        df = dataframes[file_id]
+        
+        # Detect if query is an assignment (modification) vs a filter
+        # Assignment: contains '=' but not '==', '!=', '<=', '>='
+        is_assignment = False
+        if '=' in query:
+            # Remove comparison operators to check for assignment
+            clean_query = re.sub(r'[!<>=]=', '', query)
+            if '=' in clean_query:
+                is_assignment = True
+        
+        if is_assignment:
+            # Handle as modification using df.eval() which properly handles column references
+            logger.info(f"Detected assignment operation: {query}")
+            
+            try:
+                # Parse the assignment: "ColName = Expression"
+                parts = query.split('=', 1)
+                if len(parts) != 2:
+                    return ApiResponse(success=False, error="Invalid assignment syntax. Use 'ColumnName = expression'.")
+                
+                col_name = parts[0].strip()
+                expression = parts[1].strip()
+                
+                # Use df.eval() for the expression, which handles column names properly
+                result_df = df.copy()
+                result_df[col_name] = result_df.eval(expression)
+                
+                # Update global state
+                dataframes[file_id] = result_df
+                
+                # Persist to disk
+                file_path = file_paths.get(file_id)
+                if file_path:
+                    if str(file_path).lower().endswith('.csv'):
+                        result_df.to_csv(file_path, index=False)
+                    else:
+                        result_df.to_excel(file_path, index=False)
+                    logger.info(f"💾 Persisted modified state to disk: {file_path}")
+                
+                response = QueryResponse(query_result=result_df.to_dict(orient="records"))
+                return ApiResponse(success=True, result=response.dict())
+                
+            except Exception as exec_error:
+                logger.error(f"Assignment execution failed: {exec_error}")
+                return ApiResponse(success=False, error=f"Assignment failed: {exec_error}. Check column names and expression syntax.")
+        
+        else:
+            # Handle as filter query using df.query()
+            # Sanitize column names for querying
+            sanitized_columns = {col: f"`{col}`" for col in df.columns if ' ' in col or '-' in col}
+            df_renamed = df.rename(columns=sanitized_columns)
+
+            result_df = df_renamed.query(query)
+
+            # Revert column names for the output
+            reverted_columns = {v: k for k, v in sanitized_columns.items()}
+            result_df = result_df.rename(columns=reverted_columns)
+
+            response = QueryResponse(query_result=result_df.to_dict(orient="records"))
+            return ApiResponse(success=True, result=response.dict())
+
+    except Exception as e:
+        logger.error(f"Failed to query data for file_id {file_id} with query '{query}': {e}", exc_info=True)
+        return ApiResponse(success=False, error=f"Query failed: {e}. Please check your query syntax.")
+
+
+@app.post("/nl_query", response_model=ApiResponse)
+async def natural_language_query(request: NaturalLanguageQueryRequest):
+    """
+    Process a natural language query against the spreadsheet data.
+    
+    This endpoint uses an LLM-powered sub-agent to:
+    1. Understand the natural language question
+    2. Convert it to appropriate pandas operations
+    3. Execute the operations iteratively if needed
+    4. Return a human-readable answer with the data
+    
+    Example questions:
+    - "Show me all employees older than 30"
+    - "What's the average salary by department?"
+    - "Who has the highest sales in Q1?"
+    - "Find all products with price between 10 and 50"
+    - "How many orders were placed last month?"
+    """
+    if not ensure_file_loaded(request.file_id):
+        raise HTTPException(status_code=404, detail="File not found.")
+    
+    try:
+        df = dataframes[request.file_id]
+        
+        logger.info(f"Processing natural language query: {request.question}")
+        
+        # Get session context
+        session_context = spreadsheet_session_manager.get_session_context(request.file_id)
+        
+        result = await query_agent.query(
+            df=df,
+            question=request.question,
+            max_iterations=request.max_iterations,
+            session_context=session_context
+        )
+        
+        if result.success and result.final_dataframe is not None:
+            # Update global state with the modified dataframe
+            dataframes[request.file_id] = result.final_dataframe
+            
+            # SAVE TO DISK for persistence
+            try:
+                file_path = file_paths.get(request.file_id)
+                if file_path:
+                    if str(file_path).lower().endswith('.csv'):
+                        result.final_dataframe.to_csv(file_path, index=False)
+                    else:
+                        result.final_dataframe.to_excel(file_path, index=False)
+                    logger.info(f"💾 Persisted modified state to disk: {file_path}")
+            except Exception as e:
+                logger.error(f"Failed to persist state to disk: {e}")
+            
+            # Record conversation turn
+            spreadsheet_session_manager.add_conversation_turn(
+                file_id=request.file_id,
+                user_message=request.question,
+                agent_response=result.answer
+            )
+            
+            # Record operations
+            current_state = get_dataframe_state(df, Path(file_paths[request.file_id]).name)
+            for step in result.steps_taken:
+                if step.get("success", False) and step.get("code"):
+                    spreadsheet_session_manager.add_operation(
+                        file_id=request.file_id,
+                        operation_type="query",
+                        instruction=step.get("thinking", "Query execution"),
+                        pandas_code=step.get("code"),
+                        result_summary=str(step.get("result_preview", "Success")),
+                        rows_affected=step.get("result_shape", (0, 0))[0] if isinstance(step.get("result_shape"), tuple) else 0,
+                        columns_affected=[],
+                        state_before=current_state,  # Approximate since we don't snapshot every step
+                        state_after=current_state
+                    )
+        
+        # Generate canvas display if we have data
+        canvas_display = None
+        if result.final_data and isinstance(result.final_data, list):
+            # Convert result data back to dataframe for display
+            result_df = pd.DataFrame(result.final_data)
+            filename = Path(file_paths[request.file_id]).name
+            canvas_display = dataframe_to_canvas(
+                df=result_df,
+                title=f"Query Result: {request.question[:50]}...",
+                filename=filename,
+                display_mode='query_result',
+                max_rows=100,
+                file_id=request.file_id,
+                metadata={'query': request.question}
+            )
+        
+        return ApiResponse(
+            success=result.success,
+            result={
+                "question": result.question,
+                "answer": result.answer,
+                "steps": result.steps_taken,
+                "data": result.final_data,
+                "success": result.success,
+                "canvas_display": canvas_display
+            },
+            error=result.error
+        )
+        
+    except Exception as e:
+        logger.error(f"Natural language query failed: {e}", exc_info=True)
+        return ApiResponse(success=False, error=str(e))
+
+
+@app.post("/get_column_stats", response_model=ApiResponse)
+async def get_column_stats(file_id: str = Form(...), column_name: str = Form(...)):
+    """
+    Gets descriptive statistics for a specific column.
+    """
+    if not ensure_file_loaded(file_id):
+        raise HTTPException(status_code=404, detail="File not found.")
+    try:
+        df = dataframes[file_id]
+
+        if column_name not in df.columns:
+            raise HTTPException(status_code=400, detail=f"Column '{column_name}' not found.")
+
+        stats = df[column_name].describe().to_dict()
+
+        response = StatsResponse(column_stats=stats)
+        return ApiResponse(success=True, result=response.dict())
+
+    except Exception as e:
+        logger.error(f"Failed to get stats for column '{column_name}' in file_id {file_id}: {e}", exc_info=True)
+        return ApiResponse(success=False, error=str(e))
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "agent": "spreadsheet_agent",
+        "loaded_files": list(dataframes.keys()),
+        "llm_providers": [p["name"] for p in query_agent.providers] if query_agent.providers else []
+    }
+
+
+# ============== STANDARDIZED FILE MANAGEMENT ENDPOINTS ==============
+
+@app.get("/files", response_model=ApiResponse)
+async def list_files(
+    status: Optional[str] = None,
+    thread_id: Optional[str] = None
+):
+    """
+    List all files managed by this agent.
+    
+    Parameters:
+        status: Filter by status (active, expired, deleted)
+        thread_id: Filter by conversation thread
+    """
+    try:
+        file_status = FileStatus(status) if status else FileStatus.ACTIVE
+        files = file_manager.list_files(
+            status=file_status,
+            thread_id=thread_id
+        )
+        
+        return ApiResponse(success=True, result={
+            "files": [f.to_orchestrator_format() for f in files],
+            "count": len(files)
+        })
+    except Exception as e:
+        logger.error(f"Failed to list files: {e}", exc_info=True)
+        return ApiResponse(success=False, error=str(e))
+
+
+@app.get("/files/{file_id}", response_model=ApiResponse)
+async def get_file_info(file_id: str):
+    """
+    Get detailed information about a specific file.
+    """
+    try:
+        metadata = file_manager.get_file(file_id)
+        if not metadata:
+            raise HTTPException(status_code=404, detail="File not found or expired")
+        
+        # Include processing result if available
+        result = metadata.to_orchestrator_format()
+        if metadata.processing_result:
+            result["processing_result"] = metadata.processing_result
+        
+        return ApiResponse(success=True, result=result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get file info: {e}", exc_info=True)
+        return ApiResponse(success=False, error=str(e))
+
+
+@app.delete("/files/{file_id}", response_model=ApiResponse)
+async def delete_file(file_id: str):
+    """
+    Delete a file from the agent's storage.
+    """
+    try:
+        # Also remove from in-memory dataframes
+        if file_id in dataframes:
+            del dataframes[file_id]
+        if file_id in file_paths:
+            del file_paths[file_id]
+        
+        success = file_manager.delete_file(file_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        return ApiResponse(success=True, result={"message": f"File {file_id} deleted"})
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete file: {e}", exc_info=True)
+        return ApiResponse(success=False, error=str(e))
+
+
+@app.post("/files/{file_id}/reload", response_model=ApiResponse)
+async def reload_file(file_id: str):
+    """
+    Reload a file into memory (useful after restart).
+    """
+    try:
+        metadata = file_manager.get_file(file_id)
+        if not metadata:
+            raise HTTPException(status_code=404, detail="File not found or expired")
+        
+        # Check if already loaded
+        if file_id in dataframes:
+            return ApiResponse(success=True, result={
+                "message": "File already loaded",
+                "file_id": file_id
+            })
+        
+        # Load into pandas
+        file_ext = Path(metadata.original_name).suffix.lower()
+        if file_ext == ".csv":
+            df = pd.read_csv(metadata.storage_path)
+        else:
+            df = pd.read_excel(metadata.storage_path)
+        
+        dataframes[file_id] = df
+        file_paths[file_id] = metadata.storage_path
+        
+        return ApiResponse(success=True, result={
+            "message": "File reloaded successfully",
+            "file_id": file_id,
+            "rows": len(df),
+            "columns": len(df.columns)
+        })
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to reload file: {e}", exc_info=True)
+        return ApiResponse(success=False, error=str(e))
+
+
+@app.post("/cleanup", response_model=ApiResponse)
+async def cleanup_files(max_age_hours: int = 24):
+    """
+    Clean up old/expired files.
+    
+    Parameters:
+        max_age_hours: Remove files older than this many hours
+    """
+    try:
+        expired_count = file_manager.cleanup_expired()
+        old_count = file_manager.cleanup_old(max_age_hours=max_age_hours)
+        
+        # Also clean up in-memory dataframes for deleted files
+        active_file_ids = {f.file_id for f in file_manager.list_files(status=FileStatus.ACTIVE)}
+        removed_from_memory = 0
+        for file_id in list(dataframes.keys()):
+            if file_id not in active_file_ids:
+                del dataframes[file_id]
+                if file_id in file_paths:
+                    del file_paths[file_id]
+                removed_from_memory += 1
+        
+        return ApiResponse(success=True, result={
+            "expired_removed": expired_count,
+            "old_removed": old_count,
+            "memory_cleaned": removed_from_memory
+        })
+    except Exception as e:
+        logger.error(f"Cleanup failed: {e}", exc_info=True)
+        return ApiResponse(success=False, error=str(e))
+
+
+@app.get("/stats", response_model=ApiResponse)
+async def get_stats():
+    """
+    Get file management statistics.
+    """
+    try:
+        stats = file_manager.get_stats()
+        stats["in_memory_files"] = len(dataframes)
+        return ApiResponse(success=True, result=stats)
+    except Exception as e:
+        logger.error(f"Failed to get stats: {e}", exc_info=True)
+        return ApiResponse(success=False, error=str(e))
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Reload persisted files on startup"""
+    logger.info("🔄 Checking for persisted files to reload...")
+    
+    active_files = file_manager.list_files(status=FileStatus.ACTIVE)
+    reloaded = 0
+    
+    for metadata in active_files:
+        try:
+            if metadata.file_id not in dataframes:
+                file_ext = Path(metadata.original_name).suffix.lower()
+                if file_ext == ".csv":
+                    df = pd.read_csv(metadata.storage_path)
+                else:
+                    df = pd.read_excel(metadata.storage_path)
+                
+                dataframes[metadata.file_id] = df
+                file_paths[metadata.file_id] = metadata.storage_path
+                reloaded += 1
+        except Exception as e:
+            logger.warning(f"Failed to reload file {metadata.file_id}: {e}")
+    
+    if reloaded > 0:
+        logger.info(f"✅ Reloaded {reloaded} persisted files")
+
+
+@app.post("/display", response_model=ApiResponse)
+async def display_spreadsheet(
+    file_id: str = Form(...),
+    display_mode: str = Form('full'),
+    max_rows: int = Form(100)
+):
+    """
+    Display spreadsheet in canvas.
+    Always returns canvas_display for orchestrator.
+    
+    Parameters:
+        file_id: ID of the spreadsheet
+        display_mode: 'full', 'head', 'tail', 'sample'
+        max_rows: Maximum rows to display
+    """
+    logger.info(f"[DISPLAY_ENDPOINT] Called with file_id={file_id}, mode={display_mode}")
+    logger.info(f"[DISPLAY_ENDPOINT] Current dataframes keys: {list(dataframes.keys())}")
+    
+    if not ensure_file_loaded(file_id):
+        logger.warning(f"[DISPLAY_ENDPOINT] File {file_id} NOT found, returning 404")
+        raise HTTPException(status_code=404, detail="File not found.")
+    
+    try:
+        df = dataframes[file_id]
+        filename = Path(file_paths[file_id]).name
+        
+        # Apply display mode
+        if display_mode == 'head':
+            display_df = df.head(max_rows)
+            title = f"{filename} (First {max_rows} rows)"
+        elif display_mode == 'tail':
+            display_df = df.tail(max_rows)
+            title = f"{filename} (Last {max_rows} rows)"
+        elif display_mode == 'sample':
+            display_df = df.sample(min(max_rows, len(df)))
+            title = f"{filename} (Random {max_rows} rows)"
+        else:  # full
+            display_df = df
+            title = f"{filename}"
+        
+        canvas_display = dataframe_to_canvas(
+            df=display_df,
+            title=title,
+            filename=filename,
+            display_mode=display_mode,
+            max_rows=max_rows,
+            file_id=file_id
+        )
+        
+        return ApiResponse(success=True, result={
+            "message": f"Displaying {len(display_df)} rows",
+            "canvas_display": canvas_display
+        })
+        
+    except Exception as e:
+        logger.error(f"Display failed: {e}", exc_info=True)
+        return ApiResponse(success=False, error=str(e))
+
+
+@app.get("/download/{file_id}")
+async def download_spreadsheet(
+    file_id: str,
+    format: str = 'xlsx'
+):
+    """
+    Download the current state of the spreadsheet.
+    Supports: xlsx, csv, json
+    """
+    if file_id not in dataframes:
+        raise HTTPException(status_code=404, detail="File not found.")
+    
+    try:
+        from fastapi.responses import StreamingResponse
+        import io
+        
+        df = dataframes[file_id]
+        filename = Path(file_paths[file_id]).stem
+        
+        if format == 'csv':
+            output = io.StringIO()
+            df.to_csv(output, index=False)
+            output.seek(0)
+            return StreamingResponse(
+                iter([output.getvalue()]),
+                media_type="text/csv",
+                headers={"Content-Disposition": f"attachment; filename={filename}.csv"}
+            )
+        
+        elif format == 'json':
+            output = io.StringIO()
+            df.to_json(output, orient='records', indent=2)
+            output.seek(0)
+            return StreamingResponse(
+                iter([output.getvalue()]),
+                media_type="application/json",
+                headers={"Content-Disposition": f"attachment; filename={filename}.json"}
+            )
+        
+        else:  # xlsx (default)
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False, sheet_name='Sheet1')
+            output.seek(0)
+            return StreamingResponse(
+                iter([output.getvalue()]),
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={"Content-Disposition": f"attachment; filename={filename}.xlsx"}
+            )
+    
+    except Exception as e:
+        logger.error(f"Download failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/execute_pandas", response_model=ApiResponse)
+async def execute_pandas(
+    file_id: str = Form(...),
+    instruction: str = Form(...),
+    pandas_code: Optional[str] = Form(None),
+    show_result: bool = Form(True),
+    max_display_rows: int = Form(100)
+):
+    """
+    Execute pandas operations with full session tracking.
+    
+    Flow:
+    1. Get session context
+    2. If no pandas_code, use LLM to generate from instruction
+    3. Execute code safely
+    4. Track operation in session
+    5. Generate canvas display
+    6. Return result + canvas
+    """
+    if not ensure_file_loaded(file_id):
+        raise HTTPException(status_code=404, detail="File not found.")
+    
+    try:
+        df = dataframes[file_id]
+        filename = Path(file_paths[file_id]).name
+        
+        # DETAILED LOGGING: Show current state BEFORE operation
+        logger.info(f"[EXECUTE_PANDAS] ========== START ==========")
+        logger.info(f"[EXECUTE_PANDAS] file_id: {file_id}")
+        logger.info(f"[EXECUTE_PANDAS] instruction: {instruction}")
+        logger.info(f"[EXECUTE_PANDAS] BEFORE - shape: {df.shape}, columns: {df.columns.tolist()}")
+        
+        # Get session context
+        session_context = spreadsheet_session_manager.get_session_context(file_id)
+        
+        # Get state before operation
+        state_before = get_dataframe_state(df, filename)
+        
+        # Generate pandas code if not provided
+        if not pandas_code:
+            logger.info(f"Generating pandas code for: {instruction}")
+            # Use simple direct code generation
+            pandas_code = await generate_modification_code(df, instruction)
+            
+            if not pandas_code:
+                return ApiResponse(
+                    success=False,
+                    error="Failed to generate pandas code"
+                )
+
+        
+        logger.info(f"Executing pandas code: {pandas_code}")
+        
+        # Execute the code safely using exec() instead of eval() for multi-line support
+        try:
+            # Allow necessary built-ins for pandas operations
+            safe_builtins = {
+                'range': range, 'len': len, 'sum': sum, 'min': min, 'max': max,
+                'int': int, 'float': float, 'str': str, 'list': list, 'dict': dict,
+                'abs': abs, 'round': round, 'sorted': sorted, 'enumerate': enumerate,
+                'zip': zip, 'map': map, 'filter': filter, 'True': True, 'False': False, 'None': None
+            }
+            local_vars = {"df": df, "pd": pd}
+            # exec() for multi-line code - it modifies local_vars in place
+            exec(pandas_code, {"__builtins__": safe_builtins}, local_vars)
+            
+            # After exec(), df in local_vars may be modified or a new df may be assigned
+            result_df = local_vars.get('df', df)
+            
+            # Check if dataframe was modified (columns changed)
+            if len(result_df.columns) != len(df.columns) or set(result_df.columns) != set(df.columns):
+                # Dataframe was modified - update storage
+                dataframes[file_id] = result_df
+                result_summary = f"DataFrame modified: {len(result_df)} rows, {len(result_df.columns)} columns"
+                rows_affected = len(result_df)
+                columns_affected = result_df.columns.tolist()
+            else:
+                # Even if columns didn't change, data might have - always update memory
+                dataframes[file_id] = result_df
+                result_summary = f"DataFrame with {len(result_df)} rows, {len(result_df.columns)} columns"
+                rows_affected = len(result_df)
+                columns_affected = result_df.columns.tolist()
+            
+            # CRITICAL: Persist to disk so future operations see the modified state
+            try:
+                file_path = file_paths.get(file_id)
+                if file_path:
+                    if str(file_path).lower().endswith('.csv'):
+                        result_df.to_csv(file_path, index=False)
+                    else:
+                        result_df.to_excel(file_path, index=False)
+                    logger.info(f"💾 Persisted modified DataFrame to disk: {file_path}")
+            except Exception as save_error:
+                logger.error(f"Failed to persist to disk: {save_error}")
+            
+            # Update df reference for display
+            df = result_df
+
+        
+        except Exception as exec_error:
+            logger.error(f"Pandas execution failed: {exec_error}")
+            return ApiResponse(
+                success=False,
+                error=f"Execution error: {str(exec_error)}"
+            )
+        
+        # Get state after operation
+        state_after = get_dataframe_state(df, filename)
+        
+        # Track in session
+        spreadsheet_session_manager.add_operation(
+            file_id=file_id,
+            operation_type='execute_pandas',
+            instruction=instruction,
+            pandas_code=pandas_code,
+            result_summary=result_summary,
+            rows_affected=rows_affected,
+            columns_affected=columns_affected,
+            state_before=state_before,
+            state_after=state_after
+        )
+        
+        # Add conversation turn
+        spreadsheet_session_manager.add_conversation_turn(
+            file_id=file_id,
+            user_message=instruction,
+            agent_response=result_summary
+        )
+        
+        # Generate canvas display
+        canvas_display = None
+        if show_result:
+            canvas_display = dataframe_to_canvas(
+                df=result_df,
+                title=f"Result: {instruction[:50]}...",
+                filename=filename,
+                display_mode='query_result',
+                max_rows=max_display_rows,
+                file_id=file_id,
+                metadata={
+                    'operation': 'execute_pandas',
+                    'instruction': instruction,
+                    'pandas_code': pandas_code
+                }
+            )
+        
+        # Get session info
+        session = spreadsheet_session_manager.get_or_create_session(file_id, filename)
+        
+        return ApiResponse(success=True, result={
+            "message": result_summary,
+            "pandas_code": pandas_code,
+            "rows_affected": rows_affected,
+            "columns_affected": columns_affected,
+            "canvas_display": canvas_display,
+            "session_info": {
+                "operations_count": len(session.operation_history),
+                "last_operation": session.operation_history[-1].operation_type if session.operation_history else None
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"Execute pandas failed: {e}", exc_info=True)
+        return ApiResponse(success=False, error=str(e))
+
+
+@app.post("/transform", response_model=ApiResponse)
+async def transform_data(
+    file_id: str = Form(...),
+    operation: str = Form(...),
+    params: str = Form("{}")
+):
+    """
+    Apply common transformations with session tracking.
+    
+    Operations: filter, sort, group, pivot, merge, drop_duplicates, fillna, etc.
+    """
+    if not ensure_file_loaded(file_id):
+        raise HTTPException(status_code=404, detail="File not found.")
+    
+    try:
+        df = dataframes[file_id]
+        filename = Path(file_paths[file_id]).name
+        params_dict = json.loads(params)
+        
+        state_before = get_dataframe_state(df, filename)
+        
+        # Apply transformation based on operation
+        if operation == 'filter':
+            query_str = params_dict.get('query', '')
+            result_df = df.query(query_str)
+            instruction = f"Filter: {query_str}"
+            pandas_code = f"df.query('{query_str}')"
+        
+        elif operation == 'sort':
+            by = params_dict.get('by', [])
+            ascending = params_dict.get('ascending', True)
+            result_df = df.sort_values(by=by, ascending=ascending)
+            instruction = f"Sort by {by}"
+            pandas_code = f"df.sort_values(by={by}, ascending={ascending})"
+        
+        elif operation == 'group':
+            by = params_dict.get('by', [])
+            agg = params_dict.get('agg', {})
+            result_df = df.groupby(by).agg(agg).reset_index()
+            instruction = f"Group by {by} and aggregate"
+            pandas_code = f"df.groupby({by}).agg({agg}).reset_index()"
+        
+        elif operation == 'drop_duplicates':
+            subset = params_dict.get('subset', None)
+            result_df = df.drop_duplicates(subset=subset)
+            dataframes[file_id] = result_df
+            instruction = "Remove duplicate rows"
+            pandas_code = f"df.drop_duplicates(subset={subset})"
+        
+        elif operation == 'fillna':
+            value = params_dict.get('value', 0)
+            result_df = df.fillna(value)
+            dataframes[file_id] = result_df
+            instruction = f"Fill missing values with {value}"
+            pandas_code = f"df.fillna({value})"
+        
+        else:
+            raise ValueError(f"Unknown operation: {operation}")
+        
+        # Always update global state with transformed data
+        dataframes[file_id] = result_df
+        
+        # CRITICAL: Persist to disk so future operations see the modified state
+        try:
+            file_path = file_paths.get(file_id)
+            if file_path:
+                if str(file_path).lower().endswith('.csv'):
+                    result_df.to_csv(file_path, index=False)
+                else:
+                    result_df.to_excel(file_path, index=False)
+                logger.info(f"💾 Persisted transformed DataFrame to disk: {file_path}")
+        except Exception as save_error:
+            logger.error(f"Failed to persist to disk: {save_error}")
+        
+        state_after = get_dataframe_state(result_df, filename)
+        
+        # Track in session
+        spreadsheet_session_manager.add_operation(
+            file_id=file_id,
+            operation_type=operation,
+            instruction=instruction,
+            pandas_code=pandas_code,
+            result_summary=f"Transformed data: {len(result_df)} rows",
+            rows_affected=len(result_df),
+            columns_affected=result_df.columns.tolist(),
+            state_before=state_before,
+            state_after=state_after
+        )
+        
+        # Generate canvas display
+        canvas_display = dataframe_to_canvas(
+            df=result_df,
+            title=f"Transform: {operation}",
+            filename=filename,
+            display_mode='full',
+            file_id=file_id,
+            metadata={'operation': operation, 'params': params_dict}
+        )
+        
+        return ApiResponse(success=True, result={
+            "message": f"Transformation '{operation}' applied successfully",
+            "rows": len(result_df),
+            "columns": len(result_df.columns),
+            "canvas_display": canvas_display
+        })
+        
+    except Exception as e:
+        logger.error(f"Transform failed: {e}", exc_info=True)
+        return ApiResponse(success=False, error=str(e))
+
+
+# Update existing endpoints to include canvas display
+
+# Modify get_summary to include canvas
+@app.post("/get_summary_with_canvas", response_model=ApiResponse)
+async def get_summary_with_canvas(file_id: str = Form(...)):
+    """Get summary with automatic canvas display."""
+    if file_id not in dataframes:
+        raise HTTPException(status_code=404, detail="File not found.")
+    
+    try:
+        df = dataframes[file_id]
+        filename = Path(file_paths[file_id]).name
+        
+        summary = {
+            "filename": filename,
+            "headers": df.columns.tolist(),
+            "rows": df.head(10).to_dict(orient="records"),
+            "dtypes": {k: str(v) for k, v in df.dtypes.to_dict().items()},
+            "shape": df.shape,
+            "memory_usage": int(df.memory_usage(deep=True).sum())
+        }
+        
+        # Generate canvas display
+        canvas_display = dataframe_to_canvas(
+            df=df,
+            title=f"Spreadsheet: {filename}",
+            filename=filename,
+            display_mode='full',
+            max_rows=50,
+            file_id=file_id
+        )
+        
+        return ApiResponse(success=True, result={
+            **summary,
+            "canvas_display": canvas_display
+        })
+        
+    except Exception as e:
+        logger.error(f"Get summary failed: {e}", exc_info=True)
+        return ApiResponse(success=False, error=str(e))
+
+
+# --- Main Entry Point ---
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("SPREADSHEET_AGENT_PORT", 8041))
+    logger.info(f"Starting Spreadsheet Agent on port {port}...")
+    uvicorn.run(app, host="0.0.0.0", port=port, reload=False)
+
