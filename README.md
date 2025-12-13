@@ -46,106 +46,675 @@
 - Vector embeddings for semantic search
 - Capability and endpoint management
 
-## 🚀 Quick Start
+## 🚀 Quick Start & Setup Guide
+
+### ⚠️ Important: Read This First!
+This guide covers **fresh installation** and **updating existing installations**. Follow the appropriate section for your scenario.
 
 ### Prerequisites
 
-- **Node.js** v18+ and pnpm (recommended package manager)
-- **Python** v3.11+
-- **PostgreSQL** v14+ with the `pgvector` extension enabled
-- **GROQ API Key** (for LLM operations)
+- **Node.js** v18+ (for frontend)
+- **Python** v3.11+ (for backend)
+- **PostgreSQL** v14+ (with pgvector extension)
+- **Git** (for version control)
+- **GROQ API Key** (get free key at https://console.groq.com)
+- **Cerebras API Key** (optional, for document analysis)
 
-### 1. Clone the Repository
+---
 
+## 📋 Setup Instructions
+
+### 1️⃣ Clone or Update Repository
+
+#### Fresh Installation
 ```bash
 git clone https://github.com/Orbimesh/Orbimesh-App.git
 cd Orbimesh-App
 ```
 
-### 2. Backend Setup
-
-#### Create and Activate Virtual Environment
-
+#### Updating Existing Installation
 ```bash
-# Navigate to the backend directory
-cd backend
+cd Orbimesh-App
+git pull origin main
+```
 
+---
+
+### 2️⃣ Backend Setup
+
+#### Step 1: Navigate to Backend Directory
+```bash
+cd backend
+```
+
+#### Step 2: Create and Activate Virtual Environment
+
+**On Windows (PowerShell):**
+```powershell
 # Create virtual environment
 python -m venv .venv
 
 # Activate virtual environment
-# On Windows (PowerShell)
 .\.venv\Scripts\Activate.ps1
-# On Windows (Command Prompt)
+
+# If you get an execution policy error, run:
+# Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+
+**On Windows (Command Prompt):**
+```cmd
+python -m venv .venv
 .venv\Scripts\activate.bat
-# On macOS/Linux
+```
+
+**On macOS/Linux:**
+```bash
+python3 -m venv .venv
 source .venv/bin/activate
 ```
 
-#### Install Dependencies
-
+#### Step 3: Install/Update All Python Dependencies
 ```bash
-# Install Python packages
+# Upgrade pip first
+python -m pip install --upgrade pip
+
+# Install all required packages
 pip install -r requirements.txt
+
+# For existing installations, use:
+pip install -r requirements.txt --upgrade
 ```
 
-#### Environment Configuration
+#### Step 4: Configure Environment Variables
 
-Create a `.env` file in the backend directory:
+1. **Copy the example environment file:**
+   ```bash
+   # Windows (PowerShell)
+   Copy-Item .env.example .env
+   
+   # macOS/Linux
+   cp .env.example .env
+   ```
 
-```bash
-# Create .env file (Windows PowerShell)
-@"
-GROQ_API_KEY=your_groq_api_key_here
-PG_USER=postgres
-PG_PASSWORD=your_password
-PG_HOST=localhost
-PG_PORT=5432
-DB_NAME=agentdb
-NEWS_AGENT_API_KEY=your_news_api_key_if_needed
-"@ | Out-File -FilePath .env -Encoding utf8
+2. **Edit `.env` file** with your actual values:
+   ```env
+   # REQUIRED: API Keys
+   GROQ_API_KEY=your_groq_api_key_here
+   CEREBRAS_API_KEY=your_cerebras_api_key_here
+   GOOGLE_API_KEY=your_google_api_key_here
+   
+   # Agent-specific API keys (optional)
+   SCHOLARAI_API_KEY=your_scholarai_api_key_here
+   NEWS_AGENT_API_KEY=your_news_agent_api_key_here
+   OLLAMA_API_KEY=your_ollama_api_key_here
+   BROWSER_AGENT_PORT=8070
+   
+   # REQUIRED: Database Configuration
+   PG_USER=postgres
+   PG_PASSWORD=your_postgres_password_here
+   PG_HOST=localhost
+   PG_PORT=5432
+   DB_NAME=agentdb
+   ```
 
-# Or create manually with your preferred text editor
-```
+   **✓ Checklist - Verify all variables from `.env.example` are present in your `.env`**
 
-#### Database Setup
+#### Step 5: Setup PostgreSQL Database
 
-1. Ensure PostgreSQL is running
-2. Create a database named `agentdb`
-3. Enable the pgvector extension:
+**Prerequisite: PostgreSQL is installed and running**
+
+1. **Create the database and enable pgvector:**
    ```sql
+   -- Connect to PostgreSQL with a client (psql, pgAdmin, or DBeaver)
+   
+   -- Create database
+   CREATE DATABASE agentdb;
+   
+   -- Connect to the database
+   \c agentdb
+   
+   -- Enable pgvector extension
    CREATE EXTENSION IF NOT EXISTS vector;
    ```
 
-#### Start Backend Services
+2. **Alternative: Using psql command line:**
+   ```bash
+   # Create database
+   createdb -U postgres agentdb
+   
+   # Enable pgvector
+   psql -U postgres -d agentdb -c "CREATE EXTENSION IF NOT EXISTS vector;"
+   ```
 
+#### Step 6: Initialize/Update Database Schema
+
+**For Fresh Installation:**
 ```bash
-# Create database tables
-python create_tables.py
-
-# Start the main FastAPI server
-uvicorn main:app --reload
+# Create all tables from scratch
+python db_init.py
 ```
 
-The backend will be available at `http://127.0.0.1:8000`.
+**For Existing Installation (Database Updates):**
+```bash
+# Run migrations to update schema
+alembic upgrade head
 
-### 3. Frontend Setup
+# If there are no migrations, create them:
+alembic revision --autogenerate -m "Update schema"
+alembic upgrade head
+```
+
+**Verify Database Setup:**
+```bash
+# This command should complete without errors
+python -c "from database import SessionLocal; db = SessionLocal(); print('✓ Database connection successful')"
+```
+
+#### Step 7: Start Backend Server
 
 ```bash
-# Navigate to frontend directory (from project root)
-cd frontend
+# Development mode with auto-reload
+python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
-# Install dependencies using pnpm (recommended)
+# Or simply:
+python main.py
+```
+
+✓ **Backend is ready when you see:**
+```
+INFO:     Application startup complete
+```
+
+Visit API docs: `http://127.0.0.1:8000/docs`
+
+---
+
+### 3️⃣ Frontend Setup
+
+#### Step 1: Navigate to Frontend Directory
+```bash
+# From the project root
+cd frontend
+```
+
+#### Step 2: Install/Update Node Dependencies
+
+**Using pnpm (Recommended - Faster & Better):**
+```bash
+# Install pnpm globally (if not already installed)
+npm install -g pnpm
+
+# Install dependencies
 pnpm install
 
-# Create environment file
-echo "NEXT_PUBLIC_API_URL=http://127.0.0.1:8000" | Out-File -FilePath .env.local -Encoding utf8
+# For existing installation, update dependencies:
+pnpm install --latest
+```
 
-# Start development server
+**Using npm:**
+```bash
+npm install
+
+# For existing installation:
+npm install --legacy-peer-deps
+```
+
+**Using yarn:**
+```bash
+yarn install
+```
+
+#### Step 3: Configure Frontend Environment
+
+Create `.env.local` file in the frontend directory:
+```bash
+# Windows (PowerShell)
+@"
+NEXT_PUBLIC_API_URL=http://127.0.0.1:8000
+"@ | Out-File -FilePath .env.local -Encoding utf8
+
+# macOS/Linux
+echo "NEXT_PUBLIC_API_URL=http://127.0.0.1:8000" > .env.local
+```
+
+#### Step 4: Start Frontend Development Server
+
+```bash
+pnpm dev
+# or: npm run dev
+```
+
+✓ **Frontend is ready when you see:**
+```
+▲ Next.js 15.2.4
+  - Local:        http://localhost:3000
+```
+
+Visit frontend: `http://localhost:3000`
+
+---
+
+## �️ Database Management & Updates
+
+### Keeping Your Database Up to Date
+
+**Important:** Whenever you pull new code changes, the database schema might have changed. Follow these steps:
+
+#### Check for Pending Migrations
+```bash
+cd backend
+
+# Activate virtual environment first
+.venv\Scripts\Activate.ps1  # Windows
+# source .venv/bin/activate  # macOS/Linux
+
+# View current database version
+alembic current
+
+# View all migration history
+alembic history
+
+# Check for pending/unapplied migrations
+alembic status
+```
+
+#### Apply Migrations (Required After Code Updates)
+```bash
+cd backend
+
+# Upgrade to latest migration
+alembic upgrade head
+
+# View detailed migration output
+alembic upgrade head -v  # verbose mode
+```
+
+#### If You Modified Models (Developers Only)
+
+When you make changes to `models.py`, create and apply migrations:
+
+```bash
+cd backend
+
+# 1. Create migration script (auto-generates based on model changes)
+alembic revision --autogenerate -m "Describe your changes"
+
+# 2. Review the generated migration file in alembic/versions/
+# 3. Apply the migration
+alembic upgrade head
+
+# 4. Commit the migration file to git
+git add alembic/versions/
+git commit -m "Add migration for [your changes]"
+```
+
+#### Rollback Migrations (If Something Goes Wrong)
+
+```bash
+cd backend
+
+# Downgrade to previous version
+alembic downgrade -1
+
+# Downgrade multiple versions
+alembic downgrade -2
+
+# View current version after rollback
+alembic current
+```
+
+#### Database Backup (Before Major Updates)
+
+**On Windows (PowerSQL):**
+```powershell
+# Backup database
+pg_dump -U postgres -h localhost agentdb > backup_$(Get-Date -Format 'yyyy-MM-dd_HHmmss').sql
+
+# Restore from backup
+psql -U postgres -h localhost agentdb < backup_file.sql
+```
+
+**On macOS/Linux:**
+```bash
+# Backup database
+pg_dump -U postgres -h localhost agentdb > backup_$(date +'%Y-%m-%d_%H%M%S').sql
+
+# Restore from backup
+psql -U postgres -h localhost agentdb < backup_file.sql
+```
+
+#### Database Cleanup (Optional - Advanced)
+
+```bash
+# Connect to database
+psql -U postgres -d agentdb
+
+# List all tables
+\dt
+
+# View table sizes
+\d+ table_name
+
+# Reset sequence (if needed after deletes)
+SELECT setval('table_id_seq', (SELECT MAX(id) + 1 FROM table_name));
+```
+
+#### Common Database Issues
+
+| Issue | Solution |
+|-------|----------|
+| **"relation does not exist"** | Run `alembic upgrade head` to apply pending migrations |
+| **"column does not exist"** | Pull latest code and run `alembic upgrade head` |
+| **"connection refused"** | Verify PostgreSQL is running and credentials in `.env` are correct |
+| **"permission denied"** | Verify PG_USER has proper permissions on the database |
+| **Migration conflicts** | Check migration files in `alembic/versions/` for conflicts |
+
+---
+
+## 🔄 Complete Development Startup
+
+After initial setup, here's how to start everything:
+
+**Terminal 1 - Backend:**
+```bash
+cd backend
+.venv\Scripts\Activate.ps1        # Windows PowerShell
+# source .venv/bin/activate       # macOS/Linux
+
+# ⚠️ IMPORTANT: Apply pending database migrations first
+alembic upgrade head
+
+# Then start the server
+python -m uvicorn main:app --reload
+```
+
+**Terminal 2 - Frontend:**
+```bash
+cd frontend
 pnpm dev
 ```
 
-The frontend will be available at `http://localhost:3000`.
+**Terminal 3 - Database (if needed):**
+PostgreSQL should already be running in the background.
+
+---
+
+## 📊 Verifying Installation
+
+### Backend Verification
+```bash
+# Check API is running
+curl http://127.0.0.1:8000/health
+
+# Check Swagger docs
+# Open http://127.0.0.1:8000/docs in your browser
+```
+
+### Frontend Verification
+```bash
+# Frontend should be accessible at
+# http://localhost:3000
+
+# Check browser console for errors (F12)
+```
+
+### Database Verification
+```bash
+# Connect to database
+psql -U postgres -d agentdb
+
+# List tables (should see many tables)
+\dt
+
+# Check pgvector extension
+\dx
+```
+
+---
+
+## 🆘 Common Setup Issues & Solutions
+
+### **Issue 1: "ModuleNotFoundError: No module named 'xxx'"**
+**Solution:**
+```bash
+# Activate virtual environment first
+cd backend
+.venv\Scripts\Activate.ps1  # Windows
+# source .venv/bin/activate  # macOS/Linux
+
+# Reinstall requirements
+pip install -r requirements.txt --force-reinstall
+```
+
+### **Issue 2: PostgreSQL Connection Error**
+**Solution:**
+```bash
+# Verify PostgreSQL is running
+# Windows: Check Services (services.msc) for "PostgreSQL"
+# macOS: brew services list
+# Linux: sudo systemctl status postgresql
+
+# Check credentials in .env file match your PostgreSQL setup
+# Default: PG_USER=postgres, PG_PASSWORD=postgres
+
+# Test connection
+psql -U postgres -h localhost -d agentdb
+```
+
+### **Issue 3: "pgvector extension not found"**
+**Solution:**
+```bash
+# Install pgvector extension in PostgreSQL
+psql -U postgres -d agentdb -c "CREATE EXTENSION IF NOT EXISTS vector;"
+
+# Or via pgAdmin:
+# 1. Connect to agentdb database
+# 2. Right-click Extensions
+# 3. Create new Extension
+# 4. Search for "vector" and install
+```
+
+### **Issue 4: Alembic migration fails**
+**Solution:**
+```bash
+# Check if migrations folder exists
+# If not, initialize alembic:
+alembic init migrations
+
+# View pending migrations
+alembic history
+
+# Downgrade if needed, then upgrade
+alembic downgrade -1
+alembic upgrade head
+
+# Or reset migrations (⚠️ deletes data):
+# alembic downgrade base
+# alembic upgrade head
+```
+
+### **Issue 5: Frontend dependencies conflict**
+**Solution:**
+```bash
+# Clear cache and reinstall
+cd frontend
+rm -rf node_modules pnpm-lock.yaml  # or package-lock.json for npm
+pnpm install --no-frozen-lockfile
+
+# Or with npm:
+npm install --legacy-peer-deps
+```
+
+### **Issue 6: GROQ API Key Invalid**
+**Solution:**
+- Get free GROQ API key: https://console.groq.com
+- Copy your API key
+- Update `GROQ_API_KEY` in `backend/.env`
+- Restart backend server
+
+### **Issue 8: "Table/Column does not exist" after code update**
+**Solution:**
+```bash
+# This means database migrations haven't been applied
+cd backend
+
+# Activate virtual environment
+.venv\Scripts\Activate.ps1  # Windows
+# source .venv/bin/activate  # macOS/Linux
+
+# View pending migrations
+alembic status
+
+# Apply all pending migrations
+alembic upgrade head
+
+# Verify they applied
+alembic current
+```
+
+### **Issue 9: Migration conflicts or failed migrations**
+**Solution:**
+```bash
+# First, backup your database (see backup section above)
+pg_dump -U postgres agentdb > backup.sql
+
+# Check migration history
+cd backend
+alembic history
+
+# Downgrade to before the issue
+alembic downgrade -1
+
+# Try upgrading again
+alembic upgrade head
+
+# If still failing, consult the migration file in alembic/versions/
+```
+
+### **Issue 10: Database structure out of sync with code**
+**Solution:**
+```bash
+cd backend
+
+# Check current database state
+alembic current
+
+# View all applied migrations
+alembic history
+
+# View pending migrations
+alembic status
+
+# If status shows pending, apply them:
+alembic upgrade head
+
+# If completely broken, reset (⚠️ DELETES ALL DATA):
+# alembic downgrade base
+# alembic upgrade head
+```
+
+---
+
+## 🔧 Updating to Latest Version
+
+**For Team Members with Existing Installation:**
+
+```bash
+# 1. Pull latest changes
+git pull origin main
+
+# 2. Update backend dependencies and database
+cd backend
+
+# Activate virtual environment
+.venv\Scripts\Activate.ps1  # Windows
+# source .venv/bin/activate  # macOS/Linux
+
+# Update Python packages
+pip install -r requirements.txt --upgrade
+
+# ⚠️ CRITICAL: Apply pending database migrations
+alembic upgrade head
+
+# Verify migrations applied successfully
+alembic current
+
+# 3. Update frontend dependencies
+cd ../frontend
+pnpm install --latest
+# or: npm install --legacy-peer-deps
+
+# 4. Restart both servers
+# Terminal 1 - Backend:
+# cd backend && python -m uvicorn main:app --reload
+
+# Terminal 2 - Frontend:
+# cd frontend && pnpm dev
+```
+
+### ✓ Verification After Update
+```bash
+# In backend directory
+alembic current  # Should show latest revision
+
+# In another terminal, test API
+curl http://127.0.0.1:8000/health
+```
+
+**If migrations fail, see [Database Backup](#database-backup-before-major-updates) section to restore from backup.**
+
+---
+
+## 📝 Verification Checklist
+
+Before starting development, verify:
+
+- [ ] `.env` file exists in backend with all variables from `.env.example`
+- [ ] `.env.local` exists in frontend with `NEXT_PUBLIC_API_URL`
+- [ ] PostgreSQL is running and `agentdb` database exists
+- [ ] pgvector extension is enabled: `psql -U postgres -d agentdb -c "CREATE EXTENSION IF NOT EXISTS vector;"`
+- [ ] Virtual environment is activated: `(.venv)` should appear in terminal
+- [ ] All dependencies installed: `pip list | grep fastapi` (should show version)
+- [ ] **Database migrations are current:** `alembic current` (should show latest revision, not empty)
+- [ ] **No pending migrations:** `alembic status` (should show "Target database is up to date")
+- [ ] Backend API starts without errors on port 8000: `python -m uvicorn main:app --reload`
+- [ ] Frontend builds without errors on port 3000: `pnpm dev`
+- [ ] Browser can access http://localhost:3000 without CORS errors
+- [ ] API health check passes: `curl http://127.0.0.1:8000/health`
+
+---
+
+## 📚 Additional Resources
+
+- **API Documentation:** `http://127.0.0.1:8000/docs`
+- **Database Migration Guide:** See [Database Management & Updates](#-database-management--updates) section
+- **Database Backup Guide:** See [Database Backup](#database-backup-before-major-updates) section
+- **Update Instructions:** See [Updating to Latest Version](#-updating-to-latest-version) section
+- **Troubleshooting:** See [Common Setup Issues & Solutions](#-common-setup-issues--solutions) section
+- **Environment Variables:** See [Configuration](#-configuration) section
+
+### Quick Command Reference
+
+**After pulling new code:**
+```bash
+git pull origin main
+cd backend && alembic upgrade head && pip install -r requirements.txt --upgrade
+cd ../frontend && pnpm install --latest
+```
+
+**Before each development session:**
+```bash
+# Terminal 1
+cd backend && alembic upgrade head && python -m uvicorn main:app --reload
+
+# Terminal 2
+cd frontend && pnpm dev
+```
+
+**Check database is up to date:**
+```bash
+cd backend && alembic current && alembic status
+```
 
 ## 📊 Project Structure
 
@@ -279,25 +848,65 @@ curl -X POST "http://127.0.0.1:8000/agents/" \
 
 ### Backend Environment Variables (`.env`)
 
+**Required (Without these, the app won't start):**
 ```env
-# Required
-GROQ_API_KEY=your_groq_api_key_here
-PG_USER=postgres
-PG_PASSWORD=your_password
-PG_HOST=localhost
-PG_PORT=5432
-DB_NAME=agentdb
+# LLM & AI Services
+GROQ_API_KEY=your_groq_api_key_here              # Required: https://console.groq.com
+CEREBRAS_API_KEY=your_cerebras_api_key_here      # Required for document analysis
 
-# Optional
-NEWS_AGENT_API_KEY=your_news_api_key_if_needed
-OPENAI_API_KEY=your_openai_key_if_needed
+# Database Connection (Must match your PostgreSQL setup)
+PG_USER=postgres                                  # PostgreSQL username
+PG_PASSWORD=your_postgres_password_here           # PostgreSQL password
+PG_HOST=localhost                                 # PostgreSQL server address
+PG_PORT=5432                                      # PostgreSQL port
+DB_NAME=agentdb                                   # Database name to create/use
 ```
+
+**Optional (For specific agents):**
+```env
+# External API Keys
+GOOGLE_API_KEY=your_google_api_key_here
+NEWS_AGENT_API_KEY=your_news_api_key_here
+SCHOLARAI_API_KEY=your_scholarai_api_key_here
+OLLAMA_API_KEY=your_ollama_api_key_here
+
+# Browser Agent Configuration
+BROWSER_AGENT_PORT=8070
+```
+
+**⚠️ IMPORTANT: All variables in `.env.example` should be defined in your `.env` file before starting the backend!**
 
 ### Frontend Environment Variables (`.env.local`)
 
 ```env
+# Backend API URL (must match where backend is running)
 NEXT_PUBLIC_API_URL=http://127.0.0.1:8000
 ```
+
+### Getting API Keys
+
+1. **GROQ API Key** (Free):
+   - Visit: https://console.groq.com
+   - Sign up for free account
+   - Create new API key
+   - Copy and paste into `GROQ_API_KEY` in `.env`
+
+2. **Cerebras API Key** (Optional, for document analysis):
+   - Visit: https://console.cerebras.ai
+   - Create account and API key
+   - Copy and paste into `CEREBRAS_API_KEY` in `.env`
+
+3. **Google API Key** (Optional):
+   - Visit: https://console.cloud.google.com
+   - Create project and API key
+   - Copy and paste into `GOOGLE_API_KEY` in `.env`
+
+4. **News API Key** (Optional):
+   - Visit: https://newsapi.org
+   - Sign up and get API key
+   - Copy and paste into `NEWS_AGENT_API_KEY` in `.env`
+
+---
 
 ## 🧪 Testing
 

@@ -55,20 +55,42 @@ class DocumentSessionManager:
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self._active_sessions: Dict[str, DocumentSession] = {}
     
-    def _get_session_id(self, document_path: str) -> str:
-        """Generate a unique session ID for a document."""
-        # Use document path hash as session ID for consistency
-        return hashlib.md5(document_path.encode()).hexdigest()
+    def _get_session_id(self, document_path: str, thread_id: str = None) -> str:
+        """Generate a unique session ID for a document.
+        
+        Args:
+            document_path: Path to the document
+            thread_id: Optional conversation thread ID for isolation
+                      If provided, prevents edit history mixing across conversations
+        
+        Returns:
+            Unique session ID combining both document and thread context
+        """
+        # Combine document path with thread_id for better isolation
+        # This ensures same doc uploaded to 2 different conversations get separate sessions
+        if thread_id:
+            combined = f"{thread_id}:{document_path}"
+        else:
+            combined = document_path
+        return hashlib.md5(combined.encode()).hexdigest()
     
     def _get_session_file(self, session_id: str) -> Path:
         """Get the file path for a session."""
         return self.sessions_dir / f"{session_id}.json"
     
-    def get_or_create_session(self, document_path: str, document_name: str) -> DocumentSession:
+    def get_or_create_session(self, document_path: str, document_name: str, thread_id: str = None) -> DocumentSession:
         """
         Get existing session or create a new one for a document.
+        
+        Args:
+            document_path: Path to the document file
+            document_name: Name of the document
+            thread_id: Optional conversation thread ID for isolation across conversations
+        
+        Returns:
+            DocumentSession object for this document in this conversation
         """
-        session_id = self._get_session_id(document_path)
+        session_id = self._get_session_id(document_path, thread_id)
         
         # Check if session is already loaded in memory
         if session_id in self._active_sessions:
@@ -109,7 +131,7 @@ class DocumentSessionManager:
             edit_history=[],
             conversation_context=[],
             current_structure={},
-            metadata={}
+            metadata={'thread_id': thread_id} if thread_id else {}
         )
         self._active_sessions[session_id] = session
         self._save_session(session)
@@ -123,10 +145,23 @@ class DocumentSessionManager:
         parameters: Dict[str, Any],
         result: str,
         state_before: Dict[str, Any],
-        state_after: Dict[str, Any]
+        state_after: Dict[str, Any],
+        thread_id: str = None
     ):
-        """Record an edit action in the session."""
-        session = self.get_or_create_session(document_path, Path(document_path).name)
+        """
+        Record an edit action in the session.
+        
+        Args:
+            document_path: Path to the document
+            action_type: Type of edit action
+            instruction: Natural language instruction that was executed
+            parameters: Parameters used for the action
+            result: Result message from the action
+            state_before: Document state before edit
+            state_after: Document state after edit
+            thread_id: Optional conversation thread ID for isolation
+        """
+        session = self.get_or_create_session(document_path, Path(document_path).name, thread_id)
         
         action = EditAction(
             timestamp=datetime.now().isoformat(),
@@ -148,10 +183,19 @@ class DocumentSessionManager:
         self,
         document_path: str,
         user_message: str,
-        agent_response: str
+        agent_response: str,
+        thread_id: str = None
     ):
-        """Add a conversation turn to the session."""
-        session = self.get_or_create_session(document_path, Path(document_path).name)
+        """
+        Add a conversation turn to the session.
+        
+        Args:
+            document_path: Path to the document
+            user_message: User's message
+            agent_response: Agent's response
+            thread_id: Optional conversation thread ID for isolation
+        """
+        session = self.get_or_create_session(document_path, Path(document_path).name, thread_id)
         
         session.conversation_context.append({
             'timestamp': datetime.now().isoformat(),
@@ -162,12 +206,19 @@ class DocumentSessionManager:
         session.last_accessed = datetime.now().isoformat()
         self._save_session(session)
     
-    def get_session_context(self, document_path: str) -> str:
+    def get_session_context(self, document_path: str, thread_id: str = None) -> str:
         """
         Get formatted context for the document session.
         This includes edit history and conversation context.
+        
+        Args:
+            document_path: Path to the document
+            thread_id: Optional conversation thread ID for isolation
+        
+        Returns:
+            Formatted string with session context
         """
-        session = self.get_or_create_session(document_path, Path(document_path).name)
+        session = self.get_or_create_session(document_path, Path(document_path).name, thread_id)
         
         context = f"=== DOCUMENT EDITING SESSION ===\n"
         context += f"Document: {session.document_name}\n"
@@ -197,9 +248,18 @@ class DocumentSessionManager:
         
         return context
     
-    def get_edit_history_summary(self, document_path: str) -> List[Dict[str, Any]]:
-        """Get a summary of all edits performed on the document."""
-        session = self.get_or_create_session(document_path, Path(document_path).name)
+    def get_edit_history_summary(self, document_path: str, thread_id: str = None) -> List[Dict[str, Any]]:
+        """
+        Get a summary of all edits performed on the document.
+        
+        Args:
+            document_path: Path to the document
+            thread_id: Optional conversation thread ID for isolation
+        
+        Returns:
+            List of edit action summaries
+        """
+        session = self.get_or_create_session(document_path, Path(document_path).name, thread_id)
         
         return [
             {
@@ -211,14 +271,32 @@ class DocumentSessionManager:
             for action in session.edit_history
         ]
     
-    def can_undo(self, document_path: str) -> bool:
-        """Check if there are actions that can be undone."""
-        session = self.get_or_create_session(document_path, Path(document_path).name)
+    def can_undo(self, document_path: str, thread_id: str = None) -> bool:
+        """
+        Check if there are actions that can be undone.
+        
+        Args:
+            document_path: Path to the document
+            thread_id: Optional conversation thread ID for isolation
+        
+        Returns:
+            True if undo is available
+        """
+        session = self.get_or_create_session(document_path, Path(document_path).name, thread_id)
         return len(session.edit_history) > 0
     
-    def get_last_action(self, document_path: str) -> Optional[EditAction]:
-        """Get the last action performed on the document."""
-        session = self.get_or_create_session(document_path, Path(document_path).name)
+    def get_last_action(self, document_path: str, thread_id: str = None) -> Optional[EditAction]:
+        """
+        Get the last action performed on the document.
+        
+        Args:
+            document_path: Path to the document
+            thread_id: Optional conversation thread ID for isolation
+        
+        Returns:
+            The last EditAction or None if no actions exist
+        """
+        session = self.get_or_create_session(document_path, Path(document_path).name, thread_id)
         return session.edit_history[-1] if session.edit_history else None
     
     def _save_session(self, session: DocumentSession):

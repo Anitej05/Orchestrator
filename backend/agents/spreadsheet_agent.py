@@ -5,9 +5,10 @@ import json
 import asyncio
 from pathlib import Path
 from typing import Dict, Any, Optional, List
+from threading import local
 
 import pandas as pd
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Header
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
@@ -37,9 +38,29 @@ except ImportError:
 
 app = FastAPI(title="Spreadsheet Agent")
 
-# In-memory storage for dataframes (kept for pandas processing)
+# Thread-local storage for dataframes (prevents cross-conversation contamination)
+# Each conversation gets its own isolated dataframe dictionary
+_thread_local = local()
+
+def get_conversation_dataframes(thread_id: str) -> Dict[str, pd.DataFrame]:
+    """Get thread-scoped dataframe storage, keyed by thread_id for isolation."""
+    if not hasattr(_thread_local, 'dataframes_by_thread'):
+        _thread_local.dataframes_by_thread = {}
+    if thread_id not in _thread_local.dataframes_by_thread:
+        _thread_local.dataframes_by_thread[thread_id] = {}
+    return _thread_local.dataframes_by_thread[thread_id]
+
+def get_conversation_file_paths(thread_id: str) -> Dict[str, str]:
+    """Get thread-scoped file paths, keyed by thread_id for isolation."""
+    if not hasattr(_thread_local, 'file_paths_by_thread'):
+        _thread_local.file_paths_by_thread = {}
+    if thread_id not in _thread_local.file_paths_by_thread:
+        _thread_local.file_paths_by_thread[thread_id] = {}
+    return _thread_local.file_paths_by_thread[thread_id]
+
+# Legacy fallback for backward compatibility
 dataframes: Dict[str, pd.DataFrame] = {}
-file_paths: Dict[str, str] = {}  # Backward compatibility alias
+file_paths: Dict[str, str] = {}
 
 # Create a directory to store uploaded files
 STORAGE_DIR = Path("storage/spreadsheets")
@@ -455,27 +476,36 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
         )
 
 
-def ensure_file_loaded(file_id: str) -> bool:
+def ensure_file_loaded(file_id: str, thread_id: str = "default") -> bool:
     """
-    Ensure a file is loaded into the dataframes dict.
+    Ensure a file is loaded into the dataframes dict (thread-scoped).
     If not, attempt to reload from file_manager.
     Returns True if file is available, False otherwise.
-    """
-    logger.info(f"[ENSURE_LOADED] Checking file_id={file_id}")
-    logger.info(f"[ENSURE_LOADED] Current dataframes keys: {list(dataframes.keys())}")
-    logger.info(f"[ENSURE_LOADED] Current file_paths keys: {list(file_paths.keys())}")
     
-    if file_id in dataframes:
-        df = dataframes[file_id]
-        logger.info(f"[ENSURE_LOADED] ✅ file_id {file_id} FOUND in memory")
+    Args:
+        file_id: The file identifier
+        thread_id: Conversation thread ID for isolation (defaults to "default" for backward compatibility)
+    """
+    logger.info(f"[ENSURE_LOADED] thread_id={thread_id}, file_id={file_id}")
+    
+    # Get thread-scoped storage
+    dfs = get_conversation_dataframes(thread_id)
+    file_mapping = get_conversation_file_paths(thread_id)
+    
+    logger.info(f"[ENSURE_LOADED] Current dataframes keys in thread: {list(dfs.keys())}")
+    logger.info(f"[ENSURE_LOADED] Current file_paths keys in thread: {list(file_mapping.keys())}")
+    
+    if file_id in dfs:
+        df = dfs[file_id]
+        logger.info(f"[ENSURE_LOADED] ✅ file_id {file_id} FOUND in thread {thread_id}")
         logger.info(f"[ENSURE_LOADED] DataFrame shape: {df.shape}, columns: {df.columns.tolist()}")
         return True
     
-    logger.info(f"[ENSURE_LOADED] ❌ file_id {file_id} NOT in memory, attempting reload from file_manager...")
+    logger.info(f"[ENSURE_LOADED] ❌ file_id {file_id} NOT in thread {thread_id}, attempting reload from file_manager...")
     
     # First try file_paths (our modified version)
-    if file_id in file_paths:
-        file_path = file_paths[file_id]
+    if file_id in file_mapping:
+        file_path = file_mapping[file_id]
         logger.info(f"[ENSURE_LOADED] Found in file_paths: {file_path}")
         try:
             file_ext = Path(file_path).suffix.lower()
@@ -483,7 +513,7 @@ def ensure_file_loaded(file_id: str) -> bool:
                 df = pd.read_csv(file_path)
             else:
                 df = pd.read_excel(file_path)
-            dataframes[file_id] = df
+            dfs[file_id] = df
             logger.info(f"[ENSURE_LOADED] ✅ Reloaded from file_paths. Shape: {df.shape}, columns: {df.columns.tolist()}")
             return True
         except Exception as e:
@@ -724,9 +754,17 @@ async def upload_file(
         else:
             df = pd.read_excel(file_location)
 
-        # Store in memory for pandas operations
+        # Store in thread-scoped memory for pandas operations
+        conversation_thread_id = thread_id or "default"
+        conversation_dataframes = get_conversation_dataframes(conversation_thread_id)
+        conversation_file_paths = get_conversation_file_paths(conversation_thread_id)
+        
+        conversation_dataframes[file_id] = df
+        conversation_file_paths[file_id] = file_location
+        
+        # Also store in global fallback for backward compatibility
         dataframes[file_id] = df
-        file_paths[file_id] = file_location  # Backward compatibility
+        file_paths[file_id] = file_location
 
         # Mark as processed with row/column info
         file_manager.mark_as_processed(
@@ -813,7 +851,11 @@ async def get_summary(file_id: str = Form(...), show_preview: bool = Form(False)
 
 
 @app.post("/query", response_model=ApiResponse)
-async def query_data(file_id: str = Form(...), query: str = Form(...)):
+async def query_data(
+    file_id: str = Form(...), 
+    query: str = Form(...),
+    thread_id: Optional[str] = Form(None)
+):
     """
     Queries or modifies the spreadsheet data.
     
@@ -821,14 +863,21 @@ async def query_data(file_id: str = Form(...), query: str = Form(...)):
     - For assignments (e.g., 'Total = A + B'), uses exec() to modify the dataframe
     
     For complex natural language queries, use the /nl_query endpoint instead.
+    
+    Parameters:
+        file_id: The file identifier
+        query: The pandas query or assignment to execute
+        thread_id: Optional conversation thread ID for isolation
     """
     import re
     
-    if not ensure_file_loaded(file_id):
+    if not ensure_file_loaded(file_id, thread_id or "default"):
         raise HTTPException(status_code=404, detail="File not found.")
     
     try:
-        df = dataframes[file_id]
+        # Get dataframe from thread-scoped storage
+        conversation_dataframes = get_conversation_dataframes(thread_id or "default")
+        df = conversation_dataframes[file_id]
         
         # Detect if query is an assignment (modification) vs a filter
         # Assignment: contains '=' but not '==', '!=', '<=', '>='
@@ -856,8 +905,8 @@ async def query_data(file_id: str = Form(...), query: str = Form(...)):
                 result_df = df.copy()
                 result_df[col_name] = result_df.eval(expression)
                 
-                # Update global state
-                dataframes[file_id] = result_df
+                # Update thread-scoped state
+                conversation_dataframes[file_id] = result_df
                 
                 # Persist to disk
                 file_path = file_paths.get(file_id)
@@ -896,7 +945,7 @@ async def query_data(file_id: str = Form(...), query: str = Form(...)):
 
 
 @app.post("/nl_query", response_model=ApiResponse)
-async def natural_language_query(request: NaturalLanguageQueryRequest):
+async def natural_language_query(request: NaturalLanguageQueryRequest, thread_id: Optional[str] = Form(None)):
     """
     Process a natural language query against the spreadsheet data.
     
@@ -912,17 +961,24 @@ async def natural_language_query(request: NaturalLanguageQueryRequest):
     - "Who has the highest sales in Q1?"
     - "Find all products with price between 10 and 50"
     - "How many orders were placed last month?"
+    
+    Parameters:
+        request: The natural language query request
+        thread_id: Optional conversation thread ID for isolation
     """
-    if not ensure_file_loaded(request.file_id):
+    if not ensure_file_loaded(request.file_id, thread_id or "default"):
         raise HTTPException(status_code=404, detail="File not found.")
     
     try:
-        df = dataframes[request.file_id]
+        # Get dataframe from thread-scoped storage
+        conversation_dataframes = get_conversation_dataframes(thread_id or "default")
+        conversation_file_paths = get_conversation_file_paths(thread_id or "default")
+        df = conversation_dataframes[request.file_id]
         
         logger.info(f"Processing natural language query: {request.question}")
         
-        # Get session context
-        session_context = spreadsheet_session_manager.get_session_context(request.file_id)
+        # Get session context with thread isolation
+        session_context = spreadsheet_session_manager.get_session_context(request.file_id, thread_id or "default")
         
         result = await query_agent.query(
             df=df,
@@ -932,12 +988,15 @@ async def natural_language_query(request: NaturalLanguageQueryRequest):
         )
         
         if result.success and result.final_dataframe is not None:
-            # Update global state with the modified dataframe
+            # Update thread-scoped state with the modified dataframe
+            conversation_dataframes[request.file_id] = result.final_dataframe
+            
+            # Also update global fallback for backward compatibility
             dataframes[request.file_id] = result.final_dataframe
             
             # SAVE TO DISK for persistence
             try:
-                file_path = file_paths.get(request.file_id)
+                file_path = conversation_file_paths.get(request.file_id)
                 if file_path:
                     if str(file_path).lower().endswith('.csv'):
                         result.final_dataframe.to_csv(file_path, index=False)
@@ -947,15 +1006,16 @@ async def natural_language_query(request: NaturalLanguageQueryRequest):
             except Exception as e:
                 logger.error(f"Failed to persist state to disk: {e}")
             
-            # Record conversation turn
+            # Record conversation turn with thread isolation
             spreadsheet_session_manager.add_conversation_turn(
                 file_id=request.file_id,
                 user_message=request.question,
-                agent_response=result.answer
+                agent_response=result.answer,
+                thread_id=thread_id or "default"
             )
             
-            # Record operations
-            current_state = get_dataframe_state(df, Path(file_paths[request.file_id]).name)
+            # Record operations with thread isolation
+            current_state = get_dataframe_state(df, Path(conversation_file_paths[request.file_id]).name)
             for step in result.steps_taken:
                 if step.get("success", False) and step.get("code"):
                     spreadsheet_session_manager.add_operation(
@@ -967,7 +1027,8 @@ async def natural_language_query(request: NaturalLanguageQueryRequest):
                         rows_affected=step.get("result_shape", (0, 0))[0] if isinstance(step.get("result_shape"), tuple) else 0,
                         columns_affected=[],
                         state_before=current_state,  # Approximate since we don't snapshot every step
-                        state_after=current_state
+                        state_after=current_state,
+                        thread_id=thread_id or "default"
                     )
         
         # Generate canvas display if we have data
@@ -975,7 +1036,7 @@ async def natural_language_query(request: NaturalLanguageQueryRequest):
         if result.final_data and isinstance(result.final_data, list):
             # Convert result data back to dataframe for display
             result_df = pd.DataFrame(result.final_data)
-            filename = Path(file_paths[request.file_id]).name
+            filename = Path(conversation_file_paths[request.file_id]).name
             canvas_display = dataframe_to_canvas(
                 df=result_df,
                 title=f"Query Result: {request.question[:50]}...",

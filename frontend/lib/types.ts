@@ -129,7 +129,7 @@ export interface Message {
   };
   // Canvas information for this specific message
   canvas_content?: string;
-  canvas_type?: 'html' | 'markdown';
+  canvas_type?: 'html' | 'markdown' | 'pdf' | 'spreadsheet' | 'email_preview' | 'document' | 'image' | 'json';
   has_canvas?: boolean;
   // Browser automation fields
   is_browser_task?: boolean;

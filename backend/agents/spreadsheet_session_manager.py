@@ -67,17 +67,40 @@ class SpreadsheetSessionManager:
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self._active_sessions: Dict[str, SpreadsheetSession] = {}
     
-    def _get_session_id(self, file_id: str) -> str:
-        """Generate a unique session ID for a spreadsheet."""
-        return hashlib.md5(file_id.encode()).hexdigest()
+    def _get_session_id(self, file_id: str, thread_id: str = None) -> str:
+        """
+        Generate a unique session ID for a spreadsheet.
+        
+        Args:
+            file_id: The file identifier
+            thread_id: Optional conversation thread ID for isolation across conversations
+        
+        Returns:
+            Hash-based session ID that uniquely identifies this spreadsheet in this conversation
+        """
+        if thread_id:
+            combined = f"{thread_id}:{file_id}"
+        else:
+            combined = file_id
+        return hashlib.md5(combined.encode()).hexdigest()
     
     def _get_session_file(self, session_id: str) -> Path:
         """Get the file path for a session."""
         return self.sessions_dir / f"{session_id}.json"
     
-    def get_or_create_session(self, file_id: str, filename: str) -> SpreadsheetSession:
-        """Get existing session or create a new one for a spreadsheet."""
-        session_id = self._get_session_id(file_id)
+    def get_or_create_session(self, file_id: str, filename: str, thread_id: str = None) -> SpreadsheetSession:
+        """
+        Get existing session or create a new one for a spreadsheet.
+        
+        Args:
+            file_id: The file identifier
+            filename: The filename
+            thread_id: Optional conversation thread ID for isolation across conversations
+        
+        Returns:
+            SpreadsheetSession object for this spreadsheet in this conversation
+        """
+        session_id = self._get_session_id(file_id, thread_id)
         
         # Check if session is already loaded in memory
         if session_id in self._active_sessions:
@@ -118,7 +141,7 @@ class SpreadsheetSessionManager:
             operation_history=[],
             conversation_context=[],
             current_state={},
-            metadata={}
+            metadata={'thread_id': thread_id} if thread_id else {}
         )
         self._active_sessions[session_id] = session
         self._save_session(session)
@@ -134,10 +157,25 @@ class SpreadsheetSessionManager:
         rows_affected: int,
         columns_affected: List[str],
         state_before: Dict[str, Any],
-        state_after: Dict[str, Any]
+        state_after: Dict[str, Any],
+        thread_id: str = None
     ):
-        """Record an operation in the session."""
-        session = self.get_or_create_session(file_id, state_after.get('filename', 'unknown'))
+        """
+        Record an operation in the session.
+        
+        Args:
+            file_id: The file identifier
+            operation_type: Type of operation (query, transform, filter, etc.)
+            instruction: Natural language instruction
+            pandas_code: Actual pandas code executed
+            result_summary: Summary of the result
+            rows_affected: Number of rows affected
+            columns_affected: List of columns affected
+            state_before: Dataframe state before operation
+            state_after: Dataframe state after operation
+            thread_id: Optional conversation thread ID
+        """
+        session = self.get_or_create_session(file_id, state_after.get('filename', 'unknown'), thread_id)
         
         operation = SpreadsheetOperation(
             timestamp=datetime.now().isoformat(),
@@ -161,10 +199,19 @@ class SpreadsheetSessionManager:
         self,
         file_id: str,
         user_message: str,
-        agent_response: str
+        agent_response: str,
+        thread_id: str = None
     ):
-        """Add a conversation turn to the session."""
-        session = self.get_or_create_session(file_id, "unknown")
+        """
+        Add a conversation turn to the session.
+        
+        Args:
+            file_id: The file identifier
+            user_message: User's message
+            agent_response: Agent's response
+            thread_id: Optional conversation thread ID
+        """
+        session = self.get_or_create_session(file_id, "unknown", thread_id)
         
         session.conversation_context.append({
             'timestamp': datetime.now().isoformat(),
@@ -175,12 +222,19 @@ class SpreadsheetSessionManager:
         session.last_accessed = datetime.now().isoformat()
         self._save_session(session)
     
-    def get_session_context(self, file_id: str) -> str:
+    def get_session_context(self, file_id: str, thread_id: str = None) -> str:
         """
         Get formatted context for the spreadsheet session.
         Includes operation history and conversation context.
+        
+        Args:
+            file_id: The file identifier
+            thread_id: Optional conversation thread ID
+        
+        Returns:
+            Formatted string with session context
         """
-        session = self.get_or_create_session(file_id, "unknown")
+        session = self.get_or_create_session(file_id, "unknown", thread_id)
         
         context = f"=== SPREADSHEET EDITING SESSION ===\n"
         context += f"File: {session.filename}\n"
@@ -212,9 +266,18 @@ class SpreadsheetSessionManager:
         
         return context
     
-    def get_operation_history(self, file_id: str) -> List[Dict[str, Any]]:
-        """Get a summary of all operations performed on the spreadsheet."""
-        session = self.get_or_create_session(file_id, "unknown")
+    def get_operation_history(self, file_id: str, thread_id: str = None) -> List[Dict[str, Any]]:
+        """
+        Get a summary of all operations performed on the spreadsheet.
+        
+        Args:
+            file_id: The file identifier
+            thread_id: Optional conversation thread ID
+        
+        Returns:
+            List of operation summaries
+        """
+        session = self.get_or_create_session(file_id, "unknown", thread_id)
         
         return [
             {
@@ -248,9 +311,15 @@ class SpreadsheetSessionManager:
         with open(session_file, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False, cls=NumpyEncoder)
     
-    def clear_session(self, file_id: str):
-        """Clear/reset a spreadsheet session."""
-        session_id = self._get_session_id(file_id)
+    def clear_session(self, file_id: str, thread_id: str = None):
+        """
+        Clear/reset a spreadsheet session.
+        
+        Args:
+            file_id: The file identifier
+            thread_id: Optional conversation thread ID
+        """
+        session_id = self._get_session_id(file_id, thread_id)
         session_file = self._get_session_file(session_id)
         
         if session_id in self._active_sessions:

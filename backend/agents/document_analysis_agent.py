@@ -482,11 +482,15 @@ def read_root():
 @app.post("/analyze",
           response_model=AnalyzeDocumentResponse,
           summary="Analyze a Document via RAG")
-def analyze_document(request: AnalyzeDocumentRequest):
+def analyze_document(request: AnalyzeDocumentRequest, thread_id: Optional[str] = None):
     """
     Analyzes a document using a RAG pipeline. It loads a pre-computed FAISS vector store,
     retrieves relevant text chunks based on the user's query, and then uses a Cerebras LLM
     to generate a final answer from that context.
+    
+    Parameters:
+        request: The analyze request with vector store path and query
+        thread_id: Optional conversation thread ID for isolation across conversations
     """
     # 1. Validate that the vector store path exists.
     if not os.path.exists(request.vector_store_path):
@@ -621,10 +625,14 @@ Answer:"""
 @app.post("/display",
           response_model=DisplayDocumentResponse,
           summary="Display a Document in Canvas")
-def display_document(request: DisplayDocumentRequest):
+def display_document(request: DisplayDocumentRequest, thread_id: Optional[str] = None):
     """
     Displays a document (PDF, DOCX, TXT) in the canvas by extracting its content
     and formatting it for display.
+    
+    Parameters:
+        request: The display request with file path
+        thread_id: Optional conversation thread ID for context
     """
     # Normalize path to OS-specific format (handles both forward and backward slashes)
     normalized_path = os.path.normpath(request.file_path)
@@ -807,11 +815,15 @@ def create_document(request: CreateDocumentRequest):
 @app.post("/edit",
           response_model=EditDocumentResponse,
           summary="Edit an Existing Document with Natural Language")
-def edit_document(request: EditDocumentRequest):
+def edit_document(request: EditDocumentRequest, thread_id: Optional[str] = None):
     """
     Edits an existing document using natural language instruction.
     The agent interprets the instruction with full document context and executes appropriate edits.
     Always executes the edit immediately.
+    
+    Parameters:
+        request: The edit request with file path and instruction
+        thread_id: Optional conversation thread ID for isolation across conversations
     """
     # Normalize path to OS-specific format (handles both forward and backward slashes)
     normalized_path = os.path.normpath(request.file_path)
@@ -940,7 +952,21 @@ def edit_document(request: EditDocumentRequest):
             intelligent_editor = IntelligentDocumentEditor(request.file_path)  # Reload
             state_after = intelligent_editor.analyze_current_state()
             
-            # Record edit in session
+            # VALIDATE STATE CHANGE: Verify that the edit actually modified the document
+            # This addresses the unreliable editing issue by confirming changes were applied
+            state_changed = state_before != state_after
+            
+            if not state_changed:
+                logger.warning(f"⚠️  STATE VALIDATION WARNING: Document state did not change after edit.")
+                logger.warning(f"   Actions executed: {[a.get('action') for a in actions]}")
+                logger.warning(f"   Before: {state_before}")
+                logger.warning(f"   After: {state_after}")
+                # Add validation note to results
+                results.append("⚠️  Warning: Document state did not appear to change. Edit may not have been applied correctly.")
+            else:
+                logger.info(f"✅ STATE VALIDATION PASSED: Document state changed as expected after edit")
+            
+# Record edit in session with thread isolation
             session_manager.add_edit_action(
                 document_path=request.file_path,
                 action_type="edit",
@@ -948,14 +974,16 @@ def edit_document(request: EditDocumentRequest):
                 parameters={'actions': actions},
                 result="; ".join(results),
                 state_before=state_before,
-                state_after=state_after
+                state_after=state_after,
+                thread_id=thread_id or "default"
             )
             
-            # Record conversation turn
+            # Record conversation turn with thread isolation
             session_manager.add_conversation_turn(
                 document_path=request.file_path,
                 user_message=request.instruction,
-                agent_response="; ".join(results)
+                agent_response="; ".join(results),
+                thread_id=thread_id or "default"
             )
             
             logger.info(f"✅ All actions executed and recorded in session: {results}")
