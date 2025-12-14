@@ -555,3 +555,43 @@ async def download_file_compat(file_id: str):
 async def get_file_metadata_compat(file_id: str):
     """Backward compatible file metadata endpoint."""
     return await get_content_metadata(file_id)
+
+
+# =============================================================================
+# FILE PROCESSING CACHE ENDPOINTS
+# =============================================================================
+
+@router.get("/cache/stats")
+async def get_file_cache_stats():
+    """
+    Get statistics about the file processing cache.
+    
+    Returns:
+    - cached_files: Number of files in cache
+    - cache_keys: List of cache keys (file:hash pairs)
+    """
+    from services.file_processor import file_processor
+    
+    stats = file_processor.get_cache_stats()
+    return {
+        "status": "success",
+        "cache_enabled": True,
+        "cached_files": stats['cached_files'],
+        "cache_keys": stats['cache_keys']
+    }
+
+
+@router.post("/cache/clear")
+async def clear_file_cache():
+    """
+    Clear the file processing cache.
+    Use this to force re-processing of all documents.
+    """
+    from services.file_processor import file_processor
+    
+    file_processor.clear_cache()
+    return {
+        "status": "success",
+        "message": "File cache cleared"
+    }
+

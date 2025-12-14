@@ -755,10 +755,12 @@ def save_plan_to_file(state: dict):
 # --- NEW NODE: Preprocess Files ---
 async def preprocess_files(state: State):
     '''
-    Processes uploaded files. For images, it now only confirms the path.
-    For documents, it creates the vector store AND displays them in canvas automatically.
+    Processes uploaded files asynchronously with caching.
+    - Images: Validates path only
+    - Documents: Creates vector store + displays (async + cached)
+    - Spreadsheets: Uploads to agent + displays (async)
     '''
-    logger.info("Starting file preprocessing...")
+    logger.info("⚡ Starting ASYNC file preprocessing...")
     logger.info(f"🔍 PREPROCESS_FILES ENTRY: State keys = {list(state.keys())}")
     logger.info(f"🔍 PREPROCESS_FILES ENTRY: uploaded_files in state = {'uploaded_files' in state}")
     uploaded_files = state.get("uploaded_files", [])
@@ -768,166 +770,76 @@ async def preprocess_files(state: State):
         logger.info("No files to preprocess.")
         return state
 
-    processed_files = []
-    canvas_displays = []  # Collect canvas displays for uploaded documents
+    # Import the async file processor
+    from services.file_processor import file_processor
     
-    # Convert dictionaries from state back to Pydantic objects for safe access
+    # Separate files by type for batch processing
+    image_files = []
+    document_files = []
+    spreadsheet_files = []
+    canvas_displays = []  # Collect canvas displays
+    
+    # Convert dictionaries from state back to Pydantic objects
     for idx, file_obj_dict in enumerate(uploaded_files):
-        logger.info(f"📄 Processing file {idx+1}/{len(uploaded_files)}: {file_obj_dict.get('file_name', 'unknown')}, type={file_obj_dict.get('file_type', 'unknown')}")
         try:
             file_obj = FileObject.model_validate(file_obj_dict)
-            logger.info(f"📄 Validated FileObject: name={file_obj.file_name}, type={file_obj.file_type}, path={file_obj.file_path}")
+            logger.info(f"📄 File {idx+1}/{len(uploaded_files)}: {file_obj.file_name}, type={file_obj.file_type}")
             
-            # For images, we just ensure the path is valid and pass it along.
-            # The image agent is responsible for reading and encoding.
             if file_obj.file_type == 'image':
-                logger.info(f"📄 File is image type, skipping display")
-                if not os.path.exists(file_obj.file_path):
-                    logger.warning(f"Image file not found at path: {file_obj.file_path}. Skipping.")
-                    continue
-                # No other action is needed for images here.
-            
-            # For spreadsheets, upload to agent and auto-display in canvas
-            elif file_obj.file_type == 'spreadsheet':
-                logger.info(f"📊 File is spreadsheet type, will upload and display")
-                
-                # CRITICAL FIX: If file already has a file_id from previous turn, SKIP re-upload
-                # This preserves modifications made by the spreadsheet agent in previous operations
-                existing_file_id = file_obj.file_id or file_obj.content_id
-                if existing_file_id:
-                    logger.info(f"📊 SKIPPING re-upload - file already has file_id: {existing_file_id}")
-                    logger.info(f"📊 Reusing existing file_id to preserve modifications from previous turns")
-                    processed_files.append(file_obj)
-                    continue
-                
-                if not os.path.exists(file_obj.file_path):
-                    logger.warning(f"Spreadsheet file not found at path: {file_obj.file_path}. Skipping.")
-                    continue
-                
-                # Upload to spreadsheet agent and capture canvas_display
-                try:
-                    import mimetypes
-                    mime_type, _ = mimetypes.guess_type(file_obj.file_name)
-                    mime_type = mime_type or 'application/octet-stream'
-                    
-                    with open(file_obj.file_path, 'rb') as f:
-                        file_content = f.read()
-                    
-                    async with httpx.AsyncClient(timeout=60.0) as client:
-                        logger.info(f"📊 Uploading spreadsheet to http://localhost:8041/upload")
-                        files = {"file": (file_obj.file_name, file_content, mime_type)}
-                        response = await client.post("http://localhost:8041/upload", files=files)
-                        
-                        logger.info(f"📊 Spreadsheet agent /upload response status: {response.status_code}")
-                        
-                        if response.status_code == 200:
-                            upload_result = response.json()
-                            logger.info(f"📊 Spreadsheet upload result: {str(upload_result)[:500]}")
-                            
-                            # Extract canvas_display from the nested result
-                            result_data = upload_result.get('result', {})
-                            canvas_display = result_data.get('canvas_display') if isinstance(result_data, dict) else None
-                            
-                            # Store the agent's file_id for use by subsequent operations
-                            agent_file_id = result_data.get('file_id') if isinstance(result_data, dict) else None
-                            if agent_file_id:
-                                # Store in file_obj's content_id field (this is the standard field for agent IDs)
-                                file_obj.content_id = agent_file_id
-                                file_obj.file_id = agent_file_id
-                                logger.info(f"📊 Spreadsheet agent assigned file_id: {agent_file_id}, stored in file_obj.content_id")
-                            
-                            if canvas_display:
-                                canvas_displays.append(canvas_display)
-                                logger.info(f"✅ Spreadsheet displayed in canvas: {file_obj.file_name}, canvas_type={canvas_display.get('canvas_type')}")
-                            else:
-                                logger.warning(f"❌ No canvas_display in upload response for {file_obj.file_name}")
-                        else:
-                            logger.warning(f"❌ Failed to upload spreadsheet: {response.status_code}, response: {response.text}")
-                            
-                except Exception as upload_err:
-                    logger.error(f"❌ EXCEPTION uploading spreadsheet {file_obj.file_name}: {type(upload_err).__name__}: {upload_err}", exc_info=True)
-                
-                logger.info(f"📊 Spreadsheet ready for processing: {file_obj.file_name}")
-            
-            # For documents, we perform the full RAG preprocessing AND display them
-            elif file_obj.file_type == 'document':
-                logger.info(f"📄 File is document type, will process and display")
-                logger.info(f"📄 Detected document type for: {file_obj.file_name}")
-                file_path = file_obj.file_path
-                if not os.path.exists(file_path):
-                    logger.warning(f"Document file not found at path: {file_path}. Skipping.")
-                    continue
-
-                logger.info(f"📄 Processing document: {file_path}")
-                ext = os.path.splitext(file_path)[1].lower()
-                
-                # Select the appropriate document loader based on file extension
-                if ext == ".pdf":
-                    loader = PyPDFLoader(file_path)
-                elif ext == ".docx":
-                    loader = Docx2txtLoader(file_path)
+                # Images: just validate path
+                if os.path.exists(file_obj.file_path):
+                    image_files.append(file_obj)
                 else:
-                    loader = TextLoader(file_path)
+                    logger.warning(f"Image not found: {file_obj.file_path}")
+            elif file_obj.file_type == 'document':
+                document_files.append(file_obj)
+            elif file_obj.file_type == 'spreadsheet':
+                spreadsheet_files.append(file_obj)
                 
-                logger.info(f"📄 Loading document with {type(loader).__name__}")
-                documents = loader.load()
-                logger.info(f"📄 Loaded {len(documents)} document(s), total chars: {sum(len(d.page_content) for d in documents)}")
-                
-                if not documents or sum(len(d.page_content) for d in documents) == 0:
-                    logger.error(f"❌ Document {file_obj.file_name} is empty or failed to load. Skipping vector store creation.")
-                    # Still add the file to processed_files but without vector store
-                    processed_files.append(file_obj)
-                    continue
-                
-                text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-                texts = text_splitter.split_documents(documents)
-                logger.info(f"📄 Split into {len(texts)} text chunks")
-                
-                # Create vector embeddings and save to a FAISS index
-                vector_store = FAISS.from_documents(texts, get_hf_embeddings())
-                index_path = f"storage/vector_store/{os.path.basename(file_path)}.faiss"
-                vector_store.save_local(index_path)
-                
-                # Add the path to the vector store to our file object
-                file_obj.vector_store_path = index_path
-                logger.info(f"Document processed. Vector store saved to: {index_path}")
-                
-                # Automatically display the document in canvas
-                logger.info(f"📄 Auto-displaying uploaded document: {file_obj.file_name}")
-                logger.info(f"📄 Calling document agent /display endpoint for: {file_path}")
-                
-                try:
-                    # Call document agent's display endpoint
-                    async with httpx.AsyncClient(timeout=30.0) as client:
-                        logger.info(f"📄 Making POST request to http://localhost:8070/display")
-                        response = await client.post(
-                            "http://localhost:8070/display",
-                            json={"file_path": file_path}
-                        )
-                        
-                        logger.info(f"📄 Document agent /display response status: {response.status_code}")
-                        logger.info(f"📄 Document agent /display response body: {response.text[:500]}")
-                        
-                        if response.status_code == 200:
-                            display_result = response.json()
-                            canvas_display = display_result.get("canvas_display")
-                            logger.info(f"📄 Canvas display from /display: type={canvas_display.get('canvas_type') if canvas_display else 'None'}")
-                            if canvas_display:
-                                canvas_displays.append(canvas_display)
-                                logger.info(f"✅ Document displayed in canvas: {file_obj.file_name}, canvas_type={canvas_display.get('canvas_type')}")
-                        else:
-                            logger.warning(f"❌ Failed to display document: {response.status_code}, response: {response.text}")
-                            
-                except Exception as display_err:
-                    logger.error(f"❌ EXCEPTION calling /display for {file_obj.file_name}: {type(display_err).__name__}: {display_err}", exc_info=True)
-
-            processed_files.append(file_obj)
-
         except Exception as e:
-            logger.error(f"Failed to process file {file_obj_dict.get('file_name', 'N/A')}: {e}", exc_info=True)
+            logger.error(f"Failed to validate file {file_obj_dict.get('file_name')}: {e}")
             continue
     
-    # If we have canvas displays, set them in state
+    # Process all files concurrently (with limit of 3 concurrent)
+    all_files_to_process = document_files + spreadsheet_files
+    logger.info(f"⚡ Processing {len(all_files_to_process)} files async ({len(document_files)} docs, {len(spreadsheet_files)} sheets)")
+    
+    if all_files_to_process:
+        processing_results = await file_processor.process_files_batch(
+            all_files_to_process,
+            max_concurrent=3
+        )
+        
+        # Update file objects with processing results
+        for file_obj, result in zip(all_files_to_process, processing_results):
+            if 'error' in result:
+                logger.error(f"❌ Processing failed for {file_obj.file_name}: {result['error']}")
+                continue
+            
+            # Update file object with results
+            if file_obj.file_type == 'document':
+                file_obj.vector_store_path = result.get('vector_store_path')
+                logger.info(f"✅ Document processed: {file_obj.file_name} "
+                          f"({result.get('chunks_count')} chunks, "
+                          f"{result.get('processing_time', 0):.2f}s, "
+                          f"cached={result.get('cached', False)})")
+            elif file_obj.file_type == 'spreadsheet':
+                file_id = result.get('file_id')
+                if file_id:
+                    file_obj.file_id = file_id
+                    file_obj.content_id = file_id
+                    logger.info(f"✅ Spreadsheet uploaded: {file_obj.file_name} "
+                              f"(file_id={file_id}, cached={result.get('cached', False)})")
+            
+            # Collect canvas displays
+            canvas_display = result.get('canvas_display')
+            if canvas_display:
+                canvas_displays.append(canvas_display)
+    
+    # Combine all processed files
+    processed_files = image_files + all_files_to_process
+    
+    # Prepare result with canvas displays
     result = {"uploaded_files": [pf.model_dump(mode='json', exclude_none=True) for pf in processed_files]}
     logger.info(f"🔍 PREPROCESS_FILES: Returning {len(processed_files)} uploaded files to state")
     logger.info(f"🔍 PREPROCESS_FILES: uploaded_files={result['uploaded_files']}")
@@ -1932,18 +1844,32 @@ def plan_execution(state: State, config: RunnableConfig):
                             
                             # Auto-inject vector_store_path for document tasks
                             logger.info(f"🔍 Checking {len(uploaded_files)} files for vector_store_path injection")
+                            
+                            # Collect ALL vector store paths for documents
+                            vector_store_paths = []
                             for file_obj in uploaded_files:
                                 file_dict = file_obj if isinstance(file_obj, dict) else (file_obj.__dict__ if hasattr(file_obj, '__dict__') else {})
                                 logger.info(f"🔍 File: {file_dict.get('file_name')}, type={file_dict.get('file_type')}, has_vector_store={bool(file_dict.get('vector_store_path'))}")
                                 if file_dict.get('file_type') == 'document' and file_dict.get('vector_store_path'):
+                                    vector_store_paths.append(file_dict['vector_store_path'])
+                            
+                            # Inject ALL vector store paths (not just first one)
+                            if vector_store_paths:
+                                if len(vector_store_paths) == 1:
+                                    # Single document: use vector_store_path (backward compatible)
                                     if 'vector_store_path' not in task.primary.payload:
-                                        task.primary.payload['vector_store_path'] = file_dict['vector_store_path']
-                                        logger.info(f"✅ AUTO-INJECTED vector_store_path for '{task.task_name}': {file_dict['vector_store_path']}")
-                                    else:
-                                        logger.info(f"⏭️ vector_store_path already in payload, skipping injection")
-                                    break
+                                        task.primary.payload['vector_store_path'] = vector_store_paths[0]
+                                        logger.info(f"✅ AUTO-INJECTED vector_store_path for '{task.task_name}': {vector_store_paths[0]}")
                                 else:
-                                    logger.info(f"⏭️ Skipping file (not document or no vector_store_path)")
+                                    # Multiple documents: use vector_store_paths array
+                                    if 'vector_store_paths' not in task.primary.payload:
+                                        task.primary.payload['vector_store_paths'] = vector_store_paths
+                                        logger.info(f"✅ AUTO-INJECTED {len(vector_store_paths)} vector_store_paths for '{task.task_name}'")
+                                        logger.info(f"   Files: {[os.path.basename(p) for p in vector_store_paths]}")
+                                    else:
+                                        logger.info(f"⏭️ vector_store_paths already in payload, skipping injection")
+                            else:
+                                logger.info(f"⏭️ No document files with vector stores found")
                             
                             # Auto-inject query if not provided
                             if 'query' not in task.primary.payload:
@@ -2876,7 +2802,16 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                     }
                 
                 # Not a browser agent - use standard synchronous call
-                timeout_seconds = 30.0
+                # Increase timeout for document agents when files are present
+                has_uploaded_files = state.get('uploaded_files', [])
+                is_document_agent = 'document' in agent_details.name.lower() or 'analyze' in planned_task.task_name.lower()
+                
+                if has_uploaded_files and is_document_agent:
+                    # Use very long timeout for document analysis with multiple files
+                    timeout_seconds = 300.0  # 5 minutes for analyzing multiple large PDFs
+                    logger.info(f"📄 Using extended timeout ({timeout_seconds}s) for document agent with {len(has_uploaded_files)} files")
+                else:
+                    timeout_seconds = 30.0  # Standard timeout
                 
                 # OPTIMIZATION: Check cache for GET requests
                 if http_method == 'GET':

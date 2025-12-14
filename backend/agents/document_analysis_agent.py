@@ -70,8 +70,9 @@ app = FastAPI(
 # --- Pydantic Models for API Data Validation ---
 class AnalyzeDocumentRequest(BaseModel):
     """Defines the expected input for the /analyze endpoint."""
-    vector_store_path: str = Field(..., description="The file path to the FAISS vector store index for the document.")
-    query: str = Field(..., description="The user's question about the document.")
+    vector_store_path: Optional[str] = Field(None, description="Path to single FAISS vector store (backward compatible)")
+    vector_store_paths: Optional[List[str]] = Field(None, description="Paths to multiple FAISS vector stores for multi-document analysis")
+    query: str = Field(..., description="The user's question about the document(s).")
 
 class AnalyzeDocumentResponse(BaseModel):
     """Defines the output format for the /analyze endpoint."""
@@ -152,10 +153,10 @@ def extract_document_content(file_path: str) -> tuple[str, str]:
         return content, 'docx'
     
     elif file_ext == '.pdf':
-        import PyPDF2
+        from pypdf import PdfReader
         content = []
         with open(file_path, 'rb') as f:
-            pdf_reader = PyPDF2.PdfReader(f)
+            pdf_reader = PdfReader(f)
             for page in pdf_reader.pages:
                 content.append(page.extract_text())
         return '\n'.join(content), 'pdf'
@@ -481,24 +482,38 @@ def read_root():
 
 @app.post("/analyze",
           response_model=AnalyzeDocumentResponse,
-          summary="Analyze a Document via RAG")
+          summary="Analyze Document(s) via RAG")
 def analyze_document(request: AnalyzeDocumentRequest, thread_id: Optional[str] = None):
     """
-    Analyzes a document using a RAG pipeline. It loads a pre-computed FAISS vector store,
-    retrieves relevant text chunks based on the user's query, and then uses a Cerebras LLM
-    to generate a final answer from that context.
+    Analyzes one or multiple documents using a RAG pipeline. It loads pre-computed FAISS vector stores,
+    retrieves relevant text chunks based on the user's query, and generates a final answer.
     
-    Parameters:
-        request: The analyze request with vector store path and query
-        thread_id: Optional conversation thread ID for isolation across conversations
+    Supports both single document (vector_store_path) and multiple documents (vector_store_paths).
     """
-    # 1. Validate that the vector store path exists.
-    if not os.path.exists(request.vector_store_path):
-        logger.error(f"Document vector store not found at path: {request.vector_store_path}")
+    # Determine which paths to use (support both single and multi-document)
+    vector_store_paths_to_load = []
+    if request.vector_store_paths:
+        # Multiple documents provided
+        vector_store_paths_to_load = request.vector_store_paths
+        logger.info(f"Processing {len(vector_store_paths_to_load)} documents")
+    elif request.vector_store_path:
+        # Single document provided (backward compatibility)
+        vector_store_paths_to_load = [request.vector_store_path]
+        logger.info(f"Processing single document")
+    else:
         raise HTTPException(
-            status_code=404,
-            detail=f"Document vector store not found at path: {request.vector_store_path}"
+            status_code=400,
+            detail="Either vector_store_path or vector_store_paths must be provided"
         )
+    
+    # Validate that all vector stores exist
+    for vsp in vector_store_paths_to_load:
+        if not os.path.exists(vsp):
+            logger.error(f"Document vector store not found at path: {vsp}")
+            raise HTTPException(
+                status_code=404,
+                detail=f"Document vector store not found at path: {vsp}"
+            )
 
     try:
         # Lazy import heavy dependencies
@@ -507,24 +522,35 @@ def analyze_document(request: AnalyzeDocumentRequest, thread_id: Optional[str] =
         from langchain_core.output_parsers import StrOutputParser
         from langchain_core.runnables import RunnablePassthrough
         
-        # 2. Load the vector store from the path provided by the orchestrator.
-        # This is the core of the RAG pipeline's retrieval step.
-        # The `allow_dangerous_deserialization` flag is required for FAISS with pickle.
-        logger.info(f"Loading vector store from: {request.vector_store_path}")
-        
         # Get the lazy-loaded embeddings and LLM
         embeddings = get_embeddings()
         llm_instance = get_llm()
         
-        vector_store = FAISS.load_local(
-            request.vector_store_path,
-            embeddings,
-            allow_dangerous_deserialization=True
-        )
+        # Load and merge all vector stores
+        logger.info(f"Loading {len(vector_store_paths_to_load)} vector store(s)")
+        combined_vector_store = None
+        
+        for idx, vsp in enumerate(vector_store_paths_to_load):
+            logger.info(f"Loading vector store {idx+1}/{len(vector_store_paths_to_load)}: {os.path.basename(vsp)}")
+            vs = FAISS.load_local(
+                vsp,
+                embeddings,
+                allow_dangerous_deserialization=True
+            )
+            
+            if combined_vector_store is None:
+                combined_vector_store = vs
+            else:
+                # Merge this vector store into the combined one
+                combined_vector_store.merge_from(vs)
+                logger.info(f"Merged vector store {idx+1} into combined store")
+        
+        logger.info(f"Combined vector store ready with documents from {len(vector_store_paths_to_load)} files")
+
+        logger.info(f"Combined vector store ready with documents from {len(vector_store_paths_to_load)} files")
 
         # 3. Create a modern RAG chain using LCEL (LangChain Expression Language)
-        # This replaces the deprecated RetrievalQA chain
-        retriever = vector_store.as_retriever(search_kwargs={"k": 5})
+        retriever = combined_vector_store.as_retriever(search_kwargs={"k": 5})
         
         # Define the prompt template for RAG
         template = """Answer the question based only on the following context:
