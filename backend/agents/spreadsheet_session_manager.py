@@ -100,48 +100,49 @@ class SpreadsheetSessionManager:
         Returns:
             SpreadsheetSession object for this spreadsheet in this conversation
         """
-        session_id = self._get_session_id(file_id, thread_id)
-        
-        # Check if session is already loaded in memory
-        if session_id in self._active_sessions:
-            session = self._active_sessions[session_id]
-            session.last_accessed = datetime.now().isoformat()
-            return session
-        
-        # Try to load from disk
-        session_file = self._get_session_file(session_id)
-        if session_file.exists():
-            with open(session_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                # Reconstruct SpreadsheetOperation objects
-                operation_history = [
-                    SpreadsheetOperation(**op) for op in data.get('operation_history', [])
-                ]
-                session = SpreadsheetSession(
-                    file_id=data['file_id'],
-                    filename=data['filename'],
-                    session_id=data['session_id'],
-                    created_at=data['created_at'],
-                    last_accessed=datetime.now().isoformat(),
-                    operation_history=operation_history,
-                    conversation_context=data.get('conversation_context', []),
-                    current_state=data.get('current_state', {}),
-                    metadata=data.get('metadata', {})
-                )
-                self._active_sessions[session_id] = session
+        with self._session_lock:  # LOCK: Protect session access
+            session_id = self._get_session_id(file_id, thread_id)
+            
+            # Check if session is already loaded in memory
+            if session_id in self._active_sessions:
+                session = self._active_sessions[session_id]
+                session.last_accessed = datetime.now().isoformat()
                 return session
-        
-        # Create new session
-        session = SpreadsheetSession(
-            file_id=file_id,
-            filename=filename,
-            session_id=session_id,
-            created_at=datetime.now().isoformat(),
-            last_accessed=datetime.now().isoformat(),
-            operation_history=[],
-            conversation_context=[],
-            current_state={},
-            metadata={'thread_id': thread_id} if thread_id else {}
+            
+            # Try to load from disk
+            session_file = self._get_session_file(session_id)
+            if session_file.exists():
+                with open(session_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    # Reconstruct SpreadsheetOperation objects
+                    operation_history = [
+                        SpreadsheetOperation(**op) for op in data.get('operation_history', [])
+                    ]
+                    session = SpreadsheetSession(
+                        file_id=data['file_id'],
+                        filename=data['filename'],
+                        session_id=data['session_id'],
+                        created_at=data['created_at'],
+                        last_accessed=datetime.now().isoformat(),
+                        operation_history=operation_history,
+                        conversation_context=data.get('conversation_context', []),
+                        current_state=data.get('current_state', {}),
+                        metadata=data.get('metadata', {})
+                    )
+                    self._active_sessions[session_id] = session
+                    return session
+            
+            # Create new session
+            session = SpreadsheetSession(
+                file_id=file_id,
+                filename=filename,
+                session_id=session_id,
+                created_at=datetime.now().isoformat(),
+                last_accessed=datetime.now().isoformat(),
+                operation_history=[],
+                conversation_context=[],
+                current_state={},
+                metadata={'thread_id': thread_id} if thread_id else {}
         )
         self._active_sessions[session_id] = session
         self._save_session(session)
@@ -177,23 +178,24 @@ class SpreadsheetSessionManager:
         """
         session = self.get_or_create_session(file_id, state_after.get('filename', 'unknown'), thread_id)
         
-        operation = SpreadsheetOperation(
-            timestamp=datetime.now().isoformat(),
-            operation_type=operation_type,
-            instruction=instruction,
-            pandas_code=pandas_code,
-            result_summary=result_summary,
-            rows_affected=rows_affected,
-            columns_affected=columns_affected,
-            dataframe_state_before=state_before,
-            dataframe_state_after=state_after
-        )
-        
-        session.operation_history.append(operation)
-        session.current_state = state_after
-        session.last_accessed = datetime.now().isoformat()
-        
-        self._save_session(session)
+        with self._session_lock:  # LOCK: Protect session modifications
+            operation = SpreadsheetOperation(
+                timestamp=datetime.now().isoformat(),
+                operation_type=operation_type,
+                instruction=instruction,
+                pandas_code=pandas_code,
+                result_summary=result_summary,
+                rows_affected=rows_affected,
+                columns_affected=columns_affected,
+                dataframe_state_before=state_before,
+                dataframe_state_after=state_after
+            )
+            
+            session.operation_history.append(operation)
+            session.current_state = state_after
+            session.last_accessed = datetime.now().isoformat()
+            
+            self._save_session(session)
     
     def add_conversation_turn(
         self,

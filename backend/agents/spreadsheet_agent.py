@@ -557,6 +557,10 @@ def get_dataframe_state(df: pd.DataFrame, filename: str = "unknown") -> Dict[str
 # Global query agent instance
 query_agent = SpreadsheetQueryAgent()
 
+# ADD: Async lock for spreadsheet operations (prevent concurrent pandas ops on same df)
+from asyncio import Lock as AsyncLock
+spreadsheet_operation_lock = AsyncLock()
+
 
 async def generate_modification_code(df: pd.DataFrame, instruction: str) -> Optional[str]:
     """

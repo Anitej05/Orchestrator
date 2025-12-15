@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, asdict
 import hashlib
+from threading import Lock
 
 @dataclass
 class EditAction:
@@ -54,6 +55,7 @@ class DocumentSessionManager:
         self.sessions_dir = Path(sessions_dir)
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self._active_sessions: Dict[str, DocumentSession] = {}
+        self._session_lock = Lock()  # ADD: Thread-safe concurrent access
     
     def _get_session_id(self, document_path: str, thread_id: str = None) -> str:
         """Generate a unique session ID for a document.
@@ -90,52 +92,53 @@ class DocumentSessionManager:
         Returns:
             DocumentSession object for this document in this conversation
         """
-        session_id = self._get_session_id(document_path, thread_id)
-        
-        # Check if session is already loaded in memory
-        if session_id in self._active_sessions:
-            session = self._active_sessions[session_id]
-            session.last_accessed = datetime.now().isoformat()
-            return session
-        
-        # Try to load from disk
-        session_file = self._get_session_file(session_id)
-        if session_file.exists():
-            with open(session_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                # Reconstruct EditAction objects
-                edit_history = [
-                    EditAction(**action) for action in data.get('edit_history', [])
-                ]
-                session = DocumentSession(
-                    document_path=data['document_path'],
-                    document_name=data['document_name'],
-                    session_id=data['session_id'],
-                    created_at=data['created_at'],
-                    last_accessed=datetime.now().isoformat(),
-                    edit_history=edit_history,
-                    conversation_context=data.get('conversation_context', []),
-                    current_structure=data.get('current_structure', {}),
-                    metadata=data.get('metadata', {})
-                )
-                self._active_sessions[session_id] = session
+        with self._session_lock:  # LOCK: Protect session access
+            session_id = self._get_session_id(document_path, thread_id)
+            
+            # Check if session is already loaded in memory
+            if session_id in self._active_sessions:
+                session = self._active_sessions[session_id]
+                session.last_accessed = datetime.now().isoformat()
                 return session
-        
-        # Create new session
-        session = DocumentSession(
-            document_path=document_path,
-            document_name=document_name,
-            session_id=session_id,
-            created_at=datetime.now().isoformat(),
-            last_accessed=datetime.now().isoformat(),
-            edit_history=[],
-            conversation_context=[],
-            current_structure={},
-            metadata={'thread_id': thread_id} if thread_id else {}
-        )
-        self._active_sessions[session_id] = session
-        self._save_session(session)
-        return session
+            
+            # Try to load from disk
+            session_file = self._get_session_file(session_id)
+            if session_file.exists():
+                with open(session_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    # Reconstruct EditAction objects
+                    edit_history = [
+                        EditAction(**action) for action in data.get('edit_history', [])
+                    ]
+                    session = DocumentSession(
+                        document_path=data['document_path'],
+                        document_name=data['document_name'],
+                        session_id=data['session_id'],
+                        created_at=data['created_at'],
+                        last_accessed=datetime.now().isoformat(),
+                        edit_history=edit_history,
+                        conversation_context=data.get('conversation_context', []),
+                        current_structure=data.get('current_structure', {}),
+                        metadata=data.get('metadata', {})
+                    )
+                    self._active_sessions[session_id] = session
+                    return session
+            
+            # Create new session
+            session = DocumentSession(
+                document_path=document_path,
+                document_name=document_name,
+                session_id=session_id,
+                created_at=datetime.now().isoformat(),
+                last_accessed=datetime.now().isoformat(),
+                edit_history=[],
+                conversation_context=[],
+                current_structure={},
+                metadata={'thread_id': thread_id} if thread_id else {}
+            )
+            self._active_sessions[session_id] = session
+            self._save_session(session)
+            return session
     
     def add_edit_action(
         self,
@@ -163,19 +166,20 @@ class DocumentSessionManager:
         """
         session = self.get_or_create_session(document_path, Path(document_path).name, thread_id)
         
-        action = EditAction(
-            timestamp=datetime.now().isoformat(),
-            action_type=action_type,
-            instruction=instruction,
-            parameters=parameters,
-            result=result,
-            document_state_before=state_before,
-            document_state_after=state_after
-        )
-        
-        session.edit_history.append(action)
-        session.current_structure = state_after
-        session.last_accessed = datetime.now().isoformat()
+        with self._session_lock:  # LOCK: Protect session modifications
+            action = EditAction(
+                timestamp=datetime.now().isoformat(),
+                action_type=action_type,
+                instruction=instruction,
+                parameters=parameters,
+                result=result,
+                document_state_before=state_before,
+                document_state_after=state_after
+            )
+            
+            session.edit_history.append(action)
+            session.current_structure = state_after
+            session.last_accessed = datetime.now().isoformat()
         
         self._save_session(session)
     

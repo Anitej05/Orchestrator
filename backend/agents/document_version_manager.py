@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 import logging
+from threading import Lock
 
 logger = logging.getLogger(__name__)
 
@@ -18,20 +19,24 @@ class DocumentVersionManager:
         self.base_dir = base_dir
         os.makedirs(base_dir, exist_ok=True)
         self.version_index_file = os.path.join(base_dir, "version_index.json")
+        self.index: Dict[str, Any] = {}
+        self._index_lock = Lock()  # Initialize lock BEFORE using it
         self._load_index()
     
     def _load_index(self):
-        """Load the version index from disk."""
-        if os.path.exists(self.version_index_file):
-            with open(self.version_index_file, 'r') as f:
-                self.index = json.load(f)
-        else:
-            self.index = {}
+        """Load the version index from disk with thread safety."""
+        with self._index_lock:  # Now safe to use
+            if os.path.exists(self.version_index_file):
+                with open(self.version_index_file, 'r') as f:
+                    self.index = json.load(f)
+            else:
+                self.index = {}
     
     def _save_index(self):
-        """Save the version index to disk."""
-        with open(self.version_index_file, 'w') as f:
-            json.dump(self.index, f, indent=2)
+        """Save the version index to disk with thread safety."""
+        with self._index_lock:  # ADD: Lock to prevent concurrent writes
+            with open(self.version_index_file, 'w') as f:
+                json.dump(self.index, f, indent=2)
     
     def _get_document_key(self, file_path: str) -> str:
         """Generate a unique key for a document."""
@@ -39,10 +44,11 @@ class DocumentVersionManager:
     
     def save_version(self, file_path: str, description: str = "Edit") -> str:
         """
-        Save a version of the document.
+        Save a version of the document with thread-safe index updates.
         Returns the version ID.
         """
-        doc_key = self._get_document_key(file_path)
+        with self._index_lock:  # ADD: Lock entire save operation
+            doc_key = self._get_document_key(file_path)
         
         # Initialize document history if not exists
         if doc_key not in self.index:
