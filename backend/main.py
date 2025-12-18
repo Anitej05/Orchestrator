@@ -3594,22 +3594,14 @@ def start_agents_async():
 @app.on_event("startup")
 async def startup_event():
     """Start agents, background health checker, and workflow scheduler on app startup"""
-    # Run database migrations automatically
+    # Create database tables if they don't exist
     try:
-        logger.info("🔄 Checking for pending database migrations...")
-        import subprocess
-        result = subprocess.run(
-            ["alembic", "upgrade", "head"],
-            capture_output=True,
-            text=True,
-            cwd=os.path.dirname(os.path.abspath(__file__))
-        )
-        if result.returncode == 0:
-            logger.info("✅ Database migrations applied successfully")
-        else:
-            logger.warning(f"⚠️  Migration warning: {result.stderr}")
+        logger.info("🔧 Ensuring database tables exist...")
+        from manage import create_tables
+        create_tables()
+        logger.info("✅ Database tables ready")
     except Exception as e:
-        logger.error(f"❌ Failed to run migrations: {str(e)}", exc_info=True)
+        logger.error(f"❌ Failed to create tables: {str(e)}", exc_info=True)
     
     # Sync agent definitions from Agent_entries/*.json to database
     try:

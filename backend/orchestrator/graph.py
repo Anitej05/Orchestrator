@@ -101,7 +101,7 @@ capture_agent_output_files = capture_agent_outputs if CONTENT_INTEGRATION_ENABLE
 # --- Imports for Document Processing ---
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import (
     PyPDFLoader,
     TextLoader,
@@ -2494,22 +2494,31 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
         '''
     
     # OPTIMIZATION: Check if we can skip LLM payload generation
-    # Get pre-extracted parameters from the task
+    # PRIORITY 1: Use payload from PlannedTask.primary.payload (set by plan_execution node with auto-injections)
+    # PRIORITY 2: Fall back to pre-extracted parameters from parsed_tasks
     pre_extracted_params = {}
-    for task in state.get('parsed_tasks', []):
-        if task.task_name == planned_task.task_name:
-            pre_extracted_params = task.parameters or {}
-            break
+    
+    # Check if the planned task already has a payload (from plan_execution node)
+    if hasattr(planned_task, 'primary') and planned_task.primary and hasattr(planned_task.primary, 'payload') and planned_task.primary.payload:
+        pre_extracted_params = planned_task.primary.payload.copy()
+        logger.info(f"✅ Using payload from PlannedTask.primary.payload: {list(pre_extracted_params.keys())}")
+    else:
+        # Fall back to parsed_tasks parameters
+        for task in state.get('parsed_tasks', []):
+            if task.task_name == planned_task.task_name:
+                pre_extracted_params = task.parameters or {}
+                break
     
     # AUTO-INJECT: Automatically add vector_store_path for document tasks if files are uploaded
+    # Only inject single file path if vector_store_paths (plural) is not already set
     if uploaded_files and 'vector_store_path' in [p.name for p in selected_endpoint.parameters]:
-        for file_obj in uploaded_files:
-            file_dict = file_obj if isinstance(file_obj, dict) else file_obj.__dict__
-            if file_dict.get('file_type') == 'document' and file_dict.get('vector_store_path'):
-                if 'vector_store_path' not in pre_extracted_params:
+        if 'vector_store_paths' not in pre_extracted_params and 'vector_store_path' not in pre_extracted_params:
+            for file_obj in uploaded_files:
+                file_dict = file_obj if isinstance(file_obj, dict) else file_obj.__dict__
+                if file_dict.get('file_type') == 'document' and file_dict.get('vector_store_path'):
                     pre_extracted_params['vector_store_path'] = file_dict['vector_store_path']
                     logger.info(f"AUTO-INJECTED vector_store_path: {file_dict['vector_store_path']}")
-                break
+                    break
     
     # AUTO-INJECT: Automatically add query for document tasks if not provided
     if 'query' in [p.name for p in selected_endpoint.parameters] and 'query' not in pre_extracted_params:
@@ -2574,7 +2583,21 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
     
     # Check if all required parameters are already extracted
     required_params = [p.name for p in selected_endpoint.parameters if p.required]
-    params_match = all(param in pre_extracted_params for param in required_params)
+    
+    # MULTI-DOCUMENT FIX: Check if vector_store_paths (plural) satisfies vector_store_path (singular) requirement
+    def param_is_satisfied(param_name: str, params_dict: dict) -> bool:
+        """Check if a parameter is satisfied, accounting for plural/singular variants."""
+        if param_name in params_dict:
+            return True
+        # Special case: vector_store_paths (plural) satisfies vector_store_path (singular)
+        if param_name == 'vector_store_path' and 'vector_store_paths' in params_dict:
+            return True
+        # Special case: vector_store_path (singular) can satisfy vector_store_paths (plural) for backward compat
+        if param_name == 'vector_store_paths' and 'vector_store_path' in params_dict:
+            return True
+        return False
+    
+    params_match = all(param_is_satisfied(param, pre_extracted_params) for param in required_params)
     
     if params_match and pre_extracted_params:
         logger.info(f"OPTIMIZATION: All required parameters pre-extracted. Skipping LLM payload generation.")

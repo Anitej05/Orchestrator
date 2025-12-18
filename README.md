@@ -13,6 +13,48 @@
 
 ## 🚀 Quick Start (5 Minutes)
 
+### New Developer Setup (Windows)
+
+```powershell
+# One-time setup
+powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1
+
+# Start development
+powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1
+```
+
+Then open http://localhost:3000
+
+### Existing Developer (After git pull)
+
+```powershell
+# Update everything (deps, DB, agents)
+powershell -ExecutionPolicy Bypass -File .\scripts\update.ps1
+
+# Start development
+powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1
+```
+
+---
+
+## 📋 Setup Commands Reference
+
+| Task | Command |
+|------|---------|
+| **Fresh install** | `.\scripts\setup.ps1` |
+| **Update after git pull** | `.\scripts\update.ps1` |
+| **Start dev** | `.\scripts\dev.ps1` |
+| **DB setup** | `python backend/setup.py` |
+| **Sync agents** | `python backend/manage.py sync` |
+
+**What gets updated by `update.ps1`:**
+- ✅ Python packages (pip install --upgrade)
+- ✅ Database migrations (Alembic)
+- ✅ Agent definitions (from Agent_entries/*.json)
+- ✅ Frontend packages (npm/pnpm)
+
+---
+
 ### Prerequisites
 - Python 3.11+, Node.js 18+, PostgreSQL 14+
 - GROQ API Key (free at https://console.groq.com)
@@ -64,6 +106,12 @@ pnpm dev
 
 ### Updating Existing Installation
 
+**One-liner (Windows):**
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\update.ps1
+```
+
+**Manual:**
 ```bash
 git pull origin main
 
@@ -71,8 +119,8 @@ git pull origin main
 cd backend
 .venv\Scripts\Activate.ps1  # Windows
 pip install -r requirements.txt --upgrade
-python setup.py  # Updates database automatically
-python -m uvicorn main:app --reload
+python setup.py  # Updates database automatically (creates DB, runs Alembic)
+python manage.py sync  # Syncs agent definitions
 
 # Frontend (new terminal)
 cd ../frontend
