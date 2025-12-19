@@ -1,66 +1,66 @@
 # Core Framework
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
 python-dotenv==1.0.1
 python-jose[cryptography]==3.3.0
 
 # Database
-sqlalchemy==1.4.53
-alembic==1.14.0
+sqlalchemy==2.0.43
+alembic==1.16.5
 psycopg2-binary==2.9.10
-pgvector==0.3.6
+pgvector==0.4.1
 
 # Data Processing
-numpy==1.26.4
-pandas==2.2.3
+numpy==2.3.3
+pandas==2.3.3
 openpyxl==3.1.5
 
-# LLM & AI (upgraded to 0.2.x compatible set)
-langchain==0.2.16
-langchain-core==0.2.43
-langchain-community==0.2.16
-langchain-text-splitters==0.2.4
-langchain-groq==0.1.9
-langchain-cerebras==0.1.0
-langchain-nvidia-ai-endpoints==0.2.0
-langchain-huggingface==0.0.3
-langsmith==0.1.143
-sentence-transformers==3.3.1
-openai==1.57.2
-groq==0.13.0
+# LLM & AI (Compatible versions)
+langchain>=0.3.15
+langchain-core>=0.3.15
+langchain-community>=0.3.15
+langchain-text-splitters>=0.3.0
+langchain-groq>=0.2.0
+langchain-cerebras>=0.2.0
+langchain-nvidia-ai-endpoints>=0.3.0
+langchain-huggingface>=0.1.0
+langsmith>=0.2.0
+sentence-transformers>=3.0.0
+openai>=1.0.0
+groq>=0.9.0
 
 # Document Processing
-python-docx==1.1.2
-pypdf==5.1.0
+python-docx==1.2.0
+pypdf==6.1.0
 reportlab==4.2.5
 docx2pdf==0.1.8
-Pillow==10.4.0
-pyyaml==6.0.2
+Pillow==11.3.0
+pyyaml==6.0.3
 
 # Web & HTTP
-httpx==0.28.1
+httpx==0.27.2
 aiofiles==24.1.0
-requests==2.32.3
-websockets==14.1
+requests==2.32.5
+websockets==15.0.1
 
 # Data Validation & Serialization
-pydantic==2.11.1
-pydantic-settings==2.6.1
+pydantic==2.12.3
+pydantic-settings==2.12.0
 
-# LangGraph (upgraded to 0.2.x with compatible checkpointer)
-langgraph==0.2.60
-langgraph-checkpoint-sqlite==2.0.10
-faiss-cpu==1.13.1
-docx2txt==0.8
+# LangGraph
+langgraph==1.0.5
+langgraph-checkpoint-sqlite==2.0.11
+faiss-cpu==1.12.0
+docx2txt==0.9
 mcp==1.25.0
 
 # Utilities
-python-multipart==0.0.19
-apscheduler==3.11.0
-composio-core==0.5.8
-email-validator==2.2.0
+python-multipart==0.0.20
+apscheduler==3.11.1
+composio-core==0.7.15
+email-validator==2.3.0
 
 # Agent-specific dependencies
-yfinance==0.2.49
+yfinance==0.2.66
 wikipedia==1.4.0
-playwright==1.49.1
+playwright==1.56.0
