@@ -229,22 +229,27 @@ def _summarize_completed_tasks_for_context(completed_tasks: List[Dict]) -> List[
             # Special handling for document edit results with canvas_display
             elif is_document_edit_task and "canvas_display" in result:
                 # Extract key information from canvas_display
-                canvas_display = result.get("canvas_display", {})
-                canvas_data = canvas_display.get("canvas_data", {})
-                
-                # Check if this is a successful edit
-                if canvas_data.get("status") == "edited":
-                    summary["result"] = f"Document edited successfully: {canvas_data.get('title', 'document')}"
-                    summary["edit_status"] = "success"
-                    summary["file_path"] = canvas_data.get("file_path", "")
-                    logger.info(f"📝 Document edit success extracted from canvas_display")
-                elif canvas_data.get("status") == "preview":
-                    summary["result"] = f"Preview generated for: {canvas_data.get('title', 'document')}"
-                    summary["edit_status"] = "preview"
-                    summary["requires_confirmation"] = True
-                    logger.info(f"📝 Document preview status extracted from canvas_display")
-                else:
+                canvas_display = result.get("canvas_display")
+                # CRITICAL FIX: Handle None canvas_display (e.g., from multi-document analysis)
+                if canvas_display is None:
+                    logger.info("📝 canvas_display is None - skipping extraction")
                     summary["result"] = result
+                else:
+                    canvas_data = canvas_display.get("canvas_data", {})
+                    
+                    # Check if this is a successful edit
+                    if canvas_data.get("status") == "edited":
+                        summary["result"] = f"Document edited successfully: {canvas_data.get('title', 'document')}"
+                        summary["edit_status"] = "success"
+                        summary["file_path"] = canvas_data.get("file_path", "")
+                        logger.info(f"📝 Document edit success extracted from canvas_display")
+                    elif canvas_data.get("status") == "preview":
+                        summary["result"] = f"Preview generated for: {canvas_data.get('title', 'document')}"
+                        summary["edit_status"] = "preview"
+                        summary["requires_confirmation"] = True
+                        logger.info(f"📝 Document preview status extracted from canvas_display")
+                    else:
+                        summary["result"] = result
             # Special handling for document analysis results with "answer" key
             elif is_document_task and "answer" in result:
                 # Preserve the full answer for document analysis
@@ -3028,7 +3033,11 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                         canvas_display = result.get('result', {}).get('canvas_display')
                     
                     if canvas_display:
-                        logger.info(f"✅ Agent returned canvas display: type={canvas_display.get('canvas_type')}, requires_confirmation={canvas_display.get('requires_confirmation')}, title={canvas_display.get('canvas_title')}")
+                        # CRITICAL FIX: Only access .get() if canvas_display is not None
+                        canvas_type = canvas_display.get('canvas_type') if canvas_display else None
+                        requires_confirmation = canvas_display.get('requires_confirmation', False) if canvas_display else False
+                        canvas_title = canvas_display.get('canvas_title') if canvas_display else None
+                        logger.info(f"✅ Agent returned canvas display: type={canvas_type}, requires_confirmation={requires_confirmation}, title={canvas_title}")
                     else:
                         logger.info(f"ℹ️ Agent did not return canvas_display (checked both top level and nested)")
                 
