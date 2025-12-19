@@ -529,7 +529,7 @@ def invoke_llm_with_fallback(primary_llm, fallback_llm, prompt: str, pydantic_sc
     '''
     # Initialize all LLMs
     cerebras_llm = primary_llm
-    groq_llm = ChatGroq(model="openai/gpt-oss-120b") if os.getenv("GROQ_API_KEY") else None
+    groq_llm = ChatGroq(model="llama-3.3-70b-versatile") if os.getenv("GROQ_API_KEY") else None
     nvidia_llm = fallback_llm  # ChatNVIDIA
     
     # Create list of available LLMs
@@ -1008,9 +1008,9 @@ def parse_prompt(state: State):
     logger.info(f"[PARSE_PROMPT_DEBUG] Original prompt: '{state['original_prompt']}'")
 
 
-    # Initialize both primary and fallback LLMs
-    primary_llm = ChatCerebras(model="gpt-oss-120b")
-    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
+    # Initialize both primary and fallback LLMs - use faster 8B model for parsing
+    primary_llm = ChatCerebras(model="llama3.1-8b")
+    fallback_llm = ChatNVIDIA(model="meta/llama-3.1-8b-instruct") if os.getenv("NVIDIA_API_KEY") else None
 
     error_feedback = state.get("parsing_error_feedback")
     retry_prompt_injection = ""
@@ -1480,8 +1480,8 @@ def rank_agents(state: State):
         return {"task_agent_pairs": []}
     
     # OPTIMIZATION: Use Groq for ranking (faster and cheaper than Cerebras for this task)
-    ranking_llm = ChatGroq(model="openai/gpt-oss-120b") if os.getenv("GROQ_API_KEY") else ChatCerebras(model="gpt-oss-120b")
-    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
+    ranking_llm = ChatGroq(model="llama-3.3-70b-versatile") if os.getenv("GROQ_API_KEY") else ChatCerebras(model="llama3.1-8b")
+    fallback_llm = ChatNVIDIA(model="meta/llama-3.1-8b-instruct") if os.getenv("NVIDIA_API_KEY") else None
     
     # Get user expectations for context
     user_expectations = state.get('user_expectations', {})
@@ -1615,8 +1615,8 @@ def plan_execution(state: State, config: RunnableConfig):
     logger.info(f"🔍 PLAN_EXECUTION START: uploaded_files content = {state.get('uploaded_files', [])}")
     replan_reason = state.get("replan_reason")
     # Initialize both primary and fallback LLMs
-    primary_llm = ChatCerebras(model="gpt-oss-120b")
-    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
+    primary_llm = ChatCerebras(model="llama3.1-8b")
+    fallback_llm = ChatNVIDIA(model="meta/llama-3.1-8b-instruct") if os.getenv("NVIDIA_API_KEY") else None
     output_state = {}
 
     if replan_reason:
@@ -2155,8 +2155,8 @@ def validate_plan_for_execution(state: State):
     capabilities_str = ", ".join(all_capabilities)
     
     # Initialize both primary and fallback LLMs
-    primary_llm = ChatCerebras(model="gpt-oss-120b")
-    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
+    primary_llm = ChatCerebras(model="llama3.1-8b")
+    fallback_llm = ChatNVIDIA(model="meta/llama-3.1-8b-instruct") if os.getenv("NVIDIA_API_KEY") else None
     task_to_validate = task_plan[0][0]
 
     # Rehydrate the pairs
@@ -2426,8 +2426,8 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
             return {"task_name": planned_task.task_name, "result": error_msg}
 
     # Initialize both primary and fallback LLMs for payload generation
-    primary_llm = ChatCerebras(model="gpt-oss-120b")
-    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
+    primary_llm = ChatCerebras(model="llama3.1-8b")
+    fallback_llm = ChatNVIDIA(model="meta/llama-3.1-8b-instruct") if os.getenv("NVIDIA_API_KEY") else None
     failed_attempts = []
     
     # --- CRITICAL: Prepare file context FIRST before checking skip_llm_generation ---
@@ -3458,8 +3458,8 @@ def evaluate_agent_response(state: State):
         return {"pending_user_input": False, "question_for_user": None}
 
     # Initialize both primary and fallback LLMs
-    primary_llm = ChatCerebras(model="gpt-oss-120b")
-    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
+    primary_llm = ChatCerebras(model="llama3.1-8b")
+    fallback_llm = ChatNVIDIA(model="meta/llama-3.1-8b-instruct") if os.getenv("NVIDIA_API_KEY") else None
     task_to_evaluate = latest_tasks[-1] # Evaluate the most recent task
     
     print(f"!!! EVALUATE: Task='{task_to_evaluate.get('task_name')}', Result preview={str(task_to_evaluate.get('result', ''))[:200]} !!!")
@@ -3825,8 +3825,8 @@ def render_canvas_output(state: State):
     logger.info(f"CANVAS RENDER: Canvas prompt: {canvas_prompt}")
     
     # Initialize all LLMs for fallback mechanism
-    primary_llm = ChatCerebras(model="gpt-oss-120b")
-    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
+    primary_llm = ChatCerebras(model="llama3.1-8b")
+    fallback_llm = ChatNVIDIA(model="meta/llama-3.1-8b-instruct") if os.getenv("NVIDIA_API_KEY") else None
     
     # Extract additional context from state
     original_prompt = state.get("original_prompt", "")
@@ -4055,8 +4055,8 @@ def generate_text_answer(state: State):
     canvas_type = state.get("canvas_type", "")
     
     # Initialize both primary and fallback LLMs
-    primary_llm = ChatCerebras(model="gpt-oss-120b")
-    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
+    primary_llm = ChatCerebras(model="llama3.1-8b")
+    fallback_llm = ChatNVIDIA(model="meta/llama-3.1-8b-instruct") if os.getenv("NVIDIA_API_KEY") else None
     
     # Check if this is a simple request that was handled directly by analyze_request
     if state.get("needs_complex_processing") is False:
@@ -4330,8 +4330,8 @@ def generate_final_response(state: State):
         }
     
     # Initialize both primary and fallback LLMs
-    primary_llm = ChatCerebras(model="gpt-oss-120b")
-    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
+    primary_llm = ChatCerebras(model="llama3.1-8b")
+    fallback_llm = ChatNVIDIA(model="meta/llama-3.1-8b-instruct") if os.getenv("NVIDIA_API_KEY") else None
     
     # Check if this is a simple request (no complex processing)
     is_simple_request = state.get("needs_complex_processing") is False
@@ -4566,28 +4566,26 @@ def load_conversation_history(state: State, config: RunnableConfig):
 
     # CRITICAL: Preserve uploaded_files from incoming state (set by main.py)
     incoming_uploaded_files = state.get("uploaded_files", [])
-    logger.info(f"🔍 LOAD_HISTORY: Preserving {len(incoming_uploaded_files)} uploaded files from incoming state")
 
     # Check if this is a resume after approval
     is_resuming_after_approval = state.get("plan_approved") == True
-    
-    if is_resuming_after_approval:
-        print(f"!!! LOAD_HISTORY: Resuming after approval - will load history for context !!!")
-        logger.info(f"Resuming after approval for thread {thread_id}, loading history for context")
-        # Continue to load history for context, but preserve critical state fields
     
     # If messages already exist in state (from checkpointer) and we're not resuming after approval
     # This prevents duplicate messages when continuing a conversation
     if state.get("messages") and len(state.get("messages", [])) > 0 and not is_resuming_after_approval:
         logger.info(f"Messages already exist in state for thread {thread_id}, skipping file load")
-        # Still preserve uploaded_files even when skipping file load
         return {"uploaded_files": incoming_uploaded_files}
 
+    # OPTIMIZATION: Skip file I/O for new conversations - check file existence first
     history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
-
+    
     if not os.path.exists(history_path):
-        # Preserve uploaded_files even when no history file exists
+        logger.info(f"⚡ New conversation {thread_id[:8]}... - skipping history load (performance optimization)")
         return {"uploaded_files": incoming_uploaded_files}
+    
+    # Only log and load if file actually exists (existing conversation)
+    if is_resuming_after_approval:
+        logger.info(f"Resuming after approval for thread {thread_id}, loading history for context")
 
     try:
         with open(history_path, "r", encoding="utf-8") as f:
@@ -5092,8 +5090,8 @@ def analyze_request(state: State):
         }
     
     # Initialize both primary and fallback LLMs
-    primary_llm = ChatCerebras(model="gpt-oss-120b")
-    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
+    primary_llm = ChatCerebras(model="llama3.1-8b")
+    fallback_llm = ChatNVIDIA(model="meta/llama-3.1-8b-instruct") if os.getenv("NVIDIA_API_KEY") else None
     
     # Build comprehensive context from conversation history
     history_context = ""
@@ -5502,3 +5500,6 @@ def create_execution_subgraph(checkpointer):
 
 # Create both graphs
 execution_subgraph = None  # Will be initialized when needed
+
+
+

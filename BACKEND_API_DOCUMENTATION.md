@@ -448,18 +448,18 @@ Similar to `/ws/chat` but executes saved workflow plan.
 
 ### 📧 Email Integration (Composio)
 
-**Setup Script:** `backend/setup_composio_gmail.py`
-
 **Environment Variables:**
 ```bash
 COMPOSIO_API_KEY=your_key
-COMPOSIO_EMAIL_CONNECTION_ID=conn_xxxxx
+GMAIL_CONNECTION_ID=conn_xxxxx
+GMAIL_MCP_URL=https://...
 ```
 
-**Functions:**
-- `setup_composio_gmail()` - Initialize Gmail connection
-- `check_composio_connection()` - Verify connection
-- `list_composio_integrations()` - List available integrations
+**Setup:**
+1. Get Composio API key from https://app.composio.dev/
+2. Add to backend/.env
+3. Connect Gmail account via Composio dashboard
+4. Configure connection ID in .env
 
 **Usage in Agents:**
 ```python

@@ -5,9 +5,9 @@
 $ErrorActionPreference = 'Stop'
 
 function Write-Section($msg) { Write-Host "`n==== $msg ====" -ForegroundColor Cyan }
-function Write-Ok($msg) { Write-Host "✓ $msg" -ForegroundColor Green }
-function Write-Warn($msg) { Write-Host "! $msg" -ForegroundColor Yellow }
-function Write-Err($msg) { Write-Host "✗ $msg" -ForegroundColor Red }
+function Write-Ok($msg) { Write-Host "[OK] $msg" -ForegroundColor Green }
+function Write-Warn($msg) { Write-Host "[WARN] $msg" -ForegroundColor Yellow }
+function Write-Err($msg) { Write-Host "[ERROR] $msg" -ForegroundColor Red }
 
 # Resolve repo root
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path | Split-Path -Parent

@@ -11,16 +11,43 @@
 - **📊 Vector Search**: Semantic agent discovery using pgvector
 - **🎨 Modern UI**: Built with Next.js 15 and shadcn/ui
 
-## 🚀 Quick Start (5 Minutes)
+## 🚀 Quick Start
 
 ### New Developer Setup (Windows)
 
+**1. Run automated setup:**
 ```powershell
-# One-time setup
+# Creates virtual env, database, and config files
 powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1
+```
 
-# Start development
-powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1
+**2. Install backend dependencies:**
+```powershell
+cd backend
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+**3. Install frontend dependencies:**
+```powershell
+cd frontend
+pnpm install  # or: npm install --legacy-peer-deps
+```
+
+**4. Edit configuration:**
+- Edit `backend/.env` with your API keys (GROQ_API_KEY, PG_PASSWORD, etc.)
+- Edit `frontend/.env.local` with your Clerk keys if needed
+
+**5. Start development servers:**
+```powershell
+# Terminal 1 - Backend
+cd backend
+.venv\Scripts\Activate.ps1
+python -m uvicorn main:app --reload
+
+# Terminal 2 - Frontend
+cd frontend
+pnpm dev
 ```
 
 Then open http://localhost:3000
@@ -30,9 +57,6 @@ Then open http://localhost:3000
 ```powershell
 # Update everything (deps, DB, agents)
 powershell -ExecutionPolicy Bypass -File .\scripts\update.ps1
-
-# Start development
-powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1
 ```
 
 ---
@@ -89,6 +113,7 @@ python setup.py
 
 **3. Start backend:**
 ```bash
+# This automatically starts all agents as well
 python -m uvicorn main:app --reload
 ```
 
@@ -293,10 +318,9 @@ NEXT_PUBLIC_API_URL=http://127.0.0.1:8000
 
 **Daily startup:**
 ```bash
-# Terminal 1 - Backend
+# Terminal 1 - Backend (starts agents automatically)
 cd backend
 .venv\Scripts\Activate.ps1
-python setup.py  # Quick check/update
 python -m uvicorn main:app --reload
 
 # Terminal 2 - Frontend
