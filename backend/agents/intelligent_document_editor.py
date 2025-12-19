@@ -21,8 +21,28 @@ class IntelligentDocumentEditor:
     """
     
     def __init__(self, file_path: str):
+        # ✅ CRITICAL FIX: Validate file_path before using
+        if not file_path or not isinstance(file_path, str) or file_path.strip() == '':
+            raise ValueError(
+                f"Invalid file_path provided to IntelligentDocumentEditor: {repr(file_path)}. "
+                "Expected a non-empty string path to a document file."
+            )
+        
         self.file_path = file_path
-        self.doc = Document(file_path)
+        
+        # Validate file exists before trying to open
+        if not Path(file_path).exists():
+            raise FileNotFoundError(
+                f"Document file not found at path: {file_path}. "
+                "Please ensure the file exists before attempting to edit."
+            )
+        
+        try:
+            self.doc = Document(file_path)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to open document at {file_path}: {str(e)}"
+            ) from e
     
     def analyze_current_state(self) -> Dict[str, Any]:
         """

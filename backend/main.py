@@ -400,6 +400,20 @@ async def upload_files(files: List[UploadFile] = File(...)):
         except Exception as e:
             # Handle potential file-saving errors
             raise HTTPException(status_code=500, detail=f"Could not save file: {e}")
+        
+        # CRITICAL VALIDATION: Verify file was actually saved before returning
+        if not os.path.exists(file_path):
+            raise HTTPException(
+                status_code=500, 
+                detail=f"File save failed: {file.filename} does not exist at {file_path}"
+            )
+        
+        # Additional validation: ensure file_path is never None or empty
+        if not file_path or file_path.strip() == '':
+            raise HTTPException(
+                status_code=500,
+                detail=f"Invalid file_path for {file.filename}: file_path is None or empty"
+            )
 
         file_objects.append(FileObject(
             file_name=file.filename,
@@ -448,6 +462,14 @@ async def execute_orchestration(
     across all turns in a conversation. Simplified and more robust version.
     """
     logger.info(f"Starting orchestration for thread_id: {thread_id}, planning_mode: {planning_mode}")
+    
+    # PHASE 5: Debug uploaded files state at entry
+    if files:
+        logger.info(f"📂 EXECUTE_ORCHESTRATION: Received {len(files)} files")
+        for idx, f in enumerate(files):
+            logger.info(f"  File {idx+1}: {f.file_name} (type={f.file_type}, path={f.file_path})")
+    else:
+        logger.info("📂 EXECUTE_ORCHESTRATION: No files received in this request")
 
     # Build config with task_event_callback if provided
     config = {"configurable": {"thread_id": thread_id}}

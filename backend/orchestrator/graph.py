@@ -529,7 +529,7 @@ def invoke_llm_with_fallback(primary_llm, fallback_llm, prompt: str, pydantic_sc
     '''
     # Initialize all LLMs
     cerebras_llm = primary_llm
-    groq_llm = ChatGroq(model="llama-3.3-70b-versatile") if os.getenv("GROQ_API_KEY") else None
+    groq_llm = ChatGroq(model="openai/gpt-oss-120b") if os.getenv("GROQ_API_KEY") else None
     nvidia_llm = fallback_llm  # ChatNVIDIA
     
     # Create list of available LLMs
@@ -1008,9 +1008,9 @@ def parse_prompt(state: State):
     logger.info(f"[PARSE_PROMPT_DEBUG] Original prompt: '{state['original_prompt']}'")
 
 
-    # Initialize both primary and fallback LLMs - use faster 8B model for parsing
-    primary_llm = ChatCerebras(model="llama3.1-8b")
-    fallback_llm = ChatNVIDIA(model="meta/llama-3.1-8b-instruct") if os.getenv("NVIDIA_API_KEY") else None
+    # Initialize both primary and fallback LLMs
+    primary_llm = ChatCerebras(model="gpt-oss-120b")
+    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
 
     error_feedback = state.get("parsing_error_feedback")
     retry_prompt_injection = ""
@@ -1480,8 +1480,8 @@ def rank_agents(state: State):
         return {"task_agent_pairs": []}
     
     # OPTIMIZATION: Use Groq for ranking (faster and cheaper than Cerebras for this task)
-    ranking_llm = ChatGroq(model="llama-3.3-70b-versatile") if os.getenv("GROQ_API_KEY") else ChatCerebras(model="llama3.1-8b")
-    fallback_llm = ChatNVIDIA(model="meta/llama-3.1-8b-instruct") if os.getenv("NVIDIA_API_KEY") else None
+    ranking_llm = ChatGroq(model="openai/gpt-oss-120b") if os.getenv("GROQ_API_KEY") else ChatCerebras(model="gpt-oss-120b")
+    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
     
     # Get user expectations for context
     user_expectations = state.get('user_expectations', {})
@@ -1615,8 +1615,8 @@ def plan_execution(state: State, config: RunnableConfig):
     logger.info(f"🔍 PLAN_EXECUTION START: uploaded_files content = {state.get('uploaded_files', [])}")
     replan_reason = state.get("replan_reason")
     # Initialize both primary and fallback LLMs
-    primary_llm = ChatCerebras(model="llama3.1-8b")
-    fallback_llm = ChatNVIDIA(model="meta/llama-3.1-8b-instruct") if os.getenv("NVIDIA_API_KEY") else None
+    primary_llm = ChatCerebras(model="gpt-oss-120b")
+    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
     output_state = {}
 
     if replan_reason:
@@ -2155,8 +2155,8 @@ def validate_plan_for_execution(state: State):
     capabilities_str = ", ".join(all_capabilities)
     
     # Initialize both primary and fallback LLMs
-    primary_llm = ChatCerebras(model="llama3.1-8b")
-    fallback_llm = ChatNVIDIA(model="meta/llama-3.1-8b-instruct") if os.getenv("NVIDIA_API_KEY") else None
+    primary_llm = ChatCerebras(model="gpt-oss-120b")
+    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
     task_to_validate = task_plan[0][0]
 
     # Rehydrate the pairs
@@ -2426,8 +2426,8 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
             return {"task_name": planned_task.task_name, "result": error_msg}
 
     # Initialize both primary and fallback LLMs for payload generation
-    primary_llm = ChatCerebras(model="llama3.1-8b")
-    fallback_llm = ChatNVIDIA(model="meta/llama-3.1-8b-instruct") if os.getenv("NVIDIA_API_KEY") else None
+    primary_llm = ChatCerebras(model="gpt-oss-120b")
+    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
     failed_attempts = []
     
     # --- CRITICAL: Prepare file context FIRST before checking skip_llm_generation ---
@@ -2509,22 +2509,37 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                 pre_extracted_params = task.parameters or {}
                 break
     
-    # AUTO-INJECT: Automatically add vector_store_path for document tasks if files are uploaded
-    # Only inject single file path if vector_store_paths (plural) is not already set
-    if uploaded_files and 'vector_store_path' in [p.name for p in selected_endpoint.parameters]:
-        if 'vector_store_paths' not in pre_extracted_params and 'vector_store_path' not in pre_extracted_params:
-            for file_obj in uploaded_files:
-                file_dict = file_obj if isinstance(file_obj, dict) else file_obj.__dict__
-                if file_dict.get('file_type') == 'document' and file_dict.get('vector_store_path'):
-                    pre_extracted_params['vector_store_path'] = file_dict['vector_store_path']
-                    logger.info(f"AUTO-INJECTED vector_store_path: {file_dict['vector_store_path']}")
-                    break
+    # AUTO-INJECT: Automatically add vector_store_path/paths for document tasks if files are uploaded
+    if uploaded_files:
+        # Check if endpoint accepts vector_store_path or vector_store_paths
+        param_names = [p.name for p in selected_endpoint.parameters]
+        has_single_path = 'vector_store_path' in param_names
+        has_multiple_paths = 'vector_store_paths' in param_names
+        
+        # Collect all document vector store paths
+        document_vector_stores = []
+        for file_obj in uploaded_files:
+            file_dict = file_obj if isinstance(file_obj, dict) else file_obj.__dict__
+            if file_dict.get('file_type') == 'document' and file_dict.get('vector_store_path'):
+                document_vector_stores.append(file_dict['vector_store_path'])
+        
+        if document_vector_stores:
+            # If endpoint supports plural paths and we have multiple files, use that
+            if has_multiple_paths and len(document_vector_stores) > 1:
+                if 'vector_store_paths' not in pre_extracted_params:
+                    pre_extracted_params['vector_store_paths'] = document_vector_stores
+                    logger.info(f"AUTO-INJECTED vector_store_paths ({len(document_vector_stores)} files): {document_vector_stores}")
+            # Otherwise use single path (first file)
+            elif has_single_path:
+                if 'vector_store_path' not in pre_extracted_params:
+                    pre_extracted_params['vector_store_path'] = document_vector_stores[0]
+                    logger.info(f"AUTO-INJECTED vector_store_path: {document_vector_stores[0]}")
     
     # AUTO-INJECT: Automatically add query for document tasks if not provided
     if 'query' in [p.name for p in selected_endpoint.parameters] and 'query' not in pre_extracted_params:
         # Infer query from the original prompt
         original_prompt = state.get('original_prompt', '')
-        if any(word in original_prompt.lower() for word in ['what', 'summarize', 'summary', 'about', 'describe', 'analyze']):
+        if any(word in original_prompt.lower() for word in ['what', 'summarize', 'summary', 'about', 'describe', 'analyze', 'scan', 'extract', 'list', 'find']):
             pre_extracted_params['query'] = original_prompt
             logger.info(f"AUTO-INJECTED query from original prompt: {original_prompt}")
     
@@ -2537,12 +2552,25 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
         
         # Ensure file_path is present for document edits
         if 'file_path' not in pre_extracted_params and uploaded_files:
+            # ✅ ENHANCED: Check for valid file_path (not None)
             for file_obj in uploaded_files:
                 file_dict = file_obj if isinstance(file_obj, dict) else file_obj.__dict__
                 if file_dict.get('file_type') == 'document':
-                    pre_extracted_params['file_path'] = file_dict['file_path']
-                    logger.info(f"✅ AUTO-INJECTED file_path for /edit: {file_dict['file_path']}")
-                    break
+                    candidate_path = file_dict.get('file_path')
+                    # Validate candidate_path is not None/empty
+                    if candidate_path and candidate_path.strip():
+                        pre_extracted_params['file_path'] = candidate_path
+                        logger.info(f"✅ AUTO-INJECTED file_path for /edit: {candidate_path}")
+                        break
+                    else:
+                        logger.warning(f"⚠️ Found document file but file_path is None or empty: {file_dict}")
+            
+            # If still no file_path found, log detailed error
+            if 'file_path' not in pre_extracted_params:
+                logger.error(f"❌ AUTO-INJECTION FAILED for /edit: No valid document file_path found")
+                logger.error(f"   uploaded_files count: {len(uploaded_files)}")
+                doc_files = [f if isinstance(f, dict) else f.__dict__ for f in uploaded_files if (f if isinstance(f, dict) else f.__dict__).get('file_type') == 'document']
+                logger.error(f"   document files: {doc_files}")
     
     # AUTO-INJECT: Spreadsheet file_id for spreadsheet agent endpoints
     # PRIORITY: Files uploaded in the current turn (is_current_turn=True) should be used first
@@ -2784,6 +2812,104 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
         
         async with httpx.AsyncClient() as client:
             try:
+                # CRITICAL AUTO-INJECTION: For document agent, ensure vector_store paths are injected
+                is_document_agent = 'document' in agent_details.id.lower() or 'document' in agent_details.name.lower()
+                
+                if is_document_agent and uploaded_files:
+                    # Auto-inject query from original prompt if not present
+                    if 'query' not in payload or not payload.get('query'):
+                        # Extract meaningful query from task description or original prompt
+                        task_desc = planned_task.task_description.lower()
+                        original_prompt = state.get('original_prompt', '')
+                        
+                        if any(word in task_desc for word in ['scan', 'extract', 'list', 'find', 'get', 'analyze']):
+                            payload['query'] = original_prompt
+                            logger.info(f"🔧 AUTO-INJECT: query = '{original_prompt}' (from original_prompt)")
+                        else:
+                            payload['query'] = planned_task.task_description
+                            logger.info(f"🔧 AUTO-INJECT: query = '{planned_task.task_description}' (from task)")
+                    
+                    # Auto-inject vector_store_path(s) from uploaded_files
+                    doc_files = [f for f in uploaded_files if f.get('file_type') == 'document']
+                    
+                    if doc_files:
+                        # Filter for valid vector_store_path values (not None, not empty)
+                        vector_paths = []
+                        for f in doc_files:
+                            vs_path = f.get('vector_store_path')
+                            if vs_path and vs_path.strip():
+                                vector_paths.append(vs_path)
+                            elif f.get('file_path') and f.get('file_path').strip():
+                                # Fallback: use file_path if vector_store_path is None/empty
+                                logger.warning(f"Document '{f.get('file_name')}' has None vector_store_path, using file_path: {f.get('file_path')}")
+                                vector_paths.append(f['file_path'])
+                            else:
+                                logger.error(f"Document '{f.get('file_name')}' has both None vector_store_path AND file_path")
+                        
+                        if vector_paths:
+                            if len(vector_paths) == 1:
+                                # Single document - use singular parameter
+                                if 'vector_store_path' not in payload or not payload.get('vector_store_path'):
+                                    payload['vector_store_path'] = vector_paths[0]
+                                    logger.info(f"🔧 AUTO-INJECT: vector_store_path = {vector_paths[0]}")
+                            else:
+                                # Multiple documents - use plural parameter
+                                if 'vector_store_paths' not in payload or not payload.get('vector_store_paths'):
+                                    payload['vector_store_paths'] = vector_paths
+                                    logger.info(f"🔧 AUTO-INJECT: vector_store_paths = {vector_paths}")
+                        else:
+                            logger.error(f"AUTO-INJECTION FAILED: Found {len(doc_files)} documents but no valid paths. Files: {[f.get('file_name') for f in doc_files]}")
+                
+                # CRITICAL VALIDATION: Ensure required parameters are present
+                # This prevents NoneType errors when agents expect file paths
+                required_params = [p for p in selected_endpoint.parameters if p.required]
+                missing_params = []
+                none_params = []
+                empty_params = []
+                
+                for param in required_params:
+                    param_value = payload.get(param.name)
+                    
+                    if param.name not in payload:
+                        missing_params.append(param.name)
+                        logger.error(f"❌ MISSING REQUIRED PARAMETER: '{param.name}' not in payload")
+                    elif param_value is None:
+                        none_params.append(param.name)
+                        logger.error(f"❌ NONE REQUIRED PARAMETER: '{param.name}' is None")
+                    elif isinstance(param_value, str) and param_value.strip() == '':
+                        empty_params.append(param.name)
+                        logger.error(f"❌ EMPTY REQUIRED PARAMETER: '{param.name}' is empty string")
+                    elif isinstance(param_value, list) and len(param_value) == 0:
+                        empty_params.append(param.name)
+                        logger.error(f"❌ EMPTY REQUIRED PARAMETER: '{param.name}' is empty list")
+                
+                # Log uploaded_files for debugging
+                if missing_params or none_params or empty_params:
+                    logger.error(f"📂 UPLOADED FILES COUNT: {len(uploaded_files)}")
+                    for idx, uf in enumerate(uploaded_files):
+                        logger.error(f"  File {idx+1}: name={uf.get('file_name')}, type={uf.get('file_type')}, path={uf.get('file_path')}, vector={uf.get('vector_store_path')}")
+                
+                if missing_params or none_params or empty_params:
+                    all_invalid = missing_params + none_params + empty_params
+                    error_details = []
+                    if missing_params:
+                        error_details.append(f"missing: {missing_params}")
+                    if none_params:
+                        error_details.append(f"None: {none_params}")
+                    if empty_params:
+                        error_details.append(f"empty: {empty_params}")
+                    error_msg = f"Invalid parameters for {agent_details.name}/{endpoint_path}: {', '.join(error_details)}. Payload: {payload}"
+                    logger.error(error_msg)
+                    logger.error(f"📋 Full payload: {json.dumps(payload, indent=2)}")
+                    logger.error(f"📋 Uploaded files: {json.dumps(uploaded_files, indent=2)}")
+                    return {
+                        "task_name": planned_task.task_name,
+                        "result": f"Configuration error: {error_msg}",
+                        "status_code": 400
+                    }
+                
+                logger.info(f"✅ Payload validation passed. Required params present: {[p.name for p in required_params]}")
+                logger.info(f"📤 Final payload: {json.dumps(payload, indent=2)}")
                 logger.info(f"Calling agent '{agent_details.name}' at {endpoint_url}")
                 
                 # Check if this is a browser agent - pass thread_id for push-based streaming
@@ -3072,7 +3198,15 @@ async def execute_confirmed_task(state: State, config: RunnableConfig):
 async def execute_batch(state: State, config: RunnableConfig):
     '''Executes a single batch of tasks from the plan.'''
     print(f"!!! EXECUTE_BATCH: Starting execution !!!")
-    print(f"!!! EXECUTE_BATCH: uploaded_files in state = {state.get('uploaded_files', 'NOT_FOUND')} !!!")
+    
+    # PHASE 5: Enhanced uploaded_files debugging
+    uploaded_files = state.get('uploaded_files', [])
+    print(f"!!! EXECUTE_BATCH: uploaded_files count = {len(uploaded_files)} !!!")
+    if uploaded_files:
+        for idx, uf in enumerate(uploaded_files):
+            print(f"!!!   File {idx+1}: name={uf.get('file_name')}, type={uf.get('file_type')}, path={uf.get('file_path')}, vector={uf.get('vector_store_path')} !!!")
+    else:
+        print(f"!!! EXECUTE_BATCH: NO FILES IN STATE - This may cause auto-injection failures !!!")
     
     # Rehydrate the plan
     task_plan_dicts = state.get('task_plan', [])
@@ -3458,8 +3592,8 @@ def evaluate_agent_response(state: State):
         return {"pending_user_input": False, "question_for_user": None}
 
     # Initialize both primary and fallback LLMs
-    primary_llm = ChatCerebras(model="llama3.1-8b")
-    fallback_llm = ChatNVIDIA(model="meta/llama-3.1-8b-instruct") if os.getenv("NVIDIA_API_KEY") else None
+    primary_llm = ChatCerebras(model="gpt-oss-120b")
+    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
     task_to_evaluate = latest_tasks[-1] # Evaluate the most recent task
     
     print(f"!!! EVALUATE: Task='{task_to_evaluate.get('task_name')}', Result preview={str(task_to_evaluate.get('result', ''))[:200]} !!!")
@@ -3825,8 +3959,8 @@ def render_canvas_output(state: State):
     logger.info(f"CANVAS RENDER: Canvas prompt: {canvas_prompt}")
     
     # Initialize all LLMs for fallback mechanism
-    primary_llm = ChatCerebras(model="llama3.1-8b")
-    fallback_llm = ChatNVIDIA(model="meta/llama-3.1-8b-instruct") if os.getenv("NVIDIA_API_KEY") else None
+    primary_llm = ChatCerebras(model="gpt-oss-120b")
+    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
     
     # Extract additional context from state
     original_prompt = state.get("original_prompt", "")
@@ -4055,8 +4189,8 @@ def generate_text_answer(state: State):
     canvas_type = state.get("canvas_type", "")
     
     # Initialize both primary and fallback LLMs
-    primary_llm = ChatCerebras(model="llama3.1-8b")
-    fallback_llm = ChatNVIDIA(model="meta/llama-3.1-8b-instruct") if os.getenv("NVIDIA_API_KEY") else None
+    primary_llm = ChatCerebras(model="gpt-oss-120b")
+    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
     
     # Check if this is a simple request that was handled directly by analyze_request
     if state.get("needs_complex_processing") is False:
@@ -4330,8 +4464,8 @@ def generate_final_response(state: State):
         }
     
     # Initialize both primary and fallback LLMs
-    primary_llm = ChatCerebras(model="llama3.1-8b")
-    fallback_llm = ChatNVIDIA(model="meta/llama-3.1-8b-instruct") if os.getenv("NVIDIA_API_KEY") else None
+    primary_llm = ChatCerebras(model="gpt-oss-120b")
+    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
     
     # Check if this is a simple request (no complex processing)
     is_simple_request = state.get("needs_complex_processing") is False
@@ -4566,26 +4700,28 @@ def load_conversation_history(state: State, config: RunnableConfig):
 
     # CRITICAL: Preserve uploaded_files from incoming state (set by main.py)
     incoming_uploaded_files = state.get("uploaded_files", [])
+    logger.info(f"🔍 LOAD_HISTORY: Preserving {len(incoming_uploaded_files)} uploaded files from incoming state")
 
     # Check if this is a resume after approval
     is_resuming_after_approval = state.get("plan_approved") == True
+    
+    if is_resuming_after_approval:
+        print(f"!!! LOAD_HISTORY: Resuming after approval - will load history for context !!!")
+        logger.info(f"Resuming after approval for thread {thread_id}, loading history for context")
+        # Continue to load history for context, but preserve critical state fields
     
     # If messages already exist in state (from checkpointer) and we're not resuming after approval
     # This prevents duplicate messages when continuing a conversation
     if state.get("messages") and len(state.get("messages", [])) > 0 and not is_resuming_after_approval:
         logger.info(f"Messages already exist in state for thread {thread_id}, skipping file load")
+        # Still preserve uploaded_files even when skipping file load
         return {"uploaded_files": incoming_uploaded_files}
 
-    # OPTIMIZATION: Skip file I/O for new conversations - check file existence first
     history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
-    
+
     if not os.path.exists(history_path):
-        logger.info(f"⚡ New conversation {thread_id[:8]}... - skipping history load (performance optimization)")
+        # Preserve uploaded_files even when no history file exists
         return {"uploaded_files": incoming_uploaded_files}
-    
-    # Only log and load if file actually exists (existing conversation)
-    if is_resuming_after_approval:
-        logger.info(f"Resuming after approval for thread {thread_id}, loading history for context")
 
     try:
         with open(history_path, "r", encoding="utf-8") as f:
@@ -5090,8 +5226,8 @@ def analyze_request(state: State):
         }
     
     # Initialize both primary and fallback LLMs
-    primary_llm = ChatCerebras(model="llama3.1-8b")
-    fallback_llm = ChatNVIDIA(model="meta/llama-3.1-8b-instruct") if os.getenv("NVIDIA_API_KEY") else None
+    primary_llm = ChatCerebras(model="gpt-oss-120b")
+    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
     
     # Build comprehensive context from conversation history
     history_context = ""
@@ -5500,6 +5636,3 @@ def create_execution_subgraph(checkpointer):
 
 # Create both graphs
 execution_subgraph = None  # Will be initialized when needed
-
-
-

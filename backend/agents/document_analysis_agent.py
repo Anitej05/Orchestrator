@@ -494,10 +494,22 @@ def analyze_document(request: AnalyzeDocumentRequest, thread_id: Optional[str] =
     vector_store_paths_to_load = []
     if request.vector_store_paths:
         # Multiple documents provided
-        vector_store_paths_to_load = request.vector_store_paths
+        # ✅ CRITICAL FIX: Filter out None values
+        vector_store_paths_to_load = [p for p in request.vector_store_paths if p and p.strip()]
+        if not vector_store_paths_to_load:
+            raise HTTPException(
+                status_code=400,
+                detail="vector_store_paths contains only None or empty values. Please provide valid paths."
+            )
         logger.info(f"Processing {len(vector_store_paths_to_load)} documents")
     elif request.vector_store_path:
         # Single document provided (backward compatibility)
+        # ✅ CRITICAL FIX: Validate not None
+        if not request.vector_store_path or request.vector_store_path.strip() == '':
+            raise HTTPException(
+                status_code=400,
+                detail="vector_store_path is None or empty. Please provide a valid path."
+            )
         vector_store_paths_to_load = [request.vector_store_path]
         logger.info(f"Processing single document")
     else:
@@ -582,61 +594,71 @@ Answer:"""
         # 5. Return the generated answer in the specified response format.
         logger.info("Document analysis completed successfully")
         
-        # 6. ALWAYS create canvas display to show the original document
-        # Try to find the original document file
-        # Vector store path is typically: storage/vector_store/{doc_name}.pdf.faiss
-        vector_store_base = Path(request.vector_store_path).stem  # e.g., "TRM.pdf"
-        
-        # Try to find the document in storage/documents
-        possible_doc_paths = [
-            f"storage/documents/{vector_store_base}",
-            f"storage/documents\\{vector_store_base}",  # Windows path
-            f"backend/storage/documents/{vector_store_base}",
-            f"backend/storage/documents\\{vector_store_base}",
-        ]
-        
-        doc_path = None
-        for path in possible_doc_paths:
-            if os.path.exists(path):
-                doc_path = path
-                break
-        
+        # 6. Create canvas display to show the original document
+        # Only attempt for single-document mode to avoid NoneType errors
         canvas_display = None
-        if doc_path and doc_path.lower().endswith('.pdf'):
-            # For PDFs, show the actual PDF in canvas
-            logger.info(f"Creating PDF canvas display for: {doc_path}")
-            try:
-                pdf_base64 = get_file_base64(doc_path)
-                canvas_display = create_canvas_display(
-                    canvas_type='pdf',
-                    canvas_data={
-                        'title': Path(doc_path).name,
-                        'pdf_data': f'data:application/pdf;base64,{pdf_base64}',
-                        'file_path': doc_path
-                    }
-                )
-            except Exception as pdf_err:
-                logger.error(f"Failed to create PDF canvas: {pdf_err}")
-        elif doc_path and doc_path.lower().endswith('.docx'):
-            # For Word documents, convert to PDF for display
-            logger.info(f"Creating PDF canvas display for Word doc: {doc_path}")
-            try:
-                pdf_path = convert_docx_to_pdf(doc_path)
-                pdf_base64 = get_file_base64(pdf_path)
-                canvas_display = create_canvas_display(
-                    canvas_type='pdf',
-                    canvas_data={
-                        'title': Path(doc_path).name,
-                        'pdf_data': f'data:application/pdf;base64,{pdf_base64}',
-                        'file_path': doc_path,
-                        'original_type': 'docx'
-                    }
-                )
-            except Exception as docx_err:
-                logger.error(f"Failed to convert DOCX to PDF: {docx_err}")
         
-        # If no canvas display created yet, don't create one - analysis answer is enough
-        # The answer will be shown in chat
+        # CRITICAL FIX: Only create canvas if vector_store_path exists (single-document mode)
+        # In multi-document mode, vector_store_path is None and vector_store_paths is used
+        if request.vector_store_path:
+            try:
+                # Vector store path is typically: storage/vector_store/{doc_name}.pdf.faiss
+                vector_store_base = Path(request.vector_store_path).stem  # e.g., "TRM.pdf"
+                
+                # Try to find the document in storage/documents
+                possible_doc_paths = [
+                    f"storage/documents/{vector_store_base}",
+                    f"storage/documents\\{vector_store_base}",  # Windows path
+                    f"backend/storage/documents/{vector_store_base}",
+                    f"backend/storage/documents\\{vector_store_base}",
+                ]
+                
+                doc_path = None
+                for path in possible_doc_paths:
+                    if os.path.exists(path):
+                        doc_path = path
+                        break
+                
+                if doc_path and doc_path.lower().endswith('.pdf'):
+                    # For PDFs, show the actual PDF in canvas
+                    logger.info(f"Creating PDF canvas display for: {doc_path}")
+                    try:
+                        pdf_base64 = get_file_base64(doc_path)
+                        canvas_display = create_canvas_display(
+                            canvas_type='pdf',
+                            canvas_data={
+                                'title': Path(doc_path).name,
+                                'pdf_data': f'data:application/pdf;base64,{pdf_base64}',
+                                'file_path': doc_path
+                            }
+                        )
+                    except Exception as pdf_err:
+                        logger.error(f"Failed to create PDF canvas: {pdf_err}")
+                elif doc_path and doc_path.lower().endswith('.docx'):
+                    # For Word documents, convert to PDF for display
+                    logger.info(f"Creating PDF canvas display for Word doc: {doc_path}")
+                    try:
+                        pdf_path = convert_docx_to_pdf(doc_path)
+                        pdf_base64 = get_file_base64(pdf_path)
+                        canvas_display = create_canvas_display(
+                            canvas_type='pdf',
+                            canvas_data={
+                                'title': Path(doc_path).name,
+                                'pdf_data': f'data:application/pdf;base64,{pdf_base64}',
+                                'file_path': doc_path,
+                                'original_type': 'docx'
+                            }
+                        )
+                    except Exception as docx_err:
+                        logger.error(f"Failed to convert DOCX to PDF: {docx_err}")
+            except Exception as canvas_err:
+                # Non-fatal: canvas creation failed but analysis succeeded
+                logger.warning(f"Canvas display creation failed (non-fatal): {canvas_err}")
+                canvas_display = None
+        else:
+            # Multi-document mode - no single canvas display
+            # The analysis answer contains consolidated information from all documents
+            logger.info("Multi-document mode: skipping canvas display, answer contains consolidated results")
         
         return AnalyzeDocumentResponse(answer=result, canvas_display=canvas_display)
 
@@ -851,6 +873,14 @@ def edit_document(request: EditDocumentRequest, thread_id: Optional[str] = None)
         request: The edit request with file path and instruction
         thread_id: Optional conversation thread ID for isolation across conversations
     """
+    # ✅ CRITICAL FIX: Validate file_path is not None
+    if not request.file_path or request.file_path.strip() == '':
+        logger.error("❌ Edit request failed: file_path is None or empty")
+        raise HTTPException(
+            status_code=400,
+            detail="file_path is required and cannot be None or empty. Please provide a valid document path."
+        )
+    
     # Normalize path to OS-specific format (handles both forward and backward slashes)
     normalized_path = os.path.normpath(request.file_path)
     
