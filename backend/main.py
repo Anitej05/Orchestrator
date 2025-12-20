@@ -127,6 +127,22 @@ app.include_router(credentials_router.router)
 from routers import content_router
 app.include_router(content_router.router)
 
+# Import and include the new modular routers
+from routers import files_router, agents_router, conversations_router, workflows_router, dashboard_router
+
+# Inject shared state into routers that need it
+# conversations_router needs access to conversation_store and store_lock
+conversations_router.set_shared_state(conversation_store, store_lock)
+# workflows_router needs access to checkpointer
+workflows_router.set_checkpointer(checkpointer)
+
+app.include_router(files_router.router)
+app.include_router(agents_router.router)
+app.include_router(conversations_router.router)
+app.include_router(workflows_router.router)
+app.include_router(dashboard_router.router)
+
+
 # --- Static Files for Screenshots ---
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
@@ -1120,14 +1136,16 @@ async def update_canvas(update_data: Dict[str, Any] = Body(...)):
         current_action = update_data.get("current_action", "")  # New: current action
         
         # Create browser view HTML with embedded base64 image
-        browser_view_html = f'''
-        <div style="text-align: center;">
-            <img src="data:image/png;base64,{screenshot_data}" alt="Browser live view" style="width: 100%; max-width: 1200px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);" />
-            <div style="margin-top: 10px; color: #666; font-size: 14px;">
-                <strong>🔴 Live Browser View</strong> | Step {step} | {url[:60] if url else 'Loading...'}
+        browser_view_html = ""
+        if screenshot_data:
+            browser_view_html = f'''
+            <div style="text-align: center;">
+                <img src="data:image/png;base64,{screenshot_data}" alt="Browser live view" style="width: 100%; max-width: 1200px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);" />
+                <div style="margin-top: 10px; color: #666; font-size: 14px;">
+                    <strong>🔴 Live Browser View</strong> | Step {step} | {url[:60] if url else 'Loading...'}
+                </div>
             </div>
-        </div>
-        '''
+            '''
         
         # Create plan view HTML with task progress
         # Calculate progress
