@@ -2612,6 +2612,12 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
         if 'instruction' not in pre_extracted_params:
             pre_extracted_params['instruction'] = planned_task.task_description
             logger.info(f"✅ AUTO-INJECTED instruction for /execute_pandas: {planned_task.task_description}")
+    
+    # AUTO-INJECT: Question for nl_query endpoint (similar to document agent query)
+    if '/nl_query' in endpoint_path and 'question' in [p.name for p in selected_endpoint.parameters]:
+        if 'question' not in pre_extracted_params:
+            pre_extracted_params['question'] = planned_task.task_description
+            logger.info(f"✅ AUTO-INJECTED question for /nl_query: {planned_task.task_description}")
 
     
     # Check if all required parameters are already extracted

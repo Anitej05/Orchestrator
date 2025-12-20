@@ -486,6 +486,11 @@ def ensure_file_loaded(file_id: str, thread_id: str = "default") -> bool:
         file_id: The file identifier
         thread_id: Conversation thread ID for isolation (defaults to "default" for backward compatibility)
     """
+    # CRITICAL FIX: Validate file_id is not None or empty to prevent NoneType errors
+    if not file_id or file_id is None:
+        logger.error(f"[ENSURE_LOADED] file_id is None or empty - cannot load file")
+        return False
+    
     logger.info(f"[ENSURE_LOADED] thread_id={thread_id}, file_id={file_id}")
     
     # Get thread-scoped storage
