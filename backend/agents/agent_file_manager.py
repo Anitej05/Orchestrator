@@ -124,8 +124,18 @@ class AgentFileMetadata:
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization"""
         result = asdict(self)
-        result['status'] = self.status.value
-        result['file_type'] = self.file_type.value
+        # Handle Enum vs String for status
+        if isinstance(self.status, Enum):
+            result['status'] = self.status.value
+        else:
+            result['status'] = str(self.status)
+            
+        # Handle Enum vs String for file_type
+        if isinstance(self.file_type, Enum):
+            result['file_type'] = self.file_type.value
+        else:
+            result['file_type'] = str(self.file_type)
+            
         return result
     
     @classmethod

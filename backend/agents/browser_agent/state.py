@@ -23,6 +23,7 @@ class AgentMemory(BaseModel):
     history: List[Dict[str, Any]] = Field(default_factory=list)
     observations: Dict[str, Any] = Field(default_factory=dict) # Key facts learned
     extracted_data: Dict[str, Any] = Field(default_factory=dict)
+    extracted_items: List[Dict[str, Any]] = Field(default_factory=list)  # Accumulate multiple extractions
     
     def get_active_subtask(self) -> Optional[Subtask]:
         """Get the current active subtask"""
@@ -55,6 +56,32 @@ class AgentMemory(BaseModel):
     def add_observation(self, key: str, value: Any):
         """Remember a key fact"""
         self.observations[key] = value
+
+    def update_plan(self, new_subtasks: List[str]):
+        """Dynamically update the remaining plan"""
+        # unexpected behavior: modifying the plan while iterating?
+        # Find index of first pending/active task (keep completed/failed)
+        start_idx = len(self.plan)
+        for i, task in enumerate(self.plan):
+            if task.status in ["pending", "active"]: # overwrite active too if we are replanning
+                start_idx = i
+                break
+        
+        # Keep old completed tasks
+        kept_tasks = self.plan[:start_idx]
+        
+        # Create new tasks starting from last ID + 1
+        last_id = kept_tasks[-1].id if kept_tasks else 0
+        new_task_objs = []
+        for i, desc in enumerate(new_subtasks):
+            new_task_objs.append(Subtask(
+                id=last_id + 1 + i,
+                description=desc,
+                status="pending"
+            ))
+            
+        self.plan = kept_tasks + new_task_objs
+        return len(new_task_objs)
 
     def to_prompt_context(self) -> str:
         """Format state for LLM prompt"""

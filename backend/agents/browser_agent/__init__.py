@@ -68,7 +68,6 @@ async def browse(request: BrowserTask):
         
         agent = BrowserAgent(
             task=request.task,
-            max_steps=request.max_steps,
             headless=request.headless
         )
         

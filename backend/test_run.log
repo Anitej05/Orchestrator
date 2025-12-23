@@ -1,0 +1,26 @@
+2025-12-23 11:55:57,877 | agents.agent_file_manager | INFO | AgentFileManager initialized for browser_agent_downloads at storage/browser_downloads
+2025-12-23 11:55:57,878 | agents.agent_file_manager | INFO | Loaded 83 files from registry
+2025-12-23 11:55:57,881 | agents.agent_file_manager | INFO | AgentFileManager initialized for browser_agent_screenshots at storage/browser_screenshots
+2025-12-23 11:55:57,882 | agents.browser_agent.agent | INFO | 🚀 Starting SOTA Agent [b6482803]: Go to amazon.in, search "Samsung Galaxy S25 Ultra", sort by "Low to High" price, click the cheapest S25 Ultra result, extract product name and price using save_info action.
+2025-12-23 11:55:58,914 | agents.browser_agent.browser | INFO | 🌐 Browser launched
+2025-12-23 11:55:58,914 | agents.browser_agent.agent | INFO | 🧠 Generating execution plan...
+2025-12-23 11:55:58,914 | agents.browser_agent.llm | INFO | 📤 LLM Request (prompt length: 774 chars, system: True)
+2025-12-23 11:55:58,914 | agents.browser_agent.llm | INFO | 🤖 Calling NVIDIA (minimaxai/minimax-m2)...
+2025-12-23 11:56:03,721 | httpx | INFO | HTTP Request: POST https://integrate.api.nvidia.com/v1/chat/completions "HTTP/1.1 200 OK"
+2025-12-23 11:56:03,727 | agents.browser_agent.llm | INFO | ✅ NVIDIA response (1712 chars)
+2025-12-23 11:56:03,728 | agents.browser_agent.agent | INFO | 📋 Plan: ["Navigate to amazon.in and search for 'Samsung Galaxy S25 Ultra'", "Sort by 'Low to High' price and click the cheapest S25 Ultra result", 'Extract product name and price using save_info action']
+2025-12-23 11:56:03,728 | agents.browser_agent.agent | INFO | 
+==================================================
+📍 Step 1
+==================================================
+2025-12-23 11:56:03,728 | agents.browser_agent.agent | INFO | 🎯 Current Goal: Navigate to amazon.in and search for 'Samsung Galaxy S25 Ultra'
+2025-12-23 11:56:03,759 | agents.browser_agent.dom | INFO | 🔍 DOM Extracted 0 elements
+2025-12-23 11:56:03,836 | agents.browser_agent.agent | INFO | 🌐 URL: about:blank | 📄 Title: 
+2025-12-23 11:56:03,836 | agents.browser_agent.agent | INFO | 📝 Using TEXT LLM for action planning
+2025-12-23 11:56:03,836 | agents.browser_agent.llm | INFO | 📤 LLM Request (prompt length: 1446 chars, system: True)
+2025-12-23 11:56:03,836 | agents.browser_agent.llm | INFO | 🤖 Calling NVIDIA (minimaxai/minimax-m2)...
+2025-12-23 11:56:45,953 | httpx | INFO | HTTP Request: POST https://integrate.api.nvidia.com/v1/chat/completions "HTTP/1.1 200 OK"
+2025-12-23 11:56:45,953 | agents.browser_agent.llm | INFO | ✅ NVIDIA response (935 chars)
+2025-12-23 11:56:45,955 | agents.browser_agent.agent | INFO | 💭 Action Sequence: ['navigate'] | 💡 Starting the task by navigating to amazon.in to search for Samsung Galaxy S25 Ultra. This is the fir...
+2025-12-23 11:56:45,955 | agents.browser_agent.agent | INFO | 🔮 Next Mode Prediction: text
+2025-12-23 11:56:45,956 | agents.browser_agent.actions | INFO | ⚡ Executing Sequence: ['navigate'] | Starting the task by navigating to amazon.in to se...
