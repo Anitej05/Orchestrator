@@ -38,3 +38,8 @@ frontend.md
 test_detailed_continuity.py
 
 /audit_results
+
+/zoho-books
+/agents/zoho_books/temp.json
+
+

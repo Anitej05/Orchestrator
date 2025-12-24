@@ -1,0 +1,789 @@
+{
+  "id": "zoho_books_agent",
+  "owner_id": "orbimesh-vendor",
+  "name": "Zoho Books Agent - Pharmaceutical",
+  "description": "Comprehensive Zoho Books integration for pharmaceutical companies. Automates invoice creation, management, customer handling, and pharmaceutical-specific operations with batch tracking, expiry dates, and regulatory compliance. Handles all invoice automation tasks including creation, updates, sending, payment tracking, and customer/item management.",
+  "capabilities": [
+    "create invoice",
+    "update invoice",
+    "get invoice",
+    "list invoices",
+    "delete invoice",
+    "send invoice",
+    "mark invoice as sent",
+    "mark invoice as paid",
+    "create customer",
+    "update customer",
+    "get customer",
+    "list customers",
+    "create item",
+    "update item",
+    "get item",
+    "list items",
+    "create payment",
+    "get payment",
+    "list payments",
+    "pharmaceutical invoice",
+    "batch number tracking",
+    "expiry date management",
+    "drug name tracking",
+    "regulatory compliance",
+    "pharmaceutical inventory",
+    "invoice automation",
+    "invoice management",
+    "customer management",
+    "payment tracking",
+    "estimate creation",
+    "estimate management",
+    "recurring invoice",
+    "invoice template",
+    "bulk invoice creation",
+    "invoice approval workflow",
+    "convert estimate to invoice",
+    "pharmaceutical compliance",
+    "drug batch tracking",
+    "regulatory license tracking",
+    "controlled substance tracking",
+    "prescription drug management"
+  ],
+  "price_per_call_usd": 0.01,
+  "status": "active",
+  "agent_type": "http_rest",
+  "connection_config": {
+    "base_url": "http://localhost:8050"
+  },
+  "endpoints": [
+    {
+      "endpoint": "/invoices",
+      "http_method": "POST",
+      "description": "Create a new invoice with pharmaceutical-specific fields (batch numbers, expiry dates, drug names, regulatory info). Supports all standard invoice fields plus pharmaceutical compliance tracking.",
+      "parameters": [
+        {
+          "name": "customer_id",
+          "param_type": "string",
+          "required": true,
+          "description": "Zoho Books customer ID"
+        },
+        {
+          "name": "invoice_number",
+          "param_type": "string",
+          "required": false,
+          "description": "Custom invoice number (auto-generated if not provided)"
+        },
+        {
+          "name": "date",
+          "param_type": "string",
+          "required": false,
+          "description": "Invoice date in YYYY-MM-DD format (defaults to today)"
+        },
+        {
+          "name": "due_date",
+          "param_type": "string",
+          "required": false,
+          "description": "Due date in YYYY-MM-DD format"
+        },
+        {
+          "name": "line_items",
+          "param_type": "array",
+          "required": true,
+          "description": "Array of invoice line items. Each item can include pharmaceutical fields: batch_number, expiry_date, drug_name, manufacturer, regulatory_license, storage_conditions, hazard_class, controlled_substance, prescription_required"
+        },
+        {
+          "name": "notes",
+          "param_type": "string",
+          "required": false,
+          "description": "Invoice notes"
+        },
+        {
+          "name": "terms",
+          "param_type": "string",
+          "required": false,
+          "description": "Payment terms"
+        },
+        {
+          "name": "currency_code",
+          "param_type": "string",
+          "required": false,
+          "description": "Currency code (default: USD)"
+        },
+        {
+          "name": "discount",
+          "param_type": "number",
+          "required": false,
+          "description": "Discount amount"
+        },
+        {
+          "name": "shipping_charge",
+          "param_type": "number",
+          "required": false,
+          "description": "Shipping charge"
+        }
+      ]
+    },
+    {
+      "endpoint": "/invoices",
+      "http_method": "GET",
+      "description": "List invoices with filtering options. Supports filtering by customer, item, status, date, and pharmaceutical-specific fields.",
+      "parameters": [
+        {
+          "name": "page",
+          "param_type": "integer",
+          "required": false,
+          "description": "Page number (default: 1)"
+        },
+        {
+          "name": "per_page",
+          "param_type": "integer",
+          "required": false,
+          "description": "Items per page (default: 200, max: 200)"
+        },
+        {
+          "name": "customer_id",
+          "param_type": "string",
+          "required": false,
+          "description": "Filter by customer ID"
+        },
+        {
+          "name": "status",
+          "param_type": "string",
+          "required": false,
+          "description": "Filter by status: sent, draft, overdue, paid, void"
+        },
+        {
+          "name": "date",
+          "param_type": "string",
+          "required": false,
+          "description": "Filter by date (YYYY-MM-DD)"
+        },
+        {
+          "name": "search_text",
+          "param_type": "string",
+          "required": false,
+          "description": "Search in invoice number, customer name, etc."
+        }
+      ]
+    },
+    {
+      "endpoint": "/invoices/{invoice_id}",
+      "http_method": "GET",
+      "description": "Get invoice details by ID including all pharmaceutical fields and line items.",
+      "parameters": [
+        {
+          "name": "invoice_id",
+          "param_type": "string",
+          "required": true,
+          "description": "Zoho Books invoice ID"
+        }
+      ]
+    },
+    {
+      "endpoint": "/invoices/{invoice_id}",
+      "http_method": "PUT",
+      "description": "Update an existing invoice. Can update any field including pharmaceutical-specific fields.",
+      "parameters": [
+        {
+          "name": "invoice_id",
+          "param_type": "string",
+          "required": true,
+          "description": "Zoho Books invoice ID"
+        },
+        {
+          "name": "customer_id",
+          "param_type": "string",
+          "required": false,
+          "description": "Customer ID"
+        },
+        {
+          "name": "line_items",
+          "param_type": "array",
+          "required": false,
+          "description": "Updated line items with pharmaceutical fields"
+        },
+        {
+          "name": "date",
+          "param_type": "string",
+          "required": false,
+          "description": "Invoice date (YYYY-MM-DD)"
+        },
+        {
+          "name": "due_date",
+          "param_type": "string",
+          "required": false,
+          "description": "Due date (YYYY-MM-DD)"
+        },
+        {
+          "name": "notes",
+          "param_type": "string",
+          "required": false,
+          "description": "Invoice notes"
+        }
+      ]
+    },
+    {
+      "endpoint": "/invoices/{invoice_id}",
+      "http_method": "DELETE",
+      "description": "Delete an invoice.",
+      "parameters": [
+        {
+          "name": "invoice_id",
+          "param_type": "string",
+          "required": true,
+          "description": "Zoho Books invoice ID"
+        }
+      ]
+    },
+    {
+      "endpoint": "/invoices/{invoice_id}/send",
+      "http_method": "POST",
+      "description": "Send invoice via email to customer. Supports custom email addresses, CC, subject, and body.",
+      "parameters": [
+        {
+          "name": "invoice_id",
+          "param_type": "string",
+          "required": true,
+          "description": "Zoho Books invoice ID"
+        },
+        {
+          "name": "email_ids",
+          "param_type": "array",
+          "required": false,
+          "description": "Array of email addresses to send to (defaults to customer email)"
+        },
+        {
+          "name": "cc_email_ids",
+          "param_type": "array",
+          "required": false,
+          "description": "Array of CC email addresses"
+        },
+        {
+          "name": "subject",
+          "param_type": "string",
+          "required": false,
+          "description": "Custom email subject"
+        },
+        {
+          "name": "body",
+          "param_type": "string",
+          "required": false,
+          "description": "Custom email body"
+        },
+        {
+          "name": "send_attachment",
+          "param_type": "boolean",
+          "required": false,
+          "description": "Whether to attach PDF invoice (default: true)"
+        }
+      ]
+    },
+    {
+      "endpoint": "/invoices/{invoice_id}/mark-as-sent",
+      "http_method": "POST",
+      "description": "Mark invoice as sent without actually sending email.",
+      "parameters": [
+        {
+          "name": "invoice_id",
+          "param_type": "string",
+          "required": true,
+          "description": "Zoho Books invoice ID"
+        }
+      ]
+    },
+    {
+      "endpoint": "/invoices/{invoice_id}/mark-as-paid",
+      "http_method": "POST",
+      "description": "Mark invoice as paid (full or partial payment).",
+      "parameters": [
+        {
+          "name": "invoice_id",
+          "param_type": "string",
+          "required": true,
+          "description": "Zoho Books invoice ID"
+        },
+        {
+          "name": "amount",
+          "param_type": "number",
+          "required": true,
+          "description": "Payment amount"
+        }
+      ]
+    },
+    {
+      "endpoint": "/customers",
+      "http_method": "POST",
+      "description": "Create a new customer with pharmaceutical-specific fields (license number, regulatory authority, tax ID).",
+      "parameters": [
+        {
+          "name": "customer_name",
+          "param_type": "string",
+          "required": true,
+          "description": "Customer name"
+        },
+        {
+          "name": "company_name",
+          "param_type": "string",
+          "required": false,
+          "description": "Company name"
+        },
+        {
+          "name": "billing_address",
+          "param_type": "object",
+          "required": false,
+          "description": "Billing address object with address, city, state, zip, country, etc."
+        },
+        {
+          "name": "shipping_address",
+          "param_type": "object",
+          "required": false,
+          "description": "Shipping address object"
+        },
+        {
+          "name": "currency_code",
+          "param_type": "string",
+          "required": false,
+          "description": "Currency code (default: USD)"
+        },
+        {
+          "name": "license_number",
+          "param_type": "string",
+          "required": false,
+          "description": "Pharmaceutical license number"
+        },
+        {
+          "name": "regulatory_authority",
+          "param_type": "string",
+          "required": false,
+          "description": "Regulatory authority (e.g., FDA, EMA)"
+        },
+        {
+          "name": "tax_id",
+          "param_type": "string",
+          "required": false,
+          "description": "Tax ID or VAT number"
+        }
+      ]
+    },
+    {
+      "endpoint": "/customers",
+      "http_method": "GET",
+      "description": "List customers with search and filtering options.",
+      "parameters": [
+        {
+          "name": "page",
+          "param_type": "integer",
+          "required": false,
+          "description": "Page number (default: 1)"
+        },
+        {
+          "name": "per_page",
+          "param_type": "integer",
+          "required": false,
+          "description": "Items per page (default: 200)"
+        },
+        {
+          "name": "search_text",
+          "param_type": "string",
+          "required": false,
+          "description": "Search in customer name, company name, etc."
+        }
+      ]
+    },
+    {
+      "endpoint": "/customers/{customer_id}",
+      "http_method": "GET",
+      "description": "Get customer details by ID including pharmaceutical fields.",
+      "parameters": [
+        {
+          "name": "customer_id",
+          "param_type": "string",
+          "required": true,
+          "description": "Zoho Books customer ID"
+        }
+      ]
+    },
+    {
+      "endpoint": "/customers/{customer_id}",
+      "http_method": "PUT",
+      "description": "Update an existing customer including pharmaceutical fields.",
+      "parameters": [
+        {
+          "name": "customer_id",
+          "param_type": "string",
+          "required": true,
+          "description": "Zoho Books customer ID"
+        },
+        {
+          "name": "customer_name",
+          "param_type": "string",
+          "required": false,
+          "description": "Customer name"
+        },
+        {
+          "name": "license_number",
+          "param_type": "string",
+          "required": false,
+          "description": "Pharmaceutical license number"
+        },
+        {
+          "name": "regulatory_authority",
+          "param_type": "string",
+          "required": false,
+          "description": "Regulatory authority"
+        }
+      ]
+    },
+    {
+      "endpoint": "/items",
+      "http_method": "POST",
+      "description": "Create a new item with pharmaceutical-specific fields (batch number, expiry date, drug name, manufacturer, regulatory license, storage conditions, hazard class, controlled substance flag, prescription required flag).",
+      "parameters": [
+        {
+          "name": "name",
+          "param_type": "string",
+          "required": true,
+          "description": "Item name"
+        },
+        {
+          "name": "description",
+          "param_type": "string",
+          "required": false,
+          "description": "Item description"
+        },
+        {
+          "name": "rate",
+          "param_type": "number",
+          "required": true,
+          "description": "Item price/rate"
+        },
+        {
+          "name": "unit",
+          "param_type": "string",
+          "required": false,
+          "description": "Unit of measurement (e.g., 'box', 'bottle', 'tablet')"
+        },
+        {
+          "name": "item_type",
+          "param_type": "string",
+          "required": false,
+          "description": "Item type: sales, purchases, inventory, service (default: sales)"
+        },
+        {
+          "name": "sku",
+          "param_type": "string",
+          "required": false,
+          "description": "SKU code"
+        },
+        {
+          "name": "batch_number",
+          "param_type": "string",
+          "required": false,
+          "description": "Pharmaceutical batch number"
+        },
+        {
+          "name": "expiry_date",
+          "param_type": "string",
+          "required": false,
+          "description": "Expiry date in YYYY-MM-DD format"
+        },
+        {
+          "name": "drug_name",
+          "param_type": "string",
+          "required": false,
+          "description": "Drug name (generic or brand name)"
+        },
+        {
+          "name": "manufacturer",
+          "param_type": "string",
+          "required": false,
+          "description": "Manufacturer name"
+        },
+        {
+          "name": "regulatory_license",
+          "param_type": "string",
+          "required": false,
+          "description": "Regulatory license number"
+        },
+        {
+          "name": "storage_conditions",
+          "param_type": "string",
+          "required": false,
+          "description": "Storage conditions (e.g., '2-8°C', 'Room temperature')"
+        },
+        {
+          "name": "hazard_class",
+          "param_type": "string",
+          "required": false,
+          "description": "Hazard classification"
+        },
+        {
+          "name": "controlled_substance",
+          "param_type": "boolean",
+          "required": false,
+          "description": "Whether this is a controlled substance"
+        },
+        {
+          "name": "prescription_required",
+          "param_type": "boolean",
+          "required": false,
+          "description": "Whether prescription is required"
+        }
+      ]
+    },
+    {
+      "endpoint": "/items",
+      "http_method": "GET",
+      "description": "List items with filtering options.",
+      "parameters": [
+        {
+          "name": "page",
+          "param_type": "integer",
+          "required": false,
+          "description": "Page number (default: 1)"
+        },
+        {
+          "name": "per_page",
+          "param_type": "integer",
+          "required": false,
+          "description": "Items per page (default: 200)"
+        },
+        {
+          "name": "item_type",
+          "param_type": "string",
+          "required": false,
+          "description": "Filter by item type"
+        },
+        {
+          "name": "search_text",
+          "param_type": "string",
+          "required": false,
+          "description": "Search in item name, description, etc."
+        }
+      ]
+    },
+    {
+      "endpoint": "/items/{item_id}",
+      "http_method": "GET",
+      "description": "Get item details by ID including all pharmaceutical fields.",
+      "parameters": [
+        {
+          "name": "item_id",
+          "param_type": "string",
+          "required": true,
+          "description": "Zoho Books item ID"
+        }
+      ]
+    },
+    {
+      "endpoint": "/items/{item_id}",
+      "http_method": "PUT",
+      "description": "Update an existing item including pharmaceutical fields.",
+      "parameters": [
+        {
+          "name": "item_id",
+          "param_type": "string",
+          "required": true,
+          "description": "Zoho Books item ID"
+        },
+        {
+          "name": "name",
+          "param_type": "string",
+          "required": false,
+          "description": "Item name"
+        },
+        {
+          "name": "rate",
+          "param_type": "number",
+          "required": false,
+          "description": "Item price/rate"
+        },
+        {
+          "name": "batch_number",
+          "param_type": "string",
+          "required": false,
+          "description": "Pharmaceutical batch number"
+        },
+        {
+          "name": "expiry_date",
+          "param_type": "string",
+          "required": false,
+          "description": "Expiry date (YYYY-MM-DD)"
+        }
+      ]
+    },
+    {
+      "endpoint": "/payments",
+      "http_method": "POST",
+      "description": "Record a payment against an invoice or customer.",
+      "parameters": [
+        {
+          "name": "customer_id",
+          "param_type": "string",
+          "required": true,
+          "description": "Customer ID"
+        },
+        {
+          "name": "invoice_id",
+          "param_type": "string",
+          "required": false,
+          "description": "Invoice ID (if paying specific invoice)"
+        },
+        {
+          "name": "payment_mode",
+          "param_type": "string",
+          "required": true,
+          "description": "Payment mode: cash, check, credit_card, bank_transfer, paypal, etc."
+        },
+        {
+          "name": "amount",
+          "param_type": "number",
+          "required": true,
+          "description": "Payment amount"
+        },
+        {
+          "name": "date",
+          "param_type": "string",
+          "required": false,
+          "description": "Payment date (YYYY-MM-DD, defaults to today)"
+        },
+        {
+          "name": "reference_number",
+          "param_type": "string",
+          "required": false,
+          "description": "Payment reference number (check number, transaction ID, etc.)"
+        },
+        {
+          "name": "description",
+          "param_type": "string",
+          "required": false,
+          "description": "Payment description"
+        }
+      ]
+    },
+    {
+      "endpoint": "/payments",
+      "http_method": "GET",
+      "description": "List payments with filtering options.",
+      "parameters": [
+        {
+          "name": "page",
+          "param_type": "integer",
+          "required": false,
+          "description": "Page number (default: 1)"
+        },
+        {
+          "name": "per_page",
+          "param_type": "integer",
+          "required": false,
+          "description": "Items per page (default: 200)"
+        },
+        {
+          "name": "customer_id",
+          "param_type": "string",
+          "required": false,
+          "description": "Filter by customer ID"
+        },
+        {
+          "name": "invoice_id",
+          "param_type": "string",
+          "required": false,
+          "description": "Filter by invoice ID"
+        },
+        {
+          "name": "payment_mode",
+          "param_type": "string",
+          "required": false,
+          "description": "Filter by payment mode"
+        }
+      ]
+    },
+    {
+      "endpoint": "/payments/{payment_id}",
+      "http_method": "GET",
+      "description": "Get payment details by ID.",
+      "parameters": [
+        {
+          "name": "payment_id",
+          "param_type": "string",
+          "required": true,
+          "description": "Zoho Books payment ID"
+        }
+      ]
+    },
+    {
+      "endpoint": "/estimates",
+      "http_method": "POST",
+      "description": "Create an estimate (quote) with pharmaceutical fields. Can later be converted to invoice.",
+      "parameters": [
+        {
+          "name": "customer_id",
+          "param_type": "string",
+          "required": true,
+          "description": "Customer ID"
+        },
+        {
+          "name": "line_items",
+          "param_type": "array",
+          "required": true,
+          "description": "Array of estimate line items with pharmaceutical fields"
+        },
+        {
+          "name": "date",
+          "param_type": "string",
+          "required": false,
+          "description": "Estimate date (YYYY-MM-DD)"
+        },
+        {
+          "name": "notes",
+          "param_type": "string",
+          "required": false,
+          "description": "Estimate notes"
+        }
+      ]
+    },
+    {
+      "endpoint": "/estimates",
+      "http_method": "GET",
+      "description": "List estimates with filtering options.",
+      "parameters": [
+        {
+          "name": "page",
+          "param_type": "integer",
+          "required": false,
+          "description": "Page number (default: 1)"
+        },
+        {
+          "name": "customer_id",
+          "param_type": "string",
+          "required": false,
+          "description": "Filter by customer ID"
+        },
+        {
+          "name": "status",
+          "param_type": "string",
+          "required": false,
+          "description": "Filter by status: sent, accepted, declined, invoiced"
+        }
+      ]
+    },
+    {
+      "endpoint": "/estimates/{estimate_id}/convert-to-invoice",
+      "http_method": "POST",
+      "description": "Convert an estimate to an invoice.",
+      "parameters": [
+        {
+          "name": "estimate_id",
+          "param_type": "string",
+          "required": true,
+          "description": "Zoho Books estimate ID"
+        }
+      ]
+    },
+    {
+      "endpoint": "/health",
+      "http_method": "GET",
+      "description": "Health check endpoint. Returns connection status, API domain, organization ID, and rate limit usage.",
+      "parameters": []
+    }
+  ]
+}
+
+

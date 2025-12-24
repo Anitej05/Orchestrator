@@ -32,7 +32,7 @@ test-*.html
 test-*.js
 
 # Documentation
-*.md
+# *.md
 
 # Logs
 backend/logs/*.log
