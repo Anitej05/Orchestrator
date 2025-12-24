@@ -1721,20 +1721,43 @@ def plan_execution(state: State, config: RunnableConfig):
                                         logger.warning(f"🔧 CORRECTING HTTP METHOD: LLM suggested {task.primary.http_method} for {endpoint_path}, but agent config requires {correct_http_method}")
                                         task.primary.http_method = correct_http_method
                 
-                serializable_plan = [[task.model_dump(mode='json') for task in batch] for batch in (response.plan or [])]
-                
                 # CRITICAL FIX: Update task_agent_pairs with new task names from replan
                 # This ensures execute_batch can find matching agents for replanned tasks
                 new_task_agent_pairs = []
+                
+                # Pre-process existing pairs for faster lookup
+                existing_pairs = [TaskAgentPair.model_validate(p) for p in task_agent_pair_dicts]
+                
                 for batch in response.plan:
                     for task in batch:
                         if task.primary:
-                            # Find the original agent card for this agent_id
-                            original_pair = next(
-                                (TaskAgentPair.model_validate(p) for p in task_agent_pair_dicts 
-                                 if TaskAgentPair.model_validate(p).primary.id == task.primary.id), 
-                                None
-                            )
+                            # Robustly find the original agent card
+                            original_pair = None
+                            
+                            # Strategy 1: Exact ID match
+                            for p in existing_pairs:
+                                if p.primary.id == task.primary.id:
+                                    original_pair = p
+                                    break
+                            
+                            # Strategy 2: Match by Agent Name (if ID failed)
+                            if not original_pair:
+                                for p in existing_pairs:
+                                    if p.primary.name.lower() in task.primary.id.lower() or \
+                                       task.primary.id.lower() in p.primary.name.lower():
+                                        original_pair = p
+                                        logger.info(f"🔧 Autocorrecting Agent ID: '{task.primary.id}' -> '{p.primary.id}' (matched by name)")
+                                        
+                                        # CORRECT THE PLAN: Update the task's agent ID to the valid one
+                                        task.primary.id = p.primary.id
+                                        # Also fix endpoint if needed to match the found agent
+                                        matching_ep = next((ep for ep in p.primary.endpoints if str(ep.endpoint) == str(task.primary.endpoint)), None)
+                                        if not matching_ep and p.primary.endpoints:
+                                            # If endpoint not found, default to the first one? Or keep as is?
+                                            # Safer to keep as is, but maybe warn
+                                            pass
+                                        break
+                            
                             if original_pair:
                                 # Create new pair with the replanned task name
                                 new_pair = TaskAgentPair(
@@ -1743,8 +1766,16 @@ def plan_execution(state: State, config: RunnableConfig):
                                     primary=original_pair.primary,
                                     fallbacks=original_pair.fallbacks
                                 )
-                                new_task_agent_pairs.append(new_pair.model_dump(mode='json'))
-                                logger.info(f"✅ Created new task_agent_pair for replanned task: '{task.task_name}' -> agent '{task.primary.id}'")
+                                # Avoid duplicates
+                                if not any(np['task_name'] == new_pair.task_name for np in new_task_agent_pairs) and \
+                                   not any(ep.task_name == new_pair.task_name for ep in existing_pairs):
+                                    new_task_agent_pairs.append(new_pair.model_dump(mode='json'))
+                                    logger.info(f"✅ Created new task_agent_pair for replanned task: '{task.task_name}' -> agent '{task.primary.id}'")
+                            else:
+                                logger.warning(f"⚠️ Could not find original pair for agent ID '{task.primary.id}'. This might cause mapping errors.")
+
+                # Re-serialize the plan with the CORRECTED IDs
+                serializable_plan = [[task.model_dump(mode='json') for task in batch] for batch in (response.plan or [])]
                 
                 # Combine existing pairs with new ones
                 updated_task_agent_pairs = task_agent_pair_dicts + new_task_agent_pairs
@@ -3319,7 +3350,9 @@ async def execute_batch(state: State, config: RunnableConfig):
                 if matched_pair:
                     original_task_pair = matched_pair
                 else:
-                    error_msg = f"Could not find original task pair for '{planned_task.task_name}' to get fallbacks."
+                    available_ids = [p.primary.id for p in task_agent_pairs]
+                    target_id = planned_task.primary.id if hasattr(planned_task, 'primary') and hasattr(planned_task.primary, 'id') else 'N/A'
+                    error_msg = f"Could not find original task pair for '{planned_task.task_name}' (Target ID: {target_id}). Available: {available_ids}"
                     logger.error(error_msg)
                     return {"task_name": planned_task.task_name, "result": error_msg}
 

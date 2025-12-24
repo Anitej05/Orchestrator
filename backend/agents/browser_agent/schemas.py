@@ -21,7 +21,7 @@ class AtomicAction(BaseModel):
     """Single executable browser action"""
     name: Literal[
         "navigate", "click", "type", "scroll", "extract", "done",
-        "hover", "press", "wait", "go_back", "go_forward", "screenshot"
+        "hover", "press", "wait", "go_back", "go_forward", "screenshot", "save_info", "skip_subtask", "select"
     ]
     params: Dict[str, Any] = Field(default_factory=dict)
 
@@ -34,9 +34,13 @@ class ActionPlan(BaseModel):
         default="text", 
         description="Which model to use for the NEXT step. Use 'vision' if visual analysis is needed."
     )
-    completed_subtasks: List[int] = Field(
+    completed_subtasks: List[Any] = Field(
         default_factory=list,
         description="List of subtask IDs that will be completed by these actions"
+    )
+    updated_plan: Optional[List[str]] = Field(
+        default=None,
+        description="A NEW list of subtasks to replace the current remaining plan (Dynamic Replanning)"
     )
 
 
@@ -47,6 +51,9 @@ class ActionResult(BaseModel):
     message: str = ""
     data: Optional[Dict[str, Any]] = None
     screenshot_id: Optional[str] = None
+    # Timeout handling fields
+    timeout_occurred: bool = False
+    timeout_context: Optional[Dict[str, Any]] = None  # Contains: action, params, elapsed_ms, url
 
 
 class PageState(BaseModel):
@@ -61,7 +68,6 @@ class PageState(BaseModel):
 class BrowserTask(BaseModel):
     """Task request"""
     task: str
-    max_steps: int = Field(default=10, ge=1, le=50)
     headless: bool = False
     thread_id: Optional[str] = None
 
