@@ -20,13 +20,13 @@ logger = logging.getLogger(__name__)
 
 # Import standardized file manager
 try:
-    from agents.agent_file_manager import AgentFileManager, FileType, FileStatus
+    from agents.utils.agent_file_manager import AgentFileManager, FileType, FileStatus
 except ImportError:
     from agent_file_manager import AgentFileManager, FileType, FileStatus
 
 # Import canvas utilities for display
 try:
-    from agents.canvas_utils import create_spreadsheet_display
+    from agents.utils.canvas_utils import create_spreadsheet_display
 except ImportError:
     from canvas_utils import create_spreadsheet_display
 
@@ -836,7 +836,7 @@ async def get_summary(file_id: str = Form(...), show_preview: bool = Form(False)
         canvas_display = None
         if show_preview:
             try:
-                from agents.canvas_utils import create_spreadsheet_display
+                from agents.utils.canvas_utils import create_spreadsheet_display
                 # Prepare data for canvas (headers + first 10 rows)
                 preview_data = [df.columns.tolist()] + df.head(10).values.tolist()
                 canvas_display = create_spreadsheet_display(

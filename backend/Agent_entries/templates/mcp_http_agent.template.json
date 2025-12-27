@@ -1,0 +1,126 @@
+{
+  "$schema": "https://orbimesh.com/schemas/agent/mcp_http/v1.0.0",
+  "id": "example-mcp-agent",
+  "owner_id": "orbimesh-vendor",
+  "name": "Example MCP HTTP Agent",
+  "description": "A template for creating Model Context Protocol (MCP) agents that communicate via HTTP or SSE transport.",
+  "agent_type": "mcp_http",
+  "version": "1.0.0",
+  
+  "capabilities": {
+    "categories": [
+      {
+        "name": "Context Management",
+        "description": "MCP-specific context handling capabilities",
+        "priority": "high",
+        "capabilities": [
+          {
+            "id": "provide-context",
+            "name": "Provide Context",
+            "description": "Provide contextual information via MCP protocol",
+            "keywords": [
+              "context",
+              "mcp",
+              "protocol"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Get context about X",
+              "Provide information on Y"
+            ],
+            "related_endpoints": [
+              "/tools/list",
+              "/tools/call"
+            ]
+          }
+        ]
+      }
+    ],
+    "all_keywords": [
+      "context",
+      "mcp",
+      "protocol"
+    ]
+  },
+  
+  "status": "active",
+  "price_per_call_usd": 0.01,
+  
+  "requires_credentials": true,
+  "credential_fields": [
+    {
+      "name": "api_key",
+      "label": "API Key",
+      "type": "password",
+      "required": true,
+      "description": "Your API key for authenticating with this MCP server",
+      "placeholder": "sk_...",
+      "validation": {
+        "pattern": "^sk_[a-zA-Z0-9]{32,}$"
+      }
+    }
+  ],
+  
+  "connection_config": {
+    "base_url": "http://localhost:3000",
+    "transport": "sse",
+    "timeout": 60,
+    "headers": {
+      "Content-Type": "application/json"
+    }
+  },
+  
+  "endpoints": [
+    {
+      "endpoint": "/tools/list",
+      "http_method": "GET",
+      "description": "List all available tools from the MCP server",
+      "parameters": []
+    },
+    {
+      "endpoint": "/tools/call",
+      "http_method": "POST",
+      "description": "Call a specific tool on the MCP server",
+      "request_format": "json",
+      "parameters": [
+        {
+          "name": "tool_name",
+          "param_type": "string",
+          "required": true,
+          "description": "Name of the tool to call"
+        },
+        {
+          "name": "arguments",
+          "param_type": "object",
+          "required": false,
+          "description": "Arguments to pass to the tool",
+          "default_value": {}
+        }
+      ],
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "content": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    }
+  ],
+  
+  "tool_functions": null,
+  
+  "tags": [
+    "mcp",
+    "protocol",
+    "template"
+  ],
+  "category": "context-providers",
+  "icon": "network",
+  "documentation_url": "https://docs.orbimesh.com/agents/example-mcp-agent",
+  
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nYOUR_PUBLIC_KEY_HERE\n-----END PUBLIC KEY-----"
+}

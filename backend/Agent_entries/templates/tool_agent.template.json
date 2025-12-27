@@ -1,0 +1,122 @@
+{
+  "$schema": "https://orbimesh.com/schemas/agent/tool/v1.0.0",
+  "id": "example-tool-agent",
+  "owner_id": "orbimesh-vendor",
+  "name": "Example Tool Agent",
+  "description": "A template for creating TOOL agents that use direct Python function calls via LangChain @tool decorator. These are lightweight agents that don't require separate processes or HTTP calls.",
+  "agent_type": "tool",
+  "version": "1.0.0",
+  
+  "capabilities": {
+    "categories": [
+      {
+        "name": "Quick Operations",
+        "description": "Fast, synchronous operations that don't require external services",
+        "priority": "high",
+        "capabilities": [
+          {
+            "id": "quick-lookup",
+            "name": "Quick Lookup",
+            "description": "Perform quick data lookups",
+            "keywords": [
+              "lookup",
+              "search",
+              "find",
+              "quick"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Look up information about X",
+              "Find details on Y"
+            ],
+            "related_functions": [
+              "example_lookup_function"
+            ]
+          }
+        ]
+      }
+    ],
+    "all_keywords": [
+      "lookup",
+      "search",
+      "find",
+      "quick"
+    ]
+  },
+  
+  "status": "active",
+  "price_per_call_usd": 0.001,
+  
+  "requires_credentials": false,
+  "credential_fields": [],
+  
+  "connection_config": null,
+  
+  "endpoints": null,
+  
+  "tool_functions": [
+    "example_lookup_function",
+    "example_processing_function"
+  ],
+  
+  "tool_registry": {
+    "module": "tools.example_tools",
+    "functions": [
+      {
+        "name": "example_lookup_function",
+        "description": "Example function that demonstrates the TOOL agent pattern",
+        "async": false,
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "The search query"
+            },
+            "limit": {
+              "type": "integer",
+              "description": "Maximum number of results",
+              "default": 10
+            }
+          },
+          "required": [
+            "query"
+          ]
+        }
+      },
+      {
+        "name": "example_processing_function",
+        "description": "Example async function for processing data",
+        "async": true,
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": "string",
+              "description": "Data to process"
+            },
+            "options": {
+              "type": "object",
+              "description": "Processing options",
+              "default": {}
+            }
+          },
+          "required": [
+            "data"
+          ]
+        }
+      }
+    ]
+  },
+  
+  "tags": [
+    "tool",
+    "lightweight",
+    "template"
+  ],
+  "category": "utilities",
+  "icon": "function",
+  "documentation_url": "https://docs.orbimesh.com/agents/example-tool-agent",
+  
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nYOUR_PUBLIC_KEY_HERE\n-----END PUBLIC KEY-----"
+}

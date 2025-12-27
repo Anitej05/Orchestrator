@@ -19,7 +19,7 @@ from .llm import LLMClient
 from .vision import VisionClient
 
 try:
-    from agents.agent_file_manager import AgentFileManager, FileType, FileStatus
+    from agents.utils.agent_file_manager import AgentFileManager, FileType, FileStatus
 except ImportError:
     class FileType:
         DOWNLOAD = "download"

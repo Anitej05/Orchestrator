@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 # Import standardized file manager
 try:
-    from agents.agent_file_manager import AgentFileManager, FileType, FileStatus
+    from agents.utils.agent_file_manager import AgentFileManager, FileType, FileStatus
 except ImportError:
     from agent_file_manager import AgentFileManager, FileType, FileStatus
 

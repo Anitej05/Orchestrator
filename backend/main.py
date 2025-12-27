@@ -29,8 +29,12 @@ import re
 # --- Third-party Imports ---
 from fastapi import FastAPI, HTTPException, Depends, status, Query, Response, WebSocket, WebSocketDisconnect, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_, cast, String, select
+from pathlib import Path as PathlibPath
+import pandas as pd
+import httpx
 # Lazy import SentenceTransformer to avoid jaxlib dependency issues
 # from sentence_transformers import SentenceTransformer
 
@@ -155,6 +159,453 @@ storage_path.mkdir(exist_ok=True)
 # Mount storage directory for serving screenshots
 app.mount("/storage", StaticFiles(directory=str(storage_path)), name="storage")
 logger.info(f"Mounted /storage for serving screenshot files from {storage_path}")
+
+
+# ============================================================================
+# SECURE FILE SERVING ROUTE
+# ============================================================================
+# Auth System: Uses Clerk JWT authentication via auth.py module
+# - Validates JWT tokens using JWKS (JSON Web Key Sets) from Clerk
+# - Requires "Authorization: Bearer <token>" header on all requests
+# - Function: get_user_from_request(request) verifies token and returns user info
+# - Returns 401 if token is missing, invalid, or expired
+#
+# This route serves agent-generated files from backend/storage with:
+# - Path traversal protection (rejects ../, absolute paths)
+# - Smart filename lookup across storage folders
+# - Auto MIME type detection with inline preview support
+# - Newest version selection when file exists in multiple folders
+# ============================================================================
+
+from fastapi.responses import FileResponse
+
+@app.get("/files/{file_path:path}", tags=["Files"])
+async def serve_file(file_path: str, request: Request):
+    """
+    Securely serve user files (documents, images, spreadsheets) with inline preview support.
+    
+    This endpoint allows the orchestrator UI to display or download agent-generated content.
+    Files are served with Content-Disposition: inline when supported by browsers (PDFs, images, text).
+    
+    **Authentication:** Requires Clerk JWT token via Authorization header
+    
+    **Path Handling:**
+    - Relative path: /files/documents/report.pdf → backend/storage/documents/report.pdf
+    - Filename only: /files/report.pdf → searches in: documents, content, images, spreadsheets, etc.
+    - Multi-folder: Returns newest version by modification timestamp if found in multiple locations
+    
+    **Security:**
+    - Path traversal blocked (../, ~, //)
+    - All resolved paths validated to stay within backend/storage
+    - Symlink escape prevention via resolve() validation
+    
+    **Supported File Types:**
+    - Documents: .pdf, .docx, .txt
+    - Spreadsheets: .xlsx, .csv
+    - Images: .png, .jpg, .gif, .svg
+    - Data: .json
+    
+    Args:
+        file_path: Relative path from storage root or just filename
+        request: FastAPI request object for auth validation
+        
+    Returns:
+        FileResponse with appropriate Content-Type and Content-Disposition headers
+        
+    Raises:
+        401: Missing or invalid authentication token
+        404: File not found in storage
+        500: Server error (logged but details not exposed)
+        
+    Examples:
+        GET /files/documents/sample.pdf
+        GET /files/sample.pdf  (auto-detects folder)
+        GET /files/images/chart.png
+        GET /files/spreadsheets/data.xlsx
+    """
+    try:
+        # ===== AUTHENTICATION =====
+        # Validate Clerk JWT token using existing auth pattern
+        from auth import get_user_from_request
+        
+        try:
+            user = get_user_from_request(request)
+            user_id = user.get("sub") or user.get("user_id") or user.get("id")
+            logger.info(f"File request authenticated: user_id={user_id}, file={file_path}")
+        except HTTPException as auth_error:
+            logger.warning(f"File auth failed for {file_path}: {auth_error.detail}")
+            raise HTTPException(
+                status_code=401,
+                detail="Authentication required. Please provide a valid Bearer token."
+            )
+        
+        # ===== SECURITY VALIDATION =====
+        from utils.file_server import is_safe_path, find_file_in_storage, get_mime_type, should_inline_preview
+        
+        # Check for path traversal attempts
+        if not is_safe_path(file_path):
+            logger.warning(f"Unsafe path rejected: {file_path}")
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid file path. Path traversal attempts are not allowed."
+            )
+        
+        # ===== FILE LOOKUP =====
+        # Smart search across storage folders with newest version selection
+        result = find_file_in_storage(file_path)
+        if not result:
+            logger.info(f"File not found: {file_path}")
+            raise HTTPException(
+                status_code=404,
+                detail=f"File not found: {file_path}"
+            )
+        
+        resolved_path, relative_path = result
+        logger.info(f"Serving file: {relative_path} -> {resolved_path}")
+        
+        # ===== MIME TYPE & DISPOSITION =====
+        mime_type = get_mime_type(resolved_path)
+        
+        # Use inline preview for browser-compatible types, otherwise download
+        if should_inline_preview(mime_type):
+            disposition = "inline"
+        else:
+            disposition = f'attachment; filename="{resolved_path.name}"'
+        
+        # ===== SERVE FILE =====
+        return FileResponse(
+            path=str(resolved_path),
+            media_type=mime_type,
+            headers={
+                "Content-Disposition": disposition,
+                "X-File-Path": relative_path,  # Debug header showing resolved path
+            }
+        )
+    
+    except HTTPException:
+        # Re-raise HTTP exceptions (auth, not found, validation)
+        raise
+    
+    except Exception as e:
+        # Log unexpected errors but don't expose details to client
+        logger.error(f"File serving error for {file_path}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Internal server error while serving file"
+        )
+
+
+# Example requests (for testing):
+# GET http://localhost:8000/files/documents/sample.pdf
+# GET http://localhost:8000/files/sample.pdf   -> auto-detect folder
+# GET http://localhost:8000/files/images/chart.png
+# GET http://localhost:8000/files/spreadsheets/data.xlsx
+
+
+# ============================================================================
+# DOCUMENT CREATION ROUTE (UNIFIED)
+# ============================================================================
+# This route wraps the document agent's /create endpoint and provides:
+# - Clerk authentication (same pattern as other routes)
+# - Request validation and error handling
+# - Canvas preview generation for newly created documents
+# - Integration with the file serving route (/files)
+# ============================================================================
+
+from pydantic import BaseModel, Field
+
+class CreateDocumentRequest(BaseModel):
+    """Request to create a new document via orchestrator."""
+    content: str = Field(..., description="Document content")
+    file_name: str = Field(..., description="Filename (e.g., 'report.docx')")
+    file_type: str = Field(default="docx", description="Type: docx, pdf, or txt")
+    thread_id: Optional[str] = Field(None, description="Conversation thread ID")
+
+class CreateDocumentResponse(BaseModel):
+    """Response with created document details."""
+    success: bool
+    message: str
+    file_path: str
+    relative_path: Optional[str] = None  # Path for /files endpoint
+    canvas_display: Optional[Dict[str, Any]] = None
+    preview_url: Optional[str] = None  # URL to preview via /files
+
+@app.post("/api/documents/create", tags=["Document Operations"])
+async def create_document_unified(request: CreateDocumentRequest, req: Request):
+    """
+    Create a new document through the orchestrator.
+    
+    This is a unified endpoint that:
+    1. Validates Clerk authentication
+    2. Calls document agent's /create endpoint
+    3. Generates inline preview for newly created file
+    4. Returns file path suitable for /files endpoint
+    
+    Args:
+        request: CreateDocumentRequest with content, filename, and type
+        req: FastAPI request for authentication
+        
+    Returns:
+        CreateDocumentResponse with file_path and canvas_display for immediate preview
+        
+    Example:
+        POST /api/documents/create
+        {
+            "content": "# Report\n\nThis is a test report.",
+            "file_name": "report.docx",
+            "file_type": "docx",
+            "thread_id": "conv-123"
+        }
+        
+        Response:
+        {
+            "success": true,
+            "message": "Created report.docx",
+            "file_path": "/backend/storage/documents/report.docx",
+            "relative_path": "documents/report.docx",
+            "preview_url": "/files/documents/report.docx",
+            "canvas_display": { ... }
+        }
+    """
+    try:
+        # ===== AUTHENTICATION =====
+        from auth import get_user_from_request
+        try:
+            user = get_user_from_request(req)
+            user_id = user.get("sub") or user.get("user_id") or user.get("id")
+            logger.info(f"Document creation requested by: user_id={user_id}")
+        except HTTPException as auth_error:
+            raise HTTPException(
+                status_code=401,
+                detail="Authentication required"
+            )
+        
+        # ===== CALL DOCUMENT AGENT =====
+        import httpx
+        
+        # Call document agent's /create endpoint
+        agent_url = os.getenv("DOCUMENT_AGENT_URL", "http://localhost:8001")
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            agent_request = {
+                "content": request.content,
+                "file_name": request.file_name,
+                "file_type": request.file_type,
+                "output_dir": "backend/storage/documents",
+                "thread_id": request.thread_id
+            }
+            
+            try:
+                agent_response = await client.post(
+                    f"{agent_url}/create",
+                    json=agent_request
+                )
+                agent_response.raise_for_status()
+            except httpx.RequestError as e:
+                logger.error(f"Document agent error: {e}")
+                raise HTTPException(
+                    status_code=503,
+                    detail="Document agent unavailable"
+                )
+        
+        agent_data = agent_response.json()
+        if not agent_data.get("success"):
+            raise HTTPException(
+                status_code=400,
+                detail=agent_data.get("message", "Document creation failed")
+            )
+        
+        file_path = agent_data.get("file_path", "")
+        
+        # ===== GENERATE PREVIEW =====
+        from pathlib import Path as PathlibPath
+        from utils.file_server import find_file_in_storage, get_mime_type
+        
+        canvas_display = None
+        relative_path = None
+        preview_url = None
+        
+        if file_path and PathlibPath(file_path).exists():
+            # Get relative path for /files endpoint
+            try:
+                abs_path = PathlibPath(file_path).resolve()
+                storage_base = PathlibPath("storage").resolve()
+                relative_path = str(abs_path.relative_to(storage_base))
+                preview_url = f"/files/{relative_path}"
+                
+                # Generate canvas display for inline preview
+                file_ext = PathlibPath(file_path).suffix.lower()
+                
+                if file_ext in ['.pdf']:
+                    # PDF preview
+                    canvas_display = {
+                        "canvas_type": "pdf",
+                        "file_path": file_path,
+                        "file_name": PathlibPath(file_path).name,
+                        "preview_url": preview_url
+                    }
+                elif file_ext in ['.docx', '.doc']:
+                    # DOCX preview (convert to PDF for display)
+                    canvas_display = {
+                        "canvas_type": "docx",
+                        "file_path": file_path,
+                        "file_name": PathlibPath(file_path).name,
+                        "preview_url": preview_url,
+                        "note": "Click preview URL to view document"
+                    }
+                elif file_ext in ['.txt']:
+                    # Text preview
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content_preview = f.read()[:2000]
+                    canvas_display = {
+                        "canvas_type": "text",
+                        "file_name": PathlibPath(file_path).name,
+                        "content": content_preview,
+                        "full_preview_url": preview_url
+                    }
+                else:
+                    canvas_display = {
+                        "canvas_type": "file",
+                        "file_name": PathlibPath(file_path).name,
+                        "preview_url": preview_url
+                    }
+            except Exception as e:
+                logger.warning(f"Could not generate canvas preview: {e}")
+        
+        return CreateDocumentResponse(
+            success=True,
+            message=agent_data.get("message", f"Created {request.file_name}"),
+            file_path=file_path,
+            relative_path=relative_path,
+            canvas_display=canvas_display,
+            preview_url=preview_url
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Document creation error: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to create document"
+        )
+
+
+# ============================================================================
+# SPREADSHEET CREATION ROUTE (UNIFIED)
+# ============================================================================
+# Similar to document creation but for spreadsheets
+# ============================================================================
+
+class CreateSpreadsheetRequest(BaseModel):
+    """Request to create a new spreadsheet via orchestrator."""
+    filename: str = Field(..., description="Spreadsheet filename (e.g., 'data.xlsx')")
+    data: Dict[str, Any] = Field(..., description="Data structure: {columns: [...], rows: [...]}")
+    file_format: str = Field(default="xlsx", description="Format: xlsx or csv")
+    thread_id: Optional[str] = Field(None, description="Conversation thread ID")
+
+class CreateSpreadsheetResponse(BaseModel):
+    """Response with created spreadsheet details."""
+    success: bool
+    message: str
+    file_path: str
+    relative_path: Optional[str] = None
+    canvas_display: Optional[Dict[str, Any]] = None
+    preview_url: Optional[str] = None
+
+@app.post("/api/spreadsheets/create", tags=["Spreadsheet Operations"])
+async def create_spreadsheet_unified(request: CreateSpreadsheetRequest, req: Request):
+    """
+    Create a new spreadsheet through the orchestrator.
+    
+    Args:
+        request: CreateSpreadsheetRequest with filename, data, and format
+        req: FastAPI request for authentication
+        
+    Returns:
+        CreateSpreadsheetResponse with file_path and canvas_display
+        
+    Example:
+        POST /api/spreadsheets/create
+        {
+            "filename": "sales_report.xlsx",
+            "file_format": "xlsx",
+            "data": {
+                "columns": ["Month", "Sales", "Profit"],
+                "rows": [
+                    ["Jan", 10000, 2000],
+                    ["Feb", 12000, 2500]
+                ]
+            },
+            "thread_id": "conv-123"
+        }
+    """
+    try:
+        # ===== AUTHENTICATION =====
+        from auth import get_user_from_request
+        try:
+            user = get_user_from_request(req)
+            user_id = user.get("sub") or user.get("user_id") or user.get("id")
+            logger.info(f"Spreadsheet creation requested by: user_id={user_id}")
+        except HTTPException as auth_error:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        
+        # ===== CREATE SPREADSHEET =====
+        import pandas as pd
+        from pathlib import Path as PathlibPath
+        
+        # Convert data format to DataFrame
+        try:
+            if "rows" in request.data and "columns" in request.data:
+                df = pd.DataFrame(request.data["rows"], columns=request.data["columns"])
+            else:
+                df = pd.DataFrame(request.data)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid data format: {str(e)}")
+        
+        # Create storage directory
+        storage_dir = PathlibPath("storage/spreadsheets")
+        storage_dir.mkdir(parents=True, exist_ok=True)
+        file_path = storage_dir / request.filename
+        
+        # Save file
+        try:
+            if request.file_format.lower() == "csv":
+                df.to_csv(file_path, index=False)
+            else:  # Default to xlsx
+                df.to_excel(file_path, index=False, engine='openpyxl')
+            logger.info(f"Created spreadsheet: {file_path}")
+        except Exception as e:
+            logger.error(f"File creation error: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to create file: {str(e)}")
+        
+        # ===== GENERATE PREVIEW =====
+        relative_path = str(file_path.relative_to("storage"))
+        preview_url = f"/files/{relative_path}"
+        
+        # Canvas display with data preview
+        canvas_display = {
+            "canvas_type": "spreadsheet",
+            "file_name": request.filename,
+            "columns": df.columns.tolist(),
+            "rows": df.head(10).values.tolist(),  # First 10 rows
+            "total_rows": len(df),
+            "preview_url": preview_url
+        }
+        
+        return CreateSpreadsheetResponse(
+            success=True,
+            message=f"Created {request.filename}",
+            file_path=str(file_path),
+            relative_path=relative_path,
+            canvas_display=canvas_display,
+            preview_url=preview_url
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Spreadsheet creation error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to create spreadsheet")
 
 # --- Sentence Transformer Model Loading ---
 # Lazy load to avoid jaxlib dependency issues at startup

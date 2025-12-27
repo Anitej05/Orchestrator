@@ -3,6 +3,10 @@
   "owner_id": "orbimesh-vendor",
   "name": "Mail Agent",
   "description": "Gmail integration via Composio. Read, send, search, and manage emails with full Gmail API capabilities.",
+  "agent_type": "http_rest",
+  "version": "1.0.0",
+  "status": "active",
+  "price_per_call_usd": 0.005,
   "requires_credentials": true,
   "credential_fields": [
     {
@@ -22,62 +26,6 @@
       "placeholder": "Gmail-xxxxx"
     }
   ],
-  "capabilities": [
-    "read emails",
-    "send emails",
-    "search emails",
-    "fetch emails",
-    "compose emails",
-    "reply to emails",
-    "manage email labels",
-    "get email threads",
-    "fetch unread emails",
-    "send email with attachments",
-    "search inbox",
-    "check email",
-    "email automation",
-    "gmail integration",
-    "email management",
-    "list email threads",
-    "create email draft",
-    "add email labels",
-    "delete emails",
-    "get email attachments",
-    "download attachments",
-    "fetch message by id",
-    "email operations",
-    "fetch sent emails",
-    "get sent email content",
-    "view sent mail",
-    "check sent folder",
-    "get last sent email",
-    "verify sent email",
-    "see what was sent",
-    "search emails with attachments",
-    "find attachments",
-    "download email attachments",
-    "get attachment files",
-    "send html emails",
-    "format emails",
-    "professional email templates",
-    "newsletter emails",
-    "styled emails",
-    "rich text emails",
-    "email formatting",
-    "markdown to html",
-    "bullet point emails",
-    "formatted email content",
-    "attach files to email",
-    "send files via email",
-    "email with documents",
-    "email with images",
-    "sophisticated emails",
-    "business emails",
-    "marketing emails"
-  ],
-  "price_per_call_usd": 0.005,
-  "status": "active",
-  "agent_type": "http_rest",
   "connection_config": {
     "base_url": "http://localhost:8040"
   },
@@ -442,5 +390,1522 @@
       "description": "List available email templates and their descriptions",
       "parameters": []
     }
-  ]
+  ],
+  "tool_functions": null,
+  "tool_registry": null,
+  "tags": [],
+  "category": null,
+  "icon": null,
+  "documentation_url": null,
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nYOUR_PUBLIC_KEY_HERE\n-----END PUBLIC KEY-----",
+  "capabilities": {
+    "categories": [
+      {
+        "name": "Email Management",
+        "description": "Email Management capabilities",
+        "priority": "high",
+        "capabilities": [
+          {
+            "id": "read-emails",
+            "name": "Read Emails",
+            "description": "Capability to read emails",
+            "keywords": [
+              "read",
+              "emails",
+              "read emails"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use read emails",
+              "Help me read emails"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/fetch_sent_emails",
+              "/search_emails_with_attachments"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "send-emails",
+            "name": "Send Emails",
+            "description": "Capability to send emails",
+            "keywords": [
+              "send emails",
+              "emails",
+              "send"
+            ],
+            "requires_permission": true,
+            "examples": [
+              "Use send emails",
+              "Help me send emails"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/fetch_sent_emails",
+              "/search_emails_with_attachments",
+              "/compose_html_email",
+              "/format_email_content"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "search-emails",
+            "name": "Search Emails",
+            "description": "Capability to search emails",
+            "keywords": [
+              "search",
+              "emails",
+              "search emails"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use search emails",
+              "Help me search emails"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/fetch_sent_emails",
+              "/search_emails_with_attachments"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "fetch-emails",
+            "name": "Fetch Emails",
+            "description": "Capability to fetch emails",
+            "keywords": [
+              "fetch",
+              "emails",
+              "fetch emails"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use fetch emails",
+              "Help me fetch emails"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/fetch_sent_emails",
+              "/search_emails_with_attachments"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "compose-emails",
+            "name": "Compose Emails",
+            "description": "Capability to compose emails",
+            "keywords": [
+              "compose emails",
+              "compose",
+              "emails"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use compose emails",
+              "Help me compose emails"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/fetch_sent_emails",
+              "/search_emails_with_attachments",
+              "/compose_html_email"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "reply-to-emails",
+            "name": "Reply To Emails",
+            "description": "Capability to reply to emails",
+            "keywords": [
+              "to",
+              "reply",
+              "reply to emails",
+              "emails"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use reply to emails",
+              "Help me reply to emails"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/fetch_sent_emails",
+              "/get_last_sent_email",
+              "/download_attachments",
+              "/search_emails_with_attachments",
+              "/compose_html_email",
+              "/format_email_content"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "manage-email-labels",
+            "name": "Manage Email Labels",
+            "description": "Capability to manage email labels",
+            "keywords": [
+              "email",
+              "labels",
+              "manage email labels",
+              "manage"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use manage email labels",
+              "Help me manage email labels"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/get_attachment",
+              "/fetch_sent_emails",
+              "/get_sent_email",
+              "/get_last_sent_email",
+              "/download_attachments",
+              "/search_emails_with_attachments",
+              "/compose_html_email",
+              "/format_email_content",
+              "/email_templates"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "get-email-threads",
+            "name": "Get Email Threads",
+            "description": "Capability to get email threads",
+            "keywords": [
+              "get email threads",
+              "get",
+              "threads",
+              "email"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use get email threads",
+              "Help me get email threads"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/get_message",
+              "/add_label",
+              "/delete_message",
+              "/get_attachment",
+              "/fetch_sent_emails",
+              "/get_sent_email",
+              "/get_last_sent_email",
+              "/download_attachments",
+              "/search_emails_with_attachments",
+              "/compose_html_email",
+              "/format_email_content",
+              "/email_templates"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "fetch-unread-emails",
+            "name": "Fetch Unread Emails",
+            "description": "Capability to fetch unread emails",
+            "keywords": [
+              "fetch unread emails",
+              "fetch",
+              "emails",
+              "unread"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use fetch unread emails",
+              "Help me fetch unread emails"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/fetch_sent_emails",
+              "/search_emails_with_attachments"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "send-email-with-attachments",
+            "name": "Send Email With Attachments",
+            "description": "Capability to send email with attachments",
+            "keywords": [
+              "email",
+              "send",
+              "with",
+              "send email with attachments",
+              "attachments"
+            ],
+            "requires_permission": true,
+            "examples": [
+              "Use send email with attachments",
+              "Help me send email with attachments"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/get_attachment",
+              "/fetch_sent_emails",
+              "/get_sent_email",
+              "/get_last_sent_email",
+              "/download_attachments",
+              "/search_emails_with_attachments",
+              "/compose_html_email",
+              "/format_email_content",
+              "/email_templates"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "search-inbox",
+            "name": "Search Inbox",
+            "description": "Capability to search inbox",
+            "keywords": [
+              "inbox",
+              "search inbox",
+              "search"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use search inbox",
+              "Help me search inbox"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/search_emails_with_attachments"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "check-email",
+            "name": "Check Email",
+            "description": "Capability to check email",
+            "keywords": [
+              "check email",
+              "email",
+              "check"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use check email",
+              "Help me check email"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/get_attachment",
+              "/fetch_sent_emails",
+              "/get_sent_email",
+              "/get_last_sent_email",
+              "/download_attachments",
+              "/search_emails_with_attachments",
+              "/compose_html_email",
+              "/format_email_content",
+              "/email_templates"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "email-automation",
+            "name": "Email Automation",
+            "description": "Capability to email automation",
+            "keywords": [
+              "email",
+              "email automation",
+              "automation"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use email automation",
+              "Help me email automation"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/get_attachment",
+              "/fetch_sent_emails",
+              "/get_sent_email",
+              "/get_last_sent_email",
+              "/download_attachments",
+              "/search_emails_with_attachments",
+              "/compose_html_email",
+              "/format_email_content",
+              "/email_templates"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "gmail-integration",
+            "name": "Gmail Integration",
+            "description": "Capability to gmail integration",
+            "keywords": [
+              "gmail integration",
+              "integration",
+              "gmail"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use gmail integration",
+              "Help me gmail integration"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "email-management",
+            "name": "Email Management",
+            "description": "Capability to email management",
+            "keywords": [
+              "email management",
+              "management",
+              "email"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use email management",
+              "Help me email management"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/get_attachment",
+              "/fetch_sent_emails",
+              "/get_sent_email",
+              "/get_last_sent_email",
+              "/download_attachments",
+              "/search_emails_with_attachments",
+              "/compose_html_email",
+              "/format_email_content",
+              "/email_templates"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "list-email-threads",
+            "name": "List Email Threads",
+            "description": "Capability to list email threads",
+            "keywords": [
+              "email",
+              "list email threads",
+              "threads",
+              "list"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use list email threads",
+              "Help me list email threads"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/get_attachment",
+              "/fetch_sent_emails",
+              "/get_sent_email",
+              "/get_last_sent_email",
+              "/download_attachments",
+              "/search_emails_with_attachments",
+              "/compose_html_email",
+              "/format_email_content",
+              "/email_templates"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "create-email-draft",
+            "name": "Create Email Draft",
+            "description": "Capability to create email draft",
+            "keywords": [
+              "email",
+              "create email draft",
+              "create",
+              "draft"
+            ],
+            "requires_permission": true,
+            "examples": [
+              "Use create email draft",
+              "Help me create email draft"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/get_attachment",
+              "/fetch_sent_emails",
+              "/get_sent_email",
+              "/get_last_sent_email",
+              "/download_attachments",
+              "/search_emails_with_attachments",
+              "/compose_html_email",
+              "/format_email_content",
+              "/email_templates"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "add-email-labels",
+            "name": "Add Email Labels",
+            "description": "Capability to add email labels",
+            "keywords": [
+              "email",
+              "add",
+              "add email labels",
+              "labels"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use add email labels",
+              "Help me add email labels"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/get_attachment",
+              "/fetch_sent_emails",
+              "/get_sent_email",
+              "/get_last_sent_email",
+              "/download_attachments",
+              "/search_emails_with_attachments",
+              "/compose_html_email",
+              "/format_email_content",
+              "/email_templates"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "delete-emails",
+            "name": "Delete Emails",
+            "description": "Capability to delete emails",
+            "keywords": [
+              "delete emails",
+              "delete",
+              "emails"
+            ],
+            "requires_permission": true,
+            "examples": [
+              "Use delete emails",
+              "Help me delete emails"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/fetch_sent_emails",
+              "/search_emails_with_attachments"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "get-email-attachments",
+            "name": "Get Email Attachments",
+            "description": "Capability to get email attachments",
+            "keywords": [
+              "email",
+              "get",
+              "attachments",
+              "get email attachments"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use get email attachments",
+              "Help me get email attachments"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/get_message",
+              "/add_label",
+              "/delete_message",
+              "/get_attachment",
+              "/fetch_sent_emails",
+              "/get_sent_email",
+              "/get_last_sent_email",
+              "/download_attachments",
+              "/search_emails_with_attachments",
+              "/compose_html_email",
+              "/format_email_content",
+              "/email_templates"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "fetch-message-by-id",
+            "name": "Fetch Message By Id",
+            "description": "Capability to fetch message by id",
+            "keywords": [
+              "id",
+              "fetch message by id",
+              "fetch",
+              "message",
+              "by"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use fetch message by id",
+              "Help me fetch message by id"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/get_message",
+              "/delete_message",
+              "/fetch_sent_emails",
+              "/get_sent_email"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "email-operations",
+            "name": "Email Operations",
+            "description": "Capability to email operations",
+            "keywords": [
+              "email",
+              "operations",
+              "email operations"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use email operations",
+              "Help me email operations"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/get_attachment",
+              "/fetch_sent_emails",
+              "/get_sent_email",
+              "/get_last_sent_email",
+              "/download_attachments",
+              "/search_emails_with_attachments",
+              "/compose_html_email",
+              "/format_email_content",
+              "/email_templates"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "fetch-sent-emails",
+            "name": "Fetch Sent Emails",
+            "description": "Capability to fetch sent emails",
+            "keywords": [
+              "sent",
+              "fetch",
+              "fetch sent emails",
+              "emails"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use fetch sent emails",
+              "Help me fetch sent emails"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/fetch_sent_emails",
+              "/get_sent_email",
+              "/get_last_sent_email",
+              "/search_emails_with_attachments"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "get-sent-email-content",
+            "name": "Get Sent Email Content",
+            "description": "Capability to get sent email content",
+            "keywords": [
+              "email",
+              "get sent email content",
+              "get",
+              "sent",
+              "content"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use get sent email content",
+              "Help me get sent email content"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/get_message",
+              "/add_label",
+              "/delete_message",
+              "/get_attachment",
+              "/fetch_sent_emails",
+              "/get_sent_email",
+              "/get_last_sent_email",
+              "/download_attachments",
+              "/search_emails_with_attachments",
+              "/compose_html_email",
+              "/format_email_content",
+              "/email_templates"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "view-sent-mail",
+            "name": "View Sent Mail",
+            "description": "Capability to view sent mail",
+            "keywords": [
+              "view sent mail",
+              "view",
+              "sent",
+              "mail"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use view sent mail",
+              "Help me view sent mail"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/get_attachment",
+              "/fetch_sent_emails",
+              "/get_sent_email",
+              "/get_last_sent_email",
+              "/download_attachments",
+              "/search_emails_with_attachments",
+              "/compose_html_email",
+              "/format_email_content",
+              "/email_templates"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "get-last-sent-email",
+            "name": "Get Last Sent Email",
+            "description": "Capability to get last sent email",
+            "keywords": [
+              "email",
+              "get",
+              "sent",
+              "last",
+              "get last sent email"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use get last sent email",
+              "Help me get last sent email"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/get_message",
+              "/add_label",
+              "/delete_message",
+              "/get_attachment",
+              "/fetch_sent_emails",
+              "/get_sent_email",
+              "/get_last_sent_email",
+              "/download_attachments",
+              "/search_emails_with_attachments",
+              "/compose_html_email",
+              "/format_email_content",
+              "/email_templates"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "verify-sent-email",
+            "name": "Verify Sent Email",
+            "description": "Capability to verify sent email",
+            "keywords": [
+              "email",
+              "verify sent email",
+              "sent",
+              "verify"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use verify sent email",
+              "Help me verify sent email"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/get_attachment",
+              "/fetch_sent_emails",
+              "/get_sent_email",
+              "/get_last_sent_email",
+              "/download_attachments",
+              "/search_emails_with_attachments",
+              "/compose_html_email",
+              "/format_email_content",
+              "/email_templates"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "search-emails-with-attachments",
+            "name": "Search Emails With Attachments",
+            "description": "Capability to search emails with attachments",
+            "keywords": [
+              "emails",
+              "search",
+              "with",
+              "search emails with attachments",
+              "attachments"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use search emails with attachments",
+              "Help me search emails with attachments"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/fetch_sent_emails",
+              "/get_sent_email",
+              "/get_last_sent_email",
+              "/download_attachments",
+              "/search_emails_with_attachments",
+              "/compose_html_email",
+              "/format_email_content"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "download-email-attachments",
+            "name": "Download Email Attachments",
+            "description": "Capability to download email attachments",
+            "keywords": [
+              "email",
+              "download",
+              "download email attachments",
+              "attachments"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use download email attachments",
+              "Help me download email attachments"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/get_attachment",
+              "/fetch_sent_emails",
+              "/get_sent_email",
+              "/get_last_sent_email",
+              "/download_attachments",
+              "/search_emails_with_attachments",
+              "/compose_html_email",
+              "/format_email_content",
+              "/email_templates"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "send-html-emails",
+            "name": "Send Html Emails",
+            "description": "Capability to send html emails",
+            "keywords": [
+              "send html emails",
+              "emails",
+              "html",
+              "send"
+            ],
+            "requires_permission": true,
+            "examples": [
+              "Use send html emails",
+              "Help me send html emails"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/fetch_sent_emails",
+              "/search_emails_with_attachments",
+              "/compose_html_email",
+              "/format_email_content"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "format-emails",
+            "name": "Format Emails",
+            "description": "Capability to format emails",
+            "keywords": [
+              "format",
+              "format emails",
+              "emails"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use format emails",
+              "Help me format emails"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/fetch_sent_emails",
+              "/search_emails_with_attachments",
+              "/compose_html_email",
+              "/format_email_content"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "professional-email-templates",
+            "name": "Professional Email Templates",
+            "description": "Capability to professional email templates",
+            "keywords": [
+              "email",
+              "professional",
+              "templates",
+              "professional email templates"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use professional email templates",
+              "Help me professional email templates"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/get_attachment",
+              "/fetch_sent_emails",
+              "/get_sent_email",
+              "/get_last_sent_email",
+              "/download_attachments",
+              "/search_emails_with_attachments",
+              "/compose_html_email",
+              "/format_email_content",
+              "/email_templates"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "newsletter-emails",
+            "name": "Newsletter Emails",
+            "description": "Capability to newsletter emails",
+            "keywords": [
+              "newsletter",
+              "emails",
+              "newsletter emails"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use newsletter emails",
+              "Help me newsletter emails"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/fetch_sent_emails",
+              "/search_emails_with_attachments",
+              "/compose_html_email"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "styled-emails",
+            "name": "Styled Emails",
+            "description": "Capability to styled emails",
+            "keywords": [
+              "styled emails",
+              "styled",
+              "emails"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use styled emails",
+              "Help me styled emails"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/fetch_sent_emails",
+              "/search_emails_with_attachments"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "rich-text-emails",
+            "name": "Rich Text Emails",
+            "description": "Capability to rich text emails",
+            "keywords": [
+              "rich",
+              "rich text emails",
+              "emails",
+              "text"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use rich text emails",
+              "Help me rich text emails"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/fetch_sent_emails",
+              "/search_emails_with_attachments"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "email-formatting",
+            "name": "Email Formatting",
+            "description": "Capability to email formatting",
+            "keywords": [
+              "email formatting",
+              "formatting",
+              "email"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use email formatting",
+              "Help me email formatting"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/get_attachment",
+              "/fetch_sent_emails",
+              "/get_sent_email",
+              "/get_last_sent_email",
+              "/download_attachments",
+              "/search_emails_with_attachments",
+              "/compose_html_email",
+              "/format_email_content",
+              "/email_templates"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "bullet-point-emails",
+            "name": "Bullet Point Emails",
+            "description": "Capability to bullet point emails",
+            "keywords": [
+              "bullet point emails",
+              "bullet",
+              "emails",
+              "point"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use bullet point emails",
+              "Help me bullet point emails"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/fetch_sent_emails",
+              "/search_emails_with_attachments",
+              "/format_email_content"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "formatted-email-content",
+            "name": "Formatted Email Content",
+            "description": "Capability to formatted email content",
+            "keywords": [
+              "email",
+              "content",
+              "formatted",
+              "formatted email content"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use formatted email content",
+              "Help me formatted email content"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/get_attachment",
+              "/fetch_sent_emails",
+              "/get_sent_email",
+              "/get_last_sent_email",
+              "/download_attachments",
+              "/search_emails_with_attachments",
+              "/compose_html_email",
+              "/format_email_content",
+              "/email_templates"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "attach-files-to-email",
+            "name": "Attach Files To Email",
+            "description": "Capability to attach files to email",
+            "keywords": [
+              "email",
+              "files",
+              "attach files to email",
+              "to",
+              "attach"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use attach files to email",
+              "Help me attach files to email"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/get_attachment",
+              "/fetch_sent_emails",
+              "/get_sent_email",
+              "/get_last_sent_email",
+              "/download_attachments",
+              "/search_emails_with_attachments",
+              "/compose_html_email",
+              "/format_email_content",
+              "/email_templates"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "send-files-via-email",
+            "name": "Send Files Via Email",
+            "description": "Capability to send files via email",
+            "keywords": [
+              "email",
+              "files",
+              "send",
+              "send files via email",
+              "via"
+            ],
+            "requires_permission": true,
+            "examples": [
+              "Use send files via email",
+              "Help me send files via email"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/get_attachment",
+              "/fetch_sent_emails",
+              "/get_sent_email",
+              "/get_last_sent_email",
+              "/download_attachments",
+              "/search_emails_with_attachments",
+              "/compose_html_email",
+              "/format_email_content",
+              "/email_templates"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "email-with-documents",
+            "name": "Email With Documents",
+            "description": "Capability to email with documents",
+            "keywords": [
+              "email",
+              "documents",
+              "with",
+              "email with documents"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use email with documents",
+              "Help me email with documents"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/get_attachment",
+              "/fetch_sent_emails",
+              "/get_sent_email",
+              "/get_last_sent_email",
+              "/download_attachments",
+              "/search_emails_with_attachments",
+              "/compose_html_email",
+              "/format_email_content",
+              "/email_templates"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "email-with-images",
+            "name": "Email With Images",
+            "description": "Capability to email with images",
+            "keywords": [
+              "email",
+              "with",
+              "images",
+              "email with images"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use email with images",
+              "Help me email with images"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/get_attachment",
+              "/fetch_sent_emails",
+              "/get_sent_email",
+              "/get_last_sent_email",
+              "/download_attachments",
+              "/search_emails_with_attachments",
+              "/compose_html_email",
+              "/format_email_content",
+              "/email_templates"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "sophisticated-emails",
+            "name": "Sophisticated Emails",
+            "description": "Capability to sophisticated emails",
+            "keywords": [
+              "sophisticated emails",
+              "sophisticated",
+              "emails"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use sophisticated emails",
+              "Help me sophisticated emails"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/fetch_sent_emails",
+              "/search_emails_with_attachments"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "business-emails",
+            "name": "Business Emails",
+            "description": "Capability to business emails",
+            "keywords": [
+              "business",
+              "business emails",
+              "emails"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use business emails",
+              "Help me business emails"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/fetch_sent_emails",
+              "/search_emails_with_attachments"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "marketing-emails",
+            "name": "Marketing Emails",
+            "description": "Capability to marketing emails",
+            "keywords": [
+              "marketing emails",
+              "marketing",
+              "emails"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use marketing emails",
+              "Help me marketing emails"
+            ],
+            "related_endpoints": [
+              "/fetch_emails",
+              "/send_email",
+              "/add_label",
+              "/delete_message",
+              "/fetch_sent_emails",
+              "/search_emails_with_attachments"
+            ],
+            "related_functions": null
+          }
+        ]
+      },
+      {
+        "name": "File Operations",
+        "description": "File Operations capabilities",
+        "priority": "medium",
+        "capabilities": [
+          {
+            "id": "download-attachments",
+            "name": "Download Attachments",
+            "description": "Capability to download attachments",
+            "keywords": [
+              "download",
+              "download attachments",
+              "attachments"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use download attachments",
+              "Help me download attachments"
+            ],
+            "related_endpoints": [
+              "/send_email",
+              "/get_attachment",
+              "/download_attachments",
+              "/search_emails_with_attachments",
+              "/compose_html_email"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "find-attachments",
+            "name": "Find Attachments",
+            "description": "Capability to find attachments",
+            "keywords": [
+              "attachments",
+              "find attachments",
+              "find"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use find attachments",
+              "Help me find attachments"
+            ],
+            "related_endpoints": [
+              "/send_email",
+              "/download_attachments",
+              "/search_emails_with_attachments",
+              "/compose_html_email"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "get-attachment-files",
+            "name": "Get Attachment Files",
+            "description": "Capability to get attachment files",
+            "keywords": [
+              "get attachment files",
+              "get",
+              "attachment",
+              "files"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use get attachment files",
+              "Help me get attachment files"
+            ],
+            "related_endpoints": [
+              "/send_email",
+              "/get_message",
+              "/get_attachment",
+              "/get_sent_email",
+              "/get_last_sent_email",
+              "/download_attachments",
+              "/search_emails_with_attachments",
+              "/compose_html_email"
+            ],
+            "related_functions": null
+          }
+        ]
+      },
+      {
+        "name": "General",
+        "description": "General capabilities",
+        "priority": "low",
+        "capabilities": [
+          {
+            "id": "check-sent-folder",
+            "name": "Check Sent Folder",
+            "description": "Capability to check sent folder",
+            "keywords": [
+              "sent",
+              "folder",
+              "check",
+              "check sent folder"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use check sent folder",
+              "Help me check sent folder"
+            ],
+            "related_endpoints": [
+              "/fetch_sent_emails",
+              "/get_sent_email",
+              "/get_last_sent_email"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "see-what-was-sent",
+            "name": "See What Was Sent",
+            "description": "Capability to see what was sent",
+            "keywords": [
+              "was",
+              "sent",
+              "what",
+              "see",
+              "see what was sent"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use see what was sent",
+              "Help me see what was sent"
+            ],
+            "related_endpoints": [
+              "/fetch_sent_emails",
+              "/get_sent_email",
+              "/get_last_sent_email"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "markdown-to-html",
+            "name": "Markdown To Html",
+            "description": "Capability to markdown to html",
+            "keywords": [
+              "markdown to html",
+              "html",
+              "to",
+              "markdown"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use markdown to html",
+              "Help me markdown to html"
+            ],
+            "related_endpoints": [
+              "/send_email",
+              "/add_label",
+              "/fetch_sent_emails",
+              "/get_last_sent_email",
+              "/download_attachments",
+              "/compose_html_email",
+              "/format_email_content"
+            ],
+            "related_functions": null
+          }
+        ]
+      }
+    ],
+    "all_keywords": [
+      "read emails",
+      "send emails",
+      "search emails",
+      "fetch emails",
+      "compose emails",
+      "reply to emails",
+      "manage email labels",
+      "get email threads",
+      "fetch unread emails",
+      "send email with attachments",
+      "search inbox",
+      "check email",
+      "email automation",
+      "gmail integration",
+      "email management",
+      "list email threads",
+      "create email draft",
+      "add email labels",
+      "delete emails",
+      "get email attachments",
+      "download attachments",
+      "fetch message by id",
+      "email operations",
+      "fetch sent emails",
+      "get sent email content",
+      "view sent mail",
+      "check sent folder",
+      "get last sent email",
+      "verify sent email",
+      "see what was sent",
+      "search emails with attachments",
+      "find attachments",
+      "download email attachments",
+      "get attachment files",
+      "send html emails",
+      "format emails",
+      "professional email templates",
+      "newsletter emails",
+      "styled emails",
+      "rich text emails",
+      "email formatting",
+      "markdown to html",
+      "bullet point emails",
+      "formatted email content",
+      "attach files to email",
+      "send files via email",
+      "email with documents",
+      "email with images",
+      "sophisticated emails",
+      "business emails",
+      "marketing emails"
+    ]
+  }
 }

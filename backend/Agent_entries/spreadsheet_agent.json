@@ -3,21 +3,12 @@
   "owner_id": "orbimesh-vendor",
   "name": "Spreadsheet Agent",
   "description": "PRIORITY AGENT for ALL CSV and Excel files (.csv, .xlsx, .xls). Use this agent EXCLUSIVELY for any spreadsheet file. Handles display, analysis, and modification. DO NOT use Document Agent for CSV files.",
-  "requires_credentials": false,
-  "capabilities": [
-    "analyze csv and excel files",
-    "display spreadsheet data",
-    "show spreadsheet",
-    "view csv file",
-    "modify spreadsheet data",
-    "add columns to spreadsheet",
-    "rename columns",
-    "calculate totals",
-    "execute pandas operations"
-  ],
-  "price_per_call_usd": 0.002,
-  "status": "active",
   "agent_type": "http_rest",
+  "version": "1.0.0",
+  "status": "active",
+  "price_per_call_usd": 0.002,
+  "requires_credentials": false,
+  "credential_fields": [],
   "connection_config": {
     "base_url": "http://localhost:8041",
     "request_format": "form"
@@ -203,5 +194,251 @@
         }
       ]
     }
-  ]
+  ],
+  "tool_functions": null,
+  "tool_registry": null,
+  "tags": [],
+  "category": null,
+  "icon": null,
+  "documentation_url": null,
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nYOUR_PUBLIC_KEY_HERE\n-----END PUBLIC KEY-----",
+  "capabilities": {
+    "categories": [
+      {
+        "name": "Data Analysis",
+        "description": "Data Analysis capabilities",
+        "priority": "medium",
+        "capabilities": [
+          {
+            "id": "analyze-csv-and-excel-files",
+            "name": "Analyze Csv And Excel Files",
+            "description": "Capability to analyze csv and excel files",
+            "keywords": [
+              "files",
+              "analyze csv and excel files",
+              "analyze",
+              "csv",
+              "and"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use analyze csv and excel files",
+              "Help me analyze csv and excel files"
+            ],
+            "related_endpoints": [
+              "/execute_pandas",
+              "/query",
+              "/nl_query",
+              "/get_summary",
+              "/transform"
+            ],
+            "related_functions": null
+          }
+        ]
+      },
+      {
+        "name": "File Operations",
+        "description": "File Operations capabilities",
+        "priority": "medium",
+        "capabilities": [
+          {
+            "id": "view-csv-file",
+            "name": "View Csv File",
+            "description": "Capability to view csv file",
+            "keywords": [
+              "view",
+              "csv",
+              "file",
+              "view csv file"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use view csv file",
+              "Help me view csv file"
+            ],
+            "related_endpoints": [
+              "/upload",
+              "/display",
+              "/get_summary"
+            ],
+            "related_functions": null
+          }
+        ]
+      },
+      {
+        "name": "General",
+        "description": "General capabilities",
+        "priority": "low",
+        "capabilities": [
+          {
+            "id": "display-spreadsheet-data",
+            "name": "Display Spreadsheet Data",
+            "description": "Capability to display spreadsheet data",
+            "keywords": [
+              "display spreadsheet data",
+              "display",
+              "spreadsheet",
+              "data"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use display spreadsheet data",
+              "Help me display spreadsheet data"
+            ],
+            "related_endpoints": [
+              "/upload",
+              "/display",
+              "/execute_pandas",
+              "/query",
+              "/nl_query",
+              "/get_summary"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "show-spreadsheet",
+            "name": "Show Spreadsheet",
+            "description": "Capability to show spreadsheet",
+            "keywords": [
+              "show spreadsheet",
+              "spreadsheet",
+              "show"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use show spreadsheet",
+              "Help me show spreadsheet"
+            ],
+            "related_endpoints": [
+              "/upload",
+              "/display",
+              "/get_summary"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "modify-spreadsheet-data",
+            "name": "Modify Spreadsheet Data",
+            "description": "Capability to modify spreadsheet data",
+            "keywords": [
+              "modify",
+              "modify spreadsheet data",
+              "data",
+              "spreadsheet"
+            ],
+            "requires_permission": true,
+            "examples": [
+              "Use modify spreadsheet data",
+              "Help me modify spreadsheet data"
+            ],
+            "related_endpoints": [
+              "/upload",
+              "/display",
+              "/execute_pandas",
+              "/query",
+              "/nl_query",
+              "/get_summary"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "add-columns-to-spreadsheet",
+            "name": "Add Columns To Spreadsheet",
+            "description": "Capability to add columns to spreadsheet",
+            "keywords": [
+              "add columns to spreadsheet",
+              "add",
+              "to",
+              "spreadsheet",
+              "columns"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use add columns to spreadsheet",
+              "Help me add columns to spreadsheet"
+            ],
+            "related_endpoints": [
+              "/upload",
+              "/display",
+              "/execute_pandas",
+              "/query",
+              "/get_summary"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "rename-columns",
+            "name": "Rename Columns",
+            "description": "Capability to rename columns",
+            "keywords": [
+              "rename columns",
+              "columns",
+              "rename"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use rename columns",
+              "Help me rename columns"
+            ],
+            "related_endpoints": [
+              "/execute_pandas",
+              "/query"
+            ],
+            "related_functions": null
+          },
+          {
+            "id": "calculate-totals",
+            "name": "Calculate Totals",
+            "description": "Capability to calculate totals",
+            "keywords": [
+              "calculate",
+              "totals",
+              "calculate totals"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use calculate totals",
+              "Help me calculate totals"
+            ],
+            "related_endpoints": [],
+            "related_functions": null
+          },
+          {
+            "id": "execute-pandas-operations",
+            "name": "Execute Pandas Operations",
+            "description": "Capability to execute pandas operations",
+            "keywords": [
+              "execute",
+              "pandas",
+              "operations",
+              "execute pandas operations"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Use execute pandas operations",
+              "Help me execute pandas operations"
+            ],
+            "related_endpoints": [
+              "/upload",
+              "/execute_pandas",
+              "/query",
+              "/transform"
+            ],
+            "related_functions": null
+          }
+        ]
+      }
+    ],
+    "all_keywords": [
+      "analyze csv and excel files",
+      "display spreadsheet data",
+      "show spreadsheet",
+      "view csv file",
+      "modify spreadsheet data",
+      "add columns to spreadsheet",
+      "rename columns",
+      "calculate totals",
+      "execute pandas operations"
+    ]
+  }
 }

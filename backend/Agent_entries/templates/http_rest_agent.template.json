@@ -1,0 +1,117 @@
+{
+  "$schema": "https://orbimesh.com/schemas/agent/http_rest/v1.0.0",
+  "id": "example-http-agent",
+  "owner_id": "orbimesh-vendor",
+  "name": "Example HTTP REST Agent",
+  "description": "A template for creating HTTP REST API agents that communicate via standard RESTful endpoints.",
+  "agent_type": "http_rest",
+  "version": "1.0.0",
+  
+  "capabilities": {
+    "categories": [
+      {
+        "name": "Core Operations",
+        "description": "Primary capabilities of this agent",
+        "priority": "high",
+        "capabilities": [
+          {
+            "id": "example-capability",
+            "name": "Example Capability",
+            "description": "Description of what this capability does",
+            "keywords": [
+              "example",
+              "capability",
+              "demo"
+            ],
+            "requires_permission": false,
+            "examples": [
+              "Example user query 1",
+              "Example user query 2"
+            ],
+            "related_endpoints": [
+              "/example-endpoint"
+            ]
+          }
+        ]
+      }
+    ],
+    "all_keywords": [
+      "example",
+      "capability",
+      "demo"
+    ]
+  },
+  
+  "status": "active",
+  "price_per_call_usd": 0.01,
+  
+  "requires_credentials": false,
+  "credential_fields": [],
+  
+  "connection_config": {
+    "base_url": "http://localhost:8080",
+    "timeout": 30,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "retry_config": {
+      "max_retries": 3,
+      "backoff_factor": 2
+    }
+  },
+  
+  "endpoints": [
+    {
+      "endpoint": "/example-endpoint",
+      "http_method": "POST",
+      "description": "Example endpoint that demonstrates the schema structure",
+      "request_format": "json",
+      "parameters": [
+        {
+          "name": "input_text",
+          "param_type": "string",
+          "required": true,
+          "description": "Example input parameter",
+          "validation": {
+            "min": 1,
+            "max": 1000
+          }
+        },
+        {
+          "name": "options",
+          "param_type": "object",
+          "required": false,
+          "description": "Optional configuration object",
+          "default_value": {}
+        }
+      ],
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {
+            "type": "object"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ],
+  
+  "tool_functions": null,
+  
+  "tags": [
+    "example",
+    "template",
+    "http"
+  ],
+  "category": "utilities",
+  "icon": "api",
+  "documentation_url": "https://docs.orbimesh.com/agents/example-http-agent",
+  
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nYOUR_PUBLIC_KEY_HERE\n-----END PUBLIC KEY-----"
+}

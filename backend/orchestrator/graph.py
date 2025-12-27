@@ -3192,7 +3192,7 @@ async def execute_confirmed_task(state: State, config: RunnableConfig):
     
     # If no canvas display from agent but this is a document edit, fetch the display
     file_path = pending_task.get('file_path')
-    if not canvas_display and file_path and agent_name == 'document_analysis_agent':
+    if not canvas_display and file_path and ('document' in agent_name.lower() or 'document' in (agent_details.name or '').lower()):
         logger.info(f"🔄 Auto-displaying updated document after edit: {file_path}")
         try:
             import httpx
@@ -3356,6 +3356,46 @@ async def execute_batch(state: State, config: RunnableConfig):
                     logger.error(error_msg)
                     return {"task_name": planned_task.task_name, "result": error_msg}
 
+        # CHECK FOR CREATION TASK: Document/Spreadsheet creation routes
+        # Import here to avoid circular dependency
+        try:
+            from orchestrator.creation_handler import is_creation_task, validate_creation_task, build_creation_payload, execute_creation_task_async
+            
+            is_creation, creation_type = is_creation_task(planned_task)
+            
+            if is_creation:
+                logger.info(f"🎨 CREATION TASK DETECTED: task_name='{planned_task.task_name}', type='{creation_type}'")
+                
+                # Validate creation task has required parameters
+                is_valid, validation_error = validate_creation_task(planned_task, creation_type)
+                if not is_valid:
+                    logger.error(f"❌ Creation task validation failed: {validation_error}")
+                    return {
+                        "task_name": planned_task.task_name,
+                        "result": f"Creation task validation failed: {validation_error}",
+                        "status": "failed",
+                        "execution_time": 0,
+                        "agent_used": "CreationHandler"
+                    }
+                
+                # Execute creation task directly via HTTP endpoint
+                thread_id = config.get("configurable", {}).get("thread_id") if config else None
+                task_result = await execute_creation_task_async(planned_task, creation_type, thread_id)
+                
+                if task_result.get('status') == 'success':
+                    logger.info(f"✅ Creation task completed: {planned_task.task_name}")
+                    task_result['agent_used'] = 'CreationEndpoint'
+                    return task_result
+                else:
+                    logger.error(f"❌ Creation task failed: {task_result.get('result')}")
+                    return task_result
+        
+        except ImportError as e:
+            logger.warning(f"Creation handler not available: {e}. Proceeding with regular agent execution.")
+        except Exception as e:
+            logger.error(f"Error in creation task handling: {e}. Falling back to regular execution.")
+        
+        # REGULAR AGENT EXECUTION: If not a creation task, proceed normally
         agents_to_try = [original_task_pair.primary] + original_task_pair.fallbacks
         final_error_result = None
         
