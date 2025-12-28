@@ -1,5 +1,4 @@
 {
-  "$schema": "https://orbimesh.com/schemas/agent/tool/v1.0.0",
   "id": "example-tool-agent",
   "owner_id": "orbimesh-vendor",
   "name": "Example Tool Agent",

@@ -1,5 +1,4 @@
 {
-  "$schema": "https://orbimesh.com/schemas/agent/mcp_http/v1.0.0",
   "id": "example-mcp-agent",
   "owner_id": "orbimesh-vendor",
   "name": "Example MCP HTTP Agent",

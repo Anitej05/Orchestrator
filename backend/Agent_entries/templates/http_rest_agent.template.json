@@ -1,5 +1,4 @@
 {
-  "$schema": "https://orbimesh.com/schemas/agent/http_rest/v1.0.0",
   "id": "example-http-agent",
   "owner_id": "orbimesh-vendor",
   "name": "Example HTTP REST Agent",
