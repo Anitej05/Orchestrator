@@ -31,7 +31,7 @@ class Agent(Base):
     owner_id = Column(String, nullable=False, index=True)
     name = Column(String, nullable=False)
     description = Column(Text)
-    capabilities = Column(JSON, nullable=False) # Store raw text capabilities in a JSON array
+    capabilities = Column(JSON, nullable=True)  # Now nullable - endpoints are the primary source of truth
     price_per_call_usd = Column(Float, nullable=False, default=0.0)
     status = Column(SAEnum(StatusEnum), nullable=False, default=StatusEnum.active, index=True)
     rating = Column(Float, default=0.0)

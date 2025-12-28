@@ -5,14 +5,17 @@ Execute browser actions reliably. THE MOST CRITICAL COMPONENT.
 """
 
 import logging
+import re
 import uuid
 import time
+import asyncio
 from pathlib import Path
 from typing import Dict, Any, Optional, List
-from playwright.async_api import Page
+from playwright.async_api import Page, TimeoutError as PTimeoutError, Error as PError
 
 from .schemas import ActionPlan, ActionResult, AtomicAction
 from .dom import DOMExtractor
+from .config import CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -24,21 +27,38 @@ class ActionExecutor:
         self.dom = DOMExtractor()
         self.screenshot_manager = screenshot_manager
         self.thread_id = thread_id
+        self._cached_elements = []
+
+    def set_cached_elements(self, elements: List[Dict]):
+        """Update cached elements for index-based interaction"""
+        self._cached_elements = elements
     
     async def execute(self, page: Page, plan: ActionPlan) -> ActionResult:
         """Execute a sequence of actions with smart retry for failures"""
         results_log = []
         final_data = {}
         
+        # Context for variable interpolation between actions
+        action_context = {
+            'last_run_js_output': None
+        }
+        
         logger.info(f"⚡ Executing Sequence: {[a.name for a in plan.actions]} | {plan.reasoning[:50]}...")
         
         for action in plan.actions:
             try:
-                result = await self._execute_single(page, action)
+                # Interpolate variables in action params (e.g., {{last_run_js_output}})
+                interpolated_params = self._interpolate_params(action.params, action_context)
+                interpolated_action = AtomicAction(name=action.name, params=interpolated_params)
+                
+                result = await self._execute_single(page, interpolated_action)
                 results_log.append(f"{action.name}: {result.message}")
                 
                 if result.data:
                     final_data.update(result.data)
+                    # Store run_js output for subsequent save_info
+                    if action.name == "run_js" and 'result' in result.data:
+                        action_context['last_run_js_output'] = result.data['result']
                 
                 # SMART RETRY for click failures
                 if not result.success and action.name == "click":
@@ -64,10 +84,16 @@ class ActionExecutor:
                 
                 if not result.success:
                     logger.warning(f"⚠️ Action '{action.name}' failed: {result.message}. Stopping sequence.")
+                    
+                    # ENHANCEMENT: Append strategy suggestions to break loops
+                    failure_msg = result.message
+                    if "Timeout" in failure_msg or "Nothing clicked" in failure_msg:
+                        failure_msg += " SUGGESTION: The element might be hidden or text doesn't match. 1. Try 'run_js' to click/find directly. 2. Verify element visibility with #N index."
+                    
                     return ActionResult(
                         success=False, 
                         action=action.name, 
-                        message=f"Sequence stopped at {action.name}: {result.message}",
+                        message=f"Sequence stopped at {action.name}: {failure_msg}",
                         data=final_data
                     )
             except Exception as e:
@@ -80,6 +106,24 @@ class ActionExecutor:
             message="; ".join(results_log),
             data=final_data
         )
+    
+    def _interpolate_params(self, params: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+        """Interpolate variables like {{last_run_js_output}} in action parameters"""
+        if not params:
+            return params
+        
+        result = {}
+        for key, value in params.items():
+            if isinstance(value, str):
+                # Replace {{last_run_js_output}} with actual value
+                if '{{last_run_js_output}}' in value and context.get('last_run_js_output'):
+                    result[key] = value.replace('{{last_run_js_output}}', str(context['last_run_js_output']))
+                    logger.info(f"📝 Interpolated {{{{last_run_js_output}}}} -> {result[key][:100]}...")
+                else:
+                    result[key] = value
+            else:
+                result[key] = value
+        return result
 
     async def _execute_single(self, page: Page, action: AtomicAction) -> ActionResult:
         if action.name == "navigate":
@@ -102,6 +146,15 @@ class ActionExecutor:
             try:
                 # Capture URL before
                 start_url = page.url
+                
+                # Check if we CAN go back (has history)
+                can_go_back = await page.evaluate("() => window.history.length > 1")
+                if not can_go_back:
+                    return ActionResult(
+                        success=False,
+                        action="go_back",
+                        message="No browser history to go back to. Use 'navigate' to go to a specific URL instead."
+                    )
                 
                 # Go back with wait
                 await page.go_back(wait_until='domcontentloaded', timeout=15000)
@@ -129,12 +182,20 @@ class ActionExecutor:
             return await self._extract(page, action.params)
         elif action.name == "done":
             return ActionResult(success=True, action="done", message="Task complete")
-        elif action.name == "screenshot":
-            return await self._screenshot(page, action.params)
+        elif action.name == "save_screenshot":
+            return await self._save_screenshot(page, action.params)
         elif action.name == "save_info":
             return await self._save_info(page, action.params)
         elif action.name == "skip_subtask":
             return await self._skip_subtask(page, action.params)
+        elif action.name == "upload_file":
+            return await self._upload_file(page, action.params)
+        elif action.name == "download_file":
+            return await self._download_file(page, action.params)
+        elif action.name == "run_js":
+            return await self._run_javascript(page, action.params)
+        elif action.name == "press_keys":
+            return await self._press_keys(page, action.params)
         else:
             return ActionResult(success=False, action=action.name, message=f"Unknown action: {action.name}")
 
@@ -146,7 +207,6 @@ class ActionExecutor:
         2. Searches for visible links containing those keywords
         3. Clicks the first matching visible element
         """
-        import re
         
         # Extract search keywords from various params
         keywords = []
@@ -178,6 +238,30 @@ class ActionExecutor:
         logger.info(f"🔍 Smart click fallback - searching for keywords: {keywords}")
         
         # Try to find and click elements containing these keywords
+        
+        # Strategy 0: Check MEMORY (cached elements) for text match
+        if hasattr(self, '_cached_elements') and self._cached_elements:
+            for keyword in keywords:
+                keyword_clean = keyword.strip().lower()
+                if len(keyword_clean) < 3: continue
+                
+                for el in self._cached_elements:
+                    # Check text content, name, or aria-label
+                    el_text = (el.get('text') or el.get('name') or '').lower()
+                    el_label = (el.get('attributes') or {}).get('aria-label', '').lower()
+                    
+                    if keyword_clean in el_text or keyword_clean in el_label:
+                        xpath = el.get('xpath')
+                        if xpath:
+                            try:
+                                logger.info(f"🧠 Memory Hit! Found '{keyword}' in cached element: {el.get('name')}")
+                                locator = page.locator(f"xpath={xpath}").first
+                                await locator.click(timeout=5000)
+                                return ActionResult(success=True, action="click", message=f"Smart fallback (Memory): clicked '{el.get('name')}'")
+                            except Exception as e:
+                                logger.warning(f"Memory click failed: {e}")
+
+        # Continue with page scanning strategies
         for keyword in keywords:
             try:
                 # Clean keyword - remove trailing truncation
@@ -311,6 +395,15 @@ class ActionExecutor:
         try:
             await page.wait_for_timeout(seconds * 1000)
             return ActionResult(success=True, action="wait", message=f"Waited {seconds}s")
+        except PError as e:
+            msg = str(e)
+            if "Target closed" in msg or "Session closed" in msg:
+                 logger.warning(f"⚠️ Wait interrupted by target close: {msg}")
+                 # Return success so we don't abort the sequence immediately.
+                 # The next action will likely fail if page is truly gone, 
+                 # but we avoid a crash on 'wait'.
+                 return ActionResult(success=True, action="wait", message=f"Waited {seconds}s (Target Closed)")
+            return ActionResult(success=False, action="wait", message=msg)
         except Exception as e:
             return ActionResult(success=False, action="wait", message=str(e))
 
@@ -375,7 +468,11 @@ class ActionExecutor:
             return ActionResult(success=False, action="select", message=f"Select failed: {str(e)}")
     
     async def _click(self, page: Page, params: Dict[str, Any]) -> ActionResult:
-        """Click on element - supports XPath, CSS selector, role+name (a11y), text, or coordinates"""
+        """Click on element - supports index, XPath, CSS selector, role+name (a11y), text, or coordinates"""
+        # DEBUG PARAM LOGGING
+        logger.info(f"DEBUG_CLICK params: {params}")
+        
+        index = params.get('index')  # Element index from DOM list (#N)
         xpath = params.get('xpath', '')
         selector = params.get('selector', '')
         text = params.get('text', '')
@@ -390,8 +487,40 @@ class ActionExecutor:
         try:
             clicked = False
             
+            # 0. Index-based click (highest priority - clicks specific element from DOM list)
+            if not clicked and index is not None:
+                try:
+                    # Get elements from DOM - index is 1-based from LLM
+                    elements = getattr(self, '_cached_elements', [])
+                    elem_idx = int(index) - 1  # Convert to 0-based
+                    if 0 <= elem_idx < len(elements):
+                        el = elements[elem_idx]
+                        el_x = el.get('x')
+                        el_y = el.get('y')
+                        if el_x is not None and el_y is not None:
+                            await page.mouse.click(el_x, el_y)
+                            clicked = True
+                            logger.info(f"✅ Clicked via index #{index}: ({el_x}, {el_y}) - {el.get('name', '')[:30]}")
+                        else:
+                            # Try xpath if coordinates not available
+                            el_xpath = el.get('xpath', '')
+                            if el_xpath:
+                                locator = page.locator(f"xpath={el_xpath}").first
+                                if await locator.count() > 0:
+                                    await locator.click(timeout=5000)
+                                    clicked = True
+                                    logger.info(f"✅ Clicked via index #{index} xpath: {el_xpath[:50]}")
+                            if not clicked:
+                                attempts.append(f"index({index}):no coords/xpath")
+                    else:
+                        attempts.append(f"index({index}):out of range (max {len(elements)})")
+                        logger.warning(f"Index {index} out of range. Available: 1-{len(elements)}")
+                except Exception as idx_err:
+                    attempts.append(f"index:{str(idx_err)[:30]}")
+                    logger.warning(f"Index-based click failed: {idx_err}")
+            
             # 1. Coordinate click (highest priority for vision mode)
-            if x is not None and y is not None:
+            if not clicked and x is not None and y is not None:
                 try:
                     await page.mouse.click(x, y)
                     clicked = True
@@ -491,7 +620,7 @@ class ActionExecutor:
                             await element.evaluate("el => el.click()")
                             clicked = True
                             logger.info(f"✅ Clicked via CSS JS fallback: {selector[:30]}")
-                    except:
+                    except Exception:
                         logger.warning(f"CSS selector click failed: {selector[:30]}")
 
             if clicked:
@@ -570,7 +699,7 @@ class ActionExecutor:
                             target = el
                             logger.info(f"Found input via fallback selector: {sel}")
                             break
-                    except:
+                    except Exception:
                         continue
             
             if target:
@@ -702,13 +831,12 @@ class ActionExecutor:
             file_path = storage_dir / filename
             
             # Capture and save with timeout and logging
-            import time as time_module
-            ss_start = time_module.time()
+            ss_start = time.time()
             logger.info(f"📸 _screenshot action: Capturing from {page.url[:50]}...")
             
             await page.screenshot(path=str(file_path), type='jpeg', quality=80, timeout=15000)
             
-            ss_elapsed = time_module.time() - ss_start
+            ss_elapsed = time.time() - ss_start
             logger.info(f"📸 Screenshot saved in {ss_elapsed:.2f}s: {file_path}")
             
             # Register with file manager if available
@@ -774,3 +902,377 @@ class ActionExecutor:
              message=f"Created skipping request: {reason}",
              data={"skipped": True, "reason": reason}
         )
+
+    async def _upload_file(self, page: Page, params: Dict[str, Any]) -> ActionResult:
+        """Upload a file to a file input element
+        
+        Params:
+            file_path: Path to the file (can be filename in uploads dir or absolute path)
+            selector: CSS selector for the file input (default: input[type='file'])
+            xpath: XPath for the file input (alternative to selector)
+            index: Index of file input on page (1-based)
+        """
+        file_path_str = params.get('file_path') or params.get('filename')
+        selector = params.get('selector')
+        xpath = params.get('xpath')
+        index = params.get('index')
+        
+        if not file_path_str:
+            return ActionResult(
+                success=False,
+                action="upload_file",
+                message="No file_path provided. Specify the file to upload."
+            )
+        
+        # Resolve file path using config
+        resolved_path = CONFIG.get_upload_path(file_path_str)
+        if not resolved_path:
+            available = CONFIG.list_available_uploads()
+            return ActionResult(
+                success=False,
+                action="upload_file",
+                message=f"File not found: {file_path_str}. Available files in uploads folder: {available[:10]}"
+            )
+        
+        try:
+            # Find the file input element
+            file_input = None
+            
+            if xpath:
+                file_input = page.locator(f"xpath={xpath}").first
+            elif selector:
+                file_input = page.locator(selector).first
+            elif index:
+                # Find by index (1-based)
+                all_inputs = page.locator("input[type='file']")
+                count = await all_inputs.count()
+                if 0 < index <= count:
+                    file_input = all_inputs.nth(index - 1)
+                else:
+                    return ActionResult(
+                        success=False,
+                        action="upload_file",
+                        message=f"File input index {index} out of range. Found {count} file inputs."
+                    )
+            else:
+                # Default: find first file input
+                file_input = page.locator("input[type='file']").first
+            
+            if not file_input or await file_input.count() == 0:
+                return ActionResult(
+                    success=False,
+                    action="upload_file",
+                    message="No file input element found on page."
+                )
+            
+            # Upload the file
+            await file_input.set_input_files(str(resolved_path))
+            
+            # Wait for any upload processing
+            await page.wait_for_timeout(1000)
+            
+            logger.info(f"📤 Uploaded file: {resolved_path.name}")
+            return ActionResult(
+                success=True,
+                action="upload_file",
+                message=f"Uploaded file: {resolved_path.name}",
+                data={"uploaded_file": str(resolved_path), "filename": resolved_path.name}
+            )
+            
+        except Exception as e:
+            logger.error(f"File upload failed: {e}")
+            return ActionResult(
+                success=False,
+                action="upload_file",
+        )
+
+    async def _save_screenshot(self, page: Page, params: Dict[str, Any]) -> ActionResult:
+        """Save a screenshot of the current page to disk
+        
+        Params:
+            filename: Optional custom filename (e.g. "checkout_page.jpg")
+            full_page: Whether to capture full scrollable page (default: False)
+        """
+        custom_filename = params.get('filename')
+        full_page = params.get('full_page', False)
+        
+        try:
+            # Generate filename if not provided
+            if not custom_filename:
+                timestamp = int(time.time())
+                custom_filename = f"screenshot_{timestamp}.jpg"
+            
+            # Ensure extension
+            if not custom_filename.endswith(('.jpg', '.jpeg', '.png')):
+                custom_filename += ".jpg"
+                
+            save_path = CONFIG.get_screenshot_path(custom_filename)
+            
+            # Take screenshot
+            await page.screenshot(
+                path=str(save_path),
+                full_page=full_page,
+                type='jpeg' if custom_filename.endswith(('.jpg', '.jpeg')) else 'png',
+                quality=80
+            )
+            
+            # Register with File Manager if available
+            if self.screenshot_manager:
+                try:
+                    await self.screenshot_manager.register_file(
+                        content=None,
+                        filename=custom_filename,
+                        file_type="screenshot",
+                        file_path=str(save_path),
+                        thread_id=self.thread_id,
+                        custom_metadata={"action": "save_screenshot"}
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to register screenshot: {e}")
+            
+            file_size = save_path.stat().st_size
+            logger.info(f"📸 Saved screenshot: {custom_filename} ({file_size} bytes)")
+            
+            return ActionResult(
+                success=True,
+                action="save_screenshot",
+                message=f"Screenshot saved: {custom_filename}",
+                data={
+                    "screenshot_path": str(save_path),
+                    "filename": custom_filename,
+                    "size_bytes": file_size
+                }
+            )
+            
+        except Exception as e:
+            logger.error(f"Screenshot failed: {e}")
+            return ActionResult(
+                success=False,
+                action="save_screenshot",
+                message=f"Failed to save screenshot: {str(e)}"
+            )
+
+    async def _download_file(self, page: Page, params: Dict[str, Any]) -> ActionResult:
+        """Trigger a download by clicking an element and capture the file
+        
+        Params:
+            xpath: XPath of download link/button
+            selector: CSS selector of download link/button
+            text: Text of download link/button
+            url: Direct URL to download (alternative to clicking)
+            filename: Optional custom filename to save as
+            wait_timeout: Timeout in seconds to wait for download (default: 30)
+        """
+        xpath = params.get('xpath')
+        selector = params.get('selector')
+        text = params.get('text')
+        url = params.get('url')
+        custom_filename = params.get('filename')
+        wait_timeout = params.get('wait_timeout', 30) * 1000  # Convert to ms
+        
+        try:
+            download_path = None
+            
+            if url:
+                # Direct URL download
+                async with page.expect_download(timeout=wait_timeout) as download_info:
+                    await page.goto(url)
+                download = await download_info.value
+                
+            else:
+                # Find and click the download trigger
+                element = None
+                
+                if xpath:
+                    element = page.locator(f"xpath={xpath}").first
+                elif selector:
+                    element = page.locator(selector).first
+                elif text:
+                    # Try link first, then button
+                    element = page.locator(f"a:has-text('{text}')").first
+                    if await element.count() == 0:
+                        element = page.locator(f"button:has-text('{text}')").first
+                
+                if not element or await element.count() == 0:
+                    return ActionResult(
+                        success=False,
+                        action="download_file",
+                        message="Could not find download element. Provide xpath, selector, or text."
+                    )
+                
+                # Click and wait for download
+                async with page.expect_download(timeout=wait_timeout) as download_info:
+                    await element.click()
+                download = await download_info.value
+            
+            # Determine save path
+            suggested_name = download.suggested_filename
+            final_filename = custom_filename or suggested_name
+            save_path = CONFIG.get_download_path(final_filename)
+            
+            # Save the file
+            await download.save_as(str(save_path))
+            
+            # Verify download completed
+            if save_path.exists():
+                file_size = save_path.stat().st_size
+                logger.info(f"📥 Downloaded: {final_filename} ({file_size} bytes)")
+                return ActionResult(
+                    success=True,
+                    action="download_file",
+                    message=f"Downloaded: {final_filename} ({file_size} bytes)",
+                    data={
+                        "download_path": str(save_path),
+                        "filename": final_filename,
+                        "size_bytes": file_size,
+                        "suggested_filename": suggested_name
+                    }
+                )
+            else:
+                return ActionResult(
+                    success=False,
+                    action="download_file",
+                    message=f"Download may have failed - file not found at {save_path}"
+                )
+                
+        except asyncio.TimeoutError:
+            return ActionResult(
+                success=False,
+                action="download_file",
+                message=f"Download timed out after {wait_timeout/1000} seconds. The element may not trigger a download."
+            )
+        except Exception as e:
+            logger.error(f"Download failed: {e}")
+            return ActionResult(
+                success=False,
+                action="download_file",
+                message=f"Download failed: {str(e)}"
+            )
+
+    async def _run_javascript(self, page: Page, params: Dict[str, Any]) -> ActionResult:
+        """Execute JavaScript code on the page
+        
+        Params:
+            code: JavaScript code to execute
+            return_value: If true, return the result of the script (default: true)
+            timeout: Timeout in ms (default: 30000)
+            
+        Examples:
+            - Extract React state: {"code": "return window.__REACT_DEVTOOLS_GLOBAL_HOOK__"}
+            - Get localStorage: {"code": "return JSON.stringify(localStorage)"}
+            - Scroll to element: {"code": "document.querySelector('#target').scrollIntoView()"}
+            - Click hidden button: {"code": "document.querySelector('button.hidden').click()"}
+            - Get page data: {"code": "return document.body.dataset"}
+        """
+        code = params.get('code') or params.get('script')
+        return_value = params.get('return_value', True)
+        timeout = params.get('timeout', 30000)
+        
+        if not code:
+            return ActionResult(
+                success=False,
+                action="run_js",
+                message="No JavaScript code provided. Use 'code' parameter."
+            )
+        
+        try:
+            # Wrap code to return value if not already returning
+            if return_value and not code.strip().startswith('return'):
+                # Check if it's an expression that should return a value
+                if not any(code.strip().startswith(kw) for kw in ['if', 'for', 'while', 'try', 'const', 'let', 'var', 'function']):
+                    code = f"return {code}"
+            
+            # Execute with async function wrapper for async code support
+            wrapped_code = f"""
+                (async () => {{
+                    {code}
+                }})()
+            """
+            
+            result = await page.evaluate(wrapped_code)
+            
+            # Format result for display
+            if result is None:
+                result_str = "Script executed (no return value)"
+            elif isinstance(result, (dict, list)):
+                import json
+                result_str = json.dumps(result, indent=2, default=str)[:1000]
+            else:
+                result_str = str(result)[:1000]
+            
+            logger.info(f"🔧 JavaScript executed successfully")
+            return ActionResult(
+                success=True,
+                action="run_js",
+                message=f"JavaScript executed: {result_str[:200]}",
+                data={"result": result, "code_preview": code[:100]}
+            )
+            
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"JavaScript execution failed: {error_msg}")
+            return ActionResult(
+                success=False,
+                action="run_js",
+                message=f"JavaScript error: {error_msg[:200]}"
+            )
+
+    async def _press_keys(self, page: Page, params: Dict[str, Any]) -> ActionResult:
+        """Press keyboard keys or key combinations
+        
+        Params:
+            keys: Key or key combination to press
+                - Single key: "Enter", "Escape", "Tab", "Backspace", "Delete"
+                - Arrow keys: "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"
+                - Modifiers: "Control+a", "Control+c", "Control+v", "Alt+F4"
+                - Function keys: "F1", "F5", "F12"
+                - Multiple keys: ["Tab", "Tab", "Enter"] (press in sequence)
+            delay: Delay between key presses in ms (default: 50)
+            
+        Examples:
+            - Close modal: {"keys": "Escape"}
+            - Submit form: {"keys": "Enter"}
+            - Select all: {"keys": "Control+a"}
+            - Copy: {"keys": "Control+c"}
+            - Navigate: {"keys": ["Tab", "Tab", "Enter"]}
+            - Refresh: {"keys": "F5"}
+            - Find on page: {"keys": "Control+f"}
+        """
+        keys = params.get('keys') or params.get('key')
+        delay = params.get('delay', 50)
+        
+        if not keys:
+            return ActionResult(
+                success=False,
+                action="press_keys",
+                message="No keys specified. Use 'keys' parameter."
+            )
+        
+        try:
+            # Handle list of keys (press in sequence)
+            if isinstance(keys, list):
+                for key in keys:
+                    await page.keyboard.press(key)
+                    await page.wait_for_timeout(delay)
+                pressed = ", ".join(keys)
+            else:
+                # Single key or combination
+                await page.keyboard.press(keys)
+                pressed = keys
+            
+            logger.info(f"⌨️ Pressed: {pressed}")
+            return ActionResult(
+                success=True,
+                action="press_keys",
+                message=f"Pressed: {pressed}",
+                data={"keys_pressed": keys}
+            )
+            
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Key press failed: {error_msg}")
+            return ActionResult(
+                success=False,
+                action="press_keys",
+                message=f"Key press failed: {error_msg}"
+            )

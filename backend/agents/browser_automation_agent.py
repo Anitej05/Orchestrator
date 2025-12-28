@@ -51,10 +51,12 @@ AGENT_DEFINITION = {
 app = FastAPI(title="Custom Browser Automation Agent")
 
 # Storage Setup (kept for compatibility)
-STORAGE_DIR = Path("storage/browser_screenshots")
+STORAGE_DIR = Path("storage/browser_agent/screenshots")
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-DOWNLOADS_DIR = Path("storage/browser_downloads")
+DOWNLOADS_DIR = Path("storage/browser_agent/downloads")
 DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+UPLOADS_DIR = Path("storage/browser_agent/uploads")
+UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
 screenshot_file_manager = AgentFileManager(
     agent_id="browser_agent_screenshots",
@@ -84,6 +86,7 @@ class BrowseResponse(BaseModel):
     actions_taken: List[Dict[str, Any]]
     extracted_data: Optional[Dict[str, Any]] = None
     screenshot_files: Optional[List[str]] = None
+    downloaded_files: Optional[List[str]] = None
     error: Optional[str] = None
 
 class FileListResponse(BaseModel):
@@ -117,9 +120,9 @@ async def browse(request: BrowseRequest, headless: bool = False, enable_streamin
     try:
         # Initialize SOTA Agent
         # Uses default backend_url=http://localhost:8000. Update if configurable.
+        # Note: max_steps is accepted in request but not used by current BrowserAgent
         agent = SotaBrowserAgent(
             task=request.task, 
-            max_steps=request.max_steps or 20, 
             headless=headless,
             thread_id=thread_id if enable_streaming else None
         )
@@ -127,12 +130,32 @@ async def browse(request: BrowseRequest, headless: bool = False, enable_streamin
         # Run SOTA Agent
         result = await agent.run()
         
+        # Extract downloads and screenshots from result data if present
+        downloads = []
+        screenshots = []
+        if result.success:
+            # Check history for download/screenshot items
+            for item in getattr(result, 'extracted_data', {}).values():
+                 if isinstance(item, dict):
+                    if 'downloaded_files' in item:
+                        downloads.extend(item['downloaded_files'])
+                    if 'screenshot_path' in item:
+                        screenshots.append(item['screenshot_path'])
+
+            # Also check raw data in actions_taken for direct action results
+            for action in result.actions_taken:
+                if action.get('action') == 'save_screenshot' and action.get('data'):
+                    path = action['data'].get('screenshot_path')
+                    if path:
+                        screenshots.append(path)
+        
         return BrowseResponse(
             success=result.success,
             task_summary=result.task_summary,
             actions_taken=result.actions_taken, # SOTA result.actions_taken is List[Dict]
             extracted_data=result.extracted_data,
-            screenshot_files=[], # SOTA Agent streams updates, doesn't return file paths list yet
+            screenshot_files=screenshots, 
+            downloaded_files=downloads,
             error=result.error
         )
         
@@ -195,3 +218,18 @@ async def get_file_stats():
         )
     except Exception as e:
         return FileStatsResponse(success=False, screenshots={}, downloads={}, error=str(e))
+
+if __name__ == "__main__":
+    import uvicorn
+    # Read port from AGENT_DEFINITION or default to 8090
+    port = 8090
+    endpoints = AGENT_DEFINITION.get("endpoints", [])
+    if endpoints:
+        url = endpoints[0].get("endpoint", "")
+        if url and ":" in url:
+            try:
+                port = int(url.split(":")[-1].split("/")[0])
+            except:
+                pass
+    
+    uvicorn.run(app, host="0.0.0.0", port=port)

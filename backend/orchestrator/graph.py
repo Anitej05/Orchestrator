@@ -24,6 +24,7 @@ import re
 import base64
 import numpy as np
 import textwrap
+from pathlib import Path
 from contextlib import redirect_stdout, redirect_stderr
 from pydantic import BaseModel, Field, ValidationError, create_model
 from pydantic.networks import HttpUrl
@@ -926,6 +927,71 @@ def get_all_capabilities():
     finally:
         db.close()
 
+# Cache for lean agent catalogue
+cached_agent_catalogue = {
+    "agents": [],
+    "timestamp": 0
+}
+AGENT_CATALOGUE_CACHE_DURATION = 60  # 1 minute
+
+def get_lean_agent_catalogue():
+    """
+    Returns a compact agent catalogue with name, description, and endpoints.
+    This is used for task parsing to help the LLM understand what agents can do.
+    Endpoints are the source of truth for agent capabilities.
+    """
+    global cached_agent_catalogue
+    now = time.time()
+    
+    if now - cached_agent_catalogue["timestamp"] < AGENT_CATALOGUE_CACHE_DURATION and cached_agent_catalogue["agents"]:
+        logger.info("Using cached agent catalogue.")
+        return cached_agent_catalogue["agents"]
+    
+    logger.info("Fetching lean agent catalogue from database...")
+    db = SessionLocal()
+    try:
+        from models import Agent, AgentEndpoint
+        from sqlalchemy.orm import joinedload
+        
+        # Fetch active agents with their endpoints
+        agents = db.query(Agent).filter(Agent.status == 'active').options(
+            joinedload(Agent.endpoints)
+        ).all()
+        
+        catalogue = []
+        for agent in agents:
+            # Get endpoints with descriptions
+            endpoints = []
+            for ep in agent.endpoints:
+                # Extract just the path from full URL for display
+                path = ep.endpoint
+                if "localhost" in path:
+                    path = "/" + path.split("/")[-1] if "/" in path else path
+                endpoints.append({
+                    "path": path,
+                    "method": ep.http_method,
+                    "description": (ep.description[:150] + "...") if ep.description and len(ep.description) > 150 else (ep.description or "")
+                })
+            
+            catalogue.append({
+                "id": agent.id,
+                "name": agent.name,
+                "description": agent.description or "No description available",
+                "endpoints": endpoints
+            })
+        
+        cached_agent_catalogue["agents"] = catalogue
+        cached_agent_catalogue["timestamp"] = now
+        
+        logger.info(f"Fetched {len(catalogue)} agents for catalogue")
+        return catalogue
+    except Exception as e:
+        logger.error(f"Error fetching agent catalogue: {e}")
+        return []
+    finally:
+        db.close()
+
+
 async def fetch_agents_for_task(client: httpx.AsyncClient, task_name: str, url: str):
     max_retries = 3
     for attempt in range(max_retries):
@@ -976,36 +1042,76 @@ def parse_prompt(state: State):
     capability_texts, _ = get_all_capabilities()
     capabilities_list_str = ", ".join(f"'{c}'" for c in capability_texts)
     
+    # Get lean agent catalogue for smarter task parsing
+    agent_catalogue = get_lean_agent_catalogue()
+    agent_catalogue_str = ""
+    if agent_catalogue:
+        agent_lines = []
+        for agent in agent_catalogue:
+            # Build endpoint list
+            endpoints = agent.get("endpoints", [])
+            endpoint_strs = []
+            for ep in endpoints[:5]:  # Show up to 5 endpoints
+                endpoint_strs.append(f"    • {ep['method']} {ep['path']}: {ep['description'][:80]}...")
+            endpoints_display = "\n".join(endpoint_strs) if endpoint_strs else "    (No endpoints)"
+            agent_lines.append(f"**{agent['name']}** (id: {agent['id']})\n  {agent.get('description', '')[:120]}\n{endpoints_display}")
+        agent_catalogue_str = "\n\n".join(agent_lines)
+    
     # Add file context if files are uploaded
     file_context = ""
     uploaded_files = state.get("uploaded_files", [])
     if uploaded_files:
-        # Handle both dict and FileObject instances - include file type information
+        # Handle both dict and FileObject instances - include file IDs and timestamps
         file_details = []
+        file_id_mapping = []  # For explicit file_id reference
         for f in uploaded_files:
             if isinstance(f, dict):
                 file_name = f.get('file_name', 'unknown')
                 file_type = f.get('file_type', 'document')
+                file_id = f.get('file_id') or f.get('content_id') or file_name
+                file_path = f.get('file_path', '')
+                upload_time = f.get('upload_timestamp', 'recent')
             else:
                 file_name = f.file_name
                 file_type = f.file_type
-            file_details.append(f"{file_name} (type: {file_type})")
+                file_id = getattr(f, 'file_id', None) or getattr(f, 'content_id', None) or file_name
+                file_path = getattr(f, 'file_path', '')
+                upload_time = getattr(f, 'upload_timestamp', 'recent')
+            
+            file_details.append(f"{file_name} (type: {file_type}, file_id: {file_id})")
+            file_id_mapping.append({
+                "file_name": file_name,
+                "file_type": file_type,
+                "file_id": file_id,
+                "file_path": file_path,
+                "upload_time": upload_time
+            })
+        
+        # Create explicit file reference table for LLM
+        file_reference_table = "\n".join([
+            f"  - {f['file_name']}: file_id='{f['file_id']}', type={f['file_type']}, path={f['file_path']}"
+            for f in file_id_mapping
+        ])
         
         file_context = f'''
-        **UPLOADED FILES DETECTED:**
-        The user has uploaded {len(file_details)} file(s): {", ".join(file_details)}
+        **UPLOADED FILES WITH FILE_IDS:**
+        The user has uploaded {len(file_details)} file(s):
         
-        **CRITICAL INSTRUCTIONS BASED ON FILE TYPE:**
-        - **For spreadsheet files (.csv, .xlsx):** Create tasks like "display spreadsheet", "analyze spreadsheet data", "query spreadsheet" - NOT document tasks!
-        - **For document files (.pdf, .docx, .txt):** Create tasks like "summarize_document", "answer_question_about_document"
-        - **For image files:** Create tasks like "analyze image", "describe image"
+{file_reference_table}
         
-        **IMPORTANT:** Match the task type to the file type! CSV files need spreadsheet tasks, not document tasks.
-        - If the user asks ANY question about the file(s) (e.g., "What is this?", "Display this", "Show me the data"), create the appropriate task based on file type.
-        - The task_description MUST include the file name and match the file type.
-        - DO NOT treat this as chitchat - files uploaded = task required!
+        **CRITICAL: USE FILE_IDs IN TASK PARAMETERS!**
+        When creating tasks that reference files:
+        - For spreadsheet tasks: Use the 'file_id' value shown above, NOT the filename
+        - For document tasks: Use the 'file_path' or 'file_id' value shown above
+        - NEVER use generic names like 'sample_data.csv' - always use the actual file_id from above
+        
+        **INSTRUCTIONS BASED ON FILE TYPE:**
+        - **For spreadsheet files (.csv, .xlsx):** Use file_id in task parameters
+        - **For document files (.pdf, .docx, .txt):** Use file_path in task parameters
+        
+        **IMPORTANT:** The task_description MUST include the correct file_id/file_path!
         '''
-        logger.info(f"[PARSE_PROMPT_DEBUG] File context built for {len(file_details)} files: {file_details}")
+        logger.info(f"[PARSE_PROMPT_DEBUG] File context built for {len(file_details)} files with IDs: {file_id_mapping}")
     else:
         logger.info("[PARSE_PROMPT_DEBUG] No uploaded_files in state")
     
@@ -1069,10 +1175,17 @@ def parse_prompt(state: State):
         
         {file_context}
 
-        Here is a list of agent capabilities that already exist in the system:
+        **AVAILABLE AGENTS AND THEIR ENDPOINTS:**
+        Each agent below shows its endpoints (operations it can perform). Use this to create tasks that match what agents can actually do.
         ---
-        AVAILABLE CAPABILITIES: [{capabilities_list_str}]
+        {agent_catalogue_str if agent_catalogue_str else "No agents currently available"}
         ---
+        
+        **ENDPOINT-AWARE TASK CREATION:**
+        - Look at the endpoints above to understand what each agent can do
+        - For local service health checks (like "browser agent health"), use the browser agent to navigate to the actual endpoint (e.g., http://localhost:8090/health)
+        - Match your task to an agent's actual endpoints, not abstract capabilities
+
 
         Follow these rules:
         1.  **Group Related Information:** If the user asks for multiple pieces of information that are likely to be returned by a single tool or API call (e.g., "get news headlines, publishers, and links" or "get a stock's open, high, low, and close price"), you **MUST** treat this as a single, unified task. Do not split these into separate tasks. For example, a request for "news headlines, publishers, and links" should become a single task like "get company news with details".
@@ -1624,6 +1737,30 @@ def plan_execution(state: State, config: RunnableConfig):
     fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
     output_state = {}
 
+    # Build files context string with absolute paths for the prompt
+    uploaded_files = state.get("uploaded_files", [])
+    files_context = ""
+    if uploaded_files:
+        files_list = []
+        for f in uploaded_files:
+            f_dict = f if isinstance(f, dict) else (f.__dict__ if hasattr(f, '__dict__') else {})
+            # Include absolute path if available
+            f_info = f"- Name: {f_dict.get('file_name', 'unknown')}"
+            if f_dict.get('file_id'):
+                f_info += f", ID: {f_dict.get('file_id')}"
+            
+            # Crucial: Include the absolute path
+            if f_dict.get('file_path'):
+                # FORCE ABSOLUTE PATH: Use os.path.abspath to resolve relative paths like 'storage/...'
+                abs_path = os.path.abspath(f_dict.get('file_path'))
+                f_info += f", Path: {abs_path}"
+            
+            files_list.append(f_info)
+        
+        if files_list:
+            files_context = "\n**AVAILABLE FILES (Use these Absolute Paths for file operations):**\n" + "\n".join(files_list)
+
+
     if replan_reason:
         # --- REPLANNING MODE ---
         logger.info(f"Replanning initiated. Reason: {replan_reason}")
@@ -1668,8 +1805,13 @@ def plan_execution(state: State, config: RunnableConfig):
                     elif msg.type == "ai":
                         conversation_history += f"Assistant: {msg.content}\n"
         
+        # Build a strict list of valid agent IDs for the LLM
+        valid_agent_ids = [info["agent_id"] for info in available_agents_info]
+        valid_agent_ids_str = ", ".join(f'"{aid}"' for aid in valid_agent_ids)
+        
         prompt = f'''
-        You are an expert autonomous planner. The current execution plan is stalled. Your task is to surgically insert a new task into the plan to resolve the issue.
+        You are an expert autonomous planner with CREATIVE PROBLEM-SOLVING capabilities. 
+        The current execution plan has stalled. Your task is to find a way to achieve the user's goal using the available agents.
 
         **Conversation History:**
         {conversation_history}
@@ -1677,24 +1819,50 @@ def plan_execution(state: State, config: RunnableConfig):
         **Reason for Replan:** "{replan_reason}"
         **Current Stalled Plan:** {json.dumps([task for batch in state.get('task_plan', []) for task in batch], indent=2)}
         **Recently Completed Tasks:** {json.dumps(recent_tasks_summary, indent=2)}
-        **Full List of Available System Capabilities:** [{capabilities_str}]
+        {files_context}
         
-        **Available Agents:**
+        ============================================================
+        **AVAILABLE AGENTS AND THEIR CAPABILITIES:**
+        ============================================================
         {json.dumps(available_agents_info, indent=2)}
         
-        **Instructions:**
-        1.  Read the `Conversation History` to understand the full context of what the user wants
-        2.  Analyze the `Reason for Replan` to understand what's missing or what failed
-        3.  Look at `Recently Completed Tasks` to see what was just done successfully
-        4.  For continuation tasks (same document, same type of work), reuse the SAME agent AND endpoint
-        5.  Create a new `PlannedTask` with proper agent assignment (primary field with agent_id, http_method, endpoint)
-        6.  Return the entire modified plan conforming to the `ExecutionPlan` schema
+        **VALID AGENT IDs (YOU MUST USE ONE OF THESE):** [{valid_agent_ids_str}]
         
-        **Key Principles:**
-        - Conversation context is your primary source of truth for understanding user intent
-        - Recently completed tasks show you what's working - reuse successful patterns
-        - For document editing continuations, the endpoint should match the previous successful edit
-        - Think logically: if a document was just edited, continuing to edit it uses the same endpoint
+        ============================================================
+        **CRITICAL CONSTRAINTS:**
+        ============================================================
+        1. You MUST use ONLY agent IDs from the list above. DO NOT invent new agent IDs!
+        2. The `primary.id` field in your PlannedTask MUST be one of: {valid_agent_ids_str}
+        3. If you use an agent ID not in this list, the task WILL FAIL.
+        
+        ============================================================
+        **CREATIVE PROBLEM SOLVING - FIND WORKAROUNDS:**
+        ============================================================
+        If the direct approach failed, think of ALTERNATIVE ways to achieve the user's goal:
+        
+        - **Browser Agent Workaround:** If you need to check a service/API status, use the browser agent to visit the URL directly
+          Example: To check if a service at localhost:8090 is running, create a task to "navigate to http://localhost:8090/health and extract the response"
+        
+        - **Different Endpoint:** If one endpoint failed, try a different endpoint on the same agent
+          Example: If /analyze failed, try /display or /query instead
+        
+        - **Chain Multiple Agents:** Break down the problem into smaller steps using multiple agents
+          Example: First fetch data with one agent, then process it with another
+        
+        - **Simplify the Request:** If a complex task failed, try a simpler version
+          Example: Instead of "analyze and summarize", just try "get content"
+        
+        ============================================================
+        **INSTRUCTIONS:**
+        ============================================================
+        1. Understand what the user originally wanted from the conversation history
+        2. Analyze WHY the previous approach failed (from replan reason)
+        3. Look at which agents are ACTUALLY available and what they can do
+        4. Create a NEW approach using the available agents' capabilities
+        5. ALWAYS use a valid agent_id from the list above
+        6. Return a modified plan conforming to the ExecutionPlan schema
+        
+        **Remember:** The goal is to ACHIEVE what the user wants, not to mirror the failed approach!
         '''
         try:
             response = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, ExecutionPlan)
@@ -1770,9 +1938,31 @@ def plan_execution(state: State, config: RunnableConfig):
                                 if not any(np['task_name'] == new_pair.task_name for np in new_task_agent_pairs) and \
                                    not any(ep.task_name == new_pair.task_name for ep in existing_pairs):
                                     new_task_agent_pairs.append(new_pair.model_dump(mode='json'))
-                                    logger.info(f"✅ Created new task_agent_pair for replanned task: '{task.task_name}' -> agent '{task.primary.id}'")
+                                    logger.info(f"✅ Created new task_agent_pair for replanned task: '{task.task_name}' -> agent '{original_pair.primary.id}'")
                             else:
-                                logger.warning(f"⚠️ Could not find original pair for agent ID '{task.primary.id}'. This might cause mapping errors.")
+                                # CRITICAL FIX: When no match found, use the first available agent as fallback
+                                # This prevents execute_batch from failing due to missing task_agent_pairs
+                                if existing_pairs:
+                                    fallback_pair = existing_pairs[0]
+                                    logger.warning(f"⚠️ Could not find original pair for agent ID '{task.primary.id}'. Using fallback agent '{fallback_pair.primary.id}'")
+                                    
+                                    # Correct the task's primary agent ID to the fallback
+                                    task.primary.id = fallback_pair.primary.id
+                                    
+                                    # Create new pair with the fallback agent
+                                    new_pair = TaskAgentPair(
+                                        task_name=task.task_name,
+                                        task_description=task.task_description,
+                                        primary=fallback_pair.primary,
+                                        fallbacks=fallback_pair.fallbacks
+                                    )
+                                    # Avoid duplicates
+                                    if not any(np['task_name'] == new_pair.task_name for np in new_task_agent_pairs) and \
+                                       not any(ep.task_name == new_pair.task_name for ep in existing_pairs):
+                                        new_task_agent_pairs.append(new_pair.model_dump(mode='json'))
+                                        logger.info(f"✅ Created fallback task_agent_pair for replanned task: '{task.task_name}' -> agent '{fallback_pair.primary.id}'")
+                                else:
+                                    logger.error(f"❌ No agents available for replan task '{task.task_name}'. This task will fail.")
 
                 # Re-serialize the plan with the CORRECTED IDs
                 serializable_plan = [[task.model_dump(mode='json') for task in batch] for batch in (response.plan or [])]
@@ -1826,6 +2016,8 @@ def plan_execution(state: State, config: RunnableConfig):
         If input has 3 tasks, output should have 3 PlannedTasks.
         
         **DO NOT CREATE DUPLICATE TASKS!**
+
+        {files_context}
 
         Tasks to Plan: {json.dumps([p.model_dump(mode='json') for p in task_agent_pairs], indent=2)}
         
@@ -3350,11 +3542,18 @@ async def execute_batch(state: State, config: RunnableConfig):
                 if matched_pair:
                     original_task_pair = matched_pair
                 else:
-                    available_ids = [p.primary.id for p in task_agent_pairs]
-                    target_id = planned_task.primary.id if hasattr(planned_task, 'primary') and hasattr(planned_task.primary, 'id') else 'N/A'
-                    error_msg = f"Could not find original task pair for '{planned_task.task_name}' (Target ID: {target_id}). Available: {available_ids}"
-                    logger.error(error_msg)
-                    return {"task_name": planned_task.task_name, "result": error_msg}
+                    # Strategy 3 (FINAL FALLBACK): Use the first available agent
+                    # This ensures we never fail due to missing task_agent_pairs
+                    if task_agent_pairs:
+                        fallback_pair = task_agent_pairs[0]
+                        logger.warning(f"⚠️ No matching agent found for '{planned_task.task_name}'. Using first available agent '{fallback_pair.primary.name}' as fallback.")
+                        original_task_pair = fallback_pair
+                    else:
+                        available_ids = [p.primary.id for p in task_agent_pairs]
+                        target_id = planned_task.primary.id if hasattr(planned_task, 'primary') and hasattr(planned_task.primary, 'id') else 'N/A'
+                        error_msg = f"Could not find original task pair for '{planned_task.task_name}' (Target ID: {target_id}). Available: {available_ids}"
+                        logger.error(error_msg)
+                        return {"task_name": planned_task.task_name, "result": error_msg}
 
         # CHECK FOR CREATION TASK: Document/Spreadsheet creation routes
         # Import here to avoid circular dependency
@@ -3578,6 +3777,63 @@ async def execute_batch(state: State, config: RunnableConfig):
             raw_response=raw_response
         ))
 
+        # --- CAPTURE DOWNLOADED FILES ---
+        # If the agent downloaded files (e.g. Browser Agent), add them to state so subsequent agents can access them
+        if isinstance(task_result, dict) and "downloaded_files" in task_result and task_result["downloaded_files"]:
+            downloaded = task_result["downloaded_files"]
+            if isinstance(downloaded, list):
+                logger.info(f"📂 Auto-registering {len(downloaded)} downloaded files from task '{task_name}'")
+                
+                # Get current files to avoid duplicates
+                current_files = state.get('uploaded_files', [])
+                current_paths = set()
+                for f in current_files:
+                    f_path = f.get('file_path') if isinstance(f, dict) else f.file_path
+                    if f_path:
+                        current_paths.add(str(f_path)) # Normalize to string
+                
+                new_file_objects = []
+                for file_path in downloaded:
+                    # Check if already exists
+                    if str(file_path) in current_paths:
+                        continue
+                        
+                    file_path_obj = Path(file_path)
+                    filename = file_path_obj.name
+                    
+                    # Determine type
+                    ext = file_path_obj.suffix.lower()
+                    file_type = 'document' # Default
+                    if ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp']:
+                        file_type = 'image'
+                    elif ext in ['.csv', '.xlsx', '.xls']:
+                        file_type = 'spreadsheet'
+                    elif ext in ['.zip', '.tar', '.gz']:
+                        file_type = 'archive'
+                        
+                    # Create FileObject (as dict for state)
+                    try:
+                        # Use dict format to match what state expects
+                        file_obj_dict = {
+                            "file_name": filename,
+                            "file_path": str(file_path),
+                            "file_type": file_type,
+                            "source": "agent_output",
+                            "thread_id": thread_id_for_artifacts
+                        }
+                        new_file_objects.append(file_obj_dict)
+                        current_paths.add(str(file_path)) # Prevent dupes in same batch
+                        logger.info(f"✅ Registered new file: {filename} ({file_type})")
+                    except Exception as e:
+                        logger.error(f"Failed to register downloaded file {file_path}: {e}")
+                
+                if new_file_objects:
+                    # We need to add these to the output state
+                    # We'll use a temporary key in batch_results handling or side-channel list
+                    if 'new_uploaded_files' not in locals():
+                        new_uploaded_files = []
+                    new_uploaded_files.extend(new_file_objects)
+
     completed_tasks = state.get('completed_tasks', []) + completed_tasks_with_desc
     print(f"!!! EXECUTE_BATCH: Total completed tasks: {len(completed_tasks)}, Latest: {len(completed_tasks_with_desc)} !!!")
     logger.info(f"Batch execution complete. Total completed: {len(completed_tasks)}, Latest: {len(completed_tasks_with_desc)}")
@@ -3618,6 +3874,18 @@ async def execute_batch(state: State, config: RunnableConfig):
         "pending_confirmation": requires_confirmation,
         "pending_confirmation_task": pending_confirmation_task
     }
+
+    # Add new uploaded files if any were registered
+    if 'new_uploaded_files' in locals() and new_uploaded_files:
+        current_files = state.get('uploaded_files', [])
+        # We append to the list. The reducer in state.py (overwrite_reducer) might need attention
+        # but actually for lists of dicts, we want to append. 
+        # State definition says: uploaded_files: Annotated[List[Dict], overwrite_reducer]
+        # This is problematic. overwrite_reducer replaces the list.
+        # So we must provide the FULL list (old + new).
+        all_files = current_files + new_uploaded_files
+        output_state['uploaded_files'] = all_files
+        logger.info(f"📁 Updated state with {len(new_uploaded_files)} new files. Total: {len(all_files)}")
     
     # If we have canvas displays, update the canvas state with the latest one
     if canvas_displays:
