@@ -91,10 +91,12 @@ class DisplayDocumentResponse(BaseModel):
 
 class CreateDocumentRequest(BaseModel):
     """Request to create a new document."""
-    content: str = Field(..., description="Content for the document")
+    content: Optional[str] = Field(None, description="Content for the document (optional if using reference_file_path)")
+    reference_file_path: Optional[str] = Field(None, description="Path to a source file to transform into a document")
+    instruction: Optional[str] = Field(None, description="Natural language instruction for how to create the document using LLM")
     file_name: str = Field(..., description="Name for the document file (e.g., 'report.docx')")
     file_type: str = Field(default="docx", description="Document type: 'docx', 'txt', or 'pdf'")
-    output_dir: str = Field(default="backend/storage/documents", description="Directory to save the document")
+    output_dir: str = Field(default="storage/documents", description="Directory to save the document")
 
 class CreateDocumentResponse(BaseModel):
     """Response after creating a document."""
@@ -161,6 +163,31 @@ def extract_document_content(file_path: str) -> tuple[str, str]:
                 content.append(page.extract_text())
         return '\n'.join(content), 'pdf'
     
+    elif file_ext == '.csv':
+        try:
+            import pandas as pd
+            df = pd.read_csv(file_path)
+            return df.to_markdown(index=False), 'csv'
+        except ImportError:
+            # Fallback to standard csv
+            import csv
+            with open(file_path, 'r', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                rows = list(reader)
+                # Convert to simple string or markdown-like
+                header = ' | '.join(rows[0])
+                separator = '|'.join(['---'] * len(rows[0]))
+                body = '\n'.join([' | '.join(row) for row in rows[1:]])
+                return f"{header}\n{separator}\n{body}", 'csv'
+            
+    elif file_ext in ['.xlsx', '.xls']:
+        try:
+            import pandas as pd
+            df = pd.read_excel(file_path)
+            return df.to_markdown(index=False), 'xlsx'
+        except ImportError:
+            raise ValueError(f"Pandas/Openpyxl required to read Excel files: {file_ext}")
+
     else:
         raise ValueError(f"Unsupported file format: {file_ext}")
 
@@ -294,13 +321,18 @@ def analyze_document_structure(file_path: str) -> Dict[str, Any]:
         'file_name': Path(file_path).name
     }
 
-def interpret_editing_instruction(instruction: str, file_path: str) -> list:
+def interpret_editing_instruction(instruction: str, file_path: str, thread_id: str = None) -> list:
     """
     Use LLM to interpret natural language editing instruction and generate
     structured editing actions with full document context and session memory.
     """
     # Get session context for this document
-    session_context = session_manager.get_session_context(file_path)
+    session_context = session_manager.get_session_context(file_path, thread_id)
+    
+    # Get all files in this conversation for cross-file awareness
+    all_files_context = ""
+    if thread_id:
+        all_files_context = session_manager.get_all_files_summary(thread_id)
     
     # Analyze document structure
     doc_structure = analyze_document_structure(file_path)
@@ -318,6 +350,9 @@ def interpret_editing_instruction(instruction: str, file_path: str) -> list:
     
     # Create prompt for instruction interpretation with session context
     prompt = f"""You are a Word document editing expert with memory of previous edits. Your task is to interpret a natural language editing instruction and generate the appropriate structured editing actions.
+
+=== ALL DOCUMENTS IN THIS CONVERSATION ===
+{all_files_context if all_files_context else "Currently working with one document."}
 
 {session_context}
 
@@ -609,8 +644,6 @@ Answer:"""
                 possible_doc_paths = [
                     f"storage/documents/{vector_store_base}",
                     f"storage/documents\\{vector_store_base}",  # Windows path
-                    f"backend/storage/documents/{vector_store_base}",
-                    f"backend/storage/documents\\{vector_store_base}",
                 ]
                 
                 doc_path = None
@@ -785,8 +818,17 @@ def display_document(request: DisplayDocumentRequest, thread_id: Optional[str] =
           summary="Create a New Document")
 def create_document(request: CreateDocumentRequest):
     """
-    Creates a new document (DOCX, TXT, or PDF) with the provided content.
-    Always creates the document immediately and displays it.
+    Creates a new document (DOCX, TXT, or PDF) with optional LLM-powered content generation.
+    
+    Supports:
+    1. Direct content: Just provide content and create the document
+    2. Reference file: Provide reference_file_path to transform an existing file
+    3. LLM generation: Provide instruction to have LLM generate content
+    
+    Examples:
+    - {"content": "My report content...", "file_name": "report.docx"}
+    - {"reference_file_path": "storage/documents/data.pdf", "instruction": "Create a summary report", "file_name": "summary.docx"}
+    - {"instruction": "Create a professional cover letter for a software engineer", "file_name": "cover_letter.docx"}
     """
     try:
         # Ensure output directory exists
@@ -795,21 +837,57 @@ def create_document(request: CreateDocumentRequest):
         # Build full file path
         file_path = os.path.join(request.output_dir, request.file_name)
         
-        # Create the document
+        # Step 1: Determine content source
+        final_content = None
+        
+        if request.content:
+            # Direct content provided
+            final_content = request.content
+            
+            # If instruction is also provided, use LLM to transform content
+            if request.instruction:
+                logger.info(f"Using LLM to transform provided content with instruction: {request.instruction}")
+                final_content = _generate_document_content_with_llm(request.content, request.instruction)
+                if not final_content:
+                    final_content = request.content  # Fallback to original
+                    
+        elif request.reference_file_path:
+            # Load content from reference file
+            if os.path.exists(request.reference_file_path):
+                source_content, source_type = extract_document_content(request.reference_file_path)
+                logger.info(f"Loaded source content from: {request.reference_file_path} ({len(source_content)} chars)")
+                
+                if request.instruction:
+                    logger.info(f"Using LLM to transform source content with instruction: {request.instruction}")
+                    final_content = _generate_document_content_with_llm(source_content, request.instruction)
+                else:
+                    final_content = source_content
+            else:
+                raise ValueError(f"Reference file not found: {request.reference_file_path}")
+                
+        elif request.instruction:
+            # Generate from scratch with LLM
+            logger.info(f"Using LLM to generate document from instruction: {request.instruction}")
+            final_content = _generate_document_content_with_llm(None, request.instruction)
+            if not final_content:
+                raise ValueError("Failed to generate content with LLM")
+        else:
+            raise ValueError("Either 'content', 'reference_file_path', or 'instruction' must be provided")
+        
+        # Step 2: Create the document
         if request.file_type == 'txt':
             with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(request.content)
+                f.write(final_content)
         elif request.file_type == 'docx':
-            create_docx(request.content, file_path)
+            create_docx(final_content, file_path)
         elif request.file_type == 'pdf':
-            create_pdf(request.content, file_path)
+            create_pdf(final_content, file_path)
         else:
             raise ValueError(f"Unsupported file type: {request.file_type}")
         
         logger.info(f"Document created successfully: {file_path}")
         
-        # Create canvas display showing the created document
-        # For DOCX, convert to PDF for better display
+        # Step 3: Create canvas display
         if request.file_type == 'docx':
             try:
                 pdf_path = convert_docx_to_pdf(file_path)
@@ -825,23 +903,21 @@ def create_document(request: CreateDocumentRequest):
                 )
             except Exception as conv_err:
                 logger.warning(f"Failed to convert created DOCX to PDF: {conv_err}")
-                # Fallback to text display
                 canvas_display = create_canvas_display(
                     canvas_type='document',
                     canvas_data={
                         'title': request.file_name,
-                        'content': request.content,
+                        'content': final_content,
                         'file_path': file_path,
                         'file_type': request.file_type
                     }
                 )
         else:
-            # For TXT and PDF, show as-is
             canvas_display = create_canvas_display(
                 canvas_type='document',
                 canvas_data={
                     'title': request.file_name,
-                    'content': request.content,
+                    'content': final_content,
                     'file_path': file_path,
                     'file_type': request.file_type
                 }
@@ -859,6 +935,51 @@ def create_document(request: CreateDocumentRequest):
             status_code=500,
             detail=f"Failed to create document: {str(e)}"
         )
+
+
+def _generate_document_content_with_llm(source_content: Optional[str], instruction: str) -> Optional[str]:
+    """Use LLM to generate or transform document content."""
+    llm_instance = get_llm()
+    
+    if source_content:
+        prompt = f"""You are a professional document writer. Transform the following content based on the instruction.
+
+=== SOURCE CONTENT ===
+{source_content[:8000]}
+
+=== INSTRUCTION ===
+{instruction}
+
+=== RULES ===
+1. Output ONLY the final document content - no explanations
+2. Maintain professional formatting
+3. Use appropriate paragraphs and structure
+4. If creating a structured document, use clear headings
+
+=== OUTPUT DOCUMENT CONTENT NOW ==="""
+    else:
+        prompt = f"""You are a professional document writer. Create a document based on the following instruction.
+
+=== INSTRUCTION ===
+{instruction}
+
+=== RULES ===
+1. Output ONLY the document content - no explanations or meta-commentary
+2. Use professional language and formatting
+3. Structure with clear paragraphs
+4. Include appropriate headings if needed
+
+=== OUTPUT DOCUMENT CONTENT NOW ==="""
+    
+    try:
+        response = llm_instance.invoke(prompt)
+        content = response.content if hasattr(response, 'content') else str(response)
+        logger.info(f"LLM generated document content: {len(content)} chars")
+        return content.strip()
+    except Exception as e:
+        logger.error(f"LLM document generation failed: {e}")
+        return None
+
 
 @app.post("/edit",
           response_model=EditDocumentResponse,

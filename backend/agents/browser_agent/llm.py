@@ -9,11 +9,12 @@ import re
 import json
 import logging
 from typing import Dict, Any, List, Optional
-from openai import OpenAI
+from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
 from .schemas import ActionPlan, AtomicAction
 from .system_prompt import get_system_prompt
+from .message_manager import MessageManager, format_page_content_for_prompt
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -25,31 +26,34 @@ NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
 
 
 class LLMClient:
-    """LLM client for planning browser actions"""
+    """LLM client for planning browser actions - uses true async calls"""
     
     def __init__(self):
-        # Primary: NVIDIA (minimaxai/minimax-m2 - better reasoning)
-        self.nvidia = OpenAI(
-            api_key=NVIDIA_API_KEY,
-            base_url="https://integrate.api.nvidia.com/v1"
-        ) if NVIDIA_API_KEY else None
-        
-        # Fallback 1: Cerebras (fast)
-        self.cerebras = OpenAI(
+        # Primary: Cerebras (FAST - best for browser agent)
+        self.cerebras = AsyncOpenAI(
             api_key=CEREBRAS_API_KEY,
-            base_url="https://api.cerebras.ai/v1"
+            base_url="https://api.cerebras.ai/v1",
+            timeout=30.0  # 30 second timeout
         ) if CEREBRAS_API_KEY else None
         
-        # Fallback 2: Groq
-        self.groq = OpenAI(
+        # Fallback 1: Groq (also fast)
+        self.groq = AsyncOpenAI(
             api_key=GROQ_API_KEY,
-            base_url="https://api.groq.com/openai/v1"
+            base_url="https://api.groq.com/openai/v1",
+            timeout=30.0
         ) if GROQ_API_KEY else None
         
-        # Model Configuration
-        self.model_nvidia = "minimaxai/minimax-m2"
-        self.model_cerebras = "gpt-oss-120b"
-        self.model_groq = "openai/gpt-oss-120b"
+        # Fallback 2: NVIDIA (slower but larger context)
+        self.nvidia = AsyncOpenAI(
+            api_key=NVIDIA_API_KEY,
+            base_url="https://integrate.api.nvidia.com/v1",
+            timeout=60.0
+        ) if NVIDIA_API_KEY else None
+        
+        # Model Configuration - use correct model names
+        self.model_cerebras = "gpt-oss-120b"  # User requested
+        self.model_groq = "openai/gpt-oss-120b"  # Groq uses this model
+        self.model_nvidia = "meta/llama-3.1-70b-instruct"  # NVIDIA's llama
 
     
     async def plan_action(
@@ -89,7 +93,6 @@ class LLMClient:
         url = page_content.get('url', '')
         if url == 'about:blank' or not url:
             # Extract URL from task if possible
-            import re
             url_match = re.search(r'(google|flipkart|amazon|reliance)', task.lower())
             if url_match:
                 site = url_match.group(1)
@@ -124,117 +127,111 @@ class LLMClient:
         step: int,
         last_error: Optional[str] = None
     ) -> str:
-        """Build a focused prompt for action planning"""
+        """Build a focused prompt for action planning with token-aware history"""
         
-        # Format history (last 5 actions with success/failure status)
+        # Use MessageManager for token-aware history formatting
         history_str = ""
         if history:
-            # Show FULL history (up to 50 steps) so agent remembers everything
-            # User explicitly requested "literally everything it has been doing"
-            recent = history[-50:] 
-            history_lines = []
-            for h in recent:
+            # Create a temporary manager to format history (12K tokens for history budget)
+            manager = MessageManager(max_total_tokens=32000)
+            
+            for h in history:
                 try:
-                    step_num = h.get('step', '?')
+                    step_num = h.get('step', 0)
                     action_plan = h.get('action', {})
                     reasoning = action_plan.get('reasoning', 'No reasoning')
                     actions = action_plan.get('actions', [])
                     action_names = [a['name'] for a in actions] if isinstance(actions, list) else ['?']
                     
                     result = h.get('result', {})
-                    success = "✅" if result.get('success', False) else "❌"
-                    msg = result.get('message', '')[:100] # Increased log length
+                    success = result.get('success', False)
+                    msg = result.get('message', '')
+                    url = h.get('url', '')
                     
-                    # Highlight Failed Attempts
-                    status_icon = success
-                    if not result.get('success', False):
-                         status_icon = "🛑 FAILED"
-
-                    line = f"  {status_icon} Step {step_num}: {action_names} \n    Reasoning: {reasoning[:150]}\n    Result: {msg}"
-                    history_lines.append(line)
-                except:
+                    manager.add_step(
+                        step_number=step_num,
+                        action_names=action_names,
+                        reasoning=reasoning,
+                        result_success=success,
+                        result_message=msg,
+                        url=url,
+                        extracted_data=result.get('data'),
+                        observation=h.get('observation', '')  # What was seen on page
+                    )
+                except Exception:
                     pass
-            history_str = "\n".join(history_lines)
+            
+            # Get token-aware formatted history
+            history_str = manager.get_history_for_prompt()
+            
+            # Log token stats
+            stats = manager.get_token_stats()
+            logger.debug(f"📊 History tokens: {stats['history_total']}, "
+                        f"messages: {stats['history_messages']}, "
+                        f"failures: {stats['failures_count']}")
         
-        # Format elements with BOTH xpath AND role+name for maximum flexibility
-        elements = page_content.get('elements', [])[:100]  # Include more elements
+        # Get the hierarchical page structure (A11y tree with grouping)
+        # This is for CONTEXT only - shows page structure
+        a11y_tree = page_content.get('a11y_tree', '')
+        
+        # Build INTERACTIVE ELEMENTS section - this is the SOURCE OF TRUTH for clicking
+        elements = page_content.get('elements', [])
         elements_str = ""
         if elements:
             elem_lines = []
-            for el in elements:
+            for idx, el in enumerate(elements[:80]):  # Cap at 80 elements
                 role = el.get('role', 'element')
-                name = el.get('name', '')
-                xpath = el.get('xpath', '')
-                options = el.get('options', [])  # Dropdown options if present
+                name = el.get('name', '')[:50]  # Truncate long names
+                section = el.get('section', '')
+                elem_idx = idx + 1  # 1-indexed
                 
-                # Build element line
-                if xpath and name:
-                    line = f'  [{role}] "{name}"\n      xpath: {xpath}\n      OR: {{"role": "{role}", "name": "{name}"}}'
-                elif xpath:
-                    line = f'  [{role}] "(no text)" → xpath: {xpath}'
-                elif name:
-                    line = f'  [{role}] "{name}" → {{"role": "{role}", "name": "{name}"}}'
+                # Build compact element line
+                if name:
+                    line = f"#{elem_idx} [{role}] \"{name}\""
+                    if section:
+                        line += f" [under: {section[:30]}]"
                 else:
-                    continue
-                
-                # Add dropdown options if present
-                if options:
-                    line += f'\n      OPTIONS: {options}'
+                    line = f"#{elem_idx} [{role}] (no text)"
                 
                 elem_lines.append(line)
+            
             elements_str = "\n".join(elem_lines)
-        
-        # Format accessibility tree (backup for elements not in list)
-        a11y_tree = page_content.get('a11y_tree', '')
-        if a11y_tree:
-            a11y_section = f"""
-ACCESSIBILITY TREE (for role+name clicks):
-Elements with #N are interactive - you can click them using role+name!
-Example: #5 [link] "Samsung Galaxy" → {{"role": "link", "name": "Samsung Galaxy"}}
-{a11y_tree}"""
-        else:
-            a11y_section = ""
         
         # Build scroll position context
         scroll_pos = page_content.get('scroll_position', 0)
         max_scroll = page_content.get('max_scroll', 0)
         scroll_pct = page_content.get('scroll_percent', 100)
-        scroll_context = f"Scroll Position: {scroll_pos}px / {max_scroll}px ({scroll_pct}% down the page)"
+        
         if scroll_pct == 0:
-            scroll_context += " [AT TOP - can scroll down]"
-        elif scroll_pct >= 100:
-            scroll_context += " [AT BOTTOM - cannot scroll down further]"
+            scroll_hint = "📍 AT TOP - scroll down to see more"
+        elif scroll_pct >= 95:
+            scroll_hint = "📍 AT BOTTOM - no more content below"
         else:
-            scroll_context += " [CAN SCROLL UP AND DOWN]"
+            scroll_hint = f"📍 {scroll_pct}% scrolled - can scroll up/down"
         
         # Build the current context prompt (system prompt is sent separately)
         prompt = f"""
 ═══════════════════════════════════════════════════════════════════════════════
-CURRENT TASK
+🎯 TASK: {task}
 ═══════════════════════════════════════════════════════════════════════════════
-{task}
+📍 Step: {step} | URL: {page_content.get('url', 'about:blank')}
+📄 Title: {page_content.get('title', '(loading...')}
+{scroll_hint}
 
 ═══════════════════════════════════════════════════════════════════════════════
-PAGE STATE
-═══════════════════════════════════════════════════════════════════════════════
-URL: {page_content.get('url', 'about:blank')}
-Title: {page_content.get('title', '(empty)')}
-Step: {step}
-{scroll_context}
-{a11y_section}
-
-PAGE TEXT (excerpt):
-{page_content.get('body_text', '')}
-
-═══════════════════════════════════════════════════════════════════════════════
-INTERACTIVE ELEMENTS (with XPaths)
+🔘 INTERACTIVE ELEMENTS (use #N index to click)
 ═══════════════════════════════════════════════════════════════════════════════
 {elements_str if elements_str else "(no elements detected)"}
 
 ═══════════════════════════════════════════════════════════════════════════════
-PREVIOUS ACTIONS
+📖 PAGE STRUCTURE (context only - shows grouping)
 ═══════════════════════════════════════════════════════════════════════════════
-{history_str if history_str else "(none)"}
+{a11y_tree if a11y_tree else "(Page structure not available)"}
+
+═══════════════════════════════════════════════════════════════════════════════
+📜 PREVIOUS ACTIONS
+═══════════════════════════════════════════════════════════════════════════════
+{history_str if history_str else "(First step - no previous actions)"}
 
 {f'''
 ⚠️ PREVIOUS ATTEMPT FAILED:
@@ -242,7 +239,6 @@ PREVIOUS ACTIONS
 
 Please fix your response. Return ONLY valid JSON.
 ''' if last_error else ''}
-
 NOW RESPOND WITH YOUR ACTION (JSON ONLY):"""
         
         return prompt
@@ -252,7 +248,7 @@ NOW RESPOND WITH YOUR ACTION (JSON ONLY):"""
         return await self._call_llm(prompt)
     
     async def _call_llm(self, prompt: str, use_system_prompt: bool = True) -> Optional[str]:
-        """Call LLM with fallback. Uses system prompt by default for action planning."""
+        """Call LLM with fallback. Uses true async calls for non-blocking operation."""
         
         # Get system prompt for browser automation context
         system_prompt = get_system_prompt() if use_system_prompt else None
@@ -269,38 +265,14 @@ NOW RESPOND WITH YOUR ACTION (JSON ONLY):"""
         else:
             messages = [{"role": "user", "content": prompt}]
         
-        # Try NVIDIA first (minimaxai/minimax-m2 for better reasoning)
-        if self.nvidia:
-            try:
-                logger.info(f"🤖 Calling NVIDIA ({self.model_nvidia})...")
-                response = self.nvidia.chat.completions.create(
-                    model=self.model_nvidia,
-                    messages=messages,
-                    max_tokens=2000,
-                    temperature=0.1
-                )
-                
-                content = None
-                if response.choices and response.choices[0].message:
-                    content = response.choices[0].message.content
-                
-                if content:
-                    logger.info(f"✅ NVIDIA response ({len(content)} chars)")
-                    logger.debug(f"===== FULL RESPONSE START =====\n{content}\n===== FULL RESPONSE END =====")
-                    return content
-                else:
-                    logger.warning("⚠️ NVIDIA returned empty content")
-            except Exception as e:
-                logger.error(f"❌ NVIDIA failed: {e}")
-        
-        # Fallback 1: Cerebras
+        # Try Cerebras FIRST (fastest - ~1-3 seconds)
         if self.cerebras:
             try:
                 logger.info(f"🤖 Calling Cerebras ({self.model_cerebras})...")
-                response = self.cerebras.chat.completions.create(
+                response = await self.cerebras.chat.completions.create(
                     model=self.model_cerebras,
                     messages=messages,
-                    max_tokens=1000,
+                    max_tokens=2000,
                     temperature=0.1
                 )
                 
@@ -316,13 +288,36 @@ NOW RESPOND WITH YOUR ACTION (JSON ONLY):"""
                     logger.warning("⚠️ Cerebras returned empty content")
             except Exception as e:
                 logger.error(f"❌ Cerebras failed: {e}")
+        
+        # Fallback 1: Groq (also fast)
+        if self.groq:
+            try:
+                logger.info(f"🤖 Calling Groq ({self.model_groq})...")
+                response = await self.groq.chat.completions.create(
+                    model=self.model_groq,
+                    messages=messages,
+                    max_tokens=2000,
+                    temperature=0.1
+                )
+                
+                content = None
+                if response.choices and response.choices[0].message:
+                    content = response.choices[0].message.content
+                
+                if content:
+                    logger.info(f"✅ Groq response ({len(content)} chars)")
+                    return content
+                else:
+                    logger.warning("⚠️ Cerebras returned empty content")
+            except Exception as e:
+                logger.error(f"❌ Cerebras failed: {e}")
 
         
         # Fallback to Groq
         if self.groq:
             try:
                 logger.info(f"🤖 Calling Groq ({self.model_groq})...")
-                response = self.groq.chat.completions.create(
+                response = await self.groq.chat.completions.create(
                     model=self.model_groq,
                     messages=messages,
                     max_tokens=1000,
@@ -402,7 +397,6 @@ Respond with ONLY valid JSON:
                 if match:
                     cleaned = match.group(0)
                     
-                import json
                 data = json.loads(cleaned)
                 return data
             except Exception as e:
@@ -464,7 +458,28 @@ Respond with ONLY valid JSON:
                 actions = []
                 if 'actions' in data:
                     for act in data['actions']:
-                        actions.append(AtomicAction(name=act['name'], params=act.get('params', {})))
+                        # Use model_validate to allow AtomicAction validator to restructure params
+                        try:
+                            action = AtomicAction.model_validate(act)
+                            # DEBUG: Verify action params
+                            logger.info(f"DEBUG_VALIDATE success: {act} -> {action.params}")
+                            actions.append(action)
+                        except Exception as e:
+                            logger.warning(f"Failed to validate action {act}: {e}")
+                            # Fallback to manual verify if validation completely fails
+                            try:
+                                params = act.get('params', {})
+                                # ROBUST FALLBACK: If params is empty, check for top-level keys (common LLM error)
+                                if not params:
+                                    params = {k: v for k, v in act.items() if k != 'name'}
+                                    
+                                action = AtomicAction(
+                                    name=act['name'], 
+                                    params=params
+                                )
+                                actions.append(action)
+                            except:
+                                pass
                 else:
                      # Fallback for old single action format from LLM
                      actions.append(AtomicAction(

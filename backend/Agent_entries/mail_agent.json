@@ -22,59 +22,6 @@
       "placeholder": "Gmail-xxxxx"
     }
   ],
-  "capabilities": [
-    "read emails",
-    "send emails",
-    "search emails",
-    "fetch emails",
-    "compose emails",
-    "reply to emails",
-    "manage email labels",
-    "get email threads",
-    "fetch unread emails",
-    "send email with attachments",
-    "search inbox",
-    "check email",
-    "email automation",
-    "gmail integration",
-    "email management",
-    "list email threads",
-    "create email draft",
-    "add email labels",
-    "delete emails",
-    "get email attachments",
-    "download attachments",
-    "fetch message by id",
-    "email operations",
-    "fetch sent emails",
-    "get sent email content",
-    "view sent mail",
-    "check sent folder",
-    "get last sent email",
-    "verify sent email",
-    "see what was sent",
-    "search emails with attachments",
-    "find attachments",
-    "download email attachments",
-    "get attachment files",
-    "send html emails",
-    "format emails",
-    "professional email templates",
-    "newsletter emails",
-    "styled emails",
-    "rich text emails",
-    "email formatting",
-    "markdown to html",
-    "bullet point emails",
-    "formatted email content",
-    "attach files to email",
-    "send files via email",
-    "email with documents",
-    "email with images",
-    "sophisticated emails",
-    "business emails",
-    "marketing emails"
-  ],
   "price_per_call_usd": 0.005,
   "status": "active",
   "agent_type": "http_rest",
@@ -85,7 +32,7 @@
     {
       "endpoint": "/fetch_emails",
       "http_method": "POST",
-      "description": "Fetch/search emails from Gmail inbox",
+      "description": "Fetch/search emails from Gmail inbox. Use for 'Check my emails', 'Show unread emails', 'Find emails from John'.",
       "parameters": [
         {
           "name": "query",
@@ -97,7 +44,7 @@
           "name": "max_results",
           "param_type": "integer",
           "required": false,
-          "description": "Maximum number of emails to fetch (default: 10)"
+          "description": "Max emails to fetch (default: 10)"
         },
         {
           "name": "user_id",
@@ -116,74 +63,68 @@
     {
       "endpoint": "/send_email",
       "http_method": "POST",
-      "description": "Send a new email via Gmail with optional attachments and HTML formatting. Supports plain text, HTML emails, and file attachments.",
+      "description": "Send a new email with optional attachments and HTML formatting. Use for 'Send email to X about Y', 'Email John with the report'.",
       "parameters": [
         {
           "name": "to",
           "param_type": "array",
           "required": true,
-          "description": "Array of recipient email addresses"
+          "description": "Recipient email addresses"
         },
         {
           "name": "subject",
           "param_type": "string",
           "required": true,
-          "description": "Email subject line"
+          "description": "Email subject"
         },
         {
           "name": "body",
           "param_type": "string",
           "required": true,
-          "description": "Email body content (plain text or HTML)"
+          "description": "Email body (text or HTML)"
         },
         {
           "name": "cc",
           "param_type": "array",
           "required": false,
-          "description": "Array of CC email addresses (optional)"
+          "description": "CC addresses"
         },
         {
           "name": "bcc",
           "param_type": "array",
           "required": false,
-          "description": "Array of BCC email addresses (optional)"
+          "description": "BCC addresses"
         },
         {
           "name": "is_html",
           "param_type": "boolean",
           "required": false,
-          "description": "Whether body is HTML formatted (default: false)"
+          "description": "Is body HTML? (default: false)"
         },
         {
           "name": "attachment_file_ids",
           "param_type": "array",
           "required": false,
-          "description": "Array of file IDs from file manager to attach"
+          "description": "File IDs from file manager to attach"
         },
         {
           "name": "attachment_paths",
           "param_type": "array",
           "required": false,
-          "description": "Array of local file paths to attach"
+          "description": "Local file paths to attach"
         },
         {
           "name": "user_id",
           "param_type": "string",
           "required": false,
           "description": "Gmail user ID (default: 'me')"
-        },
-        {
-          "name": "show_preview",
-          "param_type": "boolean",
-          "required": false,
-          "description": "Show email preview in canvas before sending (optional, for user confirmation)"
         }
       ]
     },
     {
       "endpoint": "/get_message",
       "http_method": "POST",
-      "description": "Get full message details by ID",
+      "description": "Get full message details by ID. Use to read a specific email's full content.",
       "parameters": [
         {
           "name": "message_id",
@@ -208,19 +149,19 @@
     {
       "endpoint": "/add_label",
       "http_method": "POST",
-      "description": "Add labels to emails",
+      "description": "Add labels to emails. Use for 'Mark email as important', 'Star this email'.",
       "parameters": [
         {
           "name": "message_ids",
           "param_type": "array",
           "required": true,
-          "description": "Array of message IDs to label"
+          "description": "Message IDs to label"
         },
         {
           "name": "label_ids",
           "param_type": "array",
           "required": true,
-          "description": "Array of label IDs to add (e.g., ['IMPORTANT', 'STARRED'])"
+          "description": "Label IDs to add (e.g., ['IMPORTANT', 'STARRED'])"
         },
         {
           "name": "user_id",
@@ -233,13 +174,13 @@
     {
       "endpoint": "/delete_message",
       "http_method": "POST",
-      "description": "Delete emails by message ID",
+      "description": "Delete emails by message ID. Use for 'Delete this email', 'Remove message'.",
       "parameters": [
         {
           "name": "message_ids",
           "param_type": "array",
           "required": true,
-          "description": "Array of message IDs to delete"
+          "description": "Message IDs to delete"
         },
         {
           "name": "user_id",
@@ -252,7 +193,7 @@
     {
       "endpoint": "/get_attachment",
       "http_method": "POST",
-      "description": "Download email attachment",
+      "description": "Download a specific email attachment.",
       "parameters": [
         {
           "name": "message_id",
@@ -277,19 +218,19 @@
     {
       "endpoint": "/fetch_sent_emails",
       "http_method": "POST",
-      "description": "Fetch sent emails with full content (subject, body, recipients). Use this to see what emails you have sent.",
+      "description": "Fetch emails you have sent. Use for 'Show my sent emails', 'What emails did I send?'.",
       "parameters": [
         {
           "name": "max_results",
           "param_type": "integer",
           "required": false,
-          "description": "Maximum number of sent emails to fetch (default: 10)"
+          "description": "Max emails to fetch (default: 10)"
         },
         {
           "name": "include_body",
           "param_type": "boolean",
           "required": false,
-          "description": "Whether to include full email body (default: true)"
+          "description": "Include full email body (default: true)"
         },
         {
           "name": "user_id",
@@ -302,7 +243,7 @@
     {
       "endpoint": "/get_sent_email",
       "http_method": "POST",
-      "description": "Get a specific sent email by message ID with full content (subject, body, recipients)",
+      "description": "Get a specific sent email by message ID with full content.",
       "parameters": [
         {
           "name": "message_id",
@@ -321,106 +262,106 @@
     {
       "endpoint": "/get_last_sent_email",
       "http_method": "POST",
-      "description": "Get the most recently sent email with full content. Quick way to check what was just sent.",
+      "description": "Get the most recently sent email. Use for 'What was my last email?', 'Check if email was sent'.",
       "parameters": []
     },
     {
       "endpoint": "/download_attachments",
       "http_method": "POST",
-      "description": "Download all attachments from an email. Returns file paths for image/document agents to analyze.",
+      "description": "Download all attachments from an email. Returns file paths for analysis.",
       "parameters": [
         {
           "name": "message_id",
           "param_type": "string",
           "required": true,
-          "description": "Gmail message ID to download attachments from"
+          "description": "Gmail message ID"
         }
       ]
     },
     {
       "endpoint": "/search_emails_with_attachments",
       "http_method": "POST",
-      "description": "Search for emails that have attachments",
+      "description": "Search for emails that have attachments. Use for 'Find emails with attachments'.",
       "parameters": [
         {
           "name": "max_results",
           "param_type": "integer",
           "required": false,
-          "description": "Maximum number of emails to return (default: 10)"
+          "description": "Max emails to return (default: 10)"
         }
       ]
     },
     {
       "endpoint": "/compose_html_email",
       "http_method": "POST",
-      "description": "Compose and send a professionally formatted HTML email using templates. Supports multiple templates (basic, professional, newsletter) and automatic formatting with attachments.",
+      "description": "Send a professionally formatted HTML email using templates. Use for 'Send a professional email', 'Create a newsletter'.",
       "parameters": [
         {
           "name": "to",
           "param_type": "array",
           "required": true,
-          "description": "Array of recipient email addresses"
+          "description": "Recipient addresses"
         },
         {
           "name": "subject",
           "param_type": "string",
           "required": true,
-          "description": "Email subject line"
+          "description": "Subject"
         },
         {
           "name": "content",
           "param_type": "string",
           "required": true,
-          "description": "Main email content (will be formatted according to template)"
+          "description": "Email content"
         },
         {
           "name": "template",
           "param_type": "string",
           "required": false,
-          "description": "Template style: basic, professional, newsletter (default: basic)"
+          "description": "Template: basic, professional, newsletter (default: basic)"
         },
         {
           "name": "header_text",
           "param_type": "string",
           "required": false,
-          "description": "Optional header text for the email"
+          "description": "Optional header text"
         },
         {
           "name": "footer_text",
           "param_type": "string",
           "required": false,
-          "description": "Optional footer text for the email"
+          "description": "Optional footer text"
         },
         {
           "name": "cc",
           "param_type": "array",
           "required": false,
-          "description": "Array of CC email addresses"
+          "description": "CC addresses"
         },
         {
           "name": "bcc",
           "param_type": "array",
           "required": false,
-          "description": "Array of BCC email addresses"
+          "description": "BCC addresses"
         },
         {
           "name": "attachment_file_ids",
           "param_type": "array",
           "required": false,
-          "description": "Array of file IDs to attach"
+          "description": "File IDs to attach"
         },
         {
           "name": "attachment_paths",
           "param_type": "array",
           "required": false,
-          "description": "Array of file paths to attach"
+          "description": "File paths to attach"
         }
       ]
     },
     {
       "endpoint": "/format_email_content",
       "http_method": "POST",
-      "description": "Format email content with various styles (markdown to HTML, bullet points, numbered lists). Returns formatted HTML for use in send_email.",
+      "description": "Format email content with styles (markdown to HTML, bullet points, numbered lists).",
       "parameters": [
         {
           "name": "content",
@@ -439,7 +380,7 @@
     {
       "endpoint": "/email_templates",
       "http_method": "GET",
-      "description": "List available email templates and their descriptions",
+      "description": "List available email templates and their descriptions.",
       "parameters": []
     }
   ]

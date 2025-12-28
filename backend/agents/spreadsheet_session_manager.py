@@ -13,6 +13,7 @@ from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, asdict
 import hashlib
 import numpy as np
+from threading import Lock
 
 class NumpyEncoder(json.JSONEncoder):
     """Custom JSON encoder that handles numpy types."""
@@ -66,6 +67,7 @@ class SpreadsheetSessionManager:
         self.sessions_dir = Path(sessions_dir)
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self._active_sessions: Dict[str, SpreadsheetSession] = {}
+        self._session_lock = Lock()  # Thread-safe concurrent access
     
     def _get_session_id(self, file_id: str, thread_id: str = None) -> str:
         """
@@ -313,6 +315,108 @@ class SpreadsheetSessionManager:
         with open(session_file, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False, cls=NumpyEncoder)
     
+    def get_relevant_context(self, file_id: str, current_instruction: str,
+                            thread_id: str = None, max_tokens: int = 2000) -> str:
+        """
+        Get context most relevant to the current instruction.
+        Uses smart truncation to stay within token limits.
+        
+        Args:
+            file_id: The file identifier
+            current_instruction: The current user instruction
+            thread_id: Optional conversation thread ID
+            max_tokens: Maximum estimated tokens for context
+        
+        Returns:
+            Formatted context string optimized for LLM consumption
+        """
+        session = self.get_or_create_session(file_id, "unknown", thread_id)
+        
+        context_parts = []
+        estimated_tokens = 0
+        
+        # Header
+        header = f"=== AGENT MEMORY: {session.filename} ===\n"
+        header += f"Session: {len(session.operation_history)} operations performed\n\n"
+        context_parts.append(header)
+        estimated_tokens += self._estimate_tokens(header)
+        
+        # Recent operations (last 5 with full details)
+        if session.operation_history:
+            recent_section = "RECENT OPERATIONS:\n"
+            for i, op in enumerate(session.operation_history[-5:], 1):
+                recent_section += f"{i}. [{op.operation_type}] {op.instruction}\n"
+                recent_section += f"   Code: {op.pandas_code[:60]}...\n"
+                recent_section += f"   → {op.result_summary[:80]}{'...' if len(op.result_summary) > 80 else ''}\n"
+            recent_section += "\n"
+            
+            if estimated_tokens + self._estimate_tokens(recent_section) < max_tokens:
+                context_parts.append(recent_section)
+                estimated_tokens += self._estimate_tokens(recent_section)
+        
+        # Older operations (summarized, if space allows)
+        if len(session.operation_history) > 5 and estimated_tokens < max_tokens * 0.7:
+            older_section = "EARLIER OPERATIONS (summarized):\n"
+            for op in session.operation_history[-20:-5]:
+                summary = f"- {op.operation_type}: {op.instruction[:50]}...\n"
+                older_section += summary
+            older_section += "\n"
+            
+            if estimated_tokens + self._estimate_tokens(older_section) < max_tokens:
+                context_parts.append(older_section)
+                estimated_tokens += self._estimate_tokens(older_section)
+        
+        # Current dataframe state (if space allows)
+        if session.current_state and estimated_tokens < max_tokens * 0.85:
+            state_section = "CURRENT DATAFRAME STATE:\n"
+            state = session.current_state
+            state_section += f"Shape: {state.get('shape', 'unknown')}\n"
+            state_section += f"Columns: {state.get('columns', [])}\n"
+            
+            if estimated_tokens + self._estimate_tokens(state_section) < max_tokens:
+                context_parts.append(state_section)
+        
+        return "".join(context_parts)
+    
+    def get_all_files_summary(self, thread_id: str) -> str:
+        """
+        Get a summary of all spreadsheets worked on in this thread.
+        Useful for cross-file awareness.
+        
+        Args:
+            thread_id: The conversation thread ID
+        
+        Returns:
+            Summary of all spreadsheets and what was done to them
+        """
+        summaries = []
+        
+        # Find all sessions for this thread
+        for session_file in self.sessions_dir.glob("*.json"):
+            try:
+                with open(session_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    
+                # Check if this session belongs to this thread
+                if data.get('metadata', {}).get('thread_id') == thread_id:
+                    filename = data.get('filename', 'Unknown')
+                    op_count = len(data.get('operation_history', []))
+                    
+                    if op_count > 0:
+                        last_op = data['operation_history'][-1]
+                        summary = f"- {filename}: {op_count} ops, last: {last_op.get('operation_type', 'unknown')}"
+                        summaries.append(summary)
+            except Exception:
+                continue
+        
+        if summaries:
+            return "SPREADSHEETS IN THIS CONVERSATION:\n" + "\n".join(summaries)
+        return ""
+    
+    def _estimate_tokens(self, text: str) -> int:
+        """Rough token estimation (1 token ≈ 4 chars)."""
+        return len(text) // 4
+    
     def clear_session(self, file_id: str, thread_id: str = None):
         """
         Clear/reset a spreadsheet session.
@@ -329,6 +433,7 @@ class SpreadsheetSessionManager:
         
         if session_file.exists():
             session_file.unlink()
+
 
 # Global session manager instance
 spreadsheet_session_manager = SpreadsheetSessionManager()

@@ -2,32 +2,7 @@
   "id": "document_analysis_agent",
   "owner_id": "orbimesh-vendor",
   "name": "Orbimesh Document Analysis Agent",
-  "description": "Professional WORD DOCUMENT processing agent for DOCX, TXT, and PDF files ONLY. NOT for spreadsheets (CSV, Excel) - use Spreadsheet Agent for those. Capabilities: RAG-based Q&A, document display, advanced Word editing (formatting, tables, images, lists).",
-  "capabilities": [
-    "summarize_document",
-    "answer_question_about_document",
-    "extract_key_information_from_document",
-    "display_document_in_canvas",
-    "display_word_documents_as_pdf",
-    "create_new_word_document",
-    "edit_word_document",
-    "advanced_word_editing",
-    "format_text_with_styles_colors_fonts",
-    "add_remove_paragraphs",
-    "replace_text_case_sensitive",
-    "add_bullet_numbered_lists",
-    "add_modify_word_document_tables",
-    "add_images_with_captions",
-    "add_headings_sections",
-    "add_headers_footers_page_numbers",
-    "add_hyperlinks",
-    "add_page_breaks",
-    "highlight_text",
-    "strikethrough_underline",
-    "undo_redo_edits",
-    "version_history",
-    "find_and_replace_with_formatting"
-  ],
+  "description": "For WORD DOCUMENTS (DOCX, TXT, PDF) ONLY. NOT for spreadsheets - use Spreadsheet Agent for CSV/Excel. Supports Q&A, display, and Word editing.",
   "price_per_call_usd": 0.005,
   "status": "active",
   "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA3FcU8hPhmFLgez6qPf801aQahasAlG5S4MPb16nWJPA=\n-----END PUBLIC KEY-----",
@@ -35,127 +10,139 @@
     {
       "endpoint": "http://localhost:8070/analyze",
       "http_method": "POST",
-      "description": "ONLY for answering questions ABOUT a document's content (e.g., 'What is this document about?', 'Summarize the key points'). NOT for editing or modifying documents. Uses RAG to analyze document content and answer questions. Supports analyzing multiple documents at once. Always displays the document in canvas.",
+      "description": "Answer questions about a document's content using RAG. Use for 'What is this document about?', 'Summarize the key points', 'Find mentions of X'. NOT for editing.",
       "parameters": [
         {
           "name": "vector_store_path",
           "param_type": "string",
           "required": false,
-          "description": "The file path to the FAISS vector store index for a SINGLE document. Use this for backward compatibility when analyzing one document."
+          "description": "Path to FAISS vector store for a single document"
         },
         {
           "name": "vector_store_paths",
           "param_type": "array",
           "required": false,
-          "description": "Array of file paths to FAISS vector store indexes for MULTIPLE documents. Use this when analyzing multiple documents together. The agent will merge all vector stores and answer questions across all documents."
+          "description": "Paths to multiple vector stores for multi-doc analysis"
         },
         {
           "name": "query",
           "param_type": "string",
           "required": true,
-          "description": "The user's question about the document(s) (e.g., 'What are the main conclusions of this report?', 'List all products mentioned in these RFPs')."
+          "description": "Question about the document"
         }
       ]
     },
     {
       "endpoint": "http://localhost:8070/display",
       "http_method": "POST",
-      "description": "Displays a document (PDF, DOCX, TXT) in the canvas for viewing.",
+      "description": "Display a document (PDF, DOCX, TXT) in the canvas. Use for 'Show me this document', 'Display the file'.",
       "parameters": [
         {
           "name": "file_path",
           "param_type": "string",
           "required": true,
-          "description": "Path to the document file to display."
+          "description": "Path to the document file"
         }
       ]
     },
     {
       "endpoint": "http://localhost:8070/create",
       "http_method": "POST",
-      "description": "Creates a new document with the provided content. Always creates immediately and displays the result.",
+      "description": "CREATE a new document. Can use raw content, transform an existing file, or generate from instructions using LLM. Use for 'Create a document about X', 'Write a report', 'Convert PDF to DOCX'.",
       "parameters": [
         {
           "name": "content",
           "param_type": "string",
-          "required": true,
-          "description": "Content for the document."
+          "required": false,
+          "description": "Direct content for the document (optional if using reference_file_path or instruction)"
+        },
+        {
+          "name": "reference_file_path",
+          "param_type": "string",
+          "required": false,
+          "description": "Path to a source file to transform (e.g., PDF, TXT) into a new document"
+        },
+        {
+          "name": "instruction",
+          "param_type": "string",
+          "required": false,
+          "description": "Natural language instruction for LLM to generate or transform content (e.g., 'Create a summary report')"
         },
         {
           "name": "file_name",
           "param_type": "string",
           "required": true,
-          "description": "Name for the document file (e.g., 'report.docx')."
+          "description": "File name (e.g., 'report.docx')"
         },
         {
           "name": "file_type",
           "param_type": "string",
           "required": false,
-          "description": "Document type: 'docx', 'txt', or 'pdf' (default: 'docx')."
+          "description": "Type: docx, txt, pdf (default: docx)"
         },
         {
           "name": "output_dir",
           "param_type": "string",
           "required": false,
-          "description": "Directory to save the document (default: 'backend/storage/documents')."
+          "description": "Directory to save (default: 'storage/documents')"
         }
       ]
     },
     {
       "endpoint": "http://localhost:8070/edit",
       "http_method": "POST",
-      "description": "ONLY for MODIFYING or EDITING document content using natural language instructions. The agent will analyze the document structure and intelligently interpret the instruction to execute the appropriate edits. Supports all Word editing capabilities: formatting (colors, fonts, styles, bold, italic, underline, highlight), adding/removing content (paragraphs, headings, lists, tables, images), page layout (headers, footers, page breaks, sections), and advanced features (hyperlinks, find/replace, tab stops). Always executes immediately and displays the edited document. Use this endpoint for ANY request to change, modify, format, or edit a document.",
+      "description": "Edit a document using natural language. Supports formatting, adding content, tables, images, headers, footers, hyperlinks, page breaks. Use for 'Make headings bold', 'Add a table', 'Change font color'.",
       "parameters": [
         {
           "name": "file_path",
           "param_type": "string",
           "required": true,
-          "description": "Path to the document to edit."
+          "description": "Path to document to edit"
         },
         {
           "name": "instruction",
           "param_type": "string",
           "required": true,
-          "description": "Natural language instruction describing the desired edit. Examples: 'Make all subheadings red and bold', 'Add a table with 3 columns for Q1, Q2, Q3 sales data', 'Change the conclusion section to italic', 'Add a header with the company name', 'Highlight all important terms in yellow', 'Add bullet points for the key findings'. The agent will interpret the instruction with full document context and execute the appropriate actions."
+          "description": "Natural language edit instruction"
         }
       ]
     },
     {
       "endpoint": "http://localhost:8070/undo",
       "http_method": "POST",
-      "description": "Undo the last edit to a document. Restores the previous version and displays it. Returns undo/redo availability status.",
+      "description": "Undo the last edit to a document. Restores previous version.",
       "parameters": [
         {
           "name": "file_path",
           "param_type": "string",
           "required": true,
-          "description": "Path to the document."
+          "description": "Path to document"
         }
       ]
     },
     {
       "endpoint": "http://localhost:8070/redo",
       "http_method": "POST",
-      "description": "Redo the last undone edit to a document. Restores the next version and displays it. Returns undo/redo availability status.",
+      "description": "Redo a previously undone edit. Restores next version.",
       "parameters": [
         {
           "name": "file_path",
           "param_type": "string",
           "required": true,
-          "description": "Path to the document."
+          "description": "Path to document"
         }
       ]
     },
     {
       "endpoint": "http://localhost:8070/history",
       "http_method": "POST",
-      "description": "Get the version history for a document. Shows all saved versions with timestamps and descriptions.",
+      "description": "Get version history for a document. Shows all saved versions with timestamps and descriptions.",
       "parameters": [
         {
           "name": "file_path",
           "param_type": "string",
           "required": true,
-          "description": "Path to the document."
+          "description": "Path to document"
         }
       ]
     }

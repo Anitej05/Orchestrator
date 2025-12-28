@@ -653,7 +653,7 @@ async def trigger_webhook(webhook_id: str, payload: Dict[str, Any], webhook_toke
 @router.get("/api/plan/{thread_id}", response_model=PlanResponse)
 async def get_agent_plan(thread_id: str):
     """Retrieves the markdown execution plan for a given conversation thread."""
-    plan_dirs = ["agent_plans", "backend/agent_plans"]
+    plan_dirs = ["agent_plans"]
     file_path = None
     
     for plan_dir in plan_dirs:

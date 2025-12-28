@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 class DocumentVersionManager:
     """Manages document versions for undo/redo functionality."""
     
-    def __init__(self, base_dir: str = "backend/storage/document_versions"):
+    def __init__(self, base_dir: str = "storage/document_versions"):
         self.base_dir = base_dir
         os.makedirs(base_dir, exist_ok=True)
         self.version_index_file = os.path.join(base_dir, "version_index.json")

@@ -59,7 +59,6 @@ class AgentMemory(BaseModel):
 
     def update_plan(self, new_subtasks: List[str]):
         """Dynamically update the remaining plan"""
-        # unexpected behavior: modifying the plan while iterating?
         # Find index of first pending/active task (keep completed/failed)
         start_idx = len(self.plan)
         for i, task in enumerate(self.plan):

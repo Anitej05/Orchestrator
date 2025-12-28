@@ -34,7 +34,7 @@ class AgentCard(BaseModel):
     owner_id: str
     name: str
     description: str
-    capabilities: List[str]
+    capabilities: List[str] = []  # Now optional - endpoints are the source of truth
     price_per_call_usd: float
     status: Literal['active', 'inactive', 'deprecated'] = 'active'
     endpoints: List[EndpointDetail]

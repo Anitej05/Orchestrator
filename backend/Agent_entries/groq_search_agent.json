@@ -2,10 +2,7 @@
   "id": "groq_search_agent",
   "owner_id": "orbimesh-vendor",
   "name": "Orbimesh Groq Compound Agent",
-  "description": "A powerful research agent that uses Groq's `compound-beta` model to perform real-time web searches and provide summarized, cited answers to user queries.",
-  "capabilities": [
-    "perform web search and summarize"
-  ],
+  "description": "A powerful research agent that uses Groq's compound-beta model to perform real-time web searches and provide summarized, cited answers.",
   "price_per_call_usd": 0.005,
   "status": "active",
   "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA3FcU8hPhmFLgez6qPf801aQahasAlG5S4MPb16nWJPA=\n-----END PUBLIC KEY-----",
@@ -13,25 +10,25 @@
     {
       "endpoint": "http://localhost:8050/search-and-summarize",
       "http_method": "POST",
-      "description": "Performs a real-time web search using Groq's `compound-beta` system and returns a synthesized answer with citations. Supports domain filtering.",
+      "description": "Perform a web search and get a summarized answer with citations. Use for research questions like 'What are the latest developments in AI?', 'Explain quantum computing', 'Recent breakthroughs in medicine'.",
       "parameters": [
         {
           "name": "query",
           "param_type": "string",
           "required": true,
-          "description": "The question or topic to search for and summarize (e.g., 'What are the latest developments in AI?')."
+          "description": "The question or topic to search for and summarize."
         },
         {
           "name": "include_domains",
           "param_type": "array[string]",
           "required": false,
-          "description": "A list of domains to restrict the search to (e.g., ['techcrunch.com', '*.gov'])."
+          "description": "Domains to restrict search to (e.g., ['techcrunch.com', '*.gov'])."
         },
         {
           "name": "exclude_domains",
           "param_type": "array[string]",
           "required": false,
-          "description": "A list of domains to exclude from the search (e.g., ['wikipedia.org'])."
+          "description": "Domains to exclude (e.g., ['wikipedia.org'])."
         }
       ]
     }

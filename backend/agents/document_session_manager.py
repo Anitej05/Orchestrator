@@ -323,6 +323,108 @@ class DocumentSessionManager:
         with open(session_file, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
     
+    def get_relevant_context(self, document_path: str, current_instruction: str, 
+                            thread_id: str = None, max_tokens: int = 2000) -> str:
+        """
+        Get context most relevant to the current instruction.
+        Uses smart truncation to stay within token limits.
+        
+        Args:
+            document_path: Path to the document
+            current_instruction: The current user instruction
+            thread_id: Optional conversation thread ID
+            max_tokens: Maximum estimated tokens for context
+        
+        Returns:
+            Formatted context string optimized for LLM consumption
+        """
+        session = self.get_or_create_session(document_path, Path(document_path).name, thread_id)
+        
+        context_parts = []
+        estimated_tokens = 0
+        
+        # Header
+        header = f"=== AGENT MEMORY: {session.document_name} ===\n"
+        header += f"Session: {len(session.edit_history)} edits performed\n\n"
+        context_parts.append(header)
+        estimated_tokens += self._estimate_tokens(header)
+        
+        # Recent edits (last 5 with full details)
+        if session.edit_history:
+            recent_section = "RECENT OPERATIONS:\n"
+            for i, action in enumerate(session.edit_history[-5:], 1):
+                recent_section += f"{i}. [{action.action_type}] {action.instruction}\n"
+                recent_section += f"   → {action.result[:100]}{'...' if len(action.result) > 100 else ''}\n"
+            recent_section += "\n"
+            
+            if estimated_tokens + self._estimate_tokens(recent_section) < max_tokens:
+                context_parts.append(recent_section)
+                estimated_tokens += self._estimate_tokens(recent_section)
+        
+        # Older edits (summarized, if space allows)
+        if len(session.edit_history) > 5 and estimated_tokens < max_tokens * 0.7:
+            older_section = "EARLIER OPERATIONS (summarized):\n"
+            for action in session.edit_history[-20:-5]:
+                summary = f"- {action.action_type}: {action.instruction[:50]}...\n"
+                older_section += summary
+            older_section += "\n"
+            
+            if estimated_tokens + self._estimate_tokens(older_section) < max_tokens:
+                context_parts.append(older_section)
+                estimated_tokens += self._estimate_tokens(older_section)
+        
+        # Current document state (if space allows)
+        if session.current_structure and estimated_tokens < max_tokens * 0.85:
+            state_section = "CURRENT DOCUMENT STATE:\n"
+            state_str = json.dumps(session.current_structure, indent=2)
+            if len(state_str) > 500:
+                state_str = state_str[:500] + "...(truncated)"
+            state_section += state_str + "\n"
+            
+            if estimated_tokens + self._estimate_tokens(state_section) < max_tokens:
+                context_parts.append(state_section)
+        
+        return "".join(context_parts)
+    
+    def get_all_files_summary(self, thread_id: str) -> str:
+        """
+        Get a summary of all documents worked on in this thread.
+        Useful for cross-file awareness.
+        
+        Args:
+            thread_id: The conversation thread ID
+        
+        Returns:
+            Summary of all documents and what was done to them
+        """
+        summaries = []
+        
+        # Find all sessions for this thread
+        for session_file in self.sessions_dir.glob("*.json"):
+            try:
+                with open(session_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    
+                # Check if this session belongs to this thread
+                if data.get('metadata', {}).get('thread_id') == thread_id:
+                    doc_name = data.get('document_name', 'Unknown')
+                    edit_count = len(data.get('edit_history', []))
+                    
+                    if edit_count > 0:
+                        last_action = data['edit_history'][-1]
+                        summary = f"- {doc_name}: {edit_count} edits, last: {last_action.get('action_type', 'unknown')}"
+                        summaries.append(summary)
+            except Exception:
+                continue
+        
+        if summaries:
+            return "DOCUMENTS IN THIS CONVERSATION:\n" + "\n".join(summaries)
+        return ""
+    
+    def _estimate_tokens(self, text: str) -> int:
+        """Rough token estimation (1 token ≈ 4 chars)."""
+        return len(text) // 4
+    
     def clear_session(self, document_path: str):
         """Clear/reset a document session."""
         session_id = self._get_session_id(document_path)
@@ -336,3 +438,4 @@ class DocumentSessionManager:
 
 # Global session manager instance
 session_manager = DocumentSessionManager()
+

@@ -102,6 +102,16 @@ class ApiResponse(BaseModel):
     error: Optional[str] = None
 
 
+class CreateSpreadsheetRequest(BaseModel):
+    """Request model for LLM-powered spreadsheet creation"""
+    content: Optional[str] = Field(None, description="Raw CSV/JSON text or natural language content to transform into a spreadsheet")
+    reference_file_id: Optional[str] = Field(None, description="File ID of an existing file to transform (e.g., from document agent)")
+    instruction: Optional[str] = Field(None, description="Natural language instruction for how to create/transform the data")
+    output_format: str = Field(default="csv", description="Output format: 'csv' or 'xlsx'")
+    output_filename: Optional[str] = Field(None, description="Optional filename for the output")
+    thread_id: Optional[str] = Field(None, description="Conversation thread ID for context")
+
+
 class NaturalLanguageQueryRequest(BaseModel):
     """Request model for natural language queries"""
     file_id: str = Field(..., description="ID of the uploaded file")
@@ -221,9 +231,12 @@ Column Statistics:
         
         return context
     
-    def _build_system_prompt(self, df_context: str, session_context: str = "") -> str:
+    def _build_system_prompt(self, df_context: str, session_context: str = "", all_files_context: str = "") -> str:
         """Build the system prompt for the query agent"""
         return f"""You are a powerful data analysis assistant that helps users query and analyze spreadsheet data using pandas.
+
+=== ALL FILES IN THIS CONVERSATION ===
+{all_files_context if all_files_context else "Currently working with one file."}
 
 === CURRENT DATAFRAME STATE ===
 {df_context}
@@ -310,7 +323,8 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
         except Exception as e:
             return None, df, str(e)
     
-    async def query(self, df: pd.DataFrame, question: str, max_iterations: int = 5, session_context: str = "") -> QueryResult:
+    async def query(self, df: pd.DataFrame, question: str, max_iterations: int = 5, 
+                    session_context: str = "", all_files_context: str = "") -> QueryResult:
         """
         Process a natural language query against the dataframe.
         Uses a ReAct-style loop to iteratively reason and execute.
@@ -328,7 +342,7 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
         current_df = df.copy()
         
         df_context = self._get_dataframe_context(current_df)
-        system_prompt = self._build_system_prompt(df_context, session_context)
+        system_prompt = self._build_system_prompt(df_context, session_context, all_files_context)
         
         steps_taken = []
         conversation = [
@@ -989,11 +1003,15 @@ async def natural_language_query(request: NaturalLanguageQueryRequest, thread_id
         # Get session context with thread isolation
         session_context = spreadsheet_session_manager.get_session_context(request.file_id, thread_id or "default")
         
+        # Get ALL files in this conversation for cross-file awareness
+        all_files_context = spreadsheet_session_manager.get_all_files_summary(thread_id or "default")
+        
         result = await query_agent.query(
             df=df,
             question=request.question,
             max_iterations=request.max_iterations,
-            session_context=session_context
+            session_context=session_context,
+            all_files_context=all_files_context
         )
         
         if result.success and result.final_dataframe is not None:
@@ -1729,6 +1747,258 @@ async def get_summary_with_canvas(file_id: str = Form(...)):
     except Exception as e:
         logger.error(f"Get summary failed: {e}", exc_info=True)
         return ApiResponse(success=False, error=str(e))
+
+
+@app.post("/create", response_model=ApiResponse)
+async def create_spreadsheet(request: CreateSpreadsheetRequest):
+    """
+    Create a new spreadsheet from raw content or by transforming existing data using LLM.
+    
+    This endpoint can:
+    1. Take raw CSV/JSON text and create a spreadsheet
+    2. Take natural language content and use LLM to structure it as a spreadsheet
+    3. Take a reference file_id and transform that data based on instructions
+    
+    Examples:
+    - {"content": "Name,Age\\nAlice,30\\nBob,25", "output_format": "csv"}
+    - {"content": "Create a table with 5 employees...", "instruction": "Generate sample employee data"}
+    - {"reference_file_id": "doc_123", "instruction": "Extract all tabular data from this document"}
+    """
+    import io
+    import csv
+    import re
+    
+    try:
+        source_content = None
+        
+        # Step 1: Get source content
+        if request.reference_file_id:
+            # Load from existing file
+            if request.reference_file_id in dataframes:
+                source_content = dataframes[request.reference_file_id].to_csv(index=False)
+                logger.info(f"Using existing dataframe as source: {request.reference_file_id}")
+            else:
+                # Try file_manager
+                metadata = file_manager.get_file(request.reference_file_id)
+                if metadata and metadata.storage_path:
+                    try:
+                        with open(metadata.storage_path, 'r', encoding='utf-8') as f:
+                            source_content = f.read()
+                        logger.info(f"Loaded source content from file_manager: {metadata.storage_path}")
+                    except:
+                        # Read as binary and decode
+                        with open(metadata.storage_path, 'rb') as f:
+                            source_content = f.read().decode('utf-8', errors='ignore')
+                else:
+                    # Fallback: Check document storage for cross-agent access
+                    import glob
+                    doc_storage_search = glob.glob(f"storage/documents/{request.reference_file_id}.*")
+                    if doc_storage_search:
+                         doc_path = doc_storage_search[0]
+                         logger.info(f"Found reference file in global document storage: {doc_path}")
+                         try:
+                             # For PDFs, extracting text is hard here without PyPDF2/etc.
+                             # But let's assume it's text-readable or handled by logic below
+                             if doc_path.lower().endswith('.pdf'):
+                                 # Basic text extraction from PDF if possible, or fail gracefully
+                                 # Ideally, orchestrator should have extracted text. 
+                                 # But for now, try to read as binary/text or use pypdf if available
+                                 try:
+                                     try:
+                                         from pypdf import PdfReader
+                                     except ImportError:
+                                         # Try PyPDF2 as fallback
+                                         from PyPDF2 import PdfReader
+                                         
+                                     reader = PdfReader(doc_path)
+                                     text_content = ""
+                                     for page in reader.pages:
+                                         text_content += page.extract_text() + "\n"
+                                     source_content = text_content
+                                     logger.info(f"Extracted text from PDF: {len(source_content)} chars")
+                                 except Exception as e:
+                                     logger.warning(f"Failed to extract PDF text: {e}")
+                                     # Fallback to binary decode (unlikely to work well for PDF but better than 404)
+                                     with open(doc_path, 'rb') as f:
+                                         source_content = f.read().decode('utf-8', errors='ignore')
+                             else:
+                                 with open(doc_path, 'r', encoding='utf-8', errors='replace') as f:
+                                     source_content = f.read()
+                         except Exception as e:
+                             # Read as binary and decode
+                             with open(doc_path, 'rb') as f:
+                                 source_content = f.read().decode('utf-8', errors='ignore')
+                    else:
+                        return ApiResponse(success=False, error=f"Reference file not found: {request.reference_file_id}")
+        elif request.content:
+            source_content = request.content
+        else:
+            return ApiResponse(success=False, error="Either 'content' or 'reference_file_id' must be provided")
+        
+        # Step 2: Use LLM to generate/transform into structured CSV
+        if request.instruction or not _is_valid_csv(source_content):
+            logger.info("Using LLM to generate structured CSV data...")
+            csv_content = await _generate_csv_with_llm(source_content, request.instruction)
+            if not csv_content:
+                return ApiResponse(success=False, error="Failed to generate CSV from content using LLM")
+        else:
+            csv_content = source_content
+        
+        # Step 3: Parse CSV into DataFrame
+        try:
+            df = pd.read_csv(io.StringIO(csv_content))
+        except Exception as parse_err:
+            logger.error(f"Failed to parse generated CSV: {parse_err}")
+            # Try to fix common issues and retry
+            csv_content = csv_content.strip()
+            try:
+                df = pd.read_csv(io.StringIO(csv_content))
+            except:
+                return ApiResponse(success=False, error=f"Failed to parse CSV: {parse_err}")
+        
+        # Step 4: Generate file_id and save
+        file_id = str(uuid.uuid4())[:8]
+        filename = request.output_filename or f"created_{file_id}.{request.output_format}"
+        file_path = STORAGE_DIR / filename
+        
+        if request.output_format == "xlsx":
+            df.to_excel(file_path, index=False)
+        else:
+            df.to_csv(file_path, index=False)
+        
+        # Step 5: Register with file_manager and in-memory stores
+        thread_id = request.thread_id or "default"
+        conversation_dataframes = get_conversation_dataframes(thread_id)
+        conversation_file_paths = get_conversation_file_paths(thread_id)
+        
+        conversation_dataframes[file_id] = df
+        conversation_file_paths[file_id] = str(file_path)
+        dataframes[file_id] = df
+        file_paths[file_id] = str(file_path)
+        
+        # Register with file manager
+        try:
+            fm_metadata = await file_manager.register_file(
+                content=open(file_path, 'rb').read(),
+                filename=filename,
+                file_type=FileType.SPREADSHEET,
+                thread_id=thread_id,
+                custom_metadata={"created_by": "llm", "source": "create_endpoint"}
+            )
+            file_id = fm_metadata.file_id  # Use file_manager's ID
+            logger.info(f"Registered created file with file_manager: {file_id}")
+        except Exception as fm_err:
+            logger.warning(f"Failed to register with file_manager: {fm_err}")
+        
+        # Step 6: Generate canvas display
+        canvas_display = dataframe_to_canvas(
+            df=df,
+            title=f"Created: {filename}",
+            filename=filename,
+            display_mode='full',
+            max_rows=50,
+            file_id=file_id,
+            metadata={'operation': 'create', 'source': 'llm' if request.instruction else 'raw'}
+        )
+        
+        logger.info(f"✅ Created spreadsheet: {filename} with {len(df)} rows, {len(df.columns)} columns")
+        
+        return ApiResponse(success=True, result={
+            "file_id": file_id,
+            "filename": filename,
+            "file_path": str(file_path),
+            "rows": len(df),
+            "columns": len(df.columns),
+            "column_names": df.columns.tolist(),
+            "canvas_display": canvas_display
+        })
+        
+    except Exception as e:
+        logger.error(f"Create spreadsheet failed: {e}", exc_info=True)
+        return ApiResponse(success=False, error=str(e))
+
+
+def _is_valid_csv(content: str) -> bool:
+    """Check if content is already valid CSV format."""
+    try:
+        import io
+        lines = content.strip().split('\n')
+        if len(lines) < 2:
+            return False
+        # Check if first line looks like headers
+        first_line = lines[0]
+        if ',' not in first_line and '\t' not in first_line:
+            return False
+        # Try to parse as CSV
+        df = pd.read_csv(io.StringIO(content))
+        return len(df) > 0 and len(df.columns) > 0
+    except:
+        return False
+
+
+async def _generate_csv_with_llm(content: str, instruction: str = None) -> Optional[str]:
+    """Use LLM to generate structured CSV from content."""
+    instruction_text = instruction or "Convert this content into a well-structured CSV table"
+    
+    prompt = f"""You are a data structuring expert. Convert the following content into a clean CSV format.
+
+=== CONTENT ===
+{content[:5000]}  # Limit content length
+
+=== INSTRUCTION ===
+{instruction_text}
+
+=== RULES ===
+1. Output ONLY valid CSV data - no explanations, no markdown code blocks
+2. First row must be headers
+3. Use comma as delimiter
+4. Quote fields that contain commas
+5. If the content describes tabular data, extract it accurately
+6. If the content is natural language, create a reasonable spreadsheet from it
+7. Ensure all rows have the same number of columns
+
+=== OUTPUT CSV NOW (no markdown, just raw CSV) ==="""
+
+    # Use query_agent's providers
+    providers = query_agent.providers
+    if not providers:
+        logger.error("No LLM providers available for CSV generation")
+        return None
+    
+    for provider in providers:
+        try:
+            provider_name = provider['name']
+            client = provider['client']
+            model = provider['model']
+            
+            logger.info(f"🤖 Using {provider_name.upper()} for CSV generation")
+            
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=2000
+            )
+            
+            csv_content = response.choices[0].message.content.strip()
+            
+            # Clean up - remove markdown if present
+            if csv_content.startswith("```csv"):
+                csv_content = csv_content[6:]
+            if csv_content.startswith("```"):
+                csv_content = csv_content[3:]
+            if csv_content.endswith("```"):
+                csv_content = csv_content[:-3]
+            csv_content = csv_content.strip()
+            
+            logger.info(f"Generated CSV with {csv_content.count(chr(10)) + 1} lines")
+            return csv_content
+            
+        except Exception as e:
+            logger.warning(f"⚠️ {provider_name.upper()} failed: {e}")
+            continue
+    
+    return None
 
 
 # --- Main Entry Point ---

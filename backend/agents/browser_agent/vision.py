@@ -11,7 +11,7 @@ import base64
 import logging
 import io
 from typing import Dict, Any, Optional, List, Tuple
-from openai import OpenAI
+from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
 try:
@@ -26,26 +26,36 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY")
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
 
 
 class VisionClient:
-    """Vision model client with Set-of-Mark overlays for precise action planning"""
+    """Vision model client with Set-of-Mark overlays for precise action planning - uses true async calls"""
     
     def __init__(self):
-        self.ollama = OpenAI(
+        # Primary: Ollama with Qwen VL
+        self.ollama = AsyncOpenAI(
             api_key=OLLAMA_API_KEY,
-            base_url="https://ollama.com/v1"
+            base_url="https://ollama.com/v1",
+            timeout=60.0  # Explicit timeout matching debug script
         ) if OLLAMA_API_KEY else None
         
+        # Fallback: NVIDIA with Mistral Large (for vision)
+        self.nvidia = AsyncOpenAI(
+            api_key=NVIDIA_API_KEY,
+            base_url="https://integrate.api.nvidia.com/v1"
+        ) if NVIDIA_API_KEY else None
+        
         self.model = "qwen3-vl:235b-cloud"
+        self.model_nvidia = "mistralai/mistral-large-3-675b-instruct-2512"  # NVIDIA vision fallback
         self.max_tokens = 1200
-        self.valid_actions = ["click", "type", "scroll", "search", "navigate", "done", "wait", "fail", "hover", "press", "go_back", "save_info", "skip_subtask"]
+        self.valid_actions = ["click", "type", "scroll", "search", "navigate", "done", "wait", "fail", "hover", "press", "go_back", "save_info", "skip_subtask", "run_js"]
         self.mark_elements: Dict[int, Dict] = {}  # Store mark→element mapping
     
     @property
     def available(self) -> bool:
-        """Check if vision is available"""
-        return self.ollama is not None
+        """Check if vision is available (either Ollama or NVIDIA fallback)"""
+        return self.ollama is not None or self.nvidia is not None
     
     def _add_som_overlay(self, screenshot_b64: str, elements: List[Dict]) -> Tuple[str, Dict[int, Dict]]:
         """Add Set-of-Mark numbered labels to screenshot
@@ -80,8 +90,8 @@ class VisionClient:
                 (128, 0, 128), (0, 128, 128), (255, 0, 255), (128, 128, 0)
             ]
             
-            # Draw marks on top 30 elements (limit to avoid clutter)
-            for idx, el in enumerate(elements[:50]):  # More elements for better coverage
+            # Mark ALL viewport-visible elements (DOM already filters to viewport)
+            for idx, el in enumerate(elements):
                 mark_num = idx + 1
                 x = el.get('x', 0)
                 y = el.get('y', 0)
@@ -111,11 +121,12 @@ class VisionClient:
                 # Draw label text
                 draw.text((label_x + 2, label_y + 2), label, fill=(255, 255, 255), font=font)
                 
-                # Store mapping
+                # Store mapping with section context
                 mark_mapping[mark_num] = {
                     'role': role,
                     'name': name,
                     'xpath': xpath,
+                    'section': el.get('section', ''),  # Parent heading for context
                     'x': x,
                     'y': y
                 }
@@ -142,7 +153,7 @@ class VisionClient:
         """Plan action based on screenshot analysis with Set-of-Mark overlays"""
         
         if not self.available:
-            logger.warning("Vision not available (no OLLAMA_API_KEY)")
+            logger.warning("Vision not available (no OLLAMA_API_KEY or NVIDIA_API_KEY)")
             return None
         
         try:
@@ -156,13 +167,41 @@ class VisionClient:
             logger.info(f"📸 Calling vision model: {self.model}")
             logger.debug(f"Vision prompt length: {len(prompt)} chars, image size: {len(marked_screenshot)} chars")
             
+            # Log exact image size for debugging empty response issues
+            print(f"DEBUG: marked_screenshot length: {len(marked_screenshot)}", flush=True)
+            
+            # STRICT SYSTEM MESSAGE - enforces JSON output
+            system_msg = """You are a browser automation agent. You MUST respond with ONLY valid JSON.
+
+CRITICAL RULES:
+1. Your response MUST be a valid JSON object starting with { and ending with }
+2. NO text before or after JSON
+3. NO markdown code blocks
+4. NO explanation outside JSON
+5. DO NOT LOOP: If the previous action was also a vision analysis of the SAME page state, you MUST take a constructive action (click, type, done, or switch to text mode). Do not just describe the page again.
+6. EFFICIENCY: Switch to "next_mode": "text" as soon as you have understood the visual layout. Text mode is faster and cheaper.
+
+REQUIRED JSON FORMAT:
+{
+  "reasoning": "Brief explanation of what you see and your decision effectively.",
+  "actions": [{"name": "action_name", "params": {...}}],
+  "confidence": 0.9,
+  "next_mode": "text"
+}
+
+Valid action names: click, type, scroll, navigate, done, wait, hover, press, go_back, save_info, skip_subtask
+For clicks: use {"mark": N} where N is the number you see on the screenshot like [1], [2], [3]"""
+
+            # MERGE SYSTEM PROMPT INTO USER MESSAGE for better Qwen compatibility
+            full_prompt_text = system_msg + "\n\n" + prompt
+
             messages = [
                 {
                     "role": "user",
                     "content": [
                         {
                             "type": "text",
-                            "text": prompt
+                            "text": full_prompt_text
                         },
                         {
                             "type": "image_url",
@@ -174,28 +213,38 @@ class VisionClient:
                 }
             ]
             
-            # Define tool for structured output
+            # Define tool for structured output - UPDATED FOR MULTI-ACTION
             tools = [
                 {
                     "type": "function",
                     "function": {
                         "name": "browser_action",
-                        "description": "Output the next browser action based on visual analysis.",
+                        "description": "Output a SEQUENCE of browser actions based on visual analysis.",
                         "parameters": {
                             "type": "object",
                             "properties": {
                                 "reasoning": {
                                     "type": "string",
-                                    "description": "Detailed reasoning for the action, analyzing the UI elements and task state."
+                                    "description": "Detailed reasoning for the action sequence, analyzing the UI elements and task state."
                                 },
-                                "action_name": {
-                                    "type": "string",
-                                    "enum": ["click", "type", "scroll", "search", "navigate", "done", "wait", "fail", "hover", "press", "go_back", "save_info", "skip_subtask"],
-                                    "description": "The name of the action to execute."
-                                },
-                                "params": {
-                                    "type": "object",
-                                    "description": "Parameters for the action (e.g., {'mark': 1} or {'text': 'shoes'})."
+                                "actions": {
+                                    "type": "array",
+                                    "description": "List of actions to execute in order.",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "name": {
+                                                "type": "string",
+                                                "enum": ["click", "type", "scroll", "search", "navigate", "done", "wait", "fail", "hover", "press", "go_back", "save_info", "skip_subtask", "run_js"],
+                                                "description": "The name of the action."
+                                            },
+                                            "params": {
+                                                "type": "object",
+                                                "description": "Parameters for the action (e.g., {'mark': 1})."
+                                            }
+                                        },
+                                        "required": ["name", "params"]
+                                    }
                                 },
                                 "confidence": {
                                     "type": "number",
@@ -207,20 +256,63 @@ class VisionClient:
                                     "description": "The next mode to switch to."
                                 }
                             },
-                            "required": ["reasoning", "action_name", "confidence", "next_mode"]
+                            "required": ["reasoning", "actions", "confidence", "next_mode"]
                         }
                     }
                 }
             ]
 
-            response = self.ollama.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                max_tokens=self.max_tokens,
-                temperature=0.1,
-                tools=tools,
-                tool_choice={"type": "function", "function": {"name": "browser_action"}} 
-            )
+            response = None
+            
+            # Try Ollama first (primary vision model)
+            if self.ollama:
+                try:
+                    logger.info(f"🎨 Trying Ollama vision: {self.model} (Tools Enabled)")
+                    response = await self.ollama.chat.completions.create(
+                        model=self.model,
+                        messages=messages,
+                        max_tokens=self.max_tokens,
+                        temperature=0.1,
+                        tools=tools,
+                        tool_choice="auto"
+                    )
+                    
+                    # LOG FULL RESPONSE FOR DEBUGGING
+                    if response and response.choices:
+                        msg = response.choices[0].message
+                        content = msg.content or ""
+                        reasoning = getattr(msg, 'reasoning', None) or ""
+                        
+                        if content:
+                            logger.info(f"🔮 Vision Response (content): {content[:200]}...")
+                        if reasoning:
+                            logger.info(f"🔮 Vision Response (reasoning): {reasoning[:200]}...")
+                        if not content and not reasoning:
+                            logger.warning("🔮 Vision Response: EMPTY (no content or reasoning)")
+                    else:
+                        logger.warning("🔮 Vision Response: NULL (no choices)")
+
+
+                except Exception as ollama_err:
+                    print(f"\n\n❌ OLLAMA VISION ERROR: {ollama_err}\n\n", flush=True)
+                    logger.warning(f"⚠️ Ollama vision failed: {ollama_err}")
+                    response = None
+            
+            # Fallback to NVIDIA if Ollama failed or unavailable
+            if (not response or not response.choices) and self.nvidia:
+                try:
+                    logger.info(f"🎨 Falling back to NVIDIA vision: {self.model_nvidia}")
+                    # NVIDIA with text-only prompt (no image support for this model)
+                    text_only_messages = [{"role": "user", "content": prompt}]
+                    response = await self.nvidia.chat.completions.create(
+                        model=self.model_nvidia,
+                        messages=text_only_messages,
+                        max_tokens=self.max_tokens,
+                        temperature=0.1
+                    )
+                except Exception as nvidia_err:
+                    logger.warning(f"⚠️ NVIDIA vision fallback also failed: {nvidia_err}")
+                    response = None
             
             # Check for valid response structure
             if not response or not response.choices:
@@ -231,39 +323,39 @@ class VisionClient:
             tool_calls = response.choices[0].message.tool_calls
             if tool_calls:
                 logger.info(f"🎨 Vision returned Tool Call: {tool_calls[0].function.name}")
-                # DEBUG VERIFICATION LOG
-                with open("vision_tool_success.log", "a") as f:
-                     f.write(f"Tool Call: {tool_calls[0].function.name} Args: {tool_calls[0].function.arguments}\n")
+                logger.debug(f"Tool Call Args: {tool_calls[0].function.arguments}")
                 
                 try:
                     args = json.loads(tool_calls[0].function.arguments)
-                    # Map to Action object format expected by agent
-                    # Note: Action Name in tool is 'action_name', agent expects 'name' inside valid_actions checking, 
-                    # but _parse_action logic usually handles conversion. 
-                    # Let's construct the dict to match what _parse_action produces.
                     
-                    action_data = {
-                        "reasoning": args.get("reasoning", ""),
-                        "actions": [{
-                            "name": args.get("action_name"),
-                            "params": args.get("params", {})
-                        }],
-                        "confidence": args.get("confidence", 1.0),
-                        "next_mode": args.get("next_mode", "text")
-                    }
-                    
-                    # Validate action
-                    if action_data["actions"][0]["name"] not in self.valid_actions:
-                        logger.warning(f"Vision tool returned invalid action: {action_data['actions'][0]['name']}")
-                        # Fallback to text parsing if invalid? Or just fail.
+                    # New Schema Handling: 'actions' list
+                    actions_list = []
+                    if "actions" in args:
+                        for act in args["actions"]:
+                            actions_list.append(AtomicAction(
+                                name=act.get("name"),
+                                params=act.get("params", {})
+                            ))
                     else:
-                        # Return properly formatted Action object (via _parse_action helper usually, but manually here)
-                        return ActionPlan(
-                            reasoning=action_data["reasoning"],
-                            actions=[AtomicAction(name=action_data["actions"][0]["name"], params=action_data["actions"][0]["params"])],
-                            confidence=action_data["confidence"],
-                            next_mode=action_data.get("next_mode")
-                        )
+                        # Fallback for old/malformed schema
+                        if "action_name" in args:
+                            actions_list.append(AtomicAction(
+                                name=args.get("action_name"),
+                                params=args.get("params", {})
+                            ))
+
+                    # Validate actions
+                    if not actions_list:
+                        logger.warning("Vision tool returned no valid actions")
+                        return None
+                        
+                    return ActionPlan(
+                        reasoning=args.get("reasoning", ""),
+                        actions=actions_list,
+                        confidence=args.get("confidence", 1.0),
+                        next_mode=args.get("next_mode", "text"),
+                        completed_subtasks=args.get("completed_subtasks", [])
+                    )
 
                 except json.JSONDecodeError:
                     logger.error("Failed to decode tool arguments json")
@@ -279,7 +371,7 @@ class VisionClient:
                  content = response.choices[0].message.reasoning
                  
             if content and content.strip():
-                 logger.info("Falling back to text parsing from content/reasoning...")
+                 logger.debug("Parsing raw vision response content (standard path for Ollama)...")
                  return self._parse_action(content, self.mark_elements)
             
             logger.warning("Vision failed to return tool call or parseable content.")
@@ -311,27 +403,51 @@ Focus on visual elements that are relevant to the task.
 
 Provide a detailed description of what you observe."""
 
-            response = self.ollama.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_base64}"}}
-                        ]
-                    }
-                ],
-                max_tokens=1000,
-                temperature=0.3
-            )
+            response = None
             
-            content = response.choices[0].message.content
-            if content:
-                # Strip any thinking tags
-                content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL | re.IGNORECASE)
-                content = re.sub(r'<thinking>.*?</thinking>', '', content, flags=re.DOTALL | re.IGNORECASE)
-                return content.strip()
+            # Try Ollama first if available
+            if self.ollama:
+                try:
+                    response = await self.ollama.chat.completions.create(
+                        model=self.model,
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": prompt},
+                                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_base64}"}}
+                                ]
+                            }
+                        ],
+                        max_tokens=1000,
+                        temperature=0.3
+                    )
+                except Exception as ollama_err:
+                    logger.warning(f"Ollama image analysis failed: {ollama_err}")
+                    response = None
+            
+            # Fallback to NVIDIA if Ollama failed or unavailable
+            if (not response or not response.choices) and self.nvidia:
+                try:
+                    logger.info("Falling back to NVIDIA for image analysis")
+                    # NVIDIA doesn't support images directly, use text-only prompt
+                    response = await self.nvidia.chat.completions.create(
+                        model=self.model_nvidia,
+                        messages=[{"role": "user", "content": prompt + "\n\n(Note: Analyzing based on context only, no image available)"}],
+                        max_tokens=1000,
+                        temperature=0.3
+                    )
+                except Exception as nvidia_err:
+                    logger.warning(f"NVIDIA image analysis fallback failed: {nvidia_err}")
+                    response = None
+            
+            if response and response.choices:
+                content = response.choices[0].message.content
+                if content:
+                    # Strip any thinking tags
+                    content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL | re.IGNORECASE)
+                    content = re.sub(r'<thinking>.*?</thinking>', '', content, flags=re.DOTALL | re.IGNORECASE)
+                    return content.strip()
             return None
             
         except Exception as e:
@@ -369,13 +485,17 @@ Provide a detailed description of what you observe."""
                     pass
             history_str = "\n".join(lines)
         
-        # Build Set-of-Mark legend
+        # Build Set-of-Mark legend with section context
         mark_legend = ""
         if mark_elements:
             legend_lines = []
             for mark_num, el in mark_elements.items():
-                legend_lines.append(f"  [{mark_num}] {el.get('role', 'element')}: \"{el.get('name', '')}\"")
-            mark_legend = "\n".join(legend_lines)  # Full legend
+                section = el.get('section', '')
+                line = f'  [{mark_num}] {el.get("role", "element")}: "{el.get("name", "")}"'
+                if section:
+                    line += f'  [under: {section}]'
+                legend_lines.append(line)
+            mark_legend = "\n".join(legend_lines)  # Full legend with section context
         
         return f"""You are a browser automation agent with VISION capabilities. Analyze this screenshot and decide the next action.
 
@@ -412,6 +532,7 @@ AVAILABLE ACTIONS
 ═══════════════════════════════════════════════════════════════════════════════
 • navigate    → {{"url": "https://example.com"}}
 • click       → {{"mark": 3}} (PREFERRED - use numbered labels from screenshot)
+• click       → {{"index": 52}} (use element # from accessibility tree for multiple same-name elements)
 • click       → {{"x": 640, "y": 400}} (fallback if mark not visible)
 • type        → {{"text": "search query", "submit": true}}
 • scroll      → {{"direction": "down", "amount": 500}}
@@ -457,6 +578,24 @@ ANOTHER VALID EXAMPLE (saving extracted data):
   "next_mode": "text",
   "completed_subtasks": []
 }}
+
+COMPLETING A SUBTASK (when visual goal is achieved - DESCRIBE something):
+{{
+  "reasoning": "I can see the Picture of the Day shows a snow-covered mountain (Nuptse) in the Himalayas with dramatic lighting and clouds.",
+  "actions": [
+    {{"name": "save_info", "params": {{"key": "picture_description", "value": "Snow-covered mountain Nuptse in the Himalayas with dramatic lighting and clouds"}}}},
+    {{"name": "done", "params": {{}}}}
+  ],
+  "confidence": 0.95,
+  "next_mode": "text",
+  "completed_subtasks": [1]
+}}
+
+⚠️ CRITICAL WORKFLOW for "describe" tasks:
+1. FIRST use "save_info" to store what you see/describe
+2. THEN use "done" to mark the subtask complete
+3. Set "completed_subtasks" to include the current subtask ID
+This ensures the description is saved before moving to the next task.
 
 NOW RESPOND WITH YOUR ACTION (JSON ONLY - remember next_mode must be "text" or "vision"):"""
     

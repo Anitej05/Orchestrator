@@ -4,17 +4,6 @@
   "name": "Spreadsheet Agent",
   "description": "PRIORITY AGENT for ALL CSV and Excel files (.csv, .xlsx, .xls). Use this agent EXCLUSIVELY for any spreadsheet file. Handles display, analysis, and modification. DO NOT use Document Agent for CSV files.",
   "requires_credentials": false,
-  "capabilities": [
-    "analyze csv and excel files",
-    "display spreadsheet data",
-    "show spreadsheet",
-    "view csv file",
-    "modify spreadsheet data",
-    "add columns to spreadsheet",
-    "rename columns",
-    "calculate totals",
-    "execute pandas operations"
-  ],
   "price_per_call_usd": 0.002,
   "status": "active",
   "agent_type": "http_rest",
@@ -27,8 +16,7 @@
       "endpoint": "/upload",
       "http_method": "POST",
       "request_format": "form",
-      "description": "STEP 1: Upload a spreadsheet file. This MUST be called first before any other endpoint. Returns a file_id that is required for all subsequent operations.",
-      "when_to_use": "Always call this first when the user provides a CSV or Excel file.",
+      "description": "Upload a spreadsheet file (CSV or Excel). This MUST be called first before any other endpoint. Returns a file_id required for all subsequent operations. Use when user provides a CSV or Excel file.",
       "parameters": [
         {
           "name": "file",
@@ -42,8 +30,7 @@
       "endpoint": "/display",
       "http_method": "POST",
       "request_format": "form",
-      "description": "DISPLAY ONLY: Shows the spreadsheet data in a visual canvas. Does NOT modify data. Use this when user just wants to VIEW or SEE the spreadsheet.",
-      "when_to_use": "When user says 'show me', 'display', 'view', or wants to see the current state of the spreadsheet WITHOUT making changes.",
+      "description": "Display spreadsheet data in a visual canvas. Does NOT modify data. Use when user wants to VIEW, SEE, or SHOW the spreadsheet without making changes.",
       "parameters": [
         {
           "name": "file_id",
@@ -69,8 +56,7 @@
       "endpoint": "/execute_pandas",
       "http_method": "POST",
       "request_format": "form",
-      "description": "PRIMARY MODIFICATION ENDPOINT: Use this for ALL data modifications. Supports: adding columns (Sl.No., Total, averages), renaming columns, deleting columns, filtering, sorting, grouping, calculations, and ANY data transformation. The agent generates pandas code from natural language and executes it.",
-      "when_to_use": "When user wants to CHANGE, ADD, REMOVE, RENAME, CALCULATE, FILTER, SORT, or TRANSFORM data. Keywords: 'add column', 'rename', 'delete', 'calculate', 'sum', 'average', 'filter', 'sort', 'group by'.",
+      "description": "Execute ANY data modification using natural language. Supports: adding columns (Sl.No., Total, averages), renaming/deleting columns, filtering, sorting, grouping, calculations, and ANY data transformation. Use for ADD, REMOVE, RENAME, CALCULATE, SUM, AVERAGE, FILTER, SORT, GROUP operations.",
       "parameters": [
         {
           "name": "file_id",
@@ -82,7 +68,7 @@
           "name": "instruction",
           "param_type": "string",
           "required": true,
-          "description": "Natural language instruction. Examples: 'add a Sl.No. column starting from 1', 'rename Feature1 to Subject1', 'add a Total column that sums each row', 'filter rows where value > 100', 'sort by column X descending'."
+          "description": "Natural language instruction. Examples: 'add a Sl.No. column', 'rename Feature1 to Subject1', 'add Total column summing each row'."
         },
         {
           "name": "show_result",
@@ -96,8 +82,7 @@
       "endpoint": "/query",
       "http_method": "POST",
       "request_format": "form",
-      "description": "FILTER OR SIMPLE ASSIGNMENT: Filters data (e.g., 'age > 30') OR creates new columns from expressions (e.g., 'Total = A + B'). For complex transformations, use /execute_pandas instead.",
-      "when_to_use": "When user wants to filter rows using conditions OR add a calculated column using simple arithmetic on existing columns.",
+      "description": "Filter data or create new columns from expressions (e.g., 'age > 30' or 'Total = A + B'). Use for simple filtering and column calculations.",
       "parameters": [
         {
           "name": "file_id",
@@ -117,8 +102,7 @@
       "endpoint": "/nl_query",
       "http_method": "POST",
       "request_format": "json",
-      "description": "NATURAL LANGUAGE QUESTIONS: Ask questions about the data in plain English. The agent interprets your question and returns an answer. Use this for analytical questions, NOT for modifications.",
-      "when_to_use": "When user asks analytical questions like 'What is the average?', 'How many rows have X?', 'Who has the highest value?', 'Show me all people older than 30'.",
+      "description": "Ask analytical questions about the data in plain English. Use for questions like 'What is the average?', 'How many rows?', 'Who has the highest value?'. NOT for modifications.",
       "parameters": [
         {
           "name": "file_id",
@@ -144,8 +128,7 @@
       "endpoint": "/get_summary",
       "http_method": "POST",
       "request_format": "form",
-      "description": "GET METADATA: Returns spreadsheet metadata including headers, data types, row count, and a preview of first 5 rows. Does NOT display the full data.",
-      "when_to_use": "When you need to understand the structure of the spreadsheet before performing operations.",
+      "description": "Get spreadsheet metadata: headers, data types, row count, and preview of first 5 rows. Use to understand structure before operations.",
       "parameters": [
         {
           "name": "file_id",
@@ -159,8 +142,7 @@
       "endpoint": "/get_column_stats",
       "http_method": "POST",
       "request_format": "form",
-      "description": "COLUMN STATISTICS: Returns descriptive statistics for a specific numeric column (min, max, mean, std, etc.).",
-      "when_to_use": "When user wants statistics about a specific column.",
+      "description": "Get descriptive statistics for a numeric column (min, max, mean, std, etc.).",
       "parameters": [
         {
           "name": "file_id",
@@ -180,8 +162,7 @@
       "endpoint": "/transform",
       "http_method": "POST",
       "request_format": "form",
-      "description": "STRUCTURED TRANSFORMATIONS: Apply predefined transformations with explicit parameters. For flexibility, prefer /execute_pandas.",
-      "when_to_use": "When you need a specific transformation with explicit control over parameters.",
+      "description": "Apply predefined transformations with explicit parameters. Use for structured operations like filter, sort, group, drop_duplicates, fillna.",
       "parameters": [
         {
           "name": "file_id",
@@ -200,6 +181,44 @@
           "param_type": "string",
           "required": true,
           "description": "JSON string with operation parameters."
+        }
+      ]
+    },
+    {
+      "endpoint": "/create",
+      "http_method": "POST",
+      "request_format": "json",
+      "description": "CREATE a new spreadsheet from raw text, CSV data, or by transforming existing content using LLM. Use when: orchestrator passes data to create a CSV/Excel, user wants to convert text to spreadsheet, or generate sample data.",
+      "parameters": [
+        {
+          "name": "content",
+          "param_type": "string",
+          "required": false,
+          "description": "Raw text, CSV data, or natural language content to transform into a spreadsheet."
+        },
+        {
+          "name": "reference_file_id",
+          "param_type": "string",
+          "required": false,
+          "description": "File ID of an existing file to use as source data."
+        },
+        {
+          "name": "instruction",
+          "param_type": "string",
+          "required": false,
+          "description": "Natural language instruction for how to structure the data (e.g., 'Extract key metrics as columns')."
+        },
+        {
+          "name": "output_format",
+          "param_type": "string",
+          "required": false,
+          "description": "Output format: 'csv' or 'xlsx'. Default: 'csv'."
+        },
+        {
+          "name": "output_filename",
+          "param_type": "string",
+          "required": false,
+          "description": "Filename for the created spreadsheet."
         }
       ]
     }

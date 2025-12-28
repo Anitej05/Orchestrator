@@ -17,6 +17,7 @@ from .dom import DOMExtractor
 from .actions import ActionExecutor
 from .llm import LLMClient
 from .vision import VisionClient
+from .config import CONFIG
 
 try:
     from agents.agent_file_manager import AgentFileManager, FileType, FileStatus
@@ -61,6 +62,9 @@ class BrowserAgent:
         self.streaming_task = None
         self.stuck_count = 0  # Track consecutive stuck warnings
         self.previous_url = ""  # Track URL changes to detect progress
+        self.recent_downloads = [] # Track downloads in the current step
+        self.known_elements = {} # Memory of elements by URL: {url: {xpath: elem}}
+        self._active_downloads = set() # Track active background downloads
         
         # Initialize File Managers
         self.download_manager = None
@@ -69,13 +73,13 @@ class BrowserAgent:
             try:
                 self.download_manager = AgentFileManager(
                     agent_id="browser_agent_downloads",
-                    storage_dir="storage/browser_downloads",
+                    storage_dir=str(CONFIG.DOWNLOADS_DIR),
                     default_ttl_hours=72,
                     auto_cleanup=True
                 )
                 self.screenshot_manager = AgentFileManager(
                     agent_id="browser_agent_screenshots",
-                    storage_dir="storage/browser_screenshots",
+                    storage_dir=str(CONFIG.SCREENSHOTS_DIR),
                     default_ttl_hours=72,
                     auto_cleanup=True
                 )
@@ -88,17 +92,88 @@ class BrowserAgent:
             thread_id=self.thread_id
         )
 
+    def _update_page_knowledge(self, url: str, elements: List[Dict]):
+        """Update memory of elements for this URL"""
+        if not url: return
+
+        if url not in self.known_elements:
+            self.known_elements[url] = {}
+        
+        memory = self.known_elements[url]
+        
+        for el in elements:
+            # Mark it visible=True since it's in current viewport
+            el['visible'] = True 
+            el['last_seen'] = time.time()
+            
+            # Key: prefer xpath but fallback to something unique
+            key = el.get('xpath')
+            if key:
+                memory[key] = el
+        
+    def _merge_known_elements(self, url: str, current_elements: List[Dict]) -> List[Dict]:
+        """Merge current viewport elements with off-screen memory"""
+        if not url or url not in self.known_elements:
+            # Just ensure visible flag is set
+            for el in current_elements: el['visible'] = True
+            return current_elements
+
+        memory = self.known_elements[url]
+        current_xpaths = {el.get('xpath') for el in current_elements}
+        
+        merged = []
+        
+        # 1. Add current elements (Priority: Fresh, definitely visible)
+        merged.extend(current_elements)
+        
+        # 2. Add memory elements NOT in current view
+        for xpath, el in memory.items():
+            if xpath not in current_xpaths:
+                # This element is known but not in current view
+                el_copy = el.copy()
+                el_copy['visible'] = False
+                merged.append(el_copy)
+        
+        # 3. Sort by Y position (Top to Bottom) to maintain logical flow
+        # Use safe get because off-screen elements might have stale coordinates?
+        # Actually coordinates are page-absolute, so they are correct relative to page top.
+        merged.sort(key=lambda x: x.get('y', 0))
+        
+        return merged
+
+    async def _wait_for_downloads(self, timeout: int = 30):
+        """Wait for active downloads to complete"""
+        if not self._active_downloads:
+            return
+
+        logger.info(f"⏳ Waiting for {len(self._active_downloads)} active downloads...")
+        start_time = time.time()
+        
+        while self._active_downloads:
+            if time.time() - start_time > timeout:
+                logger.warning(f"⚠️ Timeout waiting for downloads: {len(self._active_downloads)} remaining")
+                break
+            await asyncio.sleep(0.5)
+        
+        if not self._active_downloads:
+            logger.info("✅ All downloads finished")
+
     async def _handle_download(self, download):
         """Handle file download event"""
+        download_id = str(uuid.uuid4())
+        self._active_downloads.add(download_id)
         try:
             filename = download.suggested_filename
             logger.info(f"📥 Starting download: {filename}")
             
-            storage_dir = Path(self.download_manager.storage_dir) if self.download_manager else Path("storage/browser_downloads")
+            storage_dir = Path(self.download_manager.storage_dir) if self.download_manager else CONFIG.DOWNLOADS_DIR
             storage_dir.mkdir(parents=True, exist_ok=True)
             target_path = storage_dir / filename
             
             await download.save_as(str(target_path))
+            
+            # Track this download for the current step logic
+            self.recent_downloads.append(str(target_path))
             
             if self.download_manager:
                 try:
@@ -116,6 +191,8 @@ class BrowserAgent:
             logger.info(f"✅ Download complete: {filename}")
         except Exception as e:
             logger.error(f"Download failed: {e}")
+        finally:
+            self._active_downloads.discard(download_id)
 
     async def _stream_loop(self):
         """Background task for smooth visual streaming (1fps)"""
@@ -213,6 +290,9 @@ class BrowserAgent:
                 step += 1
                 logger.info(f"\n{'='*50}\n📍 Step {step}\n{'='*50}")
                 
+                # Clear previous step's downloads
+                self.recent_downloads = []
+                
                 # Get Active Subtask
                 current_subtask = self.memory.get_active_subtask()
                 if not current_subtask:
@@ -225,10 +305,19 @@ class BrowserAgent:
                 active_page = self.browser.get_active_page() or self.browser.page
                 
                 # Brief wait to let any recent tab switch settle
-                import asyncio
                 await asyncio.sleep(0.3)
                 
                 page_content = await self.dom.get_page_content(active_page)
+
+                # MEMORY UPDATE: Persist known elements
+                # Merge current viewport elements with previously seen off-screen elements
+                current_url_val = page_content.get('url', '')
+                if current_url_val:
+                    self._update_page_knowledge(current_url_val, page_content.get('elements', []))
+                    page_content['elements'] = self._merge_known_elements(current_url_val, page_content.get('elements', []))
+                    
+                    # UPDATE CACHE for ACTIONS (CRITICAL for index-based clicks)
+                    self.executor.set_cached_elements(page_content['elements'])
                 
                 # Get URL early for blank page detection
                 current_url = page_content.get('url', '')
@@ -246,10 +335,9 @@ class BrowserAgent:
                         logger.info(f"📸 Taking screenshot from active_page (URL: {current_url[:50]}...)")
                         
                         # Take screenshot directly from active_page to avoid page mismatch
-                        import time as time_module
-                        ss_start = time_module.time()
+                        ss_start = time.time()
                         screenshot_bytes = await active_page.screenshot(type='jpeg', quality=70, timeout=15000)
-                        ss_elapsed = time_module.time() - ss_start
+                        ss_elapsed = time.time() - ss_start
                         
                         if screenshot_bytes:
                             screenshot_b64 = base64.b64encode(screenshot_bytes).decode()
@@ -301,21 +389,6 @@ class BrowserAgent:
                     (self.next_mode == "vision" or is_stuck)
                 )
 
-                # Special Case: Image Analysis explicitly requested
-                if self._needs_image_analysis(current_subtask.description) and screenshot_b64:
-                    self.current_action_description = "Analyzing image..."
-                    logger.info("🖼️ Analysis subtask detected. Analyzing image...")
-                    analysis = await self.vision.analyze_image(
-                        screenshot_b64, self.task, page_content.get('url', '')
-                    )
-                    if analysis:
-                        self.memory.add_observation(f"Image Analysis ({current_subtask.description})", analysis)
-                        logger.info(f"✅ Image analyzed. Result stored in memory.")
-                        self.memory.mark_completed(current_subtask.id, "Image analyzed")
-                        if self.next_mode != "vision":
-                            self.next_mode = "text"
-                        continue 
-
                 # Action Planning
                 self.current_action_description = "Planning action..."
                 action_prompt_context = self.memory.to_prompt_context()
@@ -325,14 +398,40 @@ class BrowserAgent:
                     # Check recent history for context
                     recent_actions = [h['action']['actions'][0]['name'] for h in self.memory.history[-3:] if h['action'].get('actions')]
                     
-                    warning_msg = "\n\n⚠️ SYSTEM WARNING: YOU ARE STUCK! ⚠️\nYou have repeated the same failed action multiple times.\n"
+                    warning_msg = "\n\n" + "="*60 + "\n"
+                    warning_msg += "🚨 CRITICAL SYSTEM ALERT: YOU ARE IN A LOOP 🚨\n"
+                    warning_msg += "="*60 + "\n\n"
                     
-                    if 'go_back' in recent_actions:
-                         warning_msg += "Your 'go_back' action seems to be failing or looping. STOP using 'go_back'.\nInstead, use the 'navigate' action to explicitly go to the previous URL (e.g. the search results page)."
+                    # Include explicit failed action if available
+                    if hasattr(self, '_last_no_effect_action') and self._last_no_effect_action:
+                        warning_msg += f"YOUR ACTION: {self._last_no_effect_action}\n"
+                        warning_msg += "RESULT: ❌ NO EFFECT - The page state did not change.\n\n"
+                    
+                    warning_msg += "🚫 IT IS FORBIDDEN TO REPEAT ACTIONS THAT HAD NO EFFECT.\n"
+                    warning_msg += "There is NO POINT trying the same action again - it will fail again.\n"
+                    warning_msg += "Clicking different elements at similar coordinates will also fail.\n\n"
+                    
+                    # AGGRESSIVE WARNING for stuck_count >= 2
+                    if self.stuck_count >= 2:
+                        warning_msg += "="*60 + "\n"
+                        warning_msg += "🛑 MANDATORY: YOU MUST TAKE A DIFFERENT APPROACH\n"
+                        warning_msg += "="*60 + "\n\n"
+                        warning_msg += "STEP 1 - VERIFY THE ELEMENT:\n"
+                        warning_msg += "Use 'run_js' to check if the element is actually interactive:\n"
+                        warning_msg += "  Example: run_js with code: document.querySelector('a[href]').href\n"
+                        warning_msg += "  This tells you what the link URL is, so you can 'navigate' to it directly.\n\n"
+                        warning_msg += "STEP 2 - DECIDE BASED ON VERIFICATION:\n"
+                        warning_msg += "  • If JS reveals a URL → Use 'navigate' to go there directly\n"
+                        warning_msg += "  • If the element is an image/non-link → The content is already visible. Use 'save_info' to save what you see, then 'done'\n"
+                        warning_msg += "  • If the goal is impossible → Use 'skip_subtask' to move on\n\n"
+                        warning_msg += "⛔ DO NOT OUTPUT 'click'. IT IS FORBIDDEN AND WILL FAIL.\n"
+                    elif 'go_back' in recent_actions:
+                        warning_msg += "Your 'go_back' action is failing. Use 'navigate' to the previous URL instead.\n"
                     elif 'click' in recent_actions:
-                         warning_msg += "Your 'click' action is not working or you are clicking the wrong thing repeatedly.\nTRY A DIFFERENT STRATEGY: Scroll to find a different element, use KeyDown/KeyUp to navigate, or try 'navigate'."
+                        warning_msg += "Your 'click' is not causing navigation. STOP CLICKING.\n"
+                        warning_msg += "Instead: Use 'run_js' to extract the href/onclick, then decide.\n"
                     else:
-                         warning_msg += "DO NOT try the exact same action again. Use a different strategy."
+                        warning_msg += "DO NOT repeat the same action. Use a different approach.\n"
                          
                     logger.warning(f"🚫 Injecting STUCK WARNING into prompt: {warning_msg}")
                     action_prompt_context += warning_msg
@@ -340,7 +439,17 @@ class BrowserAgent:
                 action = None
                 if use_vision:
                     logger.info("🎨 Using VISION for action planning")
-                    vision_task_context = f"Main Task: {self.task}\nCurrent Subtask: {current_subtask.description}\n{action_prompt_context}"
+                    # Strongly emphasize: Complete CURRENT subtask, don't worry about future ones
+                    vision_task_context = f"""Main Task (for context only): {self.task}
+
+⚡ YOUR CURRENT FOCUS - Subtask #{current_subtask.id}: {current_subtask.description}
+
+🎯 IMPORTANT: You must ONLY focus on completing Subtask #{current_subtask.id}. 
+   - If you have achieved the goal of THIS subtask (e.g., described an image, found info), use 'done' action IMMEDIATELY
+   - Do NOT worry about other subtasks yet - they will be handled after you mark this one done
+   - Set 'completed_subtasks': [{current_subtask.id}] when using 'done'
+
+{action_prompt_context}"""
                     action = await self.vision.plan_action_with_vision(
                         vision_task_context, screenshot_b64, page_content, self.memory.history, step
                     )
@@ -371,8 +480,95 @@ class BrowserAgent:
                     continue
 
                 # Execute Action Sequence
+                # Intelligent Replanning: Capture State Before Action (including visual hash)
+                pre_state = {
+                    'url': active_page.url,
+                    'title': await active_page.title(),
+                    'screenshot_hash': None
+                }
+                # Capture pre-action screenshot hash for visual comparison
+                try:
+                    pre_screenshot = await active_page.screenshot(type='jpeg', quality=50, timeout=5000)
+                    pre_state['screenshot_hash'] = hash(pre_screenshot)  # Simple hash for comparison
+                except Exception:
+                    pass  # Screenshot failed, will rely on URL comparison
+
+                # Cache elements on executor for index-based clicking
+                self.executor._cached_elements = page_content.get('elements', [])
                 result = await self.executor.execute(active_page, action)
                 
+                # Wait for any background downloads trigger by clicks
+                await self._wait_for_downloads()
+                
+                # Intelligent Replanning: Capture State After Action & Verify with VISUAL comparison
+                if result.success and not result.timeout_occurred:
+                    try:
+                        # Small delay to let page update
+                        await asyncio.sleep(0.3)
+                        
+                        post_state = {
+                            'url': active_page.url,
+                            'title': await active_page.title(),
+                            'screenshot_hash': None
+                        }
+                        # Capture post-action screenshot hash
+                        try:
+                            post_screenshot = await active_page.screenshot(type='jpeg', quality=50, timeout=5000)
+                            post_state['screenshot_hash'] = hash(post_screenshot)
+                        except Exception:
+                            pass
+                            
+                    except Exception as e:
+                        # "Execution context destroyed" = navigation happened = SUCCESS!
+                        if "destroyed" in str(e).lower() or "navigation" in str(e).lower():
+                            logger.info("✅ Navigation detected (context destroyed) - this is successful!")
+                            post_state = {'url': 'navigated', 'title': 'navigated', 'screenshot_hash': 'changed'}
+                        else:
+                            logger.warning(f"⚠️ Post-state capture failed: {e}")
+                            post_state = pre_state  # Fallback to pre-state
+                    
+                    # Determine if ANY change happened (URL OR visual)
+                    url_changed = pre_state['url'] != post_state['url']
+                    visual_changed = (pre_state['screenshot_hash'] != post_state['screenshot_hash']) if (pre_state['screenshot_hash'] and post_state['screenshot_hash']) else None
+                    
+                    # Detect "No Effect" for state-changing actions
+                    action_types = [a.name for a in action.actions]
+                    expect_change = any(t in ['click', 'navigate', 'type', 'press', 'go_back'] for t in action_types)
+                    
+                    if expect_change:
+                        if url_changed:
+                            logger.info(f"✅ URL changed: {pre_state['url'][:50]} → {post_state['url'][:50]}")
+                            self._last_no_effect_action = None  # Clear any previous no-effect flag
+                        elif visual_changed:
+                            logger.info(f"✅ Visual change detected (modal/overlay/content update)")
+                            self._last_no_effect_action = None  # Clear - action had effect
+                        elif visual_changed is None:
+                            logger.info(f"⚠️ Could not verify visual change (screenshot comparison unavailable)")
+                        else:
+                            # BOTH URL and visual unchanged = TRUE no effect
+                            failed_action_desc = f"{action_types} on {[a.params for a in action.actions]}"
+                            self._last_no_effect_action = failed_action_desc
+                            warning = f"\n⚠️ NO EFFECT: Action {action_types} had no visual or URL change. The element might be non-interactive."
+                            logger.warning(warning)
+                            result.message += warning
+                            result.data['state_unchanged'] = True
+
+                # Check for background downloads (e.g. PDF links that don't navigate)
+                if self.recent_downloads:
+                    logger.info(f"✅ Download detected during action: {self.recent_downloads}")
+                    self.stuck_count = 0 # Reset stuck count as progress was made
+                    result.success = True
+                    result.message = result.message.replace("⚠️ CRITICAL", "✅") # Clear warning if download happened
+                    result.message += f" (Triggered {len(self.recent_downloads)} downloads)"
+                    
+                    # Add download info to result data
+                    if not result.data: result.data = {}
+                    result.data['downloaded_files'] = [str(p) for p in self.recent_downloads]
+                    
+                    # Auto-complete if subtask explicitly asked for download
+                    if 'download' in current_subtask.description.lower():
+                        self.memory.mark_completed(current_subtask.id, f"Downloaded {len(self.recent_downloads)} files: {self.recent_downloads}")
+
                 # Dynamic Replanning: Handle Skip
                 if result.action == "skip_subtask":
                     reason = result.data.get('reason', 'Skipped by agent')
@@ -420,6 +616,8 @@ class BrowserAgent:
                     'action': action.model_dump(),
                     'result': result.model_dump(),
                     'url': page_content.get('url'),
+                    'observation': page_content.get('observation_summary', ''),  # What was seen on page
+                    'overlays': page_content.get('overlays', {}).get('hasOverlay', False),  # Were there popups?
                     'timestamp': time.time()
                 })
 
@@ -434,21 +632,49 @@ class BrowserAgent:
                     has_extract = any(a.name == "extract" for a in action.actions)
                     has_save = any(a.name == "save_info" for a in action.actions)
 
+                    # FIRST: Always capture save_info data (even if done is also present)
+                    if has_save and result.data:
+                        # Enrich data with LLM reasoning
+                        if action and action.reasoning:
+                            result.data['llm_reasoning'] = action.reasoning
+                        
+                        self.memory.extracted_data.update(result.data)
+                        self.memory.extracted_items.append(result.data)  # Accumulate data
+                        logger.info(f"💾 Data saved: {result.data.get('structured_info', {}).get('key', 'unknown')}")
+                    
+                    # THEN: Handle task completion
                     if has_done:
                          self.memory.mark_completed(current_subtask.id, action.reasoning)
                          logger.info(f"✅ Subtask '{current_subtask.description}' marked complete (Done).")
                     elif has_extract or has_save:
+                        # Only mark complete if we have data and no explicit done
                         if result.data:
-                            # Enrich data with LLM reasoning (often contains the observed price)
-                            if action and action.reasoning:
-                                result.data['llm_reasoning'] = action.reasoning
-                                
-                            self.memory.extracted_data.update(result.data)
-                            self.memory.extracted_items.append(result.data)  # Accumulate data
                             self.memory.mark_completed(current_subtask.id, "Data extracted")
                             logger.info(f"✅ Subtask '{current_subtask.description}' marked complete (Data extracted).")
                 else:
                     logger.warning(f"⚠️ Sequence Failed at {result.action}: {result.message}")
+                    
+                    # Check if we should trigger intelligent replanning
+                    should_replan = await self.planner.should_replan_after_failure(
+                        self.memory, 
+                        result.action, 
+                        result.message
+                    )
+                    
+                    if should_replan:
+                        logger.info("📋 Triggering intelligent replanning...")
+                        failure_context = f"Action '{result.action}' failed: {result.message}"
+                        did_replan, new_subtasks = await self.planner.update_plan(
+                            self.memory, 
+                            failure_context
+                        )
+                        
+                        if did_replan and new_subtasks:
+                            logger.info(f"📋 Revised plan: {new_subtasks}")
+                            self.memory.update_plan(new_subtasks)
+                            # Reset stuck counter since we have a new approach
+                            self.stuck_count = 0
+                    
                     if self._is_stuck():
                         logger.warning("🔄 Stuck detected. Marking subtask failed.")
                         self.memory.mark_failed(current_subtask.id, "Stuck executing actions")
@@ -462,6 +688,9 @@ class BrowserAgent:
             logger.error(f"❌ Critical Agent Failure: {e}", exc_info=True)
             return BrowserResult(success=False, task_summary=f"Critical failure: {str(e)}", error=str(e))
         finally:
+            # Final wait for downloads before closing
+            await self._wait_for_downloads()
+            
             self.is_running = False
             if self.streaming_task:
                 self.streaming_task.cancel()
@@ -511,7 +740,9 @@ class BrowserAgent:
                 logger.warning(f"🔄 Stuck detection: Repeated action {action_name} 3 times")
                 return True
                 
-        # Fallback: check for alternating loop (A-B-A-B) in last 6 steps
+        # Improved alternating loop detection:
+        # ONLY flag if there's a TRUE alternating pattern like A-B-A-B-A-B
+        # AND scroll is NOT one of the actions (scrolling to find things is valid!)
         if len(self.memory.history) >= 6:
             recent_6 = self.memory.history[-6:]
             sigs_6 = []
@@ -519,11 +750,20 @@ class BrowserAgent:
                 actions = h['action'].get('actions', [])
                 if actions: sigs_6.append(actions[0]['name'])
             
-            # If only 2 unique action types in last 6 steps (e.g. scroll, click, scroll, click...)
-            # AND none are 'done'
-            if len(set(sigs_6)) <= 2 and 'done' not in sigs_6:
-                 logger.warning(f"🔄 Stuck detection: Alternating loop detected {set(sigs_6)}")
-                 return True
+            unique_actions = set(sigs_6)
+            
+            # NEVER flag scroll-heavy patterns as stuck - scrolling to find elements is valid
+            if 'scroll' in unique_actions:
+                return False
+            
+            # Only flag TRUE alternating: A-B-A-B-A-B (3 occurrences of each)
+            # Not just "2 unique actions in 6 steps"
+            if len(unique_actions) == 2 and 'done' not in sigs_6 and 'navigate' not in sigs_6:
+                # Check if it's a TRUE alternating pattern (A-B-A-B-A-B)
+                is_true_alternating = all(sigs_6[i] != sigs_6[i+1] for i in range(5))
+                if is_true_alternating:
+                    logger.warning(f"🔄 Stuck detection: TRUE alternating loop detected {unique_actions}")
+                    return True
 
         return False
 

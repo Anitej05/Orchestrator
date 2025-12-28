@@ -8,7 +8,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(name)s | %(level
 
 async def main():
     agent = BrowserAgent(
-        task='Go to amazon.in, search "Samsung Galaxy S25 Ultra", sort by "Low to High" price, click the cheapest S25 Ultra result, extract product name and price using save_info action.',
+        task='Go to google.com and check if there is a Google Doodle on the homepage. If there is a doodle (special Google logo), observe it carefully and tell me what it represents and the significance of that doodle image. Use vision mode to analyze the image.',
         headless=False
     )
     result = await agent.run()

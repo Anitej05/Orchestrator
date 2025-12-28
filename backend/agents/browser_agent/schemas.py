@@ -4,26 +4,35 @@ Browser Agent - Pydantic Schemas
 Clean, simple schemas for LLM responses and action planning.
 """
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import Optional, Literal, Dict, Any, List
-
-
-class ActionParams(BaseModel):
-    """Parameters for actions"""
-    url: Optional[str] = None
-    selector: Optional[str] = None
-    text: Optional[str] = None
-    x: Optional[int] = None
-    y: Optional[int] = None
 
 
 class AtomicAction(BaseModel):
     """Single executable browser action"""
     name: Literal[
         "navigate", "click", "type", "scroll", "extract", "done",
-        "hover", "press", "wait", "go_back", "go_forward", "screenshot", "save_info", "skip_subtask", "select"
+        "hover", "press", "wait", "go_back", "go_forward", "save_screenshot", 
+        "save_info", "skip_subtask", "select", "upload_file", "download_file",
+        "run_js", "press_keys"
     ]
     params: Dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode='before')
+    @classmethod
+    def restructure_params(cls, data: Any) -> Any:
+        # DEBUG: Check if validator is running
+        # print(f"DEBUG: restructure_params called with {data}")
+        """Handle flat JSON where params are mixed with name"""
+        if isinstance(data, dict) and 'params' not in data:
+            # Move all non-name fields into params
+            restructured = {
+                "name": data.get("name"),
+                "params": {k: v for k, v in data.items() if k != "name"}
+            }
+            # print(f"DEBUG: restructured to {restructured}")
+            return restructured
+        return data
 
 class ActionPlan(BaseModel):
     """LLM response containing a sequence of actions"""
