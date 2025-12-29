@@ -26,6 +26,10 @@ from .utils import (
 
 logger = logging.getLogger(__name__)
 
+# Get workspace root (3 levels up from this file: agent.py -> document_agent -> agents -> backend -> root)
+WORKSPACE_ROOT = Path(__file__).parent.parent.parent.parent.resolve()
+DEFAULT_STORAGE_DIR = WORKSPACE_ROOT / "storage" / "documents"
+
 
 class DocumentAgent:
     """
@@ -38,7 +42,7 @@ class DocumentAgent:
         self.session_manager = DocumentSessionManager()
         self.version_manager = DocumentVersionManager()
         self.llm_client = DocumentLLMClient()
-        ensure_directory("backend/storage/documents")
+        ensure_directory(str(DEFAULT_STORAGE_DIR))
         self._analysis_cache = {}  # Simple in-memory cache
         self._cache_lock = Lock()
         self._max_cache_size = 100
@@ -320,7 +324,11 @@ class DocumentAgent:
     def create_document(self, request: CreateDocumentRequest) -> Dict[str, Any]:
         """Create a new document."""
         try:
-            output_dir = Path(request.output_dir)
+            # Use absolute path from workspace root
+            if Path(request.output_dir).is_absolute():
+                output_dir = Path(request.output_dir)
+            else:
+                output_dir = WORKSPACE_ROOT / request.output_dir
             output_dir.mkdir(parents=True, exist_ok=True)
             file_path = output_dir / request.file_name
 

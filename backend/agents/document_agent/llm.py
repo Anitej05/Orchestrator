@@ -252,21 +252,39 @@ Provide response in JSON format:
     def _parse_edit_response(self, response: str) -> Dict[str, Any]:
         """Parse LLM response into structured actions."""
         try:
+            # Clean the response - remove markdown code blocks
+            cleaned = response.strip()
+            if '```json' in cleaned:
+                cleaned = re.sub(r'```json\s*', '', cleaned)
+                cleaned = re.sub(r'```\s*$', '', cleaned)
+            elif '```' in cleaned:
+                cleaned = re.sub(r'```\s*', '', cleaned)
+            
             # Try to extract JSON from response
-            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', cleaned, re.DOTALL)
             if json_match:
-                return json.loads(json_match.group())
+                json_str = json_match.group()
+                # Remove any trailing commas before closing braces
+                json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
+                return json.loads(json_str)
+            
+            # If no JSON found, try the entire cleaned response
+            try:
+                return json.loads(cleaned)
+            except:
+                pass
             
             # Fallback: return raw response
+            logger.warning(f"Could not parse JSON, using fallback. Response: {response[:200]}")
             return {
                 'success': True,
                 'actions': [],
                 'reasoning': response
             }
         except Exception as e:
-            logger.error(f"Failed to parse response: {e}")
+            logger.error(f"Failed to parse response: {e}. Response: {response[:200]}")
             return {
                 'success': False,
-                'error': 'Failed to parse LLM response',
+                'error': f'Failed to parse LLM response: {str(e)}',
                 'actions': []
             }

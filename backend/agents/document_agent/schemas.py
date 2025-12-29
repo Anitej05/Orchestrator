@@ -91,7 +91,7 @@ class CreateDocumentRequest(BaseModel):
     content: str = Field(..., description="Content for the document")
     file_name: str = Field(..., description="Name for the document file (e.g., 'report.docx')")
     file_type: DocumentType = Field(default=DocumentType.DOCX, description="Document type")
-    output_dir: str = Field(default="backend/storage/documents", description="Output directory")
+    output_dir: str = Field(default="storage/documents", description="Output directory")
     thread_id: Optional[str] = Field(None, description="Conversation thread ID")
 
 

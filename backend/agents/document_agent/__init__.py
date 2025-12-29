@@ -14,6 +14,11 @@ from aiofiles import open as aio_open
 from fastapi import File, UploadFile
 from typing import List
 from pathlib import Path
+import os
+
+# Get workspace root
+WORKSPACE_ROOT = Path(__file__).parent.parent.parent.parent.resolve()
+STORAGE_DIR = WORKSPACE_ROOT / "storage" / "documents"
 
 from .schemas import (
     AnalyzeDocumentRequest, AnalyzeDocumentResponse,
@@ -90,22 +95,22 @@ async def upload_documents(files: List[UploadFile] = File(...)):
     Returns file paths suitable for document operations.
     """
     try:
-        os.makedirs("backend/storage/documents", exist_ok=True)
+        STORAGE_DIR.mkdir(parents=True, exist_ok=True)
         
         uploaded_files = []
         for file in files:
             if not file.filename:
                 continue
             
-            # Save file
-            file_path = os.path.join("backend/storage/documents", file.filename)
+            # Save file to workspace root storage directory
+            file_path = STORAGE_DIR / file.filename
             async with aio_open(file_path, 'wb') as f:
                 content = await file.read()
                 await f.write(content)
             
             uploaded_files.append({
                 "file_name": file.filename,
-                "file_path": file_path,
+                "file_path": str(file_path),
                 "size_bytes": len(content),
                 "ready": True
             })
@@ -134,7 +139,9 @@ async def analyze_document(request: AnalyzeDocumentRequest):
     """
     try:
         agent = get_agent()
-        result = agent.analyze_document(request)
+        # Run sync operation in thread executor to avoid blocking
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, agent.analyze_document, request)
 
         if not result.get('success'):
             raise HTTPException(
@@ -199,7 +206,9 @@ async def create_document(request: CreateDocumentRequest):
     """
     try:
         agent = get_agent()
-        result = agent.create_document(request)
+        # Run sync operation in thread executor to avoid blocking
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, agent.create_document, request)
 
         if not result.get('success'):
             raise HTTPException(
@@ -232,7 +241,9 @@ async def edit_document(request: EditDocumentRequest):
     """
     try:
         agent = get_agent()
-        result = agent.edit_document(request)
+        # Run sync operation in thread executor to avoid blocking
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, agent.edit_document, request)
 
         if not result.get('success'):
             raise HTTPException(

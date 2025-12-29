@@ -62,8 +62,9 @@ class SpreadsheetSessionManager:
     
     def __init__(self, sessions_dir: str = None):
         if sessions_dir is None:
-            base_dir = Path(__file__).parent.parent
-            sessions_dir = base_dir / "storage" / "spreadsheet_sessions"
+            # Get workspace root (3 levels up: spreadsheet_session_manager.py -> agents -> backend -> root)
+            workspace_root = Path(__file__).parent.parent.parent.resolve()
+            sessions_dir = workspace_root / "storage" / "spreadsheet_sessions"
         self.sessions_dir = Path(sessions_dir)
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self._active_sessions: Dict[str, SpreadsheetSession] = {}

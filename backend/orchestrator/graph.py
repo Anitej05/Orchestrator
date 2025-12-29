@@ -1366,13 +1366,23 @@ async def agent_directory_search(state: State):
         agent_lookup = {}  # For quick lookup after LLM selection
         
         for agent in all_agents:
+            # Include endpoints so LLM can validate endpoint availability during selection
+            endpoints_info = []
+            for ep in agent.endpoints:
+                endpoints_info.append({
+                    "endpoint": ep.endpoint,
+                    "http_method": ep.http_method,
+                    "description": ep.description
+                })
+            
             agent_info = {
                 "id": agent.id,
                 "name": agent.name,
                 "description": agent.description,
                 "capabilities": agent.capabilities,
                 "rating": agent.rating,
-                "price_per_call_usd": agent.price_per_call_usd
+                "price_per_call_usd": agent.price_per_call_usd,
+                "endpoints": endpoints_info  # Include actual endpoints
             }
             agent_catalog.append(agent_info)
             agent_lookup[agent.id] = agent
@@ -1391,7 +1401,7 @@ async def agent_directory_search(state: State):
         
         # LLM prompt for semantic agent selection
         prompt = f'''
-You are an expert at matching tasks to the most appropriate agents based on their capabilities.
+You are an expert at matching tasks to the most appropriate agents based on their capabilities and available endpoints.
 
 **ORIGINAL USER REQUEST:**
 "{original_prompt}"
@@ -1405,14 +1415,29 @@ You are an expert at matching tasks to the most appropriate agents based on thei
 **INSTRUCTIONS:**
 For each task, select ALL agents that could potentially handle it, ranked from best to worst match.
 
-**CRITICAL RULES:**
-1. **Respect Explicit User Preferences**: If the user explicitly mentions wanting to use a specific type of agent (e.g., "use browser automation", "use the browser agent", "automate with browser"), you MUST prioritize agents that match that preference.
-2. **Semantic Matching**: Match based on the meaning and intent, not just keyword overlap. For example:
-   - "browse a website" → browser automation agent (NOT just web search)
+**CRITICAL RULES (in priority order):**
+1. **ENDPOINT REQUIREMENT MATCHING (MANDATORY - HIGHEST PRIORITY)**:
+   - First, identify what type of operation the task requires:
+     * Document editing/modification tasks → MUST have /edit endpoint
+     * Document analysis/Q&A tasks → MUST have /analyze endpoint  
+     * Document creation tasks → MUST have /create endpoint
+     * Web browsing/navigation tasks → MUST have /browse endpoint
+     * Spreadsheet operations → MUST have spreadsheet-related endpoints
+   - **DO NOT select agents that lack the required endpoint**, even if their description sounds relevant!
+   - Check the "endpoints" array for each agent to verify they have the necessary endpoint
+   - Example: For "edit document" task, ONLY select agents with /edit endpoint
+
+2. **Respect Explicit User Preferences**: If the user explicitly mentions wanting to use a specific type of agent (e.g., "use browser automation", "use the browser agent"), you MUST prioritize agents that match that preference AND have the required endpoints.
+
+3. **Semantic Matching**: Match based on the meaning and intent, not just keyword overlap. For example:
+   - "browse a website" → browser automation agent with /browse endpoint (NOT document agents)
+   - "edit a document" → document agent with /edit endpoint (NOT browser agents)
    - "search for information" → web search agent
    - "automate clicking on a page" → browser automation agent
-3. **Capability Depth**: Prefer agents with more specific/relevant capabilities over generic ones.
-4. **Include Multiple Candidates**: Include 2-4 candidate agents per task when possible, so the ranking step can make the final choice.
+
+4. **Capability Depth**: Prefer agents with more specific/relevant capabilities over generic ones.
+
+5. **Include Multiple Candidates**: Include 2-4 candidate agents per task when possible, so the ranking step can make the final choice. But all candidates MUST have the required endpoint.
 
 **OUTPUT FORMAT:**
 Return a JSON object where keys are task names and values are arrays of agent IDs (ordered best to worst):
@@ -1421,7 +1446,7 @@ Return a JSON object where keys are task names and values are arrays of agent ID
     "task_name_2": ["best_agent_id", ...]
 }}
 
-Only include agents that are genuinely capable of handling the task. If no agent can handle a task, use an empty array.
+Only include agents that have the required endpoint AND are genuinely capable of handling the task. If no agent meets both criteria, use an empty array.
 '''
         
         # Schema for LLM response
@@ -1633,6 +1658,15 @@ def rank_agents(state: State):
             # ENHANCED: Provide rich metadata for intelligent ranking
             agents_metadata = []
             for agent in candidate_agents:
+                # Include actual endpoints so LLM can match task requirements to available endpoints
+                endpoints_info = []
+                if agent.endpoints:
+                    for ep in agent.endpoints:
+                        endpoints_info.append({
+                            'endpoint': ep.endpoint if isinstance(ep, dict) else ep.endpoint,
+                            'method': ep.http_method if isinstance(ep, dict) else ep.http_method
+                        })
+                
                 agents_metadata.append({
                     'id': agent.id,
                     'name': agent.name,
@@ -1641,7 +1675,7 @@ def rank_agents(state: State):
                     'rating': agent.rating,
                     'price_per_call_usd': agent.price_per_call_usd,
                     'status': agent.status,
-                    'endpoints_count': len(agent.endpoints)
+                    'endpoints': endpoints_info  # Include actual endpoints, not just count
                 })
             
             conversation_context = f"\n**Conversation Context:**\n{conversation_history}\n" if conversation_history else ""
@@ -1658,14 +1692,15 @@ def rank_agents(state: State):
             {json.dumps(agents_metadata, indent=2)}
 
             **Ranking Criteria (in order of importance):**
-            1. **Capability Match** (Most Important): How well does the agent's description and capabilities match the task?
-            2. **Quality/Rating**: Higher rated agents are generally more reliable (scale 0-5)
-            3. **Price**: Consider user's budget if specified, otherwise prefer reasonable pricing
-            4. **Task Complexity**: Match agent sophistication to task complexity
+            1. **Endpoint Availability** (Most Critical): Does the agent have the specific endpoints needed for this task? (e.g., /edit for editing, /analyze for analysis)
+            2. **Capability Match**: How well does the agent's description and capabilities match the task?
+            3. **Quality/Rating**: Higher rated agents are generally more reliable (scale 0-5)
+            4. **Price**: Consider user's budget if specified, otherwise prefer reasonable pricing
             5. **Status**: Prefer active agents
 
             **Instructions:**
             - Rank ALL agents from best to worst
+            - PRIORITIZE: If a task requires a specific endpoint (like /edit for document editing), prefer agents that have that endpoint
             - Consider trade-offs (e.g., "Agent A is slightly more expensive but has much better ratings")
             - If user specified budget/rating preferences, prioritize those
             - Provide brief reasoning for your top choice
@@ -1723,6 +1758,84 @@ def rank_agents(state: State):
     logger.info("Agent ranking complete.")
     logger.debug(f"Final agent selections: {[p for p in serializable_pairs]}")
     return {"task_agent_pairs": serializable_pairs}
+
+def validate_agent_endpoints(state: State):
+    """
+    Post-ranking validation to ensure selected agents have required endpoints.
+    Swaps in fallback agents if primary agent lacks the necessary endpoint.
+    Acts as a safety net to prevent endpoint mismatches.
+    """
+    task_agent_pairs = state.get('task_agent_pairs', [])
+    validated_pairs = []
+    
+    logger.info(f"Validating endpoints for {len(task_agent_pairs)} task-agent pairs")
+    
+    for pair_dict in task_agent_pairs:
+        pair = TaskAgentPair.model_validate(pair_dict)
+        task_name = pair.task_name.lower()
+        task_desc = pair.task_description.lower()
+        
+        # Define required endpoints based on task type (semantic matching)
+        required_endpoint = None
+        endpoint_type = "unknown"
+        
+        # Check for document editing operations
+        if any(word in task_name or word in task_desc for word in ['edit', 'modify', 'update', 'change', 'revise', 'rewrite']):
+            # Only require /edit if it's a document-related task
+            if any(word in task_name or word in task_desc for word in ['document', 'doc', 'docx', 'pdf', 'txt', 'resume', 'report', 'file']):
+                required_endpoint = '/edit'
+                endpoint_type = 'document editing'
+        
+        # Check for document analysis operations
+        elif any(word in task_name or word in task_desc for word in ['analyze', 'question', 'query', 'search', 'find', 'extract', 'read']):
+            if any(word in task_name or word in task_desc for word in ['document', 'doc', 'docx', 'pdf', 'txt']):
+                required_endpoint = '/analyze'
+                endpoint_type = 'document analysis'
+        
+        # Check for document creation operations
+        elif any(word in task_name or word in task_desc for word in ['create', 'generate', 'write', 'compose']):
+            if any(word in task_name or word in task_desc for word in ['document', 'doc', 'docx', 'report']):
+                required_endpoint = '/create'
+                endpoint_type = 'document creation'
+        
+        # Check for web browsing operations
+        elif any(word in task_name or word in task_desc for word in ['browse', 'navigate', 'visit', 'scrape', 'web', 'website', 'url']):
+            required_endpoint = '/browse'
+            endpoint_type = 'web browsing'
+        
+        # Validate primary agent has required endpoint
+        if required_endpoint:
+            agent_endpoints = [ep.endpoint if isinstance(ep, dict) else ep.endpoint for ep in pair.primary.endpoints]
+            
+            if required_endpoint not in agent_endpoints:
+                logger.warning(f"❌ VALIDATION FAILED: Agent '{pair.primary.name}' lacks required endpoint '{required_endpoint}' for {endpoint_type} task '{task_name}'")
+                logger.warning(f"   Agent has endpoints: {agent_endpoints}")
+                
+                # Try to find a fallback agent with the required endpoint
+                swapped = False
+                for i, fallback in enumerate(pair.fallbacks):
+                    fallback_endpoints = [ep.endpoint if isinstance(ep, dict) else ep.endpoint for ep in fallback.endpoints]
+                    if required_endpoint in fallback_endpoints:
+                        logger.info(f"✅ VALIDATION FIX: Swapping to fallback agent '{fallback.name}' which has '{required_endpoint}' endpoint")
+                        # Swap primary with this fallback
+                        old_primary = pair.primary
+                        pair.primary = fallback
+                        pair.fallbacks[i] = old_primary
+                        swapped = True
+                        break
+                
+                if not swapped:
+                    logger.error(f"❌ CRITICAL: No available agent has the required '{required_endpoint}' endpoint for task '{task_name}'")
+                    logger.error(f"   This task will likely fail during execution!")
+            else:
+                logger.info(f"✅ VALIDATION PASSED: Agent '{pair.primary.name}' has required endpoint '{required_endpoint}' for {endpoint_type}")
+        else:
+            logger.debug(f"⚪ No specific endpoint requirement detected for task '{task_name}'")
+        
+        validated_pairs.append(pair.model_dump(mode='json'))
+    
+    logger.info("Endpoint validation complete.")
+    return {"task_agent_pairs": validated_pairs}
 
 def plan_execution(state: State, config: RunnableConfig):
     '''
@@ -2780,16 +2893,26 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
         
         # Ensure file_path is present for document edits
         if 'file_path' not in pre_extracted_params and uploaded_files:
-            # ✅ ENHANCED: Check for valid file_path (not None)
+            # ✅ ENHANCED: Check for valid file_path (not None) and use absolute path
             for file_obj in uploaded_files:
                 file_dict = file_obj if isinstance(file_obj, dict) else file_obj.__dict__
                 if file_dict.get('file_type') == 'document':
                     candidate_path = file_dict.get('file_path')
                     # Validate candidate_path is not None/empty
                     if candidate_path and candidate_path.strip():
-                        pre_extracted_params['file_path'] = candidate_path
-                        logger.info(f"✅ AUTO-INJECTED file_path for /edit: {candidate_path}")
-                        break
+                        # ✅ CRITICAL FIX: Ensure path is absolute and exists
+                        # Handle both relative and absolute paths
+                        if not os.path.isabs(candidate_path):
+                            # Convert relative path to absolute
+                            candidate_path = os.path.abspath(candidate_path)
+                        
+                        # Verify file exists
+                        if os.path.exists(candidate_path):
+                            pre_extracted_params['file_path'] = candidate_path
+                            logger.info(f"✅ AUTO-INJECTED absolute file_path for /edit: {candidate_path}")
+                            break
+                        else:
+                            logger.warning(f"⚠️ File does not exist at path: {candidate_path}")
                     else:
                         logger.warning(f"⚠️ Found document file but file_path is None or empty: {file_dict}")
             
@@ -5799,6 +5922,7 @@ builder.add_node("parse_prompt", parse_prompt)  # OPTIMIZED: Super-parser (3-in-
 builder.add_node("preprocess_files", preprocess_files)
 builder.add_node("agent_directory_search", agent_directory_search)  # OPTIMIZED: Internal DB search
 builder.add_node("rank_agents", rank_agents)  # OPTIMIZED: Enhanced LLM ranking
+builder.add_node("validate_agent_endpoints", validate_agent_endpoints)  # SAFETY NET: Endpoint validation
 builder.add_node("plan_execution", plan_execution)
 builder.add_node("pause_for_plan_approval", pause_for_plan_approval)
 builder.add_node("validate_plan_for_execution", validate_plan_for_execution)
@@ -5832,7 +5956,8 @@ builder.add_conditional_edges("parse_prompt", route_after_parse, {
 })
 
 builder.add_edge("agent_directory_search", "rank_agents")
-builder.add_edge("rank_agents", "plan_execution")
+builder.add_edge("rank_agents", "validate_agent_endpoints")
+builder.add_edge("validate_agent_endpoints", "plan_execution")
 
 # Simple routing: if planning mode, stop for approval; otherwise continue
 def route_after_plan_creation(state: State):

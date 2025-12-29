@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, asdict
 import hashlib
-from threading import Lock
+from threading import RLock
 import shutil
 import time
 import logging
@@ -50,13 +50,14 @@ class DocumentSessionManager:
     def __init__(self, sessions_dir: str = None):
         """Initialize session manager with optional custom directory."""
         if sessions_dir is None:
-            base_dir = Path(__file__).parent.parent.parent
-            sessions_dir = base_dir / "storage" / "document_sessions"
+            # Get workspace root (4 levels up: state.py -> document_agent -> agents -> backend -> root)
+            workspace_root = Path(__file__).parent.parent.parent.parent.resolve()
+            sessions_dir = workspace_root / "storage" / "document_sessions"
         
         self.sessions_dir = Path(sessions_dir)
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self._active_sessions: Dict[str, DocumentSession] = {}
-        self._session_lock = Lock()
+        self._session_lock = RLock()
 
     def _get_session_id(self, document_path: str, thread_id: str = None) -> str:
         """Generate unique session ID."""
@@ -288,13 +289,15 @@ class DocumentVersionManager:
     def __init__(self, base_dir: str = None):
         """Initialize version manager."""
         if base_dir is None:
-            base_dir = Path(__file__).parent.parent.parent / "storage" / "document_versions"
+            # Get workspace root (4 levels up: state.py -> document_agent -> agents -> backend -> root)
+            workspace_root = Path(__file__).parent.parent.parent.parent.resolve()
+            base_dir = workspace_root / "storage" / "document_versions"
         
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.version_index_file = self.base_dir / "version_index.json"
         self.index: Dict[str, Any] = {}
-        self._index_lock = Lock()
+        self._index_lock = RLock()
         self._load_index()
 
     def _load_index(self) -> None:
