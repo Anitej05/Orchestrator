@@ -380,10 +380,11 @@ class DocumentEditor:
                 # Apply new list style
                 self._set_list_style(para, to_type)
             
-            logger.info(f\"Converted lists from {from_type} to {to_type}\")\n            return f\"✓ Converted lists from {from_type} to {to_type}\"
+            logger.info(f"Converted lists from {from_type} to {to_type}")
+            return f"✓ Converted lists from {from_type} to {to_type}"
         except Exception as e:
-            logger.error(f\"Failed to convert list style: {e}\")
-            return f\"✗ Failed to convert list style: {e}\"
+            logger.error(f"Failed to convert list style: {e}")
+            return f"✗ Failed to convert list style: {e}"
 
     def _set_list_style(self, paragraph, list_type: str):
         """Apply list style to a paragraph."""
@@ -401,7 +402,7 @@ class DocumentEditor:
             elif list_type == 'numbered':
                 paragraph.style = 'List Number'
         except Exception as e:
-            logger.error(f\"Failed to set list style: {e}\")
+            logger.error(f"Failed to set list style: {e}")
 
     def _apply_numbering(self, paragraph, num_id: int, ilvl: int):
         """Apply numbering XML to a paragraph."""
@@ -419,7 +420,7 @@ class DocumentEditor:
             
             pPr.append(numPr)
         except Exception as e:
-            logger.error(f\"Failed to apply numbering: {e}\")
+            logger.error(f"Failed to apply numbering: {e}")
 
     def remove_paragraphs_by_pattern(self, pattern: str = None, indices: List[int] = None):
         """Remove paragraphs matching a pattern or at specific indices."""
@@ -443,11 +444,11 @@ class DocumentEditor:
                 p.getparent().remove(p)
                 removed_count += 1
             
-            logger.info(f\"Removed {removed_count} paragraphs\")
-            return f\"✓ Removed {removed_count} paragraphs\"
+            logger.info(f"Removed {removed_count} paragraphs")
+            return f"✓ Removed {removed_count} paragraphs"
         except Exception as e:
-            logger.error(f\"Failed to remove paragraphs: {e}\")
-            return f\"✗ Failed to remove paragraphs: {e}\"
+            logger.error(f"Failed to remove paragraphs: {e}")
+            return f"✗ Failed to remove paragraphs: {e}"
 
     def modify_text_formatting(
         self,
@@ -460,7 +461,7 @@ class DocumentEditor:
         color: Optional[str] = None,
         font_size: Optional[int] = None
     ):
-        \"\"\"Modify text formatting with flexible targeting.\"\"\"
+        """Modify text formatting with flexible targeting."""
         try:
             modified_count = 0
             
@@ -496,14 +497,14 @@ class DocumentEditor:
                 
                 modified_count += 1
             
-            logger.info(f\"Modified formatting for {modified_count} paragraphs\")
-            return f\"✓ Modified formatting for {modified_count} paragraphs\"
+            logger.info(f"Modified formatting for {modified_count} paragraphs")
+            return f"✓ Modified formatting for {modified_count} paragraphs"
         except Exception as e:
-            logger.error(f\"Failed to modify formatting: {e}\")
-            return f\"✗ Failed to modify formatting: {e}\"
+            logger.error(f"Failed to modify formatting: {e}")
+            return f"✗ Failed to modify formatting: {e}"
 
     def remove_all_formatting(self, para_indices: Optional[List[int]] = None):
-        \"\"\"Remove all formatting from specified paragraphs or entire document.\"\"\"
+        """Remove all formatting from specified paragraphs or entire document."""
         try:
             for i, para in enumerate(self.doc.paragraphs):
                 if para_indices and i not in para_indices:
@@ -516,14 +517,14 @@ class DocumentEditor:
                     run.font.color.rgb = None
                     run.font.size = None
             
-            logger.info(\"Removed all formatting\")
-            return \"✓ Removed all formatting\"
+            logger.info("Removed all formatting")
+            return "✓ Removed all formatting"
         except Exception as e:
-            logger.error(f\"Failed to remove formatting: {e}\")
-            return f\"✗ Failed to remove formatting: {e}\"
+            logger.error(f"Failed to remove formatting: {e}")
+            return f"✗ Failed to remove formatting: {e}"
 
     def delete_tables(self, table_indices: Optional[List[int]] = None):
-        \"\"\"Delete specific tables or all tables.\"\"\"
+        """Delete specific tables or all tables."""
         try:
             if table_indices is None:
                 table_indices = list(range(len(self.doc.tables)))
@@ -535,17 +536,17 @@ class DocumentEditor:
                     tbl = table._element
                     tbl.getparent().remove(tbl)
             
-            logger.info(f\"Deleted {len(table_indices)} tables\")
-            return f\"✓ Deleted {len(table_indices)} tables\"
+            logger.info(f"Deleted {len(table_indices)} tables")
+            return f"✓ Deleted {len(table_indices)} tables"
         except Exception as e:
-            logger.error(f\"Failed to delete tables: {e}\")
-            return f\"✗ Failed to delete tables: {e}\"
+            logger.error(f"Failed to delete tables: {e}")
+            return f"✗ Failed to delete tables: {e}"
 
     def modify_table(self, table_index: int, modifications: Dict[str, Any]):
-        \"\"\"Modify table cells, structure, or formatting.\"\"\"
+        """Modify table cells, structure, or formatting."""
         try:
             if table_index >= len(self.doc.tables):
-                return \"✗ Invalid table index\"
+                return "✗ Invalid table index"
             
             table = self.doc.tables[table_index]
             
@@ -567,28 +568,28 @@ class DocumentEditor:
             if 'add_column' in modifications:
                 table.add_column(modifications.get('column_width', Inches(1.5)))
             
-            logger.info(f\"Modified table {table_index}\")
-            return f\"✓ Modified table {table_index}\"
+            logger.info(f"Modified table {table_index}")
+            return f"✓ Modified table {table_index}"
         except Exception as e:
-            logger.error(f\"Failed to modify table: {e}\")
-            return f\"✗ Failed to modify table: {e}\"
+            logger.error(f"Failed to modify table: {e}")
+            return f"✗ Failed to modify table: {e}"
 
     def change_style(self, para_indices: List[int], new_style: str):
-        \"\"\"Change the style of specified paragraphs.\"\"\"
+        """Change the style of specified paragraphs."""
         try:
             mapped_style = self._map_style(new_style)
             for i in para_indices:
                 if 0 <= i < len(self.doc.paragraphs):
                     self.doc.paragraphs[i].style = mapped_style
             
-            logger.info(f\"Changed style for {len(para_indices)} paragraphs\")
-            return f\"✓ Changed style to {mapped_style}\"
+            logger.info(f"Changed style for {len(para_indices)} paragraphs")
+            return f"✓ Changed style to {mapped_style}"
         except Exception as e:
-            logger.error(f\"Failed to change style: {e}\")
-            return f\"✗ Failed to change style: {e}\"
+            logger.error(f"Failed to change style: {e}")
+            return f"✗ Failed to change style: {e}"
 
     def remove_all_lists(self):
-        \"\"\"Remove all list formatting from the document.\"\"\"
+        """Remove all list formatting from the document."""
         try:
             for para in self.doc.paragraphs:
                 if self._is_list_item(para):
@@ -600,14 +601,14 @@ class DocumentEditor:
                         if numPr is not None:
                             pPr.remove(numPr)
             
-            logger.info(\"Removed all lists\")
-            return \"✓ Removed all lists\"
+            logger.info("Removed all lists")
+            return "✓ Removed all lists"
         except Exception as e:
-            logger.error(f\"Failed to remove lists: {e}\")
-            return f\"✗ Failed to remove lists: {e}\"
+            logger.error(f"Failed to remove lists: {e}")
+            return f"✗ Failed to remove lists: {e}"
 
     def clear_document_content(self, keep_structure: bool = False):
-        \"\"\"Clear document content, optionally keeping structure.\"\"\"
+        """Clear document content, optionally keeping structure."""
         try:
             if keep_structure:
                 # Keep headings and structure, clear only body text
@@ -619,14 +620,14 @@ class DocumentEditor:
                 for element in self.doc.element.body:
                     self.doc.element.body.remove(element)
             
-            logger.info(\"Cleared document content\")
-            return \"✓ Document content cleared\"
+            logger.info("Cleared document content")
+            return "✓ Document content cleared"
         except Exception as e:
-            logger.error(f\"Failed to clear content: {e}\")
-            return f\"✗ Failed to clear content: {e}\"
+            logger.error(f"Failed to clear content: {e}")
+            return f"✗ Failed to clear content: {e}"
 
     def find_and_delete(self, search_text: str, case_sensitive: bool = False):
-        \"\"\"Find and delete paragraphs containing specific text.\"\"\"
+        """Find and delete paragraphs containing specific text."""
         try:
             deleted_count = 0
             paragraphs_to_delete = []
@@ -643,14 +644,14 @@ class DocumentEditor:
                 p.getparent().remove(p)
                 deleted_count += 1
             
-            logger.info(f\"Deleted {deleted_count} paragraphs\")
-            return f\"✓ Deleted {deleted_count} paragraphs containing '{search_text}'\"
+            logger.info(f"Deleted {deleted_count} paragraphs")
+            return f"✓ Deleted {deleted_count} paragraphs containing '{search_text}'"
         except Exception as e:
-            logger.error(f\"Failed to find and delete: {e}\")
-            return f\"✗ Failed to find and delete: {e}\"
+            logger.error(f"Failed to find and delete: {e}")
+            return f"✗ Failed to find and delete: {e}"
 
     def replace_all_text(self, old_text: str, new_text: str, case_sensitive: bool = False):
-        \"\"\"Replace all occurrences of text in the document.\"\"\"
+        """Replace all occurrences of text in the document."""
         try:
             replaced_count = 0
             
@@ -680,14 +681,14 @@ class DocumentEditor:
                                 cell.text = re.sub(re.escape(old_text), new_text, cell.text, flags=re.IGNORECASE)
                                 replaced_count += 1
             
-            logger.info(f\"Replaced text in {replaced_count} locations\")
-            return f\"✓ Replaced '{old_text}' with '{new_text}' in {replaced_count} locations\"
+            logger.info(f"Replaced text in {replaced_count} locations")
+            return f"✓ Replaced '{old_text}' with '{new_text}' in {replaced_count} locations"
         except Exception as e:
-            logger.error(f\"Failed to replace text: {e}\")
-            return f\"✗ Failed to replace text: {e}\"
+            logger.error(f"Failed to replace text: {e}")
+            return f"✗ Failed to replace text: {e}"
 
     def remove_empty_paragraphs(self):
-        \"\"\"Remove all empty paragraphs from the document.\"\"\"
+        """Remove all empty paragraphs from the document."""
         try:
             removed_count = 0
             paragraphs_to_remove = []
@@ -701,14 +702,14 @@ class DocumentEditor:
                 p.getparent().remove(p)
                 removed_count += 1
             
-            logger.info(f\"Removed {removed_count} empty paragraphs\")
-            return f\"✓ Removed {removed_count} empty paragraphs\"
+            logger.info(f"Removed {removed_count} empty paragraphs")
+            return f"✓ Removed {removed_count} empty paragraphs"
         except Exception as e:
-            logger.error(f\"Failed to remove empty paragraphs: {e}\")
-            return f\"✗ Failed to remove empty paragraphs: {e}\"
+            logger.error(f"Failed to remove empty paragraphs: {e}")
+            return f"✗ Failed to remove empty paragraphs: {e}"
 
     def detect_pseudo_lists(self) -> List[Dict[str, Any]]:
-        \"\"\"Detect text that looks like lists but isn't formatted as such.\"\"\"
+        """Detect text that looks like lists but isn't formatted as such."""
         try:
             pseudo_lists = []
             current_list = None
@@ -744,20 +745,20 @@ class DocumentEditor:
                 else:
                     current_list = None
             
-            logger.info(f\"Detected {len(pseudo_lists)} pseudo-lists\")
+            logger.info(f"Detected {len(pseudo_lists)} pseudo-lists")
             return pseudo_lists
         except Exception as e:
-            logger.error(f\"Failed to detect pseudo-lists: {e}\")
+            logger.error(f"Failed to detect pseudo-lists: {e}")
             return []
 
     def convert_text_to_list(self, para_indices: Optional[List[int]] = None, list_type: str = 'numbered'):
-        \"\"\"Convert plain text paragraphs to proper lists.\"\"\"
+        """Convert plain text paragraphs to proper lists."""
         try:
             if para_indices is None:
                 # Detect pseudo-lists and convert them
                 pseudo_lists = self.detect_pseudo_lists()
                 if not pseudo_lists:
-                    return \"✗ No pseudo-lists detected\"
+                    return "✗ No pseudo-lists detected"
                 
                 converted_count = 0
                 for pseudo_list in pseudo_lists:
@@ -777,8 +778,8 @@ class DocumentEditor:
                         self._set_list_style(para, pseudo_list['type'])
                         converted_count += 1
                 
-                logger.info(f\"Converted {converted_count} pseudo-list items\")
-                return f\"✓ Converted {converted_count} items to lists\"
+                logger.info(f"Converted {converted_count} pseudo-list items")
+                return f"✓ Converted {converted_count} items to lists"
             else:
                 # Convert specific paragraphs to lists
                 for idx in para_indices:
@@ -786,19 +787,19 @@ class DocumentEditor:
                         para = self.doc.paragraphs[idx]
                         self._set_list_style(para, list_type)
                 
-                logger.info(f\"Converted {len(para_indices)} paragraphs to {list_type} list\")
-                return f\"✓ Converted {len(para_indices)} paragraphs to {list_type} list\"
+                logger.info(f"Converted {len(para_indices)} paragraphs to {list_type} list")
+                return f"✓ Converted {len(para_indices)} paragraphs to {list_type} list"
         except Exception as e:
-            logger.error(f\"Failed to convert to list: {e}\")
-            return f\"✗ Failed to convert to list: {e}\"
+            logger.error(f"Failed to convert to list: {e}")
+            return f"✗ Failed to convert to list: {e}"
 
     def move_paragraph(self, from_index: int, to_index: int):
-        \"\"\"Move a paragraph from one position to another.\"\"\"
+        """Move a paragraph from one position to another."""
         try:
             if not (0 <= from_index < len(self.doc.paragraphs)):
-                return \"✗ Invalid from_index\"
+                return "✗ Invalid from_index"
             if not (0 <= to_index <= len(self.doc.paragraphs)):
-                return \"✗ Invalid to_index\"
+                return "✗ Invalid to_index"
             
             # Get paragraph element
             para_element = self.doc.paragraphs[from_index]._element
@@ -814,17 +815,17 @@ class DocumentEditor:
                 ref_element = self.doc.paragraphs[to_index]._element
                 parent.insert(parent.index(ref_element), para_element)
             
-            logger.info(f\"Moved paragraph from {from_index} to {to_index}\")
-            return f\"✓ Moved paragraph from position {from_index} to {to_index}\"
+            logger.info(f"Moved paragraph from {from_index} to {to_index}")
+            return f"✓ Moved paragraph from position {from_index} to {to_index}"
         except Exception as e:
-            logger.error(f\"Failed to move paragraph: {e}\")
-            return f\"✗ Failed to move paragraph: {e}\"
+            logger.error(f"Failed to move paragraph: {e}")
+            return f"✗ Failed to move paragraph: {e}"
 
     def insert_paragraph_at(self, index: int, text: str, style: str = 'Normal', **formatting):
-        \"\"\"Insert a new paragraph at a specific position with formatting.\"\"\"
+        """Insert a new paragraph at a specific position with formatting."""
         try:
             if not (0 <= index <= len(self.doc.paragraphs)):
-                return \"✗ Invalid index\"
+                return "✗ Invalid index"
             
             mapped_style = self._map_style(style)
             
@@ -855,8 +856,11 @@ class DocumentEditor:
                 ref_element = self.doc.paragraphs[index]._element
                 parent.insert(parent.index(ref_element), para_element)
             
-            logger.info(f\"Inserted paragraph at position {index}\")
-            return f\"✓ Inserted paragraph at position {index}\"
+            logger.info(f"Inserted paragraph at position {index}")
+            return f"✓ Inserted paragraph at position {index}"
         except Exception as e:
-            logger.error(f\"Failed to insert paragraph: {e}\")
-            return f\"✗ Failed to insert paragraph: {e}\"
+            logger.error(f"Failed to insert paragraph: {e}")
+            return f"✗ Failed to insert paragraph: {e}"
+
+
+

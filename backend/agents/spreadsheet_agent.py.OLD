@@ -1,4 +1,5 @@
 import os
+import sys
 import uuid
 import logging
 import json
@@ -7,9 +8,14 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 from threading import local
 
+# Add parent directory to path for imports when running as standalone
+CURRENT_DIR = Path(__file__).parent
+BACKEND_DIR = CURRENT_DIR.parent
+sys.path.insert(0, str(BACKEND_DIR))
+
 import pandas as pd
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Header
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_serializer
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -22,13 +28,21 @@ logger = logging.getLogger(__name__)
 try:
     from agents.utils.agent_file_manager import AgentFileManager, FileType, FileStatus
 except ImportError:
-    from agent_file_manager import AgentFileManager, FileType, FileStatus
+    try:
+        from utils.agent_file_manager import AgentFileManager, FileType, FileStatus
+    except ImportError:
+        logger.error("Failed to import agent_file_manager from any location")
+        raise
 
 # Import canvas utilities for display
 try:
     from agents.utils.canvas_utils import create_spreadsheet_display
 except ImportError:
-    from canvas_utils import create_spreadsheet_display
+    try:
+        from utils.canvas_utils import create_spreadsheet_display
+    except ImportError:
+        logger.error("Failed to import canvas_utils from any location")
+        raise
 
 # Import session manager for operation tracking
 try:
@@ -100,6 +114,31 @@ class ApiResponse(BaseModel):
     success: bool
     result: Optional[Any] = None
     error: Optional[str] = None
+    
+    @model_serializer
+    def serialize_model(self):
+        """Custom serializer to handle numpy types"""
+        import numpy as np
+        
+        def convert_numpy(obj):
+            """Recursively convert numpy types to Python native types"""
+            if isinstance(obj, (np.integer, np.int64, np.int32, np.int16, np.int8)):
+                return int(obj)
+            elif isinstance(obj, (np.floating, np.float64, np.float32, np.float16)):
+                return float(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, dict):
+                return {k: convert_numpy(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [convert_numpy(item) for item in obj]
+            return obj
+        
+        return {
+            'success': self.success,
+            'result': convert_numpy(self.result),
+            'error': self.error
+        }
 
 
 class CreateSpreadsheetRequest(BaseModel):
@@ -662,7 +701,7 @@ df
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
-                max_tokens=500
+                max_tokens=2000
             )
             
             code = response.choices[0].message.content.strip()
@@ -968,7 +1007,12 @@ async def query_data(
 
 
 @app.post("/nl_query", response_model=ApiResponse)
-async def natural_language_query(request: NaturalLanguageQueryRequest, thread_id: Optional[str] = Form(None)):
+async def natural_language_query(
+    file_id: str = Form(...),
+    question: str = Form(...),
+    max_iterations: int = Form(5),
+    thread_id: Optional[str] = Form(None)
+):
     """
     Process a natural language query against the spreadsheet data.
     
@@ -986,44 +1030,46 @@ async def natural_language_query(request: NaturalLanguageQueryRequest, thread_id
     - "How many orders were placed last month?"
     
     Parameters:
-        request: The natural language query request
+        file_id: ID of the uploaded file
+        question: Natural language question about the data
+        max_iterations: Maximum reasoning iterations (default 5)
         thread_id: Optional conversation thread ID for isolation
     """
-    if not ensure_file_loaded(request.file_id, thread_id or "default"):
+    if not ensure_file_loaded(file_id, thread_id or "default"):
         raise HTTPException(status_code=404, detail="File not found.")
     
     try:
         # Get dataframe from thread-scoped storage
         conversation_dataframes = get_conversation_dataframes(thread_id or "default")
         conversation_file_paths = get_conversation_file_paths(thread_id or "default")
-        df = conversation_dataframes[request.file_id]
+        df = conversation_dataframes[file_id]
         
-        logger.info(f"Processing natural language query: {request.question}")
+        logger.info(f"Processing natural language query: {question}")
         
         # Get session context with thread isolation
-        session_context = spreadsheet_session_manager.get_session_context(request.file_id, thread_id or "default")
+        session_context = spreadsheet_session_manager.get_session_context(file_id, thread_id or "default")
         
         # Get ALL files in this conversation for cross-file awareness
         all_files_context = spreadsheet_session_manager.get_all_files_summary(thread_id or "default")
         
         result = await query_agent.query(
             df=df,
-            question=request.question,
-            max_iterations=request.max_iterations,
+            question=question,
+            max_iterations=max_iterations,
             session_context=session_context,
             all_files_context=all_files_context
         )
         
         if result.success and result.final_dataframe is not None:
             # Update thread-scoped state with the modified dataframe
-            conversation_dataframes[request.file_id] = result.final_dataframe
+            conversation_dataframes[file_id] = result.final_dataframe
             
             # Also update global fallback for backward compatibility
-            dataframes[request.file_id] = result.final_dataframe
+            dataframes[file_id] = result.final_dataframe
             
             # SAVE TO DISK for persistence
             try:
-                file_path = conversation_file_paths.get(request.file_id)
+                file_path = conversation_file_paths.get(file_id)
                 if file_path:
                     if str(file_path).lower().endswith('.csv'):
                         result.final_dataframe.to_csv(file_path, index=False)
@@ -1035,18 +1081,18 @@ async def natural_language_query(request: NaturalLanguageQueryRequest, thread_id
             
             # Record conversation turn with thread isolation
             spreadsheet_session_manager.add_conversation_turn(
-                file_id=request.file_id,
-                user_message=request.question,
+                file_id=file_id,
+                user_message=question,
                 agent_response=result.answer,
                 thread_id=thread_id or "default"
             )
             
             # Record operations with thread isolation
-            current_state = get_dataframe_state(df, Path(conversation_file_paths[request.file_id]).name)
+            current_state = get_dataframe_state(df, Path(conversation_file_paths[file_id]).name)
             for step in result.steps_taken:
                 if step.get("success", False) and step.get("code"):
                     spreadsheet_session_manager.add_operation(
-                        file_id=request.file_id,
+                        file_id=file_id,
                         operation_type="query",
                         instruction=step.get("thinking", "Query execution"),
                         pandas_code=step.get("code"),
@@ -1063,15 +1109,15 @@ async def natural_language_query(request: NaturalLanguageQueryRequest, thread_id
         if result.final_data and isinstance(result.final_data, list):
             # Convert result data back to dataframe for display
             result_df = pd.DataFrame(result.final_data)
-            filename = Path(conversation_file_paths[request.file_id]).name
+            filename = Path(conversation_file_paths[file_id]).name
             canvas_display = dataframe_to_canvas(
                 df=result_df,
-                title=f"Query Result: {request.question[:50]}...",
+                title=f"Query Result: {question[:50]}...",
                 filename=filename,
                 display_mode='query_result',
                 max_rows=100,
-                file_id=request.file_id,
-                metadata={'query': request.question}
+                file_id=file_id,
+                metadata={'query': question}
             )
         
         return ApiResponse(

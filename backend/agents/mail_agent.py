@@ -5,16 +5,23 @@ Provides email reading, sending, and management capabilities.
 """
 
 import os
+import sys
 import asyncio
 import logging
 import base64
 import re
 from typing import Dict, Any, Optional, List
+from pathlib import Path
+
+# Add parent directory to path for imports when running as standalone
+CURRENT_DIR = Path(__file__).parent
+BACKEND_DIR = CURRENT_DIR.parent
+sys.path.insert(0, str(BACKEND_DIR))
+
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 import httpx
-from pathlib import Path
 
 load_dotenv()
 
@@ -26,7 +33,11 @@ logger = logging.getLogger(__name__)
 try:
     from agents.utils.agent_file_manager import AgentFileManager, FileType, FileStatus
 except ImportError:
-    from agent_file_manager import AgentFileManager, FileType, FileStatus
+    try:
+        from utils.agent_file_manager import AgentFileManager, FileType, FileStatus
+    except ImportError:
+        logger.error("Failed to import agent_file_manager from any location")
+        raise
 
 # Configuration
 COMPOSIO_API_KEY = os.getenv("COMPOSIO_API_KEY")

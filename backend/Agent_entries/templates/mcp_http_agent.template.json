@@ -7,39 +7,8 @@
   "version": "1.0.0",
   
   "capabilities": {
-    "categories": [
-      {
-        "name": "Context Management",
-        "description": "MCP-specific context handling capabilities",
-        "priority": "high",
-        "capabilities": [
-          {
-            "id": "provide-context",
-            "name": "Provide Context",
-            "description": "Provide contextual information via MCP protocol",
-            "keywords": [
-              "context",
-              "mcp",
-              "protocol"
-            ],
-            "requires_permission": false,
-            "examples": [
-              "Get context about X",
-              "Provide information on Y"
-            ],
-            "related_endpoints": [
-              "/tools/list",
-              "/tools/call"
-            ]
-          }
-        ]
-      }
-    ],
-    "all_keywords": [
-      "context",
-      "mcp",
-      "protocol"
-    ]
+    "categories": [],
+    "all_keywords": []
   },
   
   "status": "active",

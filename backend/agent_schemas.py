@@ -114,8 +114,8 @@ class CapabilityCategory(BaseModel):
 
 class CapabilityStructure(BaseModel):
     """Complete capability structure for an agent"""
-    categories: List[CapabilityCategory] = Field(..., min_length=1, description="Capability categories")
-    all_keywords: List[str] = Field(..., min_length=1, description="Flat list of all keywords")
+    categories: List[CapabilityCategory] = Field(default_factory=list, description="Capability categories")
+    all_keywords: List[str] = Field(default_factory=list, description="Flat list of all keywords")
 
     @field_validator('categories')
     @classmethod
@@ -129,6 +129,9 @@ class CapabilityStructure(BaseModel):
     @model_validator(mode='after')
     def validate_all_keywords_match(self):
         """Ensure all_keywords contains all keywords from capabilities"""
+        if not self.categories:
+            # Capabilities are optional now; empty structure is allowed
+            return self
         capability_keywords = set()
         for category in self.categories:
             for capability in category.capabilities:
@@ -295,7 +298,7 @@ class AgentSchema(BaseModel):
     version: str = Field(..., pattern=r"^\d+\.\d+\.\d+$", description="Semantic version (X.Y.Z)")
     
     # Capabilities
-    capabilities: CapabilityStructure = Field(..., description="Structured capabilities")
+    capabilities: Optional[CapabilityStructure] = Field(None, description="Structured capabilities (optional)")
     
     # Status & pricing
     status: AgentStatus = Field(..., description="Agent status")
@@ -387,23 +390,24 @@ class AgentSchema(BaseModel):
             function_names = set(self.tool_functions)
         
         # Check all capabilities
-        for category in self.capabilities.categories:
-            for capability in category.capabilities:
-                # Check related_endpoints
-                if capability.related_endpoints:
-                    for endpoint in capability.related_endpoints:
-                        if endpoint not in endpoint_paths:
-                            raise ValueError(
-                                f"Capability '{capability.id}' references non-existent endpoint '{endpoint}'"
-                            )
-                
-                # Check related_functions
-                if capability.related_functions:
-                    for func in capability.related_functions:
-                        if func not in function_names:
-                            raise ValueError(
-                                f"Capability '{capability.id}' references non-existent function '{func}'"
-                            )
+        if self.capabilities:
+            for category in self.capabilities.categories:
+                for capability in category.capabilities:
+                    # Check related_endpoints
+                    if capability.related_endpoints:
+                        for endpoint in capability.related_endpoints:
+                            if endpoint not in endpoint_paths:
+                                raise ValueError(
+                                    f"Capability '{capability.id}' references non-existent endpoint '{endpoint}'"
+                                )
+                    
+                    # Check related_functions
+                    if capability.related_functions:
+                        for func in capability.related_functions:
+                            if func not in function_names:
+                                raise ValueError(
+                                    f"Capability '{capability.id}' references non-existent function '{func}'"
+                                )
         
         return self
 

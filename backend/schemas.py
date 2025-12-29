@@ -34,7 +34,7 @@ class AgentCard(BaseModel):
     owner_id: str
     name: str
     description: str
-    capabilities: List[str] | Dict[str, Any]  # Accept both old list format and new structured format
+    capabilities: List[str] | Dict[str, Any] | None = []  # Optional; accepts old list format, structured, or None
     price_per_call_usd: float
     status: Literal['active', 'inactive', 'deprecated'] = 'active'
     endpoints: List[EndpointDetail]
@@ -49,6 +49,8 @@ class AgentCard(BaseModel):
     @field_validator('capabilities', mode='before')
     def normalize_capabilities(cls, v):
         """Convert new structured format to flat list for backward compatibility"""
+        if v is None:
+            return []
         if isinstance(v, dict):
             # New structured format - extract all_keywords
             return v.get('all_keywords', [])

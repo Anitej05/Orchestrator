@@ -170,9 +170,10 @@ def verify_setup():
     try:
         # Import database to test connection
         from database import SessionLocal
+        from sqlalchemy import text
         
         db = SessionLocal()
-        db.execute("SELECT 1")
+        db.execute(text("SELECT 1"))
         db.close()
         
         print_success("Database connection verified")
@@ -180,7 +181,7 @@ def verify_setup():
         # Check for tables
         db = SessionLocal()
         result = db.execute(
-            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public'"
+            text("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public'")
         )
         table_count = result.scalar()
         db.close()

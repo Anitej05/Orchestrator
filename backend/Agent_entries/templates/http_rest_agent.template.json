@@ -7,38 +7,8 @@
   "version": "1.0.0",
   
   "capabilities": {
-    "categories": [
-      {
-        "name": "Core Operations",
-        "description": "Primary capabilities of this agent",
-        "priority": "high",
-        "capabilities": [
-          {
-            "id": "example-capability",
-            "name": "Example Capability",
-            "description": "Description of what this capability does",
-            "keywords": [
-              "example",
-              "capability",
-              "demo"
-            ],
-            "requires_permission": false,
-            "examples": [
-              "Example user query 1",
-              "Example user query 2"
-            ],
-            "related_endpoints": [
-              "/example-endpoint"
-            ]
-          }
-        ]
-      }
-    ],
-    "all_keywords": [
-      "example",
-      "capability",
-      "demo"
-    ]
+    "categories": [],
+    "all_keywords": []
   },
   
   "status": "active",

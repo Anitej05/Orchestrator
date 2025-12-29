@@ -187,6 +187,7 @@ export function InteractiveChatInterface({
         await continueConversation(userResponse, attachedFiles, planningMode, owner);
         setUserResponse('');
         setAttachedFiles([]); // Clear files after submission
+        if (fileInputRef.current) fileInputRef.current.value = ''; // Reset file input
       }
     } else if (state.metadata?.currentStage === 'validating' || state.status === 'planning_complete') {
       // User is modifying a saved workflow plan
@@ -195,6 +196,7 @@ export function InteractiveChatInterface({
         await continueConversation(inputValue, attachedFiles, false, owner);
         setInputValue('');
         setAttachedFiles([]);
+        if (fileInputRef.current) fileInputRef.current.value = ''; // Reset file input
       }
     } else {
       // Check if this is a continuation of an existing conversation or a new one
@@ -210,6 +212,7 @@ export function InteractiveChatInterface({
         }
         setInputValue('');
         setAttachedFiles([]);
+        if (fileInputRef.current) fileInputRef.current.value = ''; // Reset file input
       }
     }
   };
