@@ -4085,6 +4085,8 @@ def start_agents_async():
 @app.on_event("startup")
 async def startup_event():
     """Start agents, background health checker, and workflow scheduler on app startup"""
+    # Note: Tools are lazy-loaded only when orchestrator needs them (not at startup)
+    
     # Run database migrations automatically
     try:
         logger.info("🔧 Running database migrations...")

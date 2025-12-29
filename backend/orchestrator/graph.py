@@ -1118,6 +1118,16 @@ def parse_prompt(state: State):
     logger.info(f"[PARSE_PROMPT_DEBUG] Capabilities count: {len(capability_texts)}, first 5: {capability_texts[:5]}")
     logger.info(f"[PARSE_PROMPT_DEBUG] Original prompt: '{state['original_prompt']}'")
 
+    # Get tool descriptions for LLM context
+    tool_descriptions = ""
+    try:
+        from orchestrator.tool_registry import get_tool_descriptions
+        tool_descriptions = get_tool_descriptions()
+        logger.info(f"[PARSE_PROMPT_DEBUG] Loaded tool descriptions")
+    except ImportError:
+        logger.debug("Tool registry not available")
+        tool_descriptions = "(No direct tools available - all tasks will use agents)"
+
 
     # Initialize both primary and fallback LLMs
     primary_llm = ChatCerebras(model="gpt-oss-120b")
@@ -1181,10 +1191,16 @@ def parse_prompt(state: State):
         {agent_catalogue_str if agent_catalogue_str else "No agents currently available"}
         ---
         
+        **AVAILABLE DIRECT TOOLS (Fast, stateless operations):**
+        These tools can handle simple queries without needing full agent services. Prefer these for straightforward data retrieval:
+        {tool_descriptions}
+        
         **ENDPOINT-AWARE TASK CREATION:**
         - Look at the endpoints above to understand what each agent can do
+        - For simple data queries (stock quotes, news, Wikipedia), use the exact tool capability names shown above
+        - For complex operations (document editing, spreadsheet analysis, browser automation), use the agent endpoints
         - For local service health checks (like "browser agent health"), use the browser agent to navigate to the actual endpoint (e.g., http://localhost:8090/health)
-        - Match your task to an agent's actual endpoints, not abstract capabilities
+        - Match your task to an agent's actual endpoints or tool capabilities, not abstract descriptions
 
 
         Follow these rules:
@@ -3595,6 +3611,71 @@ async def execute_batch(state: State, config: RunnableConfig):
     async def try_task_with_fallbacks(planned_task: PlannedTask):
         nonlocal task_events  # Ensure we're modifying the outer scope's task_events
         
+        # PRIORITY 1: Check if this task can be handled by a direct tool (faster than agents)
+        try:
+            from orchestrator.tool_registry import is_tool_capable, execute_tool
+            
+            if is_tool_capable(planned_task.task_name):
+                logger.info(f"🔧 Task '{planned_task.task_name}' can be handled by direct tool - using tool instead of agent")
+                task_start_time = time.time()
+                
+                # EMIT: Task started event
+                started_event = {
+                    "event_type": "task_started",
+                    "task_name": planned_task.task_name,
+                    "agent_name": "DirectTool",
+                    "timestamp": task_start_time
+                }
+                task_events.append(started_event)
+                
+                if task_event_callback:
+                    try:
+                        await task_event_callback(started_event)
+                    except Exception as e:
+                        logger.error(f"Failed to stream task_started event: {e}")
+                
+                # Execute the tool
+                tool_result = await execute_tool(planned_task.task_name, planned_task.parameters or {})
+                
+                task_end_time = time.time()
+                execution_time = round(task_end_time - task_start_time, 2)
+                
+                if tool_result.get('success'):
+                    logger.info(f"✅ Tool execution successful for '{planned_task.task_name}' in {execution_time}s")
+                    
+                    # EMIT: Task completed event
+                    completed_event = {
+                        "event_type": "task_completed",
+                        "task_name": planned_task.task_name,
+                        "agent_name": tool_result.get('tool_name', 'DirectTool'),
+                        "execution_time": execution_time,
+                        "timestamp": task_end_time
+                    }
+                    task_events.append(completed_event)
+                    
+                    if task_event_callback:
+                        try:
+                            await task_event_callback(completed_event)
+                        except Exception as e:
+                            logger.error(f"Failed to stream task_completed event: {e}")
+                    
+                    return {
+                        "task_name": planned_task.task_name,
+                        "result": tool_result.get('result'),
+                        "raw_response": tool_result,
+                        "execution_time": execution_time,
+                        "agent_used": tool_result.get('tool_name', 'DirectTool'),
+                        "status": "completed"
+                    }
+                else:
+                    logger.warning(f"⚠️ Tool execution failed for '{planned_task.task_name}': {tool_result.get('error')}")
+                    # Fall through to agent execution
+        except ImportError:
+            logger.debug("Tool registry not available - falling back to agent execution")
+        except Exception as e:
+            logger.warning(f"Tool execution error for '{planned_task.task_name}': {e} - falling back to agent")
+        
+        # PRIORITY 2: Use agent-based execution (for complex/stateful tasks)
         # ROBUST FIX: Check if PlannedTask already has agent info embedded
         if hasattr(planned_task, 'primary') and planned_task.primary:
             # Task has embedded agent info - use it directly
