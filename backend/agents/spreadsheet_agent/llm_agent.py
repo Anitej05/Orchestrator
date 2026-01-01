@@ -15,12 +15,24 @@ from typing import Dict, List, Any, Optional, Tuple
 import pandas as pd
 
 from .config import (
-    CEREBRAS_API_KEY,
     GROQ_API_KEY,
-    CEREBRAS_MODEL,
+    CEREBRAS_API_KEY,
+    NVIDIA_API_KEY,
+    GOOGLE_API_KEY,
+    OPENAI_API_KEY,
+    ANTHROPIC_API_KEY,
     GROQ_MODEL,
-    CEREBRAS_BASE_URL,
+    CEREBRAS_MODEL,
+    NVIDIA_MODEL,
+    GOOGLE_MODEL,
+    OPENAI_MODEL,
+    ANTHROPIC_MODEL,
     GROQ_BASE_URL,
+    CEREBRAS_BASE_URL,
+    NVIDIA_BASE_URL,
+    GOOGLE_BASE_URL,
+    OPENAI_BASE_URL,
+    ANTHROPIC_BASE_URL,
     LLM_TEMPERATURE,
     LLM_MAX_TOKENS_QUERY
 )
@@ -48,8 +60,12 @@ class SpreadsheetQueryAgent:
             },
             "llm_calls": {
                 "total": 0,
-                "cerebras": 0,
                 "groq": 0,
+                "cerebras": 0,
+                "nvidia": 0,
+                "google": 0,
+                "openai": 0,
+                "anthropic": 0,
                 "retries": 0,
                 "failures": 0
             },
@@ -90,7 +106,15 @@ class SpreadsheetQueryAgent:
             logger.warning("openai package not installed. LLM features disabled.")
             return
         
-        # Build provider chain: Cerebras → Groq
+        # Build provider chain: Groq → Cerebras → NVIDIA → Google → OpenAI → Anthropic
+        if GROQ_API_KEY:
+            self.providers.append({
+                "name": "groq",
+                "client": OpenAI(api_key=GROQ_API_KEY, base_url=GROQ_BASE_URL),
+                "model": GROQ_MODEL,
+                "max_tokens": LLM_MAX_TOKENS_QUERY
+            })
+        
         if CEREBRAS_API_KEY:
             self.providers.append({
                 "name": "cerebras",
@@ -98,12 +122,39 @@ class SpreadsheetQueryAgent:
                 "model": CEREBRAS_MODEL,
                 "max_tokens": LLM_MAX_TOKENS_QUERY
             })
-
-        if GROQ_API_KEY:
+        
+        if NVIDIA_API_KEY:
             self.providers.append({
-                "name": "groq",
-                "client": OpenAI(api_key=GROQ_API_KEY, base_url=GROQ_BASE_URL),
-                "model": GROQ_MODEL,
+                "name": "nvidia",
+                "client": OpenAI(api_key=NVIDIA_API_KEY, base_url=NVIDIA_BASE_URL),
+                "model": NVIDIA_MODEL,
+                "max_tokens": LLM_MAX_TOKENS_QUERY
+            })
+        
+        if GOOGLE_API_KEY:
+            # Google uses OpenAI-compatible API
+            self.providers.append({
+                "name": "google",
+                "client": OpenAI(api_key=GOOGLE_API_KEY, base_url=GOOGLE_BASE_URL),
+                "model": GOOGLE_MODEL,
+                "max_tokens": LLM_MAX_TOKENS_QUERY
+            })
+        
+        if OPENAI_API_KEY:
+            self.providers.append({
+                "name": "openai",
+                "client": OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL),
+                "model": OPENAI_MODEL,
+                "max_tokens": LLM_MAX_TOKENS_QUERY
+            })
+        
+        if ANTHROPIC_API_KEY:
+            # Anthropic uses different API, add placeholder for now
+            # Would need anthropic SDK for full implementation
+            self.providers.append({
+                "name": "anthropic",
+                "client": OpenAI(api_key=ANTHROPIC_API_KEY, base_url=ANTHROPIC_BASE_URL),
+                "model": ANTHROPIC_MODEL,
                 "max_tokens": LLM_MAX_TOKENS_QUERY
             })
         

@@ -131,8 +131,18 @@ def _display_session_metrics(metrics: dict):
     llm = metrics.get('llm_calls', {})
     print("\n🤖 LLM CALLS:")
     print(f"  Total:                {llm.get('total', 0)}")
-    print(f"  Cerebras:             {llm.get('cerebras', 0)}")
-    print(f"  Groq:                 {llm.get('groq', 0)}")
+    if llm.get('groq', 0) > 0:
+        print(f"  Groq:                 {llm.get('groq', 0)}")
+    if llm.get('cerebras', 0) > 0:
+        print(f"  Cerebras:             {llm.get('cerebras', 0)}")
+    if llm.get('nvidia', 0) > 0:
+        print(f"  NVIDIA:               {llm.get('nvidia', 0)}")
+    if llm.get('google', 0) > 0:
+        print(f"  Google:               {llm.get('google', 0)}")
+    if llm.get('openai', 0) > 0:
+        print(f"  OpenAI:               {llm.get('openai', 0)}")
+    if llm.get('anthropic', 0) > 0:
+        print(f"  Anthropic:            {llm.get('anthropic', 0)}")
     print(f"  Retries:              {llm.get('retries', 0)}")
     print(f"  Failures:             {llm.get('failures', 0)}")
     

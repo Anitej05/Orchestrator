@@ -22,13 +22,29 @@ MEMORY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 # ============== LLM CONFIGURATION ==============
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY")
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
-# LLM Models
+# LLM Models - Priority order: Groq → Cerebras → NVIDIA → Google
+GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+
 CEREBRAS_MODEL = "llama3.1-70b"
 CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
 
-GROQ_MODEL = "llama-3.3-70b-versatile"
-GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+NVIDIA_MODEL = "meta/llama-3.1-70b-instruct"  # NVIDIA NIM
+NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
+
+GOOGLE_MODEL = "gemini-1.5-flash"  # Fast and efficient
+GOOGLE_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+
+OPENAI_MODEL = "gpt-4o-mini"  # Cost-effective fallback
+OPENAI_BASE_URL = "https://api.openai.com/v1"
+
+ANTHROPIC_MODEL = "claude-3-5-haiku-20241022"  # Fast and affordable
+ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
 
 # LLM Settings
 LLM_TEMPERATURE = 0.1

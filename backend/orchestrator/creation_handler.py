@@ -207,11 +207,11 @@ def build_creation_payload(task: PlannedTask, task_type: str, thread_id: Optiona
     params = extract_creation_parameters(task)
     
     payload = {
-        'file_type': params.get('file_type', 'txt').lower(),
         'thread_id': thread_id,
     }
     
     if task_type == 'document':
+        payload['file_type'] = params.get('file_type', 'txt').lower()
         payload['content'] = params.get('content', task.task_description)
         payload['file_name'] = params.get('file_name') or 'document.txt'
     
@@ -229,7 +229,9 @@ def build_creation_payload(task: PlannedTask, task_type: str, thread_id: Optiona
                 data = _parse_csv_string(data)
         
         payload['data'] = data
-        payload['file_name'] = params.get('file_name') or 'spreadsheet.xlsx'
+        # FIX: Use 'filename' and 'file_format' for spreadsheet API (not file_name and file_type)
+        payload['filename'] = params.get('file_name') or params.get('filename') or 'spreadsheet.xlsx'
+        payload['file_format'] = params.get('file_type', 'xlsx').lower()
     
     logger.info(f"[CREATION_HANDLER] Built payload for {task_type}: {list(payload.keys())}")
     return payload

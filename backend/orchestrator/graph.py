@@ -150,6 +150,155 @@ def log_orchestrator_metrics(operation: str, success: bool):
     logging.info(f"  Peak Memory: {ORCHESTRATOR_METRICS['resource']['peak_memory_mb']:.1f} MB")
     logging.info("")
 
+# Configure logger early so helper functions can use it
+import logging
+logger = logging.getLogger("AgentOrchestrator")
+
+# ========== HELPER FUNCTIONS ==========
+
+def get_agent_catalog(db):
+    """
+    Build a comprehensive agent catalog from the database.
+    Consolidates duplicate catalog-building logic from parse_prompt and agent_directory_search.
+    
+    Returns:
+        tuple: (agent_catalog: list, agent_lookup: dict, capability_texts: list)
+    """
+    from models import Agent, AgentCapability
+    from sqlalchemy.orm import joinedload
+    
+    # Fetch all active agents with full details
+    query = db.query(Agent).options(
+        joinedload(Agent.endpoints).joinedload(AgentEndpoint.parameters)
+    ).filter(Agent.status == 'active')
+    
+    all_agents = query.all()
+    logger.info(f"Fetched {len(all_agents)} active agents for catalog")
+    
+    agent_catalog = []
+    agent_lookup = {}
+    capability_texts = []
+    
+    for agent in all_agents:
+        # Build endpoints info
+        endpoints_info = []
+        for ep in agent.endpoints:
+            endpoints_info.append({
+                "endpoint": ep.endpoint,
+                "http_method": ep.http_method,
+                "description": ep.description
+            })
+        
+        # Add to catalog
+        agent_info = {
+            "id": agent.id,
+            "name": agent.name,
+            "description": agent.description,
+            "capabilities": agent.capabilities,
+            "rating": agent.rating,
+            "price_per_call_usd": agent.price_per_call_usd,
+            "endpoints": endpoints_info
+        }
+        agent_catalog.append(agent_info)
+        agent_lookup[agent.id] = agent
+        
+        # Collect capabilities
+        capability_texts.extend(agent.capabilities)
+    
+    return agent_catalog, agent_lookup, capability_texts
+
+
+def validate_required_endpoint(task_name: str, task_desc: str, agent_endpoints: list) -> tuple:
+    """
+    Validate if an agent has the required endpoint for a given task.
+    Consolidates triple validation logic from agent_directory_search, rank_agents, and validate_agent_endpoints.
+    
+    Args:
+        task_name: Task name (lowercase)
+        task_desc: Task description (lowercase)
+        agent_endpoints: List of endpoint strings
+    
+    Returns:
+        tuple: (required_endpoint: str or None, endpoint_type: str, has_endpoint: bool)
+    """
+    required_endpoint = None
+    endpoint_type = "unknown"
+    
+    # Check for document editing operations
+    if any(word in task_name or word in task_desc for word in ['edit', 'modify', 'update', 'change', 'revise', 'rewrite']):
+        if any(word in task_name or word in task_desc for word in ['document', 'doc', 'docx', 'pdf', 'txt', 'resume', 'report', 'file']):
+            required_endpoint = '/edit'
+            endpoint_type = 'document editing'
+    
+    # Check for document analysis operations
+    elif any(word in task_name or word in task_desc for word in ['analyze', 'question', 'query', 'search', 'find', 'extract', 'read']):
+        if any(word in task_name or word in task_desc for word in ['document', 'doc', 'docx', 'pdf', 'txt']):
+            required_endpoint = '/analyze'
+            endpoint_type = 'document analysis'
+    
+    # Check for document creation operations
+    elif any(word in task_name or word in task_desc for word in ['create', 'generate', 'write', 'compose']):
+        if any(word in task_name or word in task_desc for word in ['document', 'doc', 'docx', 'report']):
+            required_endpoint = '/create'
+            endpoint_type = 'document creation'
+    
+    # Check for web browsing operations
+    elif any(word in task_name or word in task_desc for word in ['browse', 'navigate', 'visit', 'scrape', 'web', 'website', 'url']):
+        required_endpoint = '/browse'
+        endpoint_type = 'web browsing'
+    
+    # Check if agent has the required endpoint
+    has_endpoint = required_endpoint is None or required_endpoint in agent_endpoints
+    
+    return required_endpoint, endpoint_type, has_endpoint
+
+
+def inject_file_parameters(task, uploaded_files: list, original_prompt: str, logger):
+    """
+    Auto-inject file parameters (vector_store_path, file_path, file_id, query) into task payload.
+    Consolidates triple parameter injection logic from plan_execution.
+    
+    Args:
+        task: PlannedTask object with primary.payload
+        uploaded_files: List of FileObject dicts
+        original_prompt: Original user query for auto-query injection
+        logger: Logger instance
+    
+    Returns:
+        None (modifies task.primary.payload in-place)
+    """
+    if not task.primary.payload:
+        task.primary.payload = {}
+    
+    # Collect all document files with vector stores
+    vector_store_paths = []
+    for file_obj in uploaded_files:
+        file_dict = file_obj if isinstance(file_obj, dict) else (file_obj.__dict__ if hasattr(file_obj, '__dict__') else {})
+        if file_dict.get('file_type') == 'document' and file_dict.get('vector_store_path'):
+            vector_store_paths.append(file_dict['vector_store_path'])
+    
+    # Auto-inject vector_store_path(s) for document tasks
+    if vector_store_paths:
+        if len(vector_store_paths) == 1:
+            # Single document: use vector_store_path (backward compatible)
+            if 'vector_store_path' not in task.primary.payload:
+                task.primary.payload['vector_store_path'] = vector_store_paths[0]
+                logger.info(f"✅ AUTO-INJECTED vector_store_path for '{task.task_name}': {vector_store_paths[0]}")
+        else:
+            # Multiple documents: use vector_store_paths array
+            if 'vector_store_paths' not in task.primary.payload:
+                task.primary.payload['vector_store_paths'] = vector_store_paths
+                logger.info(f"✅ AUTO-INJECTED {len(vector_store_paths)} vector_store_paths for '{task.task_name}'")
+                logger.info(f"   Files: {[os.path.basename(p) for p in vector_store_paths]}")
+    
+    # Auto-inject query if not provided
+    if 'query' not in task.primary.payload:
+        if any(word in original_prompt.lower() for word in ['what', 'summarize', 'summary', 'about', 'describe', 'analyze']):
+            task.primary.payload['query'] = original_prompt
+            logger.info(f"✅ AUTO-INJECTED query for '{task.task_name}': {original_prompt}")
+
+# ========== END HELPER FUNCTIONS ==========
+
 # Define a protocol for the invoke_json method to help with type checking
 class JsonInvoker(Protocol):
     def invoke_json(self, prompt: str, pydantic_schema: Any, max_retries: int = 3) -> Any:
@@ -1598,55 +1747,23 @@ async def agent_directory_search(state: State):
     
     db = SessionLocal()
     try:
-        from models import Agent, AgentCapability
-        from sqlalchemy.orm import joinedload
+        # Use helper to build agent catalog (consolidates duplicate logic)
+        agent_catalog, agent_lookup, _ = get_agent_catalog(db)
         
-        # Fetch ALL active agents with their full details
-        query = db.query(Agent).options(
-            joinedload(Agent.endpoints).joinedload(AgentEndpoint.parameters)
-        ).filter(Agent.status == 'active')
-        
-        # Apply user expectations filters
-        if 'price' in user_expectations:
+        # Apply user expectations filters to catalog
+        if user_expectations.get('price'):
             max_price = user_expectations['price']
-            query = query.filter(Agent.price_per_call_usd <= max_price)
+            agent_catalog = [a for a in agent_catalog if a['price_per_call_usd'] <= max_price]
         
-        if 'rating' in user_expectations:
+        if user_expectations.get('rating'):
             min_rating = user_expectations['rating']
-            query = query.filter(Agent.rating >= min_rating)
+            agent_catalog = [a for a in agent_catalog if a['rating'] >= min_rating]
         
-        all_agents = query.all()
-        logger.info(f"Fetched {len(all_agents)} active agents for LLM-based selection")
+        logger.info(f"Fetched {len(agent_catalog)} active agents for LLM-based selection")
         
-        if not all_agents:
+        if not agent_catalog:
             logger.warning("No active agents found in database")
             return {"candidate_agents": {}, "parsing_error_feedback": "No active agents available in the system."}
-        
-        # Build agent catalog for LLM (lightweight: id, name, description, capabilities only)
-        agent_catalog = []
-        agent_lookup = {}  # For quick lookup after LLM selection
-        
-        for agent in all_agents:
-            # Include endpoints so LLM can validate endpoint availability during selection
-            endpoints_info = []
-            for ep in agent.endpoints:
-                endpoints_info.append({
-                    "endpoint": ep.endpoint,
-                    "http_method": ep.http_method,
-                    "description": ep.description
-                })
-            
-            agent_info = {
-                "id": agent.id,
-                "name": agent.name,
-                "description": agent.description,
-                "capabilities": agent.capabilities,
-                "rating": agent.rating,
-                "price_per_call_usd": agent.price_per_call_usd,
-                "endpoints": endpoints_info  # Include actual endpoints
-            }
-            agent_catalog.append(agent_info)
-            agent_lookup[agent.id] = agent
         
         # Use LLM to select agents for each task
         primary_llm = ChatGroq(model="llama-3.3-70b-versatile") if os.getenv("GROQ_API_KEY") else ChatCerebras(model="llama-3.3-70b")
@@ -1780,7 +1897,8 @@ Only include agents that have the required endpoint AND are genuinely capable of
             
         except Exception as e:
             logger.error(f"LLM-based agent selection failed: {e}. Falling back to text-based search.")
-            # Fallback to simple text-based matching
+            # Fallback to simple text-based matching - reconstruct all_agents list from agent_lookup
+            all_agents = list(agent_lookup.values())
             candidate_agents_map = await _fallback_text_search(parsed_tasks, all_agents, agent_lookup)
         
         # Check for tasks with no agents found
@@ -2036,60 +2154,39 @@ def validate_agent_endpoints(state: State):
         task_name = pair.task_name.lower()
         task_desc = pair.task_description.lower()
         
-        # Define required endpoints based on task type (semantic matching)
-        required_endpoint = None
-        endpoint_type = "unknown"
+        # Get primary agent endpoints as list of strings
+        agent_endpoints = [ep.endpoint if isinstance(ep, dict) else ep.endpoint for ep in pair.primary.endpoints]
         
-        # Check for document editing operations
-        if any(word in task_name or word in task_desc for word in ['edit', 'modify', 'update', 'change', 'revise', 'rewrite']):
-            # Only require /edit if it's a document-related task
-            if any(word in task_name or word in task_desc for word in ['document', 'doc', 'docx', 'pdf', 'txt', 'resume', 'report', 'file']):
-                required_endpoint = '/edit'
-                endpoint_type = 'document editing'
-        
-        # Check for document analysis operations
-        elif any(word in task_name or word in task_desc for word in ['analyze', 'question', 'query', 'search', 'find', 'extract', 'read']):
-            if any(word in task_name or word in task_desc for word in ['document', 'doc', 'docx', 'pdf', 'txt']):
-                required_endpoint = '/analyze'
-                endpoint_type = 'document analysis'
-        
-        # Check for document creation operations
-        elif any(word in task_name or word in task_desc for word in ['create', 'generate', 'write', 'compose']):
-            if any(word in task_name or word in task_desc for word in ['document', 'doc', 'docx', 'report']):
-                required_endpoint = '/create'
-                endpoint_type = 'document creation'
-        
-        # Check for web browsing operations
-        elif any(word in task_name or word in task_desc for word in ['browse', 'navigate', 'visit', 'scrape', 'web', 'website', 'url']):
-            required_endpoint = '/browse'
-            endpoint_type = 'web browsing'
+        # Use helper function to validate endpoint requirements
+        required_endpoint, endpoint_type, has_endpoint = validate_required_endpoint(
+            task_name, task_desc, agent_endpoints
+        )
         
         # Validate primary agent has required endpoint
-        if required_endpoint:
-            agent_endpoints = [ep.endpoint if isinstance(ep, dict) else ep.endpoint for ep in pair.primary.endpoints]
+        if required_endpoint and not has_endpoint:
+            logger.warning(f"❌ VALIDATION FAILED: Agent '{pair.primary.name}' lacks required endpoint '{required_endpoint}' for {endpoint_type} task '{task_name}'")
+            logger.warning(f"   Agent has endpoints: {agent_endpoints}")
             
-            if required_endpoint not in agent_endpoints:
-                logger.warning(f"❌ VALIDATION FAILED: Agent '{pair.primary.name}' lacks required endpoint '{required_endpoint}' for {endpoint_type} task '{task_name}'")
-                logger.warning(f"   Agent has endpoints: {agent_endpoints}")
+            # Try to find a fallback agent with the required endpoint
+            swapped = False
+            for i, fallback in enumerate(pair.fallbacks):
+                fallback_endpoints = [ep.endpoint if isinstance(ep, dict) else ep.endpoint for ep in fallback.endpoints]
+                _, _, fallback_has_endpoint = validate_required_endpoint(task_name, task_desc, fallback_endpoints)
                 
-                # Try to find a fallback agent with the required endpoint
-                swapped = False
-                for i, fallback in enumerate(pair.fallbacks):
-                    fallback_endpoints = [ep.endpoint if isinstance(ep, dict) else ep.endpoint for ep in fallback.endpoints]
-                    if required_endpoint in fallback_endpoints:
-                        logger.info(f"✅ VALIDATION FIX: Swapping to fallback agent '{fallback.name}' which has '{required_endpoint}' endpoint")
-                        # Swap primary with this fallback
-                        old_primary = pair.primary
-                        pair.primary = fallback
-                        pair.fallbacks[i] = old_primary
-                        swapped = True
-                        break
-                
-                if not swapped:
-                    logger.error(f"❌ CRITICAL: No available agent has the required '{required_endpoint}' endpoint for task '{task_name}'")
-                    logger.error(f"   This task will likely fail during execution!")
-            else:
-                logger.info(f"✅ VALIDATION PASSED: Agent '{pair.primary.name}' has required endpoint '{required_endpoint}' for {endpoint_type}")
+                if fallback_has_endpoint:
+                    logger.info(f"✅ VALIDATION FIX: Swapping to fallback agent '{fallback.name}' which has '{required_endpoint}' endpoint")
+                    # Swap primary with this fallback
+                    old_primary = pair.primary
+                    pair.primary = fallback
+                    pair.fallbacks[i] = old_primary
+                    swapped = True
+                    break
+            
+            if not swapped:
+                logger.error(f"❌ CRITICAL: No available agent has the required '{required_endpoint}' endpoint for task '{task_name}'")
+                logger.error(f"   This task will likely fail during execution!")
+        elif required_endpoint:
+            logger.info(f"✅ VALIDATION PASSED: Agent '{pair.primary.name}' has required endpoint '{required_endpoint}' for {endpoint_type}")
         else:
             logger.debug(f"⚪ No specific endpoint requirement detected for task '{task_name}'")
         
@@ -2427,6 +2524,7 @@ def plan_execution(state: State, config: RunnableConfig):
                 
                 # AUTO-INJECT PARAMETERS: Fill in parameters from uploaded files BEFORE serialization
                 uploaded_files = state.get("uploaded_files", [])
+                original_prompt = state.get('original_prompt', '')
                 logger.info(f"🔍 DEBUG: uploaded_files count={len(uploaded_files)}, response.plan exists={response.plan is not None}, plan length={len(response.plan) if response.plan else 0}")
                 
                 if uploaded_files and response.plan:
@@ -2441,44 +2539,9 @@ def plan_execution(state: State, config: RunnableConfig):
                                     task.primary.payload = {}
                                 task.primary.payload.update(parsed_task.parameters)
                                 logger.info(f"Using pre-extracted parameters for '{task.task_name}': {task.primary.payload}")
-                            elif not task.primary.payload:
-                                task.primary.payload = {}
                             
-                            # Auto-inject vector_store_path for document tasks
-                            logger.info(f"🔍 Checking {len(uploaded_files)} files for vector_store_path injection")
-                            
-                            # Collect ALL vector store paths for documents
-                            vector_store_paths = []
-                            for file_obj in uploaded_files:
-                                file_dict = file_obj if isinstance(file_obj, dict) else (file_obj.__dict__ if hasattr(file_obj, '__dict__') else {})
-                                logger.info(f"🔍 File: {file_dict.get('file_name')}, type={file_dict.get('file_type')}, has_vector_store={bool(file_dict.get('vector_store_path'))}")
-                                if file_dict.get('file_type') == 'document' and file_dict.get('vector_store_path'):
-                                    vector_store_paths.append(file_dict['vector_store_path'])
-                            
-                            # Inject ALL vector store paths (not just first one)
-                            if vector_store_paths:
-                                if len(vector_store_paths) == 1:
-                                    # Single document: use vector_store_path (backward compatible)
-                                    if 'vector_store_path' not in task.primary.payload:
-                                        task.primary.payload['vector_store_path'] = vector_store_paths[0]
-                                        logger.info(f"✅ AUTO-INJECTED vector_store_path for '{task.task_name}': {vector_store_paths[0]}")
-                                else:
-                                    # Multiple documents: use vector_store_paths array
-                                    if 'vector_store_paths' not in task.primary.payload:
-                                        task.primary.payload['vector_store_paths'] = vector_store_paths
-                                        logger.info(f"✅ AUTO-INJECTED {len(vector_store_paths)} vector_store_paths for '{task.task_name}'")
-                                        logger.info(f"   Files: {[os.path.basename(p) for p in vector_store_paths]}")
-                                    else:
-                                        logger.info(f"⏭️ vector_store_paths already in payload, skipping injection")
-                            else:
-                                logger.info(f"⏭️ No document files with vector stores found")
-                            
-                            # Auto-inject query if not provided
-                            if 'query' not in task.primary.payload:
-                                original_prompt = state.get('original_prompt', '')
-                                if any(word in original_prompt.lower() for word in ['what', 'summarize', 'summary', 'about', 'describe', 'analyze']):
-                                    task.primary.payload['query'] = original_prompt
-                                    logger.info(f"✅ AUTO-INJECTED query for '{task.task_name}': {original_prompt}")
+                            # Use helper function to inject file parameters (consolidates duplicate logic)
+                            inject_file_parameters(task, uploaded_files, original_prompt, logger)
                 
                 serializable_plan = [[task.model_dump(mode='json') for task in batch] for batch in (response.plan or [])]
                 output_state = {
@@ -2513,6 +2576,7 @@ def plan_execution(state: State, config: RunnableConfig):
                 
                 # AUTO-INJECT PARAMETERS: Fill in parameters from uploaded files BEFORE serialization
                 uploaded_files = state.get("uploaded_files", [])
+                original_prompt = state.get('original_prompt', '')
                 if uploaded_files and simple_plan:
                     logger.info(f"AUTO-INJECT (simple_plan path 1): Processing {len(uploaded_files)} uploaded files")
                     for task in simple_plan:
@@ -2524,24 +2588,9 @@ def plan_execution(state: State, config: RunnableConfig):
                                 task.primary.payload = {}
                             task.primary.payload.update(parsed_task.parameters)
                             logger.info(f"Using pre-extracted parameters for '{task.task_name}': {task.primary.payload}")
-                        elif not task.primary.payload:
-                            task.primary.payload = {}
                         
-                        # Auto-inject vector_store_path for document tasks
-                        for file_obj in uploaded_files:
-                            file_dict = file_obj if isinstance(file_obj, dict) else (file_obj.__dict__ if hasattr(file_obj, '__dict__') else {})
-                            if file_dict.get('file_type') == 'document' and file_dict.get('vector_store_path'):
-                                if 'vector_store_path' not in task.primary.payload:
-                                    task.primary.payload['vector_store_path'] = file_dict['vector_store_path']
-                                    logger.info(f"✅ AUTO-INJECTED vector_store_path for '{task.task_name}': {file_dict['vector_store_path']}")
-                                break
-                        
-                        # Auto-inject query if not provided
-                        if 'query' not in task.primary.payload:
-                            original_prompt = state.get('original_prompt', '')
-                            if any(word in original_prompt.lower() for word in ['what', 'summarize', 'summary', 'about', 'describe', 'analyze']):
-                                task.primary.payload['query'] = original_prompt
-                                logger.info(f"✅ AUTO-INJECTED query for '{task.task_name}': {original_prompt}")
+                        # Use helper function to inject file parameters (consolidates duplicate logic)
+                        inject_file_parameters(task, uploaded_files, original_prompt, logger)
                 
                 if simple_plan:
                     serializable_plan = [[task.model_dump(mode='json') for task in simple_plan]]
@@ -2577,6 +2626,7 @@ def plan_execution(state: State, config: RunnableConfig):
                 
                 # AUTO-INJECT PARAMETERS: Fill in parameters from uploaded files BEFORE serialization
                 uploaded_files = state.get("uploaded_files", [])
+                original_prompt = state.get('original_prompt', '')
                 if uploaded_files and simple_plan:
                     logger.info(f"AUTO-INJECT (simple_plan path 2): Processing {len(uploaded_files)} uploaded files")
                     for task in simple_plan:
@@ -2588,24 +2638,9 @@ def plan_execution(state: State, config: RunnableConfig):
                                 task.primary.payload = {}
                             task.primary.payload.update(parsed_task.parameters)
                             logger.info(f"Using pre-extracted parameters for '{task.task_name}': {task.primary.payload}")
-                        elif not task.primary.payload:
-                            task.primary.payload = {}
                         
-                        # Auto-inject vector_store_path for document tasks
-                        for file_obj in uploaded_files:
-                            file_dict = file_obj if isinstance(file_obj, dict) else (file_obj.__dict__ if hasattr(file_obj, '__dict__') else {})
-                            if file_dict.get('file_type') == 'document' and file_dict.get('vector_store_path'):
-                                if 'vector_store_path' not in task.primary.payload:
-                                    task.primary.payload['vector_store_path'] = file_dict['vector_store_path']
-                                    logger.info(f"✅ AUTO-INJECTED vector_store_path for '{task.task_name}': {file_dict['vector_store_path']}")
-                                break
-                        
-                        # Auto-inject query if not provided
-                        if 'query' not in task.primary.payload:
-                            original_prompt = state.get('original_prompt', '')
-                            if any(word in original_prompt.lower() for word in ['what', 'summarize', 'summary', 'about', 'describe', 'analyze']):
-                                task.primary.payload['query'] = original_prompt
-                                logger.info(f"✅ AUTO-INJECTED query for '{task.task_name}': {original_prompt}")
+                        # Use helper function to inject file parameters (consolidates duplicate logic)
+                        inject_file_parameters(task, uploaded_files, original_prompt, logger)
                 
                 if simple_plan:
                     serializable_plan = [[task.model_dump(mode='json') for task in simple_plan]]
