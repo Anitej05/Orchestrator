@@ -7,6 +7,9 @@ queries into pandas operations using a ReAct-style reasoning loop.
 
 import logging
 import json
+import time
+import psutil
+import os
 from typing import Dict, List, Any, Optional, Tuple
 
 import pandas as pd
@@ -36,6 +39,48 @@ class SpreadsheetQueryAgent:
     def __init__(self):
         self.providers = []
         self._init_providers()
+        self._start_time = time.time()
+        self.metrics = {
+            "queries": {
+                "total": 0,
+                "successful": 0,
+                "failed": 0
+            },
+            "llm_calls": {
+                "total": 0,
+                "cerebras": 0,
+                "groq": 0,
+                "retries": 0,
+                "failures": 0
+            },
+            "tokens": {
+                "input_total": 0,
+                "output_total": 0,
+                "estimated_cost_usd": 0.0
+            },
+            "performance": {
+                "total_latency_ms": 0,
+                "avg_latency_ms": 0,
+                "llm_latency_ms": 0,
+                "execution_latency_ms": 0,
+                "queries_completed": 0
+            },
+            "cache": {
+                "hits": 0,
+                "misses": 0,
+                "hit_rate": 0.0
+            },
+            "retry": {
+                "total_retries": 0,
+                "successful_retries": 0,
+                "retry_success_rate": 0.0
+            },
+            "resource": {
+                "peak_memory_mb": 0,
+                "avg_cpu_percent": 0,
+                "current_memory_mb": 0
+            }
+        }
     
     def _init_providers(self):
         """Initialize LLM providers with fallback chain"""
@@ -67,28 +112,72 @@ class SpreadsheetQueryAgent:
         else:
             logger.warning("⚠️ No LLM providers available for Query Agent")
     
-    def _get_completion(self, messages: List[Dict], temperature: float = None) -> str:
-        """Get LLM completion with fallback"""
+    def _get_completion(self, messages: List[Dict], temperature: float = None) -> Tuple[str, Dict[str, Any]]:
+        """Get LLM completion with fallback and metrics tracking
+        
+        Returns:
+            Tuple of (response_text, metrics_dict)
+        """
         if not self.providers:
             raise RuntimeError("No LLM providers available")
         
         if temperature is None:
             temperature = LLM_TEMPERATURE
         
+        llm_start = time.time()
+        call_metrics = {
+            "provider_used": None,
+            "retries": 0,
+            "tokens_input": 0,
+            "tokens_output": 0,
+            "latency_ms": 0
+        }
+        
         last_error = None
-        for provider in self.providers:
+        for idx, provider in enumerate(self.providers):
             try:
                 logger.info(f"🤖 Using {provider['name'].upper()} for query analysis")
+                self.metrics["llm_calls"]["total"] += 1
+                self.metrics["llm_calls"][provider['name']] += 1
+                
+                if idx > 0:
+                    self.metrics["llm_calls"]["retries"] += 1
+                    self.metrics["retry"]["total_retries"] += 1
+                    call_metrics["retries"] = idx
+                
                 response = provider["client"].chat.completions.create(
                     model=provider["model"],
                     messages=messages,
                     temperature=temperature,
                     max_tokens=provider["max_tokens"]
                 )
-                return response.choices[0].message.content.strip()
+                
+                # Track token usage
+                if hasattr(response, 'usage'):
+                    call_metrics["tokens_input"] = response.usage.prompt_tokens
+                    call_metrics["tokens_output"] = response.usage.completion_tokens
+                    self.metrics["tokens"]["input_total"] += response.usage.prompt_tokens
+                    self.metrics["tokens"]["output_total"] += response.usage.completion_tokens
+                    
+                    # Estimate cost (rough estimates: $0.10 per 1M input tokens, $0.30 per 1M output tokens)
+                    cost = (response.usage.prompt_tokens * 0.10 / 1_000_000) + \
+                           (response.usage.completion_tokens * 0.30 / 1_000_000)
+                    self.metrics["tokens"]["estimated_cost_usd"] += cost
+                
+                call_metrics["provider_used"] = provider['name']
+                call_metrics["latency_ms"] = (time.time() - llm_start) * 1000
+                self.metrics["performance"]["llm_latency_ms"] += call_metrics["latency_ms"]
+                
+                if idx > 0:
+                    self.metrics["retry"]["successful_retries"] += 1
+                
+                return response.choices[0].message.content.strip(), call_metrics
+                
             except Exception as e:
                 logger.warning(f"⚠️ {provider['name'].upper()} failed: {str(e)[:100]}")
                 last_error = e
+                if idx == len(self.providers) - 1:
+                    self.metrics["llm_calls"]["failures"] += 1
                 continue
         
         raise RuntimeError(f"All LLM providers failed. Last error: {last_error}")
@@ -237,7 +326,25 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
         Returns:
             QueryResult with answer, steps, and final data
         """
+        # Track query start time and resources
+        query_start = time.time()
+        process = psutil.Process(os.getpid())
+        start_memory = process.memory_info().rss / 1024 / 1024  # MB
+        
+        self.metrics["queries"]["total"] += 1
+        
+        query_metrics = {
+            "llm_calls": 0,
+            "tokens_input": 0,
+            "tokens_output": 0,
+            "retries": 0,
+            "cache_hit": False,
+            "iterations": 0,
+            "latency_ms": 0
+        }
+        
         if not self.providers:
+            self.metrics["queries"]["failed"] += 1
             return QueryResult(
                 question=question,
                 answer="LLM providers not available. Please check API keys.",
@@ -250,7 +357,14 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
         cached_result = spreadsheet_memory.get_cached_query(question, file_id, thread_id)
         if cached_result:
             logger.info(f"✨ Using cached result for query: {question[:50]}...")
+            self.metrics["cache"]["hits"] += 1
+            query_metrics["cache_hit"] = True
+            query_metrics["latency_ms"] = (time.time() - query_start) * 1000
+            cached_result.execution_metrics = query_metrics
+            self._log_execution_metrics(query_metrics, True)
             return cached_result
+        
+        self.metrics["cache"]["misses"] += 1
         
         # Working copy of dataframe for this session
         current_df = df.copy()
@@ -272,8 +386,13 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
             logger.info(f"📊 Query iteration {iteration}/{max_iterations}")
             
             try:
-                # Get LLM response
-                response_text = self._get_completion(conversation)
+                # Get LLM response with metrics
+                response_text, call_metrics = self._get_completion(conversation)
+                query_metrics["llm_calls"] += 1
+                query_metrics["tokens_input"] += call_metrics["tokens_input"]
+                query_metrics["tokens_output"] += call_metrics["tokens_output"]
+                query_metrics["retries"] += call_metrics["retries"]
+                query_metrics["iterations"] = iteration
                 
                 # Parse JSON response
                 try:
@@ -367,6 +486,7 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
                     else:
                         final_data = None
                     
+                    # Create query result first
                     query_result = QueryResult(
                         question=question,
                         answer=final_answer,
@@ -375,6 +495,47 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
                         success=True,
                         final_dataframe=current_df  # Return the modified dataframe
                     )
+                    
+                    # Calculate final metrics
+                    query_metrics["latency_ms"] = (time.time() - query_start) * 1000
+                    end_memory = process.memory_info().rss / 1024 / 1024
+                    query_metrics["memory_used_mb"] = end_memory - start_memory
+                    
+                    # Update session metrics
+                    self.metrics["queries"]["successful"] += 1
+                    self.metrics["performance"]["total_latency_ms"] += query_metrics["latency_ms"]
+                    self.metrics["performance"]["queries_completed"] += 1
+                    
+                    if self.metrics["performance"]["queries_completed"] > 0:
+                        self.metrics["performance"]["avg_latency_ms"] = round(
+                            self.metrics["performance"]["total_latency_ms"] / 
+                            self.metrics["performance"]["queries_completed"], 2
+                        )
+                    
+                    # Update resource metrics
+                    self.metrics["resource"]["peak_memory_mb"] = max(
+                        self.metrics["resource"]["peak_memory_mb"], end_memory
+                    )
+                    self.metrics["resource"]["current_memory_mb"] = end_memory
+                    
+                    # Calculate rates
+                    total_cache = self.metrics["cache"]["hits"] + self.metrics["cache"]["misses"]
+                    if total_cache > 0:
+                        self.metrics["cache"]["hit_rate"] = round(
+                            self.metrics["cache"]["hits"] / total_cache * 100, 1
+                        )
+                    
+                    if self.metrics["retry"]["total_retries"] > 0:
+                        self.metrics["retry"]["retry_success_rate"] = round(
+                            self.metrics["retry"]["successful_retries"] / 
+                            self.metrics["retry"]["total_retries"] * 100, 1
+                        )
+                    
+                    # Add metrics to result
+                    query_result.execution_metrics = query_metrics
+                    
+                    # Log metrics
+                    self._log_execution_metrics(query_metrics, True)
                     
                     # Cache the result
                     spreadsheet_memory.cache_query_result(question, query_result, file_id, thread_id)
@@ -399,6 +560,7 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
                 break
         
         # Max iterations reached
+        self.metrics["queries"]["failed"] += 1
         return QueryResult(
             question=question,
             answer="Could not complete the query within the maximum iterations.",
@@ -407,6 +569,58 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
             success=False,
             error="Max iterations reached"
         )
+    
+    def _log_execution_metrics(self, exec_metrics: Dict[str, Any], success: bool):
+        """Log detailed execution metrics with visual formatting."""
+        status_emoji = "✅" if success else "❌"
+        
+        logger.info("=" * 80)
+        logger.info(f"{status_emoji} SPREADSHEET AGENT EXECUTION METRICS")
+        logger.info("=" * 80)
+        logger.info(f"📊 Performance:")
+        logger.info(f"  ⏱️  Total Latency:        {exec_metrics.get('latency_ms', 0):.2f} ms")
+        logger.info(f"  🔄 Iterations:           {exec_metrics.get('iterations', 0)}")
+        logger.info(f"  💾 Cache Hit:            {'Yes' if exec_metrics.get('cache_hit') else 'No'}")
+        logger.info(f"")
+        logger.info(f"📈 LLM Statistics:")
+        logger.info(f"  🤖 API Calls:            {exec_metrics.get('llm_calls', 0)}")
+        logger.info(f"  🔄 Retries:              {exec_metrics.get('retries', 0)}")
+        logger.info(f"  📝 Tokens Input:         {exec_metrics.get('tokens_input', 0)}")
+        logger.info(f"  📤 Tokens Output:        {exec_metrics.get('tokens_output', 0)}")
+        logger.info(f"  💰 Total Tokens:         {exec_metrics.get('tokens_input', 0) + exec_metrics.get('tokens_output', 0)}")
+        logger.info(f"")
+        
+        # Session totals
+        logger.info(f"🎯 Session Totals:")
+        logger.info(f"  📝 Total Queries:        {self.metrics['queries']['total']}")
+        logger.info(f"  ✅ Successful:           {self.metrics['queries']['successful']}")
+        logger.info(f"  ❌ Failed:               {self.metrics['queries']['failed']}")
+        logger.info(f"  ⏱️  Avg Latency:          {self.metrics['performance']['avg_latency_ms']:.2f} ms")
+        logger.info(f"  💾 Cache Hit Rate:       {self.metrics['cache']['hit_rate']:.1f}%")
+        logger.info(f"  🔄 Retry Success:        {self.metrics['retry']['retry_success_rate']:.1f}%")
+        logger.info(f"  🧠 Memory Used:          {exec_metrics.get('memory_used_mb', 0):.1f} MB")
+        logger.info(f"  📊 Peak Memory:          {self.metrics['resource']['peak_memory_mb']:.1f} MB")
+        logger.info(f"  💰 Est. Cost:            ${self.metrics['tokens']['estimated_cost_usd']:.4f}")
+        logger.info("=" * 80)
+    
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get current metrics with computed values."""
+        uptime_seconds = time.time() - self._start_time
+        
+        # Update CPU usage
+        try:
+            process = psutil.Process(os.getpid())
+            self.metrics["resource"]["avg_cpu_percent"] = process.cpu_percent(interval=0.1)
+        except:
+            pass
+        
+        return {
+            **self.metrics,
+            "uptime_seconds": round(uptime_seconds, 2),
+            "success_rate": round(
+                self.metrics["queries"]["successful"] / self.metrics["queries"]["total"] * 100, 1
+            ) if self.metrics["queries"]["total"] > 0 else 0
+        }
 
 
 # Global query agent instance

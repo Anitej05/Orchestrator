@@ -10,8 +10,7 @@
   "requires_credentials": false,
   "credential_fields": [],
   "connection_config": {
-    "base_url": "http://localhost:8041",
-    "request_format": "form"
+    "base_url": "http://localhost:8041"
   },
   "endpoints": [
     {

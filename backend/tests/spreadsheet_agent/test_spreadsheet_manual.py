@@ -37,7 +37,7 @@ async def test_analyze_spreadsheet():
     
     # Put your test file in: backend/tests/test_data/
     # Example: backend/tests/test_data/sales_data.csv
-    test_file = "backend/tests/test_data/sales_data.csv"
+    test_file = "tests/test_data/sales_data.csv"
     
     if not Path(test_file).exists():
         print(f"⚠️  Test file not found: {test_file}")
@@ -64,10 +64,112 @@ async def test_analyze_spreadsheet():
         print(f"✅ Analysis Result: {result.answer if hasattr(result, 'answer') else result}")
         print(f"📊 DataFrame shape: {df.shape}")
         print(f"📋 Columns: {list(df.columns)}")
+        
+        # Display execution metrics if available
+        if hasattr(result, 'execution_metrics') and result.execution_metrics:
+            _display_metrics(result.execution_metrics, "Query Analysis")
+        
+        # Display session metrics
+        _display_session_metrics(query_agent_instance.get_metrics())
+        
     except Exception as e:
         print(f"❌ Test failed: {e}")
         import traceback
         traceback.print_exc()
+
+
+def _display_metrics(metrics: dict, operation_name: str = "Operation"):
+    """Display execution metrics in a beautiful format."""
+    print("\n" + "━"*70)
+    print(f"📊 {operation_name} - EXECUTION METRICS")
+    print("━"*70)
+    
+    # Performance metrics
+    print("\n⏱️  PERFORMANCE:")
+    print(f"  Total Latency:        {metrics.get('latency_ms', 0):.2f} ms")
+    print(f"  Cache Hit:            {'✅ Yes' if metrics.get('cache_hit') else '❌ No'}")
+    print(f"  Iterations:           {metrics.get('iterations', 0)}")
+    
+    # LLM metrics
+    if metrics.get('llm_calls', 0) > 0:
+        print("\n🤖 LLM STATISTICS:")
+        print(f"  API Calls:            {metrics.get('llm_calls', 0)}")
+        print(f"  Retries:              {metrics.get('retries', 0)}")
+        print(f"  Input Tokens:         {metrics.get('tokens_input', 0):,}")
+        print(f"  Output Tokens:        {metrics.get('tokens_output', 0):,}")
+        print(f"  Total Tokens:         {(metrics.get('tokens_input', 0) + metrics.get('tokens_output', 0)):,}")
+    
+    # Resource usage
+    if 'memory_used_mb' in metrics:
+        print("\n💾 RESOURCE USAGE:")
+        print(f"  Memory Used:          {metrics.get('memory_used_mb', 0):.2f} MB")
+    
+    print("━"*70)
+
+
+def _display_session_metrics(metrics: dict):
+    """Display session-level metrics."""
+    print("\n" + "═"*70)
+    print("🎯 SESSION-LEVEL METRICS")
+    print("═"*70)
+    
+    # Query statistics
+    queries = metrics.get('queries', {})
+    print("\n📊 QUERIES:")
+    print(f"  Total:                {queries.get('total', 0)}")
+    print(f"  Successful:           {queries.get('successful', 0)} ✅")
+    print(f"  Failed:               {queries.get('failed', 0)} ❌")
+    print(f"  Success Rate:         {metrics.get('success_rate', 0):.1f}%")
+    
+    # Performance statistics
+    perf = metrics.get('performance', {})
+    print("\n⚡ PERFORMANCE:")
+    print(f"  Avg Latency:          {perf.get('avg_latency_ms', 0):.2f} ms")
+    print(f"  Completed:            {perf.get('queries_completed', 0)}")
+    
+    # LLM statistics
+    llm = metrics.get('llm_calls', {})
+    print("\n🤖 LLM CALLS:")
+    print(f"  Total:                {llm.get('total', 0)}")
+    print(f"  Cerebras:             {llm.get('cerebras', 0)}")
+    print(f"  Groq:                 {llm.get('groq', 0)}")
+    print(f"  Retries:              {llm.get('retries', 0)}")
+    print(f"  Failures:             {llm.get('failures', 0)}")
+    
+    # Token statistics
+    tokens = metrics.get('tokens', {})
+    if tokens.get('input_total', 0) > 0:
+        print("\n📝 TOKEN USAGE:")
+        print(f"  Input Tokens:         {tokens.get('input_total', 0):,}")
+        print(f"  Output Tokens:        {tokens.get('output_total', 0):,}")
+        print(f"  Total Tokens:         {(tokens.get('input_total', 0) + tokens.get('output_total', 0)):,}")
+        print(f"  Estimated Cost:       ${tokens.get('estimated_cost_usd', 0):.4f}")
+    
+    # Cache statistics
+    cache = metrics.get('cache', {})
+    print("\n💾 CACHE:")
+    print(f"  Hits:                 {cache.get('hits', 0)}")
+    print(f"  Misses:               {cache.get('misses', 0)}")
+    print(f"  Hit Rate:             {cache.get('hit_rate', 0):.1f}%")
+    
+    # Retry statistics
+    retry = metrics.get('retry', {})
+    if retry.get('total_retries', 0) > 0:
+        print("\n🔄 RETRY:")
+        print(f"  Total Retries:        {retry.get('total_retries', 0)}")
+        print(f"  Successful:           {retry.get('successful_retries', 0)}")
+        print(f"  Success Rate:         {retry.get('retry_success_rate', 0):.1f}%")
+    
+    # Resource usage
+    resource = metrics.get('resource', {})
+    print("\n🖥️  RESOURCES:")
+    print(f"  Current Memory:       {resource.get('current_memory_mb', 0):.2f} MB")
+    print(f"  Peak Memory:          {resource.get('peak_memory_mb', 0):.2f} MB")
+    print(f"  Avg CPU:              {resource.get('avg_cpu_percent', 0):.1f}%")
+    
+    # Uptime
+    print(f"\n⏰ UPTIME:              {metrics.get('uptime_seconds', 0):.2f} seconds")
+    print("═"*70)
 
 
 async def test_execute_pandas():
@@ -77,7 +179,7 @@ async def test_execute_pandas():
     print("="*60 + "\n")
     
     # Put your test file in: backend/tests/test_data/
-    test_file = "backend/tests/test_data/sales_data.csv"
+    test_file = "tests/test_data/sales_data.csv"
     
     if not Path(test_file).exists():
         print(f"⚠️  Test file not found: {test_file}")
@@ -119,7 +221,7 @@ async def test_get_info():
     print("="*60 + "\n")
     
     # Put your test file in: backend/tests/test_data/
-    test_file = "backend/tests/test_data/sales_data.csv"
+    test_file = "tests/test_data/sales_data.csv"
     
     if not Path(test_file).exists():
         print(f"⚠️  Test file not found: {test_file}")
@@ -149,7 +251,7 @@ async def test_data_transformation():
     print("🔄 TEST 4: Data Transformation")
     print("="*60 + "\n")
     
-    test_file = "backend/tests/test_data/sales_data.csv"
+    test_file = "tests/test_data/sales_data.csv"
     
     if not Path(test_file).exists():
         print(f"⚠️  Test file not found: {test_file}")
@@ -187,7 +289,7 @@ async def test_data_transformation():
 async def main():
     """Run all spreadsheet agent tests."""
     print("\n\n" + "🟢"*30)
-    print("🚀 SPREADSHEET AGENT MANUAL TESTS")
+    print("🚀 SPREADSHEET AGENT MANUAL TESTS WITH METRICS")
     print("🟢"*30 + "\n")
     
     # Run tests
@@ -196,9 +298,13 @@ async def main():
     await test_get_info()
     await test_data_transformation()
     
-    print("\n\n" + "="*60)
+    # Final session summary
+    print("\n\n" + "="*70)
     print("✅ ALL TESTS COMPLETED")
-    print("="*60 + "\n")
+    print("="*70)
+    print("\n📊 FINAL SESSION METRICS:")
+    _display_session_metrics(query_agent_instance.get_metrics())
+    print("\n")
 
 
 if __name__ == "__main__":

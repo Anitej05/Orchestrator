@@ -24,6 +24,7 @@ import re
 import base64
 import numpy as np
 import textwrap
+import psutil
 from pathlib import Path
 from contextlib import redirect_stdout, redirect_stderr
 from pydantic import BaseModel, Field, ValidationError, create_model
@@ -33,7 +34,121 @@ from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, AI
 from langchain_cerebras import ChatCerebras
 from langchain_nvidia_ai_endpoints import ChatNVIDIA
 from langchain_groq import ChatGroq
-from typing import Protocol, Any
+from typing import Protocol, Any, Dict
+
+# Global orchestrator metrics
+ORCHESTRATOR_METRICS = {
+    "requests": {
+        "total": 0,
+        "successful": 0,
+        "failed": 0
+    },
+    "agents": {
+        "total_calls": 0,
+        "by_agent": {},
+        "successful_calls": 0,
+        "failed_calls": 0
+    },
+    "performance": {
+        "total_latency_ms": 0,
+        "avg_latency_ms": 0,
+        "requests_completed": 0
+    },
+    "errors": {
+        "total": 0,
+        "planning_errors": 0,
+        "execution_errors": 0,
+        "agent_errors": 0
+    },
+    "resource": {
+        "peak_memory_mb": 0,
+        "current_memory_mb": 0
+    },
+    "start_time": time.time()
+}
+
+def get_orchestrator_metrics() -> Dict[str, Any]:
+    """Get comprehensive orchestrator metrics."""
+    uptime_seconds = time.time() - ORCHESTRATOR_METRICS["start_time"]
+    
+    total_requests = ORCHESTRATOR_METRICS["requests"]["total"]
+    success_rate = (
+        (ORCHESTRATOR_METRICS["requests"]["successful"] / total_requests * 100) 
+        if total_requests > 0 else 0
+    )
+    
+    # Update resource metrics
+    process = psutil.Process()
+    ORCHESTRATOR_METRICS["resource"]["current_memory_mb"] = process.memory_info().rss / 1024 / 1024
+    
+    return {
+        "uptime_seconds": uptime_seconds,
+        "requests": ORCHESTRATOR_METRICS["requests"].copy(),
+        "agents": ORCHESTRATOR_METRICS["agents"].copy(),
+        "success_rate": success_rate,
+        "performance": ORCHESTRATOR_METRICS["performance"].copy(),
+        "errors": ORCHESTRATOR_METRICS["errors"].copy(),
+        "resource": ORCHESTRATOR_METRICS["resource"].copy()
+    }
+
+def log_orchestrator_metrics(operation: str, success: bool):
+    """Log orchestrator metrics with clean formatting."""
+    status_emoji = "✅" if success else "❌"
+    
+    logging.info("")
+    logging.info(f"{status_emoji} ORCHESTRATOR METRICS - {operation}")
+    logging.info("")
+    
+    # Requests
+    logging.info("Requests:")
+    logging.info(f"  Total: {ORCHESTRATOR_METRICS['requests']['total']}")
+    logging.info(f"  Successful: {ORCHESTRATOR_METRICS['requests']['successful']}")
+    logging.info(f"  Failed: {ORCHESTRATOR_METRICS['requests']['failed']}")
+    success_rate = (ORCHESTRATOR_METRICS['requests']['successful'] / ORCHESTRATOR_METRICS['requests']['total'] * 100) if ORCHESTRATOR_METRICS['requests']['total'] > 0 else 0
+    logging.info(f"  Success Rate: {success_rate:.1f}%")
+    
+    # Agent Calls
+    logging.info("")
+    logging.info("Agent Calls:")
+    logging.info(f"  Total: {ORCHESTRATOR_METRICS['agents']['total_calls']}")
+    logging.info(f"  Successful: {ORCHESTRATOR_METRICS['agents']['successful_calls']}")
+    logging.info(f"  Failed: {ORCHESTRATOR_METRICS['agents']['failed_calls']}")
+    
+    # Top agents used
+    if ORCHESTRATOR_METRICS['agents']['by_agent']:
+        logging.info("")
+        logging.info("Top Agents Used:")
+        sorted_agents = sorted(
+            ORCHESTRATOR_METRICS['agents']['by_agent'].items(),
+            key=lambda x: x[1],
+            reverse=True
+        )[:5]
+        for agent_name, count in sorted_agents:
+            logging.info(f"  {agent_name}: {count} calls")
+    
+    # Performance
+    logging.info("")
+    logging.info("Performance:")
+    logging.info(f"  Requests Completed: {ORCHESTRATOR_METRICS['performance']['requests_completed']}")
+    logging.info(f"  Total Time: {ORCHESTRATOR_METRICS['performance']['total_latency_ms']:.0f} ms")
+    if ORCHESTRATOR_METRICS['performance']['requests_completed'] > 0:
+        logging.info(f"  Avg Time: {ORCHESTRATOR_METRICS['performance']['avg_latency_ms']:.0f} ms")
+    
+    # Errors
+    if ORCHESTRATOR_METRICS['errors']['total'] > 0:
+        logging.info("")
+        logging.info("Errors:")
+        logging.info(f"  Total: {ORCHESTRATOR_METRICS['errors']['total']}")
+        logging.info(f"  Planning: {ORCHESTRATOR_METRICS['errors']['planning_errors']}")
+        logging.info(f"  Execution: {ORCHESTRATOR_METRICS['errors']['execution_errors']}")
+        logging.info(f"  Agent: {ORCHESTRATOR_METRICS['errors']['agent_errors']}")
+    
+    # Resources
+    logging.info("")
+    logging.info("Resources:")
+    logging.info(f"  Current Memory: {ORCHESTRATOR_METRICS['resource']['current_memory_mb']:.1f} MB")
+    logging.info(f"  Peak Memory: {ORCHESTRATOR_METRICS['resource']['peak_memory_mb']:.1f} MB")
+    logging.info("")
 
 # Define a protocol for the invoke_json method to help with type checking
 class JsonInvoker(Protocol):
@@ -261,6 +376,22 @@ def _summarize_completed_tasks_for_context(completed_tasks: List[Dict]) -> List[
                 max_length = 5000
                 summary["result"] = answer_text[:max_length] + ("..." if len(answer_text) > max_length else "")
                 logger.info(f"📝 Document answer extracted: length={len(answer_text)}, truncated_to={len(summary['result'])}")
+            # Special handling for spreadsheet nl_query results with nested "result.result.answer" structure
+            elif "success" in result and result.get("success") and isinstance(result.get("result"), dict):
+                # Spreadsheet agent returns: {success: true, result: {answer: "...", question: "...", ...}}
+                nested_result = result.get("result", {})
+                if "answer" in nested_result:
+                    answer_text = nested_result["answer"]
+                    max_length = 5000
+                    summary["result"] = answer_text[:max_length] + ("..." if len(answer_text) > max_length else "")
+                    logger.info(f"📊 Spreadsheet answer extracted from nested result: length={len(answer_text)}, truncated_to={len(summary['result'])}")
+                else:
+                    # Fallback - keep the whole nested result if it's small enough
+                    result_str = json.dumps(nested_result, default=str)
+                    if len(result_str) < 2000:
+                        summary["result"] = nested_result
+                    else:
+                        summary["result"] = str(nested_result)[:500] + "..."
             else:
                 # Check if result is structured data (small dict with simple values like numbers, bools, short strings)
                 # This preserves API responses, stock data, weather data, etc.

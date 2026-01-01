@@ -8,8 +8,8 @@ import time
 import uuid
 import base64
 import logging
-import asyncio
-from typing import Dict, Any, List, Optional
+import asyncioimport psutil
+import osfrom typing import Dict, Any, List, Optional
 import httpx
 
 from .browser import Browser
@@ -91,6 +91,54 @@ class BrowserAgent:
             screenshot_manager=self.screenshot_manager,
             thread_id=self.thread_id
         )
+        
+        # Metrics tracking
+        self._metrics_start_time = time.time()
+        self.metrics = {
+            "actions": {
+                "total": 0,
+                "successful": 0,
+                "failed": 0,
+                "click": 0,
+                "type": 0,
+                "navigate": 0,
+                "scroll": 0,
+                "wait": 0,
+                "extract": 0,
+                "other": 0
+            },
+            "llm_calls": {
+                "total": 0,
+                "planning": 0,
+                "vision": 0,
+                "failures": 0
+            },
+            "performance": {
+                "total_latency_ms": 0,
+                "avg_action_ms": 0,
+                "actions_completed": 0
+            },
+            "navigation": {
+                "pages_visited": 0,
+                "unique_urls": set(),
+                "successful_navigations": 0,
+                "failed_navigations": 0
+            },
+            "vision": {
+                "screenshots_taken": 0,
+                "vision_analyses": 0
+            },
+            "errors": {
+                "total": 0,
+                "action_errors": 0,
+                "llm_errors": 0,
+                "browser_errors": 0
+            },
+            "resource": {
+                "peak_memory_mb": 0,
+                "current_memory_mb": 0
+            }
+        }
 
     def _update_page_knowledge(self, url: str, elements: List[Dict]):
         """Update memory of elements for this URL"""
@@ -453,6 +501,9 @@ class BrowserAgent:
                     action = await self.vision.plan_action_with_vision(
                         vision_task_context, screenshot_b64, page_content, self.memory.history, step
                     )
+                    self.metrics["llm_calls"]["vision"] += 1
+                    self.metrics["llm_calls"]["total"] += 1
+                    self.metrics["vision"]["vision_analyses"] += 1
                 
                 if not action:
                     if use_vision: logger.info("⚠️ Vision failed, falling back to TEXT")
@@ -461,6 +512,8 @@ class BrowserAgent:
                     action = await self.llm.plan_action(
                         text_task_context, page_content, self.memory.history, step
                     )
+                    self.metrics["llm_calls"]["planning"] += 1
+                    self.metrics["llm_calls"]["total"] += 1
 
                 action_names = [a.name for a in action.actions]
                 logger.info(f"💭 Action Sequence: {action_names} | 💡 {action.reasoning[:100]}...")
@@ -495,7 +548,23 @@ class BrowserAgent:
 
                 # Cache elements on executor for index-based clicking
                 self.executor._cached_elements = page_content.get('elements', [])
+                
+                # Track actions by type
+                action_start = time.time()
+                for act in action.actions:
+                    action_type = act.name
+                    if action_type in self.metrics["actions"]:
+                        self.metrics["actions"][action_type] += 1
+                    else:
+                        self.metrics["actions"]["other"] += 1
+                    self.metrics["actions"]["total"] += 1
+                
                 result = await self.executor.execute(active_page, action)
+                
+                # Track action timing
+                action_time = (time.time() - action_start) * 1000
+                self.metrics["performance"]["total_latency_ms"] += action_time
+                self.metrics["performance"]["actions_completed"] += 1
                 
                 # Wait for any background downloads trigger by clicks
                 await self._wait_for_downloads()
@@ -622,6 +691,7 @@ class BrowserAgent:
                 })
 
                 if result.success:
+                    self.metrics["actions"]["successful"] += 1
                     logger.info(f"✅ Sequence Succeeded: {result.message}")
                     
                     if action.completed_subtasks:
@@ -652,6 +722,9 @@ class BrowserAgent:
                             self.memory.mark_completed(current_subtask.id, "Data extracted")
                             logger.info(f"✅ Subtask '{current_subtask.description}' marked complete (Data extracted).")
                 else:
+                    self.metrics["actions"]["failed"] += 1
+                    self.metrics["errors"]["action_errors"] += 1
+                    self.metrics["errors"]["total"] += 1
                     logger.warning(f"⚠️ Sequence Failed at {result.action}: {result.message}")
                     
                     # Check if we should trigger intelligent replanning
@@ -681,11 +754,33 @@ class BrowserAgent:
                         self.next_mode = "vision"
                 
             self.is_running = False
-            return self._build_final_result()
+            
+            # Update resource metrics
+            process = psutil.Process(os.getpid())
+            self.metrics["resource"]["current_memory_mb"] = process.memory_info().rss / 1024 / 1024
+            self.metrics["resource"]["peak_memory_mb"] = max(
+                self.metrics["resource"]["peak_memory_mb"],
+                self.metrics["resource"]["current_memory_mb"]
+            )
+            
+            # Calculate averages
+            if self.metrics["performance"]["actions_completed"] > 0:
+                self.metrics["performance"]["avg_action_ms"] = (
+                    self.metrics["performance"]["total_latency_ms"] / 
+                    self.metrics["performance"]["actions_completed"]
+                )
+            
+            # Log execution metrics
+            final_result = self._build_final_result()
+            self._log_execution_metrics(final_result.success)
+            return final_result
 
         except Exception as e:
             self.is_running = False
+            self.metrics["errors"]["total"] += 1
+            self.metrics["errors"]["browser_errors"] += 1
             logger.error(f"❌ Critical Agent Failure: {e}", exc_info=True)
+            self._log_execution_metrics(False)
             return BrowserResult(success=False, task_summary=f"Critical failure: {str(e)}", error=str(e))
         finally:
             # Final wait for downloads before closing
@@ -839,3 +934,100 @@ class BrowserAgent:
              logger.info(f"    Reasoning: {item.get('llm_reasoning', 'N/A')}")
              
         return result
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get comprehensive agent metrics."""
+        uptime_seconds = time.time() - self._metrics_start_time if hasattr(self, '_metrics_start_time') else 0
+        
+        total_actions = self.metrics["actions"]["total"]
+        success_rate = (
+            (self.metrics["actions"]["successful"] / total_actions * 100) 
+            if total_actions > 0 else 0
+        )
+        
+        return {
+            "uptime_seconds": uptime_seconds,
+            "actions": self.metrics["actions"].copy(),
+            "success_rate": success_rate,
+            "llm_calls": self.metrics["llm_calls"].copy(),
+            "performance": self.metrics["performance"].copy(),
+            "navigation": {
+                "pages_visited": self.metrics["navigation"]["pages_visited"],
+                "unique_urls_count": len(self.metrics["navigation"]["unique_urls"]),
+                "successful_navigations": self.metrics["navigation"]["successful_navigations"],
+                "failed_navigations": self.metrics["navigation"]["failed_navigations"]
+            },
+            "vision": self.metrics["vision"].copy(),
+            "errors": self.metrics["errors"].copy(),
+            "resource": self.metrics["resource"].copy()
+        }
+
+    def _log_execution_metrics(self, success: bool):
+        """Log execution metrics with clean formatting."""
+        status_emoji = "✅" if success else "❌"
+        
+        logger.info("")
+        logger.info(f"{status_emoji} BROWSER AGENT EXECUTION METRICS")
+        logger.info("")
+        
+        # Performance
+        logger.info("Performance:")
+        logger.info(f"  Total Actions: {self.metrics['performance']['actions_completed']}")
+        logger.info(f"  Total Time: {self.metrics['performance']['total_latency_ms']:.0f} ms")
+        logger.info(f"  Avg Action Time: {self.metrics['performance']['avg_action_ms']:.0f} ms")
+        
+        # Actions
+        logger.info("")
+        logger.info("Actions:")
+        logger.info(f"  Total: {self.metrics['actions']['total']}")
+        logger.info(f"  Successful: {self.metrics['actions']['successful']}")
+        logger.info(f"  Failed: {self.metrics['actions']['failed']}")
+        success_rate = (self.metrics['actions']['successful'] / self.metrics['actions']['total'] * 100) if self.metrics['actions']['total'] > 0 else 0
+        logger.info(f"  Success Rate: {success_rate:.1f}%")
+        
+        # Action breakdown
+        logger.info("")
+        logger.info("Action Types:")
+        for action_type in ['click', 'type', 'navigate', 'scroll', 'wait', 'extract', 'other']:
+            count = self.metrics['actions'].get(action_type, 0)
+            if count > 0:
+                logger.info(f"  {action_type.capitalize()}: {count}")
+        
+        # Navigation
+        logger.info("")
+        logger.info("Navigation:")
+        logger.info(f"  Pages Visited: {self.metrics['navigation']['pages_visited']}")
+        logger.info(f"  Unique URLs: {len(self.metrics['navigation']['unique_urls'])}")
+        
+        # LLM Calls
+        logger.info("")
+        logger.info("LLM Calls:")
+        logger.info(f"  Total: {self.metrics['llm_calls']['total']}")
+        logger.info(f"  Planning: {self.metrics['llm_calls']['planning']}")
+        logger.info(f"  Vision: {self.metrics['llm_calls']['vision']}")
+        if self.metrics['llm_calls']['failures'] > 0:
+            logger.info(f"  Failures: {self.metrics['llm_calls']['failures']}")
+        
+        # Vision
+        if self.metrics['vision']['screenshots_taken'] > 0 or self.metrics['vision']['vision_analyses'] > 0:
+            logger.info("")
+            logger.info("Vision:")
+            logger.info(f"  Screenshots: {self.metrics['vision']['screenshots_taken']}")
+            logger.info(f"  Analyses: {self.metrics['vision']['vision_analyses']}")
+        
+        # Errors
+        if self.metrics['errors']['total'] > 0:
+            logger.info("")
+            logger.info("Errors:")
+            logger.info(f"  Total: {self.metrics['errors']['total']}")
+            logger.info(f"  Action Errors: {self.metrics['errors']['action_errors']}")
+            logger.info(f"  LLM Errors: {self.metrics['errors']['llm_errors']}")
+            logger.info(f"  Browser Errors: {self.metrics['errors']['browser_errors']}")
+        
+        # Resources
+        logger.info("")
+        logger.info("Resources:")
+        logger.info(f"  Current Memory: {self.metrics['resource']['current_memory_mb']:.1f} MB")
+        logger.info(f"  Peak Memory: {self.metrics['resource']['peak_memory_mb']:.1f} MB")
+        logger.info("")
+

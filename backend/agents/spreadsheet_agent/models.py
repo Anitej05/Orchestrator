@@ -93,6 +93,7 @@ class QueryResult(BaseModel):
     final_data: Optional[List[Dict]] = None
     success: bool
     error: Optional[str] = None
+    execution_metrics: Optional[Dict[str, Any]] = None  # Add metrics field
     
     class Config:
         arbitrary_types_allowed = True
