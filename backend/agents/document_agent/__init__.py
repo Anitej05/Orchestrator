@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import logging
 import os
+import asyncio
 from dotenv import load_dotenv
 from aiofiles import open as aio_open
 from fastapi import File, UploadFile
@@ -82,6 +83,39 @@ async def health_check():
         "service": "document-agent",
         "version": "2.0.0"
     }
+
+
+# ============================================================================
+# METRICS
+# ============================================================================
+
+@app.get("/metrics")
+async def get_metrics():
+    """Get current agent metrics including API calls, LLM calls, cache stats, and uptime."""
+    try:
+        agent = get_agent()
+        return {
+            "success": True,
+            "metrics": agent.get_metrics()
+        }
+    except Exception as e:
+        logger.error(f"Failed to get metrics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/metrics/reset")
+async def reset_metrics():
+    """Reset all metrics counters to zero."""
+    try:
+        agent = get_agent()
+        result = agent.reset_metrics()
+        return {
+            "success": True,
+            **result
+        }
+    except Exception as e:
+        logger.error(f"Failed to reset metrics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ============================================================================

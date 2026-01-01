@@ -7,7 +7,7 @@ Designed for cloud deployment with efficient resource management.
 
 import logging
 import time
-from typing import Dict, Any, Optional, Tuple, List
+from typing import Dict, Any, Optional, List
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
@@ -21,7 +21,7 @@ from .state import DocumentSessionManager, DocumentVersionManager, EditAction as
 from .llm import DocumentLLMClient
 from .utils import (
     extract_document_content, create_docx, create_pdf, analyze_document_structure,
-    convert_docx_to_pdf, create_pdf_canvas_display, ensure_directory, extract_document_content
+    convert_docx_to_pdf, create_pdf_canvas_display, ensure_directory
 )
 
 logger = logging.getLogger(__name__)
@@ -29,7 +29,6 @@ logger = logging.getLogger(__name__)
 # Get workspace root (3 levels up from this file: agent.py -> document_agent -> agents -> backend -> root)
 WORKSPACE_ROOT = Path(__file__).parent.parent.parent.parent.resolve()
 DEFAULT_STORAGE_DIR = WORKSPACE_ROOT / "storage" / "documents"
-
 
 class DocumentAgent:
     """
@@ -47,6 +46,91 @@ class DocumentAgent:
         self._cache_lock = Lock()
         self._max_cache_size = 100
 
+        # Enhanced metrics tracking
+        self._cache_hits = 0
+        self._cache_misses = 0
+        self._files_processed = 0
+        self._batch_operations = 0
+        self._start_time = time.time()
+        
+        self.metrics = {
+            "api_calls": {
+                "analyze": 0,
+                "display": 0,
+                "create": 0,
+                "edit": 0,
+                "undo_redo": 0,
+                "versions": 0,
+                "extract": 0
+            },
+            "llm_calls": {
+                "analyze": 0,
+                "edit_planning": 0,
+                "create_planning": 0,
+                "extract": 0,
+                "total": 0
+            },
+            "cache": {
+                "hits": 0,
+                "misses": 0,
+                "size": 0
+            },
+            "processing": {
+                "files_processed": 0,
+                "batch_operations": 0
+            }
+        }
+
+    # ========== LLM CALL TRACKING WRAPPER ==========
+    def _llm(self, func, operation_type: str, *args, **kwargs):
+        """Wrapper to track LLM calls by operation type."""
+        self.metrics["llm_calls"][operation_type] = self.metrics["llm_calls"].get(operation_type, 0) + 1
+        self.metrics["llm_calls"]["total"] += 1
+        return func(*args, **kwargs)
+    
+    # ========== METRICS METHODS ==========
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get current metrics with computed values."""
+        uptime_seconds = time.time() - self._start_time
+        
+        # Update cache metrics
+        self.metrics["cache"]["hits"] = self._cache_hits
+        self.metrics["cache"]["misses"] = self._cache_misses
+        self.metrics["cache"]["size"] = len(self._analysis_cache)
+        
+        # Update processing metrics
+        self.metrics["processing"]["files_processed"] = self._files_processed
+        self.metrics["processing"]["batch_operations"] = self._batch_operations
+        
+        return {
+            **self.metrics,
+            "uptime_seconds": round(uptime_seconds, 2),
+            "cache_hit_rate": round(
+                self._cache_hits / (self._cache_hits + self._cache_misses) * 100, 2
+            ) if (self._cache_hits + self._cache_misses) > 0 else 0
+        }
+    
+    def reset_metrics(self) -> Dict[str, Any]:
+        """Reset all metrics counters."""
+        old_metrics = self.get_metrics()
+        
+        # Reset counters
+        self._cache_hits = 0
+        self._cache_misses = 0
+        self._files_processed = 0
+        self._batch_operations = 0
+        self._start_time = time.time()
+        
+        # Reset metrics dict
+        for key in self.metrics["api_calls"]:
+            self.metrics["api_calls"][key] = 0
+        for key in self.metrics["llm_calls"]:
+            self.metrics["llm_calls"][key] = 0
+        self.metrics["cache"] = {"hits": 0, "misses": 0, "size": len(self._analysis_cache)}
+        self.metrics["processing"] = {"files_processed": 0, "batch_operations": 0}
+        
+        return {"message": "Metrics reset successfully", "previous_metrics": old_metrics}
+
     # ========== ANALYSIS OPERATIONS ==========
 
     def analyze_document(self, request: AnalyzeDocumentRequest) -> Dict[str, Any]:
@@ -58,12 +142,15 @@ class DocumentAgent:
                 file_paths.extend(request.file_paths)
             elif request.file_path:
                 file_paths.append(request.file_path)
-
+            self.metrics["api_calls"]["analyze"] += 1
+            
             # Multi-file batch processing
             if len(file_paths) > 1:
+                self._batch_operations += 1
                 return self._analyze_multiple_files(request, file_paths)
 
             # Single file processing (optimized path)
+            self._files_processed += 1
             return self._analyze_single_file(request, file_paths[0] if file_paths else None)
 
         except Exception as e:
@@ -100,19 +187,35 @@ class DocumentAgent:
                         'errors': [f"File read error: {str(e)}"]
                     }
 
-            # Fallback to vector store if no content
+            # Collect vector store paths
             paths = request.vector_store_paths or ([request.vector_store_path] if request.vector_store_path else [])
-            if not content:
+            
+            # RAG retrieval: Load FAISS indices and retrieve relevant chunks
+            retrieved_context = ""
+            if paths and paths[0]:
+                retrieved_context = self._retrieve_from_vector_stores(paths, request.query)
+                logger.info(f"🔍 RAG retrieval: {'Retrieved context' if retrieved_context else 'No context retrieved'}")
+            
+            # Use retrieved context if available, otherwise fall back to file content
+            if retrieved_context:
+                content = retrieved_context
+            elif not content:
                 if not paths or not paths[0]:
                     return {
                         'success': False,
                         'answer': 'Error: No content or vector store path provided',
                         'errors': ['Missing both file content and vector store path']
                     }
-                content = ""  # Empty content for vector-only queries
+                return {
+                    'success': False,
+                    'answer': 'Error: Vector stores provided but RAG retrieval returned no results',
+                    'errors': ['RAG retrieval failed to extract relevant content']
+                }
 
-            # Analyze with LLM
+            # Analyze with LLM using content (either retrieved from RAG or from file)
             try:
+                self.metrics["llm_calls"]["analyze"] += 1
+                self.metrics["llm_calls"]["total"] += 1
                 answer = self.llm_client.analyze_document_with_query(content, request.query)
             except Exception as e:
                 logger.error(f"LLM analysis failed: {e}")
@@ -235,6 +338,8 @@ class DocumentAgent:
 
             # Extract and analyze
             content, _ = extract_document_content(file_path)
+            self.metrics["llm_calls"]["analyze"] += 1
+            self.metrics["llm_calls"]["total"] += 1
             answer = self.llm_client.analyze_document_with_query(content, query)
             
             result.update({
@@ -257,9 +362,14 @@ class DocumentAgent:
         return result
 
     def _get_cached_result(self, cache_key: str) -> Optional[Dict[str, Any]]:
-        """Thread-safe cache retrieval."""
+        """Thread-safe cache retrieval with hit/miss tracking."""
         with self._cache_lock:
-            return self._analysis_cache.get(cache_key)
+            result = self._analysis_cache.get(cache_key)
+            if result:
+                self._cache_hits += 1
+            else:
+                self._cache_misses += 1
+            return result
 
     def _cache_result(self, cache_key: str, result: Dict[str, Any]) -> None:
         """Thread-safe cache storage with size limit."""
@@ -270,11 +380,73 @@ class DocumentAgent:
                 del self._analysis_cache[first_key]
             self._analysis_cache[cache_key] = result
 
+    def _retrieve_from_vector_stores(self, vector_store_paths: List[str], query: str, top_k: int = 5) -> str:
+        """Load FAISS indices and retrieve relevant chunks using similarity search."""
+        try:
+            from langchain_community.vectorstores import FAISS
+            from langchain_huggingface import HuggingFaceEmbeddings
+            
+            logger.info(f"🔍 Loading {len(vector_store_paths)} FAISS vector store(s) for RAG retrieval")
+            
+            all_chunks = []
+            embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+            
+            for vs_path in vector_store_paths:
+                if not Path(vs_path).exists():
+                    logger.warning(f"Vector store not found: {vs_path}")
+                    continue
+                
+                try:
+                    # Load FAISS index
+                    vector_store = FAISS.load_local(
+                        vs_path,
+                        embeddings,
+                        allow_dangerous_deserialization=True
+                    )
+                    
+                    # Perform similarity search
+                    docs_with_scores = vector_store.similarity_search_with_score(query, k=top_k)
+                    
+                    for doc, score in docs_with_scores:
+                        all_chunks.append({
+                            'content': doc.page_content,
+                            'score': float(score),
+                            'source': vs_path
+                        })
+                    
+                    logger.info(f"✅ Retrieved {len(docs_with_scores)} chunks from {Path(vs_path).name}")
+                    
+                except Exception as e:
+                    logger.error(f"Failed to load/query vector store {vs_path}: {e}")
+                    continue
+            
+            if not all_chunks:
+                logger.warning("No chunks retrieved from any vector store")
+                return ""
+            
+            # Sort by relevance score (lower is better for FAISS L2 distance)
+            all_chunks.sort(key=lambda x: x['score'])
+            
+            # Format retrieved chunks as context
+            context_parts = []
+            for i, chunk in enumerate(all_chunks[:top_k], 1):
+                context_parts.append(f"[Source {i}]\n{chunk['content']}")
+            
+            retrieved_context = "\n\n".join(context_parts)
+            logger.info(f"📝 Prepared RAG context with {len(all_chunks[:top_k])} chunks ({len(retrieved_context)} chars)")
+            
+            return retrieved_context
+            
+        except Exception as e:
+            logger.error(f"RAG retrieval failed: {e}", exc_info=True)
+            return ""
+
     # ========== DISPLAY OPERATIONS ==========
 
     def display_document(self, file_path: str) -> Dict[str, Any]:
         """Display document with canvas."""
         try:
+            self.metrics["api_calls"]["display"] += 1
             if not Path(file_path).exists():
                 return {
                     'success': False,
@@ -324,6 +496,7 @@ class DocumentAgent:
     def create_document(self, request: CreateDocumentRequest) -> Dict[str, Any]:
         """Create a new document."""
         try:
+            self.metrics["api_calls"]["create"] += 1
             # Use absolute path from workspace root
             if Path(request.output_dir).is_absolute():
                 output_dir = Path(request.output_dir)
@@ -363,6 +536,7 @@ class DocumentAgent:
     def edit_document(self, request: EditDocumentRequest) -> Dict[str, Any]:
         """Edit document using natural language instruction."""
         try:
+            self.metrics["api_calls"]["edit"] += 1
             if not Path(request.file_path).exists():
                 return {
                     'success': False,
@@ -381,6 +555,8 @@ class DocumentAgent:
             content, _ = extract_document_content(request.file_path)
 
             # Plan edits using LLM
+            self.metrics["llm_calls"]["edit_planning"] += 1
+            self.metrics["llm_calls"]["total"] += 1
             plan = self.llm_client.interpret_edit_instruction(
                 request.instruction,
                 content,
@@ -486,6 +662,7 @@ class DocumentAgent:
     def undo_redo(self, request: UndoRedoRequest) -> Dict[str, Any]:
         """Undo or redo an edit."""
         try:
+            self.metrics["api_calls"]["undo_redo"] += 1
             versions = self.version_manager.get_versions(request.file_path)
 
             if not versions:
@@ -538,6 +715,7 @@ class DocumentAgent:
     def get_version_history(self, file_path: str) -> Dict[str, Any]:
         """Get document version history."""
         try:
+            self.metrics["api_calls"]["versions"] += 1
             versions = self.version_manager.get_versions(file_path)
             current_idx = self.version_manager.index.get(
                 self.version_manager._get_document_key(file_path), {}
@@ -564,6 +742,7 @@ class DocumentAgent:
     def extract_data(self, request: ExtractDataRequest) -> Dict[str, Any]:
         """Extract structured data from document."""
         try:
+            self.metrics["api_calls"]["extract"] += 1
             if not Path(request.file_path).exists():
                 return {
                     'success': False,
@@ -572,6 +751,8 @@ class DocumentAgent:
 
             content, _ = extract_document_content(request.file_path)
 
+            self.metrics["llm_calls"]["extract"] += 1
+            self.metrics["llm_calls"]["total"] += 1
             result = self.llm_client.extract_structured_data(
                 content,
                 request.extraction_type

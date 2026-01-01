@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 from .config import STORAGE_DIR, AGENT_PORT, MAX_FILE_SIZE_MB
 from .models import ApiResponse, CreateSpreadsheetRequest, NaturalLanguageQueryRequest
 from .memory import spreadsheet_memory
+from . import session as session_module  # Import module for _thread_local access
 from .session import (
     get_conversation_dataframes,
     get_conversation_file_paths,
@@ -75,6 +76,21 @@ app = FastAPI(title="Spreadsheet Agent", version="2.0.0")
 # Create storage directory
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
+# Metrics tracking
+import time
+from collections import defaultdict
+
+call_metrics = {
+    "api_calls": defaultdict(int),
+    "api_timing": defaultdict(list),
+    "api_errors": defaultdict(int),
+    "llm_calls": {
+        "total": 0,
+        "by_provider": defaultdict(int)
+    },
+    "start_time": time.time()
+}
+
 # Initialize file manager
 file_manager = AgentFileManager(
     agent_id="spreadsheet_agent",
@@ -90,6 +106,35 @@ spreadsheet_operation_lock = AsyncLock()
 # Legacy fallback storage
 dataframes: Dict[str, pd.DataFrame] = {}
 file_paths: Dict[str, str] = {}
+
+
+# --- Middleware for Metrics Tracking ---
+
+@app.middleware("http")
+async def track_requests(request, call_next):
+    """Track all HTTP requests for metrics."""
+    start_time = time.time()
+    endpoint = request.url.path
+    
+    try:
+        response = await call_next(request)
+        
+        # Track successful call
+        call_metrics["api_calls"][endpoint] += 1
+        duration = time.time() - start_time
+        call_metrics["api_timing"][endpoint].append(duration)
+        
+        # Keep only last 100 timings per endpoint to avoid memory growth
+        if len(call_metrics["api_timing"][endpoint]) > 100:
+            call_metrics["api_timing"][endpoint] = call_metrics["api_timing"][endpoint][-100:]
+        
+        return response
+    except Exception as e:
+        # Track error
+        call_metrics["api_errors"][endpoint] += 1
+        duration = time.time() - start_time
+        call_metrics["api_timing"][endpoint].append(duration)
+        raise
 
 
 # --- Startup and Shutdown Events ---
@@ -270,6 +315,9 @@ async def natural_language_query(
         
         # Execute query
         async with spreadsheet_operation_lock:
+            # Track LLM call
+            call_metrics["llm_calls"]["total"] += 1
+            
             result = await query_agent.query(
                 df=df,
                 question=question,
@@ -815,8 +863,8 @@ async def delete_file_endpoint(file_id: str):
     """Delete a file from storage"""
     try:
         # Remove from all thread storages
-        if hasattr(session, '_thread_local') and hasattr(session._thread_local, 'dataframes_by_thread'):
-            for thread_dfs in session._thread_local.dataframes_by_thread.values():
+        if hasattr(session_module, '_thread_local') and hasattr(session_module._thread_local, 'dataframes_by_thread'):
+            for thread_dfs in session_module._thread_local.dataframes_by_thread.values():
                 thread_dfs.pop(file_id, None)
         
         # Remove from legacy storage
@@ -923,6 +971,62 @@ async def get_stats():
     
     except Exception as e:
         logger.error(f"Stats retrieval failed: {e}")
+        return ApiResponse(success=False, error=str(e))
+
+
+@app.get("/metrics", response_model=ApiResponse)
+async def get_metrics():
+    """Get detailed agent metrics including API calls, timing, LLM calls, and errors"""
+    try:
+        uptime_seconds = time.time() - call_metrics["start_time"]
+        
+        # Calculate average response times
+        avg_timing = {}
+        for endpoint, timings in call_metrics["api_timing"].items():
+            if timings:
+                avg_timing[endpoint] = round(sum(timings) / len(timings), 3)
+        
+        metrics = {
+            "api_calls": dict(call_metrics["api_calls"]),
+            "api_errors": dict(call_metrics["api_errors"]),
+            "avg_response_time_seconds": avg_timing,
+            "llm_calls": call_metrics["llm_calls"],
+            "uptime_seconds": round(uptime_seconds, 2),
+            "files_managed": len(file_manager.list_files()),
+            "cache_stats": spreadsheet_memory.get_cache_stats()
+        }
+        
+        return ApiResponse(success=True, result=metrics)
+    
+    except Exception as e:
+        logger.error(f"Metrics retrieval failed: {e}")
+        return ApiResponse(success=False, error=str(e))
+
+
+@app.post("/metrics/reset", response_model=ApiResponse)
+async def reset_metrics():
+    """Reset all metrics counters to zero"""
+    try:
+        # Store old metrics
+        old_metrics = dict(call_metrics)
+        
+        # Reset counters
+        call_metrics["api_calls"] = defaultdict(int)
+        call_metrics["api_timing"] = defaultdict(list)
+        call_metrics["api_errors"] = defaultdict(int)
+        call_metrics["llm_calls"] = {
+            "total": 0,
+            "by_provider": defaultdict(int)
+        }
+        call_metrics["start_time"] = time.time()
+        
+        return ApiResponse(success=True, result={
+            "message": "Metrics reset successfully",
+            "previous_total_calls": sum(old_metrics.get("api_calls", {}).values())
+        })
+    
+    except Exception as e:
+        logger.error(f"Metrics reset failed: {e}")
         return ApiResponse(success=False, error=str(e))
 
 

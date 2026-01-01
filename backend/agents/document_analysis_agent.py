@@ -53,7 +53,16 @@ except ImportError as e:
 # -------------------------
 if __name__ == "__main__":
     import uvicorn
+    import socket
     # For production, run using your process manager / container and don't use reload=True.
     # Use 0.0.0.0 to bind to all interfaces for better compatibility
     port = int(os.getenv('DOCUMENT_AGENT_PORT', 8070))
+    # --- Port availability check ---
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("0.0.0.0", port))
+        sock.close()
+    except OSError:
+        logger.error(f"Port {port} is already in use. Please free the port or use a different one.")
+        sys.exit(1)
     uvicorn.run("document_analysis_agent:app", host="0.0.0.0", port=port, reload=False)

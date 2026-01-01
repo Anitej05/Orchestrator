@@ -305,6 +305,7 @@ async def execute_creation_task_async(task: PlannedTask, task_type: str, thread_
                 json=payload,
                 headers={
                     'Content-Type': 'application/json',
+                    'X-Internal-Request': 'true',  # Bypass auth for internal calls
                 }
             )
             

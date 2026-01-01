@@ -369,22 +369,30 @@ async def create_document_unified(request: CreateDocumentRequest, req: Request):
     """
     try:
         # ===== AUTHENTICATION =====
+        # Allow internal orchestrator calls (X-Internal-Request header)
+        is_internal = req.headers.get("X-Internal-Request") == "true"
+        
         from auth import get_user_from_request
-        try:
-            user = get_user_from_request(req)
-            user_id = user.get("sub") or user.get("user_id") or user.get("id")
-            logger.info(f"Document creation requested by: user_id={user_id}")
-        except HTTPException as auth_error:
-            raise HTTPException(
-                status_code=401,
-                detail="Authentication required"
-            )
+        user_id = "system"  # default for internal calls
+        
+        if not is_internal:
+            try:
+                user = get_user_from_request(req)
+                user_id = user.get("sub") or user.get("user_id") or user.get("id")
+                logger.info(f"Document creation requested by: user_id={user_id}")
+            except HTTPException as auth_error:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Authentication required"
+                )
+        else:
+            logger.info("Internal orchestrator request - bypassing auth")
         
         # ===== CALL DOCUMENT AGENT =====
         import httpx
         
         # Call document agent's /create endpoint
-        agent_url = os.getenv("DOCUMENT_AGENT_URL", "http://localhost:8001")
+        agent_url = os.getenv("DOCUMENT_AGENT_URL", "http://localhost:8070")
         async with httpx.AsyncClient(timeout=30.0) as client:
             agent_request = {
                 "content": request.content,
@@ -541,13 +549,21 @@ async def create_spreadsheet_unified(request: CreateSpreadsheetRequest, req: Req
     """
     try:
         # ===== AUTHENTICATION =====
+        # Allow internal orchestrator calls (X-Internal-Request header)
+        is_internal = req.headers.get("X-Internal-Request") == "true"
+        
         from auth import get_user_from_request
-        try:
-            user = get_user_from_request(req)
-            user_id = user.get("sub") or user.get("user_id") or user.get("id")
-            logger.info(f"Spreadsheet creation requested by: user_id={user_id}")
-        except HTTPException as auth_error:
-            raise HTTPException(status_code=401, detail="Authentication required")
+        user_id = "system"  # default for internal calls
+        
+        if not is_internal:
+            try:
+                user = get_user_from_request(req)
+                user_id = user.get("sub") or user.get("user_id") or user.get("id")
+                logger.info(f"Spreadsheet creation requested by: user_id={user_id}")
+            except HTTPException as auth_error:
+                raise HTTPException(status_code=401, detail="Authentication required")
+        else:
+            logger.info("Internal orchestrator request - bypassing auth")
         
         # ===== CREATE SPREADSHEET =====
         import pandas as pd

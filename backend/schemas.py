@@ -124,8 +124,15 @@ class PlannedTask(BaseModel):
     """A task as defined within the final execution plan."""
     task_name: str
     task_description: str
+    # Pre-extracted/injected parameters for the task (used by tools and some handlers).
+    # NOTE: This field is referenced throughout the orchestrator codebase.
+    parameters: Optional[Dict[str, Any]] = Field(default_factory=dict)
     primary: ExecutionStep
     fallbacks: List[AgentCard] = []
+
+    # Optional routing metadata (safe to ignore if unused).
+    route_type: Optional[Literal["tool", "agent"]] = None
+    selected_tool_capability: Optional[str] = None
 
 class ExecutionPlan(BaseModel):
     """The final, structured execution plan with parallel batches."""

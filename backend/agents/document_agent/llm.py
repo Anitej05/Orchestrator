@@ -128,12 +128,37 @@ class DocumentLLMClient:
     ) -> str:
         """
         Analyze document content with a query using RAG context.
+        Content can be either full document or RAG-retrieved chunks.
         """
         if not self.llm:
             return "Error: No LLM provider available"
 
         try:
-            prompt = f"""
+            # Determine if content is RAG-retrieved chunks or full document
+            is_rag_context = "[Source" in document_content
+            
+            if is_rag_context:
+                prompt = f"""
+<SYSTEM>
+You are a precise document analysis expert. The content below contains relevant chunks retrieved from vector search.
+Answer the query using ONLY these retrieved sources:
+- If the answer is not in the provided sources, say "No grounded answer found in the document."
+- Be concise (2-5 sentences max) and cite source numbers when applicable.
+- Do not invent information beyond what's in the sources.
+</SYSTEM>
+
+<RETRIEVED_SOURCES>
+{document_content[:12000]}
+</RETRIEVED_SOURCES>
+
+<QUERY>
+{query}
+</QUERY>
+
+Respond with a concise, grounded answer based on the retrieved sources.
+"""
+            else:
+                prompt = f"""
 <SYSTEM>
 You are a precise document analysis expert. Answer strictly from the provided document content.
 - If the answer is not present, say "No grounded answer found in the document."

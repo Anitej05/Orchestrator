@@ -94,7 +94,11 @@ class SpreadsheetQueryAgent:
         raise RuntimeError(f"All LLM providers failed. Last error: {last_error}")
     
     def _get_dataframe_context(self, df: pd.DataFrame, file_id: str = None) -> str:
-        """Generate context about the dataframe for the LLM (with caching)"""
+        """Generate context about the dataframe for the LLM (with caching)
+        
+        Note: The LLM should be reminded that pandas (as pd) is already imported
+        in the execution environment and no import statements should be generated.
+        """
         # Try to get from cache if file_id provided
         if file_id:
             cached_context = spreadsheet_memory.get_df_metadata(file_id)

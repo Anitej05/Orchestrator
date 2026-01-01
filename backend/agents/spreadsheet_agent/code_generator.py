@@ -46,6 +46,8 @@ async def generate_modification_code(df: pd.DataFrame, instruction: str) -> Opti
 2. The DataFrame is named 'df'
 3. Your code MUST return/result in the modified DataFrame
 4. Use proper pandas methods
+5. NEVER include any import statements - pandas is already imported as pd
+6. Do NOT write 'import pandas' or 'from pandas import' - df is ready to use
 
 === COMMON OPERATIONS (Use these patterns) ===
 
@@ -114,6 +116,17 @@ df
             if code.endswith("```"):
                 code = code[:-3]
             code = code.strip()
+            
+            # Filter out import statements (pandas is pre-imported in execution context)
+            lines = code.split('\n')
+            filtered_lines = []
+            for line in lines:
+                stripped = line.strip()
+                if not (stripped.startswith('import ') or stripped.startswith('from ') and ' import ' in stripped):
+                    filtered_lines.append(line)
+                else:
+                    logger.warning(f"Filtered out import statement: {stripped}")
+            code = '\n'.join(filtered_lines).strip()
             
             logger.info(f"Generated code: {code}")
             return code
