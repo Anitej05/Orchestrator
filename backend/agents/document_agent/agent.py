@@ -7,6 +7,7 @@ Designed for cloud deployment with efficient resource management.
 
 import logging
 import time
+import os
 from typing import Dict, Any, Optional, List
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -78,6 +79,25 @@ class DocumentAgent:
             "processing": {
                 "files_processed": 0,
                 "batch_operations": 0
+            },
+            "performance": {
+                "total_latency_ms": 0,
+                "avg_latency_ms": 0,
+                "rag_retrieval_ms": 0,
+                "llm_call_ms": 0,
+                "requests_completed": 0
+            },
+            "rag": {
+                "chunks_retrieved_total": 0,
+                "avg_chunks_per_query": 0,
+                "vector_stores_loaded": 0,
+                "retrieval_failures": 0
+            },
+            "errors": {
+                "total": 0,
+                "llm_errors": 0,
+                "rag_errors": 0,
+                "file_errors": 0
             }
         }
 
@@ -90,7 +110,7 @@ class DocumentAgent:
     
     # ========== METRICS METHODS ==========
     def get_metrics(self) -> Dict[str, Any]:
-        """Get current metrics with computed values."""
+        """Get current metrics with computed values and performance statistics."""
         uptime_seconds = time.time() - self._start_time
         
         # Update cache metrics
@@ -102,12 +122,28 @@ class DocumentAgent:
         self.metrics["processing"]["files_processed"] = self._files_processed
         self.metrics["processing"]["batch_operations"] = self._batch_operations
         
+        # Calculate performance averages
+        requests_count = self.metrics["performance"]["requests_completed"]
+        if requests_count > 0:
+            self.metrics["performance"]["avg_latency_ms"] = round(
+                self.metrics["performance"]["total_latency_ms"] / requests_count, 2
+            )
+        
+        # Calculate RAG averages
+        if self.metrics["llm_calls"]["analyze"] > 0:
+            self.metrics["rag"]["avg_chunks_per_query"] = round(
+                self.metrics["rag"]["chunks_retrieved_total"] / self.metrics["llm_calls"]["analyze"], 1
+            )
+        
         return {
             **self.metrics,
             "uptime_seconds": round(uptime_seconds, 2),
             "cache_hit_rate": round(
                 self._cache_hits / (self._cache_hits + self._cache_misses) * 100, 2
-            ) if (self._cache_hits + self._cache_misses) > 0 else 0
+            ) if (self._cache_hits + self._cache_misses) > 0 else 0,
+            "error_rate": round(
+                self.metrics["errors"]["total"] / requests_count * 100, 2
+            ) if requests_count > 0 else 0
         }
     
     def reset_metrics(self) -> Dict[str, Any]:
@@ -135,6 +171,9 @@ class DocumentAgent:
 
     def analyze_document(self, request: AnalyzeDocumentRequest) -> Dict[str, Any]:
         """Analyze document(s) with RAG and answer queries. Supports multi-file batch processing."""
+        request_start = time.time()
+        self.metrics["api_calls"]["analyze"] += 1
+        
         try:
             # Collect all file paths to process
             file_paths = []
@@ -142,27 +181,113 @@ class DocumentAgent:
                 file_paths.extend(request.file_paths)
             elif request.file_path:
                 file_paths.append(request.file_path)
-            self.metrics["api_calls"]["analyze"] += 1
             
             # Multi-file batch processing
             if len(file_paths) > 1:
                 self._batch_operations += 1
-                return self._analyze_multiple_files(request, file_paths)
-
-            # Single file processing (optimized path)
-            self._files_processed += 1
-            return self._analyze_single_file(request, file_paths[0] if file_paths else None)
+                result = self._analyze_multiple_files(request, file_paths)
+            else:
+                # Single file processing (optimized path)
+                self._files_processed += 1
+                result = self._analyze_single_file(request, file_paths[0] if file_paths else None)
+            
+            # Track performance metrics
+            request_latency = (time.time() - request_start) * 1000
+            self.metrics["performance"]["total_latency_ms"] += request_latency
+            self.metrics["performance"]["requests_completed"] += 1
+            
+            # Update RAG metrics if present in result
+            if 'metrics' in result:
+                req_metrics = result['metrics']
+                if req_metrics.get('chunks_retrieved', 0) > 0:
+                    self.metrics["rag"]["chunks_retrieved_total"] += req_metrics['chunks_retrieved']
+                if req_metrics.get('cache_hit', False):
+                    self.metrics["cache"]["hits"] += 1
+                else:
+                    self.metrics["cache"]["misses"] += 1
+            
+            # Track errors
+            if not result.get('success', False):
+                self.metrics["errors"]["total"] += 1
+                if 'RAG' in str(result.get('answer', '')):
+                    self.metrics["errors"]["rag_errors"] += 1
+                elif 'LLM' in str(result.get('answer', '')):
+                    self.metrics["errors"]["llm_errors"] += 1
+            
+            # Add execution summary to result
+            result['execution_metrics'] = {
+                'latency_ms': round(request_latency, 2),
+                'llm_calls': self.metrics["llm_calls"]["analyze"],
+                'cache_hit_rate': round(
+                    self.metrics["cache"]["hits"] / (self.metrics["cache"]["hits"] + self.metrics["cache"]["misses"]) * 100, 1
+                ) if (self.metrics["cache"]["hits"] + self.metrics["cache"]["misses"]) > 0 else 0,
+                'chunks_retrieved': result.get('metrics', {}).get('chunks_retrieved', 0),
+                'rag_retrieval_ms': round(result.get('metrics', {}).get('rag_retrieval_ms', 0), 2),
+                'llm_call_ms': round(result.get('metrics', {}).get('llm_call_ms', 0), 2)
+            }
+            
+            # Log detailed execution metrics
+            self._log_execution_metrics(result['execution_metrics'], result.get('success', False))
+            
+            return result
 
         except Exception as e:
+            self.metrics["errors"]["total"] += 1
             logger.error(f"Analysis orchestration failed: {e}", exc_info=True)
             return {
                 'success': False,
                 'answer': f'Critical error: {str(e)}',
-                'errors': [str(e)]
+                'errors': [str(e)],
+                'execution_metrics': {
+                    'latency_ms': round((time.time() - request_start) * 1000, 2),
+                    'error': True
+                }
             }
+    
+    def _log_execution_metrics(self, exec_metrics: Dict[str, Any], success: bool):
+        """Log detailed execution metrics with visual formatting."""
+        status_emoji = "✅" if success else "❌"
+        
+        logger.info("=" * 80)
+        logger.info(f"{status_emoji} DOCUMENT AGENT EXECUTION METRICS")
+        logger.info("=" * 80)
+        logger.info(f"📊 Performance:")
+        logger.info(f"  ⏱️  Total Latency:        {exec_metrics['latency_ms']:.2f} ms")
+        logger.info(f"  🔍 RAG Retrieval Time:   {exec_metrics['rag_retrieval_ms']:.2f} ms")
+        logger.info(f"  🤖 LLM Processing Time:  {exec_metrics['llm_call_ms']:.2f} ms")
+        logger.info(f"")
+        logger.info(f"📈 Statistics:")
+        logger.info(f"  📚 Chunks Retrieved:     {exec_metrics['chunks_retrieved']}")
+        logger.info(f"  💬 LLM API Calls:        {exec_metrics['llm_calls']}")
+        logger.info(f"  💾 Cache Hit Rate:       {exec_metrics['cache_hit_rate']:.1f}%")
+        logger.info(f"")
+        
+        # Session totals
+        total_requests = self.metrics["performance"]["requests_completed"]
+        avg_latency = self.metrics["performance"]["avg_latency_ms"]
+        error_rate = round(
+            self.metrics["errors"]["total"] / total_requests * 100, 1
+        ) if total_requests > 0 else 0
+        
+        logger.info(f"🎯 Session Totals:")
+        logger.info(f"  📝 Total Requests:       {total_requests}")
+        logger.info(f"  ⏱️  Avg Latency:          {avg_latency:.2f} ms")
+        logger.info(f"  ❌ Error Rate:           {error_rate}%")
+        logger.info(f"  🔄 Cache Hit Rate:       {exec_metrics['cache_hit_rate']:.1f}%")
+        logger.info(f"  📊 Total LLM Calls:      {self.metrics['llm_calls']['total']}")
+        logger.info("=" * 80)
 
     def _analyze_single_file(self, request: AnalyzeDocumentRequest, file_path: Optional[str]) -> Dict[str, Any]:
-        """Analyze a single document with caching and error handling."""
+        """Analyze a single document using proven LCEL RAG chain."""
+        start_time = time.time()
+        metrics = {
+            'rag_retrieval_ms': 0,
+            'llm_call_ms': 0,
+            'cache_hit': False,
+            'chunks_retrieved': 0,
+            'tokens_used': 0
+        }
+        
         try:
             # Check cache
             cache_key = None
@@ -170,65 +295,114 @@ class DocumentAgent:
                 cache_key = f"{file_path}:{request.query}"
                 cached_result = self._get_cached_result(cache_key)
                 if cached_result:
-                    logger.info(f"Cache hit for {file_path}")
+                    logger.info(f"✅ Cache hit for {file_path}")
+                    metrics['cache_hit'] = True
+                    cached_result['metrics'] = metrics
                     return cached_result
-
-            # Extract content
-            content = None
-            if file_path:
-                try:
-                    content, _ = extract_document_content(file_path)
-                    logger.info(f"Extracted {len(content)} chars from {file_path}")
-                except Exception as e:
-                    logger.error(f"Failed to read {file_path}: {e}")
-                    return {
-                        'success': False,
-                        'answer': f'Error reading file: {str(e)}',
-                        'errors': [f"File read error: {str(e)}"]
-                    }
 
             # Collect vector store paths
             paths = request.vector_store_paths or ([request.vector_store_path] if request.vector_store_path else [])
             
-            # RAG retrieval: Load FAISS indices and retrieve relevant chunks
-            retrieved_context = ""
-            if paths and paths[0]:
-                retrieved_context = self._retrieve_from_vector_stores(paths, request.query)
-                logger.info(f"🔍 RAG retrieval: {'Retrieved context' if retrieved_context else 'No context retrieved'}")
+            if not paths or not paths[0]:
+                return {
+                    'success': False,
+                    'answer': 'Error: No vector store path provided',
+                    'errors': ['Missing vector store path'],
+                    'metrics': metrics
+                }
             
-            # Use retrieved context if available, otherwise fall back to file content
-            if retrieved_context:
-                content = retrieved_context
-            elif not content:
-                if not paths or not paths[0]:
+            # Validate all vector stores exist
+            for vsp in paths:
+                if not os.path.exists(vsp):
+                    logger.error(f"Vector store not found: {vsp}")
                     return {
                         'success': False,
-                        'answer': 'Error: No content or vector store path provided',
-                        'errors': ['Missing both file content and vector store path']
+                        'answer': f'Error: Vector store not found at {vsp}',
+                        'errors': [f'Vector store missing: {vsp}'],
+                        'metrics': metrics
                     }
-                return {
-                    'success': False,
-                    'answer': 'Error: Vector stores provided but RAG retrieval returned no results',
-                    'errors': ['RAG retrieval failed to extract relevant content']
-                }
-
-            # Analyze with LLM using content (either retrieved from RAG or from file)
+            
+            # RAG retrieval using proven LCEL approach
+            rag_start = time.time()
             try:
+                from langchain_community.vectorstores import FAISS
+                from langchain_core.prompts import ChatPromptTemplate
+                from langchain_core.output_parsers import StrOutputParser
+                from langchain_core.runnables import RunnablePassthrough
+                from langchain_huggingface import HuggingFaceEmbeddings
+                
+                # Use same embeddings as orchestrator (all-mpnet-base-v2)
+                embeddings = HuggingFaceEmbeddings(model_name='all-mpnet-base-v2')
+                
+                # Load and merge all vector stores
+                logger.info(f"🔍 Loading {len(paths)} vector store(s) for RAG")
+                combined_vector_store = None
+                
+                for idx, vsp in enumerate(paths):
+                    logger.info(f"📂 Loading vector store {idx+1}/{len(paths)}: {os.path.basename(vsp)}")
+                    vs = FAISS.load_local(
+                        vsp,
+                        embeddings,
+                        allow_dangerous_deserialization=True
+                    )
+                    
+                    if combined_vector_store is None:
+                        combined_vector_store = vs
+                    else:
+                        combined_vector_store.merge_from(vs)
+                        logger.info(f"✅ Merged vector store {idx+1}")
+                
+                # Create retriever
+                retriever = combined_vector_store.as_retriever(search_kwargs={"k": 5})
+                metrics['rag_retrieval_ms'] = (time.time() - rag_start) * 1000
+                
+                # Build RAG chain using LCEL
+                template = """Answer the question based only on the following context:
+
+{context}
+
+Question: {question}
+
+Answer:"""
+                
+                prompt = ChatPromptTemplate.from_template(template)
+                
+                def format_docs(docs):
+                    metrics['chunks_retrieved'] = len(docs)
+                    return "\n\n".join(doc.page_content for doc in docs)
+                
+                rag_chain = (
+                    {"context": retriever | format_docs, "question": RunnablePassthrough()}
+                    | prompt
+                    | self.llm_client.llm
+                    | StrOutputParser()
+                )
+                
+                # Execute RAG chain
+                logger.info(f"🤖 Processing query: {request.query[:50]}...")
+                llm_start = time.time()
                 self.metrics["llm_calls"]["analyze"] += 1
                 self.metrics["llm_calls"]["total"] += 1
-                answer = self.llm_client.analyze_document_with_query(content, request.query)
+                
+                answer = rag_chain.invoke(request.query)
+                metrics['llm_call_ms'] = (time.time() - llm_start) * 1000
+                
+                logger.info(f"✅ RAG analysis complete ({metrics['chunks_retrieved']} chunks, {metrics['llm_call_ms']:.0f}ms)")
+                
             except Exception as e:
-                logger.error(f"LLM analysis failed: {e}")
+                logger.error(f"RAG retrieval failed: {e}", exc_info=True)
                 return {
                     'success': False,
-                    'answer': f'LLM error: {str(e)}',
-                    'errors': [f"LLM failure: {str(e)}"]
+                    'answer': f'RAG error: {str(e)}',
+                    'errors': [f'RAG failure: {str(e)}'],
+                    'metrics': metrics
                 }
 
             result = {
                 'success': True,
                 'answer': answer,
-                'sources': [file_path] if file_path else (paths if paths else [])
+                'sources': [file_path] if file_path else paths,
+                'metrics': metrics
             }
 
             # Cache result
@@ -238,11 +412,12 @@ class DocumentAgent:
             return result
 
         except Exception as e:
-            logger.error(f"Single file analysis failed: {e}", exc_info=True)
+            logger.error(f"Document analysis failed: {e}", exc_info=True)
             return {
                 'success': False,
                 'answer': f'Error: {str(e)}',
-                'errors': [str(e)]
+                'errors': [str(e)],
+                'metrics': metrics
             }
 
     def _analyze_multiple_files(self, request: AnalyzeDocumentRequest, file_paths: List[str]) -> Dict[str, Any]:
@@ -380,66 +555,7 @@ class DocumentAgent:
                 del self._analysis_cache[first_key]
             self._analysis_cache[cache_key] = result
 
-    def _retrieve_from_vector_stores(self, vector_store_paths: List[str], query: str, top_k: int = 5) -> str:
-        """Load FAISS indices and retrieve relevant chunks using similarity search."""
-        try:
-            from langchain_community.vectorstores import FAISS
-            from langchain_huggingface import HuggingFaceEmbeddings
-            
-            logger.info(f"🔍 Loading {len(vector_store_paths)} FAISS vector store(s) for RAG retrieval")
-            
-            all_chunks = []
-            embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-            
-            for vs_path in vector_store_paths:
-                if not Path(vs_path).exists():
-                    logger.warning(f"Vector store not found: {vs_path}")
-                    continue
-                
-                try:
-                    # Load FAISS index
-                    vector_store = FAISS.load_local(
-                        vs_path,
-                        embeddings,
-                        allow_dangerous_deserialization=True
-                    )
-                    
-                    # Perform similarity search
-                    docs_with_scores = vector_store.similarity_search_with_score(query, k=top_k)
-                    
-                    for doc, score in docs_with_scores:
-                        all_chunks.append({
-                            'content': doc.page_content,
-                            'score': float(score),
-                            'source': vs_path
-                        })
-                    
-                    logger.info(f"✅ Retrieved {len(docs_with_scores)} chunks from {Path(vs_path).name}")
-                    
-                except Exception as e:
-                    logger.error(f"Failed to load/query vector store {vs_path}: {e}")
-                    continue
-            
-            if not all_chunks:
-                logger.warning("No chunks retrieved from any vector store")
-                return ""
-            
-            # Sort by relevance score (lower is better for FAISS L2 distance)
-            all_chunks.sort(key=lambda x: x['score'])
-            
-            # Format retrieved chunks as context
-            context_parts = []
-            for i, chunk in enumerate(all_chunks[:top_k], 1):
-                context_parts.append(f"[Source {i}]\n{chunk['content']}")
-            
-            retrieved_context = "\n\n".join(context_parts)
-            logger.info(f"📝 Prepared RAG context with {len(all_chunks[:top_k])} chunks ({len(retrieved_context)} chars)")
-            
-            return retrieved_context
-            
-        except Exception as e:
-            logger.error(f"RAG retrieval failed: {e}", exc_info=True)
-            return ""
+    # RAG retrieval is now integrated into _analyze_single_file using LCEL chain
 
     # ========== DISPLAY OPERATIONS ==========
 

@@ -189,6 +189,9 @@ def _summarize_completed_tasks_for_context(completed_tasks: List[Dict]) -> List[
         result = task.get("result", {})
         raw_response = task.get("raw_response", {})
         
+        # Log the actual result for debugging
+        logger.info(f"🔍 Task '{task.get('task_name')}' result type: {type(result).__name__}, keys: {result.keys() if isinstance(result, dict) else 'N/A'}")
+        
         # Check if this is a document task - preserve important information
         task_name = task.get("task_name", "")
         is_document_task = any(keyword in task_name for keyword in [
@@ -1382,7 +1385,11 @@ async def classify_and_route_to_tools(state: State):
                 logger.info(f"🔧 Executing tool '{routing_decision.tool_name}' with params: {routing_decision.tool_params}")
                 result = await execute_tool(routing_decision.tool_name, routing_decision.tool_params)
                 
-                if result.get("success"):
+                # Check if tool execution succeeded AND result doesn't contain an error
+                tool_result = result.get("result")
+                has_tool_error = isinstance(tool_result, dict) and "error" in tool_result
+                
+                if result.get("success") and not has_tool_error:
                     logger.info(f"✅ Tool execution SUCCESS for '{routing_decision.tool_name}'")
                     print(f"✅ TOOL SUCCESS: {routing_decision.tool_name}")
                     
@@ -1391,12 +1398,18 @@ async def classify_and_route_to_tools(state: State):
                         task_name=task.task_name,
                         task_description=task.task_description,
                         agent_name=f"Tool: {routing_decision.tool_name}",
-                        result=result.get("result"),
+                        result=tool_result,
                         success=True,
                         execution_time=0.5,  # Fast tool execution
                         error=None
                     )
                     tool_routed_tasks.append(completed_task)
+                elif has_tool_error:
+                    # Tool returned an error in its result - treat as failure
+                    error_msg = tool_result.get("error", "Unknown tool error")
+                    logger.warning(f"⚠️ Tool returned error for '{routing_decision.tool_name}': {error_msg}")
+                    print(f"⚠️ TOOL ERROR RESULT: {routing_decision.tool_name} - {error_msg}")
+                    agent_required_tasks.append(task)
                 else:
                     # Tool execution failed - fallback to agent
                     logger.warning(f"⚠️ Tool execution FAILED for '{routing_decision.tool_name}': {result.get('error')}")

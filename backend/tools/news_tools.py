@@ -50,8 +50,17 @@ def search_news(
         response.raise_for_status()
         data = response.json()
         
+        # Check for API-level errors
+        if data.get("status") == "error":
+            return {"error": f"NewsAPI error: {data.get('message', 'Unknown error')}"}
+        
         if not data.get("articles"):
-            return {"error": f"No news found for query '{query}'"}
+            return {
+                "status": "ok",
+                "totalResults": 0,
+                "articles": [],
+                "message": f"No news articles found for query '{query}'. Try different keywords or check back later."
+            }
         
         return {
             "status": data.get("status"),
@@ -67,8 +76,16 @@ def search_news(
                 for article in data.get("articles", [])[:page_size]
             ]
         }
+    except requests.exceptions.HTTPError as e:
+        # Handle HTTP errors specifically
+        if e.response and e.response.status_code == 401:
+            return {"error": "NewsAPI authentication failed. Check API key."}
+        elif e.response and e.response.status_code == 429:
+            return {"error": "NewsAPI rate limit exceeded. Try again later."}
+        else:
+            return {"error": f"NewsAPI request failed: {str(e)}"}
     except requests.exceptions.RequestException as e:
-        return {"error": f"Failed to fetch news: {str(e)}"}
+        return {"error": f"Failed to connect to NewsAPI: {str(e)}"}
 
 
 @tool
@@ -106,8 +123,17 @@ def get_top_headlines(
         response.raise_for_status()
         data = response.json()
         
+        # Check for API-level errors
+        if data.get("status") == "error":
+            return {"error": f"NewsAPI error: {data.get('message', 'Unknown error')}"}
+        
         if not data.get("articles"):
-            return {"error": f"No headlines found for country '{country}'"}
+            return {
+                "status": "ok",
+                "totalResults": 0,
+                "articles": [],
+                "message": f"No headlines found for country '{country}'. Try a different country code."
+            }
         
         return {
             "status": data.get("status"),
@@ -123,5 +149,13 @@ def get_top_headlines(
                 for article in data.get("articles", [])[:page_size]
             ]
         }
+    except requests.exceptions.HTTPError as e:
+        # Handle HTTP errors specifically
+        if e.response and e.response.status_code == 401:
+            return {"error": "NewsAPI authentication failed. Check API key."}
+        elif e.response and e.response.status_code == 429:
+            return {"error": "NewsAPI rate limit exceeded. Try again later."}
+        else:
+            return {"error": f"NewsAPI request failed: {str(e)}"}
     except requests.exceptions.RequestException as e:
-        return {"error": f"Failed to fetch headlines: {str(e)}"}
+        return {"error": f"Failed to connect to NewsAPI: {str(e)}"}
