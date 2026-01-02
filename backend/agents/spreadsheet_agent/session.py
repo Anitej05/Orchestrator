@@ -17,6 +17,60 @@ from .memory import spreadsheet_memory
 logger = logging.getLogger(__name__)
 
 
+def _normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Clean up common spreadsheet issues so the LLM sees a sane schema.
+
+    - Trim column headers
+    - Drop empty/unnamed columns
+    - If a single column header contains commas (e.g., "YearsExperience,Salary") and the
+      remaining columns are empty, split that column into multiple columns.
+    - Best-effort type coercion for newly split columns.
+    """
+    cleaned = df.copy()
+
+    # Trim headers
+    cleaned.columns = [str(c).strip() for c in cleaned.columns]
+
+    # Drop completely empty columns (all NaN or all blank strings)
+    def _is_empty_series(series: pd.Series) -> bool:
+        if series.isna().all():
+            return True
+        try:
+            return series.astype(str).str.strip().eq("").all()
+        except Exception:
+            return False
+
+    empty_cols = [c for c in cleaned.columns if _is_empty_series(cleaned[c]) or str(c).lower().startswith("unnamed")]
+    if empty_cols:
+        cleaned = cleaned.drop(columns=empty_cols)
+
+    if not cleaned.columns.any():
+        return cleaned
+
+    # Detect "CSV-in-a-cell" style: first column header has commas and others were empty/unnamed
+    first_col = cleaned.columns[0]
+    other_cols_empty = len(cleaned.columns) == 1
+    if not other_cols_empty:
+        other_cols_empty = all(_is_empty_series(cleaned[c]) for c in cleaned.columns[1:])
+
+    if "," in str(first_col) and other_cols_empty:
+        target_cols = [part.strip() for part in str(first_col).split(",") if part.strip()]
+        if len(target_cols) >= 2:
+            try:
+                # Split the combined column into separate columns
+                split_df = cleaned[first_col].astype(str).str.split(",", expand=True)
+                split_df.columns = target_cols[: split_df.shape[1]]
+                # Coerce numerics where possible
+                for col in split_df.columns:
+                    split_df[col] = pd.to_numeric(split_df[col].str.strip(), errors="ignore")
+
+                cleaned = split_df
+            except Exception as e:
+                logger.warning(f"[NORMALIZE] Failed to split combined column '{first_col}': {e}")
+
+    return cleaned
+
+
 # Thread-local storage for dataframes (prevents cross-conversation contamination)
 _thread_local = local()
 
@@ -86,6 +140,7 @@ def ensure_file_loaded(file_id: str, thread_id: str = "default", file_manager=No
                 df = pd.read_csv(file_path)
             else:
                 df = pd.read_excel(file_path)
+            df = _normalize_dataframe(df)
             dfs[file_id] = df
             file_mapping[file_id] = file_path
             logger.info(f"[ENSURE_LOADED] ✅ Reloaded from cache. Shape: {df.shape}")
@@ -103,6 +158,7 @@ def ensure_file_loaded(file_id: str, thread_id: str = "default", file_manager=No
                 df = pd.read_csv(file_path)
             else:
                 df = pd.read_excel(file_path)
+            df = _normalize_dataframe(df)
             dfs[file_id] = df
             logger.info(f"[ENSURE_LOADED] ✅ Reloaded from file_paths. Shape: {df.shape}")
             return True
@@ -120,6 +176,7 @@ def ensure_file_loaded(file_id: str, thread_id: str = "default", file_manager=No
                     df = pd.read_csv(metadata.storage_path)
                 else:
                     df = pd.read_excel(metadata.storage_path)
+                df = _normalize_dataframe(df)
                 dfs[file_id] = df
                 file_mapping[file_id] = metadata.storage_path
                 
@@ -156,15 +213,17 @@ def store_dataframe(file_id: str, df: pd.DataFrame, file_path: str, thread_id: s
     """Store dataframe in thread-scoped storage and cache."""
     dfs = get_conversation_dataframes(thread_id)
     paths = get_conversation_file_paths(thread_id)
-    
-    dfs[file_id] = df
+
+    normalized = _normalize_dataframe(df)
+
+    dfs[file_id] = normalized
     paths[file_id] = file_path
     
     # Cache metadata
     spreadsheet_memory.cache_df_metadata(file_id, {
         'file_path': file_path,
-        'shape': df.shape,
-        'columns': df.columns.tolist()
+        'shape': normalized.shape,
+        'columns': normalized.columns.tolist()
     })
     
     logger.info(f"Stored dataframe {file_id} in thread {thread_id}")

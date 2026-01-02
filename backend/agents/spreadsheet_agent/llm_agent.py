@@ -71,8 +71,7 @@ class SpreadsheetQueryAgent:
             },
             "tokens": {
                 "input_total": 0,
-                "output_total": 0,
-                "estimated_cost_usd": 0.0
+                "output_total": 0
             },
             "performance": {
                 "total_latency_ms": 0,
@@ -106,15 +105,7 @@ class SpreadsheetQueryAgent:
             logger.warning("openai package not installed. LLM features disabled.")
             return
         
-        # Build provider chain: Groq → Cerebras → NVIDIA → Google → OpenAI → Anthropic
-        if GROQ_API_KEY:
-            self.providers.append({
-                "name": "groq",
-                "client": OpenAI(api_key=GROQ_API_KEY, base_url=GROQ_BASE_URL),
-                "model": GROQ_MODEL,
-                "max_tokens": LLM_MAX_TOKENS_QUERY
-            })
-        
+        # Build provider chain: Cerebras → Groq → NVIDIA → Google → OpenAI → Anthropic
         if CEREBRAS_API_KEY:
             self.providers.append({
                 "name": "cerebras",
@@ -122,7 +113,15 @@ class SpreadsheetQueryAgent:
                 "model": CEREBRAS_MODEL,
                 "max_tokens": LLM_MAX_TOKENS_QUERY
             })
-        
+
+        if GROQ_API_KEY:
+            self.providers.append({
+                "name": "groq",
+                "client": OpenAI(api_key=GROQ_API_KEY, base_url=GROQ_BASE_URL),
+                "model": GROQ_MODEL,
+                "max_tokens": LLM_MAX_TOKENS_QUERY
+            })
+
         if NVIDIA_API_KEY:
             self.providers.append({
                 "name": "nvidia",
@@ -131,6 +130,7 @@ class SpreadsheetQueryAgent:
                 "max_tokens": LLM_MAX_TOKENS_QUERY
             })
         
+        # Continue with other providers
         if GOOGLE_API_KEY:
             # Google uses OpenAI-compatible API
             self.providers.append({
@@ -159,21 +159,25 @@ class SpreadsheetQueryAgent:
             })
         
         if self.providers:
-            logger.info(f"🔧 Query Agent initialized with providers: {' → '.join([p['name'] for p in self.providers])}")
+            provider_names = ' → '.join([p['name'] for p in self.providers])
+            logger.info(f"🔧 Query Agent initialized with providers: {provider_names}")
         else:
-            logger.warning("⚠️ No LLM providers available for Query Agent")
+            logger.warning("⚠️ No LLM providers configured. Agent will not be functional.")
     
-    def _get_completion(self, messages: List[Dict], temperature: float = None) -> Tuple[str, Dict[str, Any]]:
+    def _get_completion(self, messages: List[Dict], temperature: float = 0.1, provider_offset: int = 0) -> Tuple[str, Dict[str, Any]]:
         """Get LLM completion with fallback and metrics tracking
         
         Returns:
             Tuple of (response_text, metrics_dict)
+        
+        Note: Temperature is hardcoded to 0.1 (matching old working agent) for consistency.
+              Do not change this unless thoroughly testing the new temperature's JSON output.
+        provider_offset lets callers skip providers that produced repeated parse errors.
         """
         if not self.providers:
             raise RuntimeError("No LLM providers available")
         
-        if temperature is None:
-            temperature = LLM_TEMPERATURE
+        # HARDCODED: Always use 0.1 to match old agent's tested behavior
         
         llm_start = time.time()
         call_metrics = {
@@ -185,7 +189,7 @@ class SpreadsheetQueryAgent:
         }
         
         last_error = None
-        for idx, provider in enumerate(self.providers):
+        for idx, provider in enumerate(self.providers[provider_offset:], start=provider_offset):
             try:
                 logger.info(f"🤖 Using {provider['name'].upper()} for query analysis")
                 self.metrics["llm_calls"]["total"] += 1
@@ -210,10 +214,7 @@ class SpreadsheetQueryAgent:
                     self.metrics["tokens"]["input_total"] += response.usage.prompt_tokens
                     self.metrics["tokens"]["output_total"] += response.usage.completion_tokens
                     
-                    # Estimate cost (rough estimates: $0.10 per 1M input tokens, $0.30 per 1M output tokens)
-                    cost = (response.usage.prompt_tokens * 0.10 / 1_000_000) + \
-                           (response.usage.completion_tokens * 0.30 / 1_000_000)
-                    self.metrics["tokens"]["estimated_cost_usd"] += cost
+                    logger.info(f"📊 Tokens - Input: {response.usage.prompt_tokens}, Output: {response.usage.completion_tokens}")
                 
                 call_metrics["provider_used"] = provider['name']
                 call_metrics["latency_ms"] = (time.time() - llm_start) * 1000
@@ -276,11 +277,12 @@ Column Statistics:
         return context
     
     def _build_system_prompt(self, df_context: str, session_context: str = "", all_files_context: str = "") -> str:
-        """Build the system prompt for the query agent"""
+        """Build the system prompt for the query agent
+        
+        NOTE: Simplified to match old working agent's prompt structure.
+        Removed 'ALL FILES' section which confused Llama 3.1 models.
+        """
         return f"""You are a powerful data analysis assistant that helps users query and analyze spreadsheet data using pandas.
-
-=== ALL FILES IN THIS CONVERSATION ===
-{all_files_context if all_files_context else "Currently working with one file."}
 
 === CURRENT DATAFRAME STATE ===
 {df_context}
@@ -300,9 +302,10 @@ You can perform ANY pandas operation including:
 1. ALWAYS respond with valid JSON in the exact format specified below
 2. Use the DataFrame variable 'df' for all operations
 3. Handle column names with spaces using backticks in query() OR bracket notation df['col name']
-4. If the question is unclear, make reasonable assumptions and explain them
-5. For multi-step analysis, break it down clearly with needs_more_steps=true
-6. ALWAYS provide a helpful, human-readable final_answer
+4. If column names look combined (e.g., "YearsExperience,Salary"), split them into separate columns and drop empty/unnamed columns before analysis
+5. If the question is unclear, make reasonable assumptions and explain them
+6. For multi-step analysis, break it down clearly with needs_more_steps=true
+7. ALWAYS provide a helpful, human-readable final_answer
 
 === RESPONSE FORMAT (JSON) ===
 {{
@@ -404,16 +407,17 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
                 error="No LLM providers configured"
             )
         
-        # Check cache for similar query
-        cached_result = spreadsheet_memory.get_cached_query(question, file_id, thread_id)
-        if cached_result:
-            logger.info(f"✨ Using cached result for query: {question[:50]}...")
-            self.metrics["cache"]["hits"] += 1
-            query_metrics["cache_hit"] = True
-            query_metrics["latency_ms"] = (time.time() - query_start) * 1000
-            cached_result.execution_metrics = query_metrics
-            self._log_execution_metrics(query_metrics, True)
-            return cached_result
+        # TEMPORARILY DISABLED CACHING: Query caching disabled until JSON parsing is stable
+        # Previous issues with cache returning malformed queries. Re-enable after validation.
+        # cached_result = spreadsheet_memory.get_cached_query(question, file_id, thread_id)
+        # if cached_result:
+        #     logger.info(f"✨ Using cached result for query: {question[:50]}...")
+        #     self.metrics["cache"]["hits"] += 1
+        #     query_metrics["cache_hit"] = True
+        #     query_metrics["latency_ms"] = (time.time() - query_start) * 1000
+        #     cached_result.execution_metrics = query_metrics
+        #     self._log_execution_metrics(query_metrics, True)
+        #     return cached_result
         
         self.metrics["cache"]["misses"] += 1
         
@@ -431,6 +435,8 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
         
         current_result = None
         iteration = 0
+        parse_failures = 0
+        provider_offset = 0
         
         while iteration < max_iterations:
             iteration += 1
@@ -438,7 +444,7 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
             
             try:
                 # Get LLM response with metrics
-                response_text, call_metrics = self._get_completion(conversation)
+                response_text, call_metrics = self._get_completion(conversation, provider_offset=provider_offset)
                 query_metrics["llm_calls"] += 1
                 query_metrics["tokens_input"] += call_metrics["tokens_input"]
                 query_metrics["tokens_output"] += call_metrics["tokens_output"]
@@ -453,17 +459,48 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
                     elif "```" in response_text:
                         response_text = response_text.split("```")[1].split("```")[0]
                     
-                    response = json.loads(response_text.strip())
-                except json.JSONDecodeError as e:
-                    logger.warning(f"Failed to parse LLM response as JSON: {e}")
+                    # HARDENED: Normalize whitespace before parsing
+                    response_text = response_text.strip()
+                    response_text = "\n".join([line.strip() for line in response_text.split("\n")])
+
+                    def _extract_json_object(text: str) -> str:
+                        start = text.find("{")
+                        end = text.rfind("}")
+                        return text[start:end + 1] if start != -1 and end != -1 and end > start else text
+
+                    try:
+                        response = json.loads(response_text)
+                    except Exception:
+                        fallback = _extract_json_object(response_text)
+                        response = json.loads(fallback)
+
+                    # VALIDATION: Ensure required fields exist in parsed JSON
+                    required_fields = ["thinking", "pandas_code", "is_final_answer"]
+                    missing_fields = [f for f in required_fields if f not in response]
+                    if missing_fields:
+                        raise ValueError(f"JSON missing required fields: {missing_fields}")
+
+                    parse_failures = 0
+
+                except (json.JSONDecodeError, ValueError) as e:
+                    parse_failures += 1
+                    logger.warning(f"Failed to parse LLM response as JSON (attempt {parse_failures}): {e}")
                     steps_taken.append({
                         "iteration": iteration,
                         "error": f"JSON parse error: {e}",
                         "raw_response": response_text[:500]
                     })
-                    # Ask LLM to fix the response
-                    conversation.append({"role": "assistant", "content": response_text})
-                    conversation.append({"role": "user", "content": "Please respond with valid JSON only, no markdown or extra text."})
+                    # Ask LLM to fix the response with stricter instruction
+                    conversation.append({"role": "assistant", "content": response_text[:500]})
+                    conversation.append({
+                        "role": "user", 
+                        "content": "Please respond with valid JSON only (no markdown), using keys thinking, pandas_code, is_final_answer, final_answer."
+                    })
+                    if parse_failures >= 2 and provider_offset < len(self.providers) - 1:
+                        failures_before_switch = parse_failures
+                        provider_offset += 1
+                        parse_failures = 0
+                        logger.info(f"Switching to next LLM provider after {failures_before_switch} consecutive parse failures")
                     continue
                 
                 # Extract fields
@@ -651,7 +688,6 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
         logger.info(f"  🔄 Retry Success:        {self.metrics['retry']['retry_success_rate']:.1f}%")
         logger.info(f"  🧠 Memory Used:          {exec_metrics.get('memory_used_mb', 0):.1f} MB")
         logger.info(f"  📊 Peak Memory:          {self.metrics['resource']['peak_memory_mb']:.1f} MB")
-        logger.info(f"  💰 Est. Cost:            ${self.metrics['tokens']['estimated_cost_usd']:.4f}")
         logger.info("=" * 80)
     
     def get_metrics(self) -> Dict[str, Any]:

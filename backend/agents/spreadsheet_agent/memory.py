@@ -215,8 +215,12 @@ class SpreadsheetMemory:
         except Exception as e:
             logger.error(f"Failed to save {key} to disk: {e}")
     
-    def load_from_disk(self, key: str) -> Optional[Any]:
-        """Load data from persistent storage"""
+    def load_from_disk(self, key: str = "state") -> Optional[Any]:
+        """Load data from persistent storage.
+
+        The caller can optionally provide a key; defaults to "state" to keep
+        backward compatibility with older call sites that didn't pass a key.
+        """
         try:
             file_path = self.memory_dir / f"{key}.json"
             if file_path.exists():

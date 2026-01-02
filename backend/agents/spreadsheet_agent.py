@@ -1,4 +1,4 @@
-# agents/spreadsheet_agent_agent.py
+# agents/spreadsheet_agent.py
 # WRAPPER - Delegates to agents/spreadsheet_agent/ modularized components
 
 from fastapi import FastAPI, HTTPException
@@ -67,4 +67,4 @@ if __name__ == "__main__":
     # For production, run using your process manager / container and don't use reload=True.
     # Use 0.0.0.0 to bind to all interfaces for better compatibility
     port = int(os.getenv('SPREADSHEET_AGENT_PORT', 8041))
-    uvicorn.run("spreadsheet_agent_agent:app", host="0.0.0.0", port=port, reload=False)
+    uvicorn.run("spreadsheet_agent:app", host="0.0.0.0", port=port, reload=False)

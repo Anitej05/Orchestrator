@@ -66,10 +66,23 @@ def is_creation_task(task: PlannedTask) -> Tuple[bool, Optional[str]]:
 
 def _is_spreadsheet_creation(task_name: str, task_desc: str, combined: str) -> bool:
     """Check if task is spreadsheet creation."""
+    # First check for analysis/summary keywords - these are NOT creation tasks
+    analysis_keywords = ['summarize', 'summary', 'analyze', 'analysis', 'describe', 'explain', 
+                        'review', 'insights', 'examine', 'interpret', 'report about', 'report on']
+    is_analysis = any(keyword in combined for keyword in analysis_keywords)
+    
+    # If it's asking to analyze/summarize an existing file, NOT creation
+    if is_analysis and any(phrase in combined for phrase in ['of the', 'about the', 'from the', 'existing', 'uploaded']):
+        return False
+    
     # Keywords must be present + file type or spreadsheet reference
     has_create_keyword = any(keyword in combined for keyword in SPREADSHEET_CREATE_KEYWORDS)
     has_file_type = any(ftype in combined for ftype in SPREADSHEET_FILE_TYPES)
     is_data_table_creation = 'create table' in combined or 'create data table' in combined or 'create spreadsheet' in combined
+    
+    # Exclude if it's clearly an analysis task even with creation keywords
+    if is_analysis:
+        return False
     
     return has_create_keyword and (has_file_type or is_data_table_creation)
 

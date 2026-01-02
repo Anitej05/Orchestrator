@@ -54,6 +54,21 @@ from .utils import (
     handle_execution_error
 )
 
+# Import metrics display using absolute import from backend
+# Backend path is already added to sys.path above (line 22)
+try:
+    # Try standard import first
+    from utils.metrics_display import display_execution_metrics, display_session_metrics
+except ImportError:
+    # If that fails, use importlib to load directly
+    import importlib.util
+    metrics_path = BACKEND_DIR / "utils" / "metrics_display.py"
+    spec = importlib.util.spec_from_file_location("metrics_display", metrics_path)
+    metrics_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(metrics_module)
+    display_execution_metrics = metrics_module.display_execution_metrics
+    display_session_metrics = metrics_module.display_session_metrics
+
 # Import standardized file manager
 try:
     from agents.utils.agent_file_manager import AgentFileManager, FileType, FileStatus
@@ -64,11 +79,8 @@ except ImportError:
         logger.error("Failed to import agent_file_manager")
         raise
 
-# Import session manager
-try:
-    from agents.spreadsheet_session_manager import spreadsheet_session_manager
-except ImportError:
-    from spreadsheet_session_manager import spreadsheet_session_manager
+# Import session manager (now in same directory)
+from .spreadsheet_session_manager import spreadsheet_session_manager
 
 # Create FastAPI app
 app = FastAPI(title="Spreadsheet Agent", version="2.0.0")
@@ -291,14 +303,24 @@ async def natural_language_query(
         
         thread_id = thread_id or "default"
         
+        if not file_id:
+            logger.error("❌ [NL_QUERY] Missing file_id in request")
+            raise HTTPException(status_code=400, detail="file_id is required. Upload a spreadsheet and provide its file_id.")
+
+        logger.info(f"🚀 [NL_QUERY] Starting with: file_id={file_id}, question='{question[:80]}...'")
+        
         # Ensure file is loaded
         if not ensure_file_loaded(file_id, thread_id, file_manager):
+            logger.error(f"❌ [NL_QUERY] File not found: {file_id}")
             raise HTTPException(status_code=404, detail=f"File {file_id} not found")
         
         # Get dataframe
         df = get_dataframe(file_id, thread_id)
         if df is None:
+            logger.error(f"❌ [NL_QUERY] Failed to load dataframe: {file_id}")
             raise HTTPException(status_code=500, detail="Failed to load dataframe")
+        
+        logger.info(f"📊 [NL_QUERY] Dataframe loaded: {len(df)} rows × {len(df.columns)} cols")
         
         # Get session context
         session_context = ""
@@ -310,13 +332,13 @@ async def natural_language_query(
                         f"{i+1}. {op.get('operation', 'unknown')}: {op.get('description', '')}"
                         for i, op in enumerate(session_history)
                     ])
+                    logger.info(f"📜 [NL_QUERY] Found {len(session_history)} previous operations in context")
             except Exception as e:
-                logger.warning(f"Could not get session history: {e}")
+                logger.warning(f"⚠️  [NL_QUERY] Could not get session history: {e}")
         
         # Execute query
         async with spreadsheet_operation_lock:
-            # Track LLM call
-            call_metrics["llm_calls"]["total"] += 1
+            logger.info(f"🤖 [NL_QUERY] Sending to LLM for processing (max_iterations={max_iterations})...")
             
             result = await query_agent.query(
                 df=df,
@@ -326,6 +348,11 @@ async def natural_language_query(
                 file_id=file_id,
                 thread_id=thread_id
             )
+            
+            if result.success:
+                logger.info(f"✅ [NL_QUERY] LLM processing completed successfully")
+            else:
+                logger.error(f"❌ [NL_QUERY] LLM processing failed: {result.error}")
         
         # Update dataframe if modified
         if result.final_dataframe is not None:
@@ -372,6 +399,16 @@ async def natural_language_query(
         if canvas_display:
             response_data["canvas_display"] = canvas_display
         
+        # Display execution metrics for debugging
+        if hasattr(result, 'metrics') and result.metrics:
+            display_execution_metrics(
+                metrics=result.metrics,
+                agent_name="Spreadsheet",
+                operation_name="nl_query",
+                success=result.success
+            )
+        
+        logger.info(f"📤 [NL_QUERY] Returning response to orchestrator")
         return ApiResponse(success=True, result=response_data)
 
     except HTTPException:
@@ -744,6 +781,28 @@ async def create_spreadsheet(request: CreateSpreadsheetRequest):
     """Create a new spreadsheet from content or instruction"""
     try:
         thread_id = request.thread_id or "default"
+        
+        # **ENDPOINT VALIDATION**: Detect if instruction is actually asking for analysis/summary
+        if request.instruction:
+            instruction_lower = request.instruction.lower()
+            analysis_keywords = ['summarize', 'summary', 'analyze', 'analysis', 'describe', 'explain',
+                               'review', 'insights', 'examine', 'interpret', 'report about', 'report on']
+            is_analysis = any(keyword in instruction_lower for keyword in analysis_keywords)
+            
+            # Check if asking about existing file
+            references_existing = any(phrase in instruction_lower for phrase in 
+                                     ['of the', 'about the', 'from the', '.xlsx', '.csv', 'spreadsheet', 'existing', 'uploaded'])
+            
+            if is_analysis and references_existing:
+                error_msg = (f"❌ /create endpoint called with analysis request. "
+                           f"This endpoint creates NEW spreadsheets. "
+                           f"For analyzing/summarizing existing files, use /nl_query endpoint instead. "
+                           f"Instruction received: {request.instruction[:100]}...")
+                logger.error(error_msg)
+                return ApiResponse(
+                    success=False,
+                    error="Wrong endpoint: Use /nl_query for analysis/summary tasks, not /create"
+                )
         
         # Generate CSV content if needed
         if request.instruction:

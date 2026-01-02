@@ -3221,15 +3221,26 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
     
     # AUTO-INJECT: Spreadsheet file_id for spreadsheet agent endpoints
     # PRIORITY: Files uploaded in the current turn (is_current_turn=True) should be used first
+    logger.info(f"🔍 [FILE_ID_INJECTION] Checking auto-injection for endpoint: {endpoint_path}")
+    logger.info(f"🔍 [FILE_ID_INJECTION] Endpoint parameters: {[p.name for p in selected_endpoint.parameters]}")
+    logger.info(f"🔍 [FILE_ID_INJECTION] file_id in params: {'file_id' in [p.name for p in selected_endpoint.parameters]}")
+    logger.info(f"🔍 [FILE_ID_INJECTION] file_id already extracted: {'file_id' in pre_extracted_params}")
+    logger.info(f"🔍 [FILE_ID_INJECTION] uploaded_files count: {len(uploaded_files) if uploaded_files else 0}")
+    
     if 'file_id' in [p.name for p in selected_endpoint.parameters] and 'file_id' not in pre_extracted_params and uploaded_files:
+        logger.info(f"🔍 [FILE_ID_INJECTION] Conditions met, searching for spreadsheet files...")
         # First pass: look for current turn spreadsheet files
         current_turn_file = None
         fallback_file = None
         
-        for file_obj in uploaded_files:
+        for idx, file_obj in enumerate(uploaded_files):
             file_dict = file_obj if isinstance(file_obj, dict) else file_obj.__dict__
+            logger.info(f"🔍 [FILE_ID_INJECTION] File {idx+1}: name={file_dict.get('file_name')}, type={file_dict.get('file_type')}, is_current={file_dict.get('is_current_turn')}")
+            
             if file_dict.get('file_type') == 'spreadsheet' or file_dict.get('file_name', '').lower().endswith(('.csv', '.xlsx', '.xls')):
                 file_id = file_dict.get('file_id') or file_dict.get('content_id')
+                logger.info(f"🔍 [FILE_ID_INJECTION] Found spreadsheet file with file_id: {file_id}")
+                
                 if file_id:
                     # Prioritize current turn files
                     if file_dict.get('is_current_turn'):
@@ -3239,6 +3250,7 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                     elif not fallback_file:
                         # Keep as fallback if no current turn file found
                         fallback_file = file_id
+                        logger.info(f"📎 Found fallback spreadsheet file_id: {file_id}")
         
         # Use current turn file if available, otherwise use fallback
         selected_file_id = current_turn_file or fallback_file
@@ -3248,6 +3260,31 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                 logger.info(f"✅ AUTO-INJECTED file_id for spreadsheet (CURRENT TURN): {selected_file_id}")
             else:
                 logger.info(f"✅ AUTO-INJECTED file_id for spreadsheet (fallback): {selected_file_id}")
+        else:
+            logger.error(f"❌ [FILE_ID_INJECTION] No valid file_id found despite having {len(uploaded_files)} uploaded files")
+    # Fallback: if file_id still missing, try last uploaded spreadsheet from state
+    if 'file_id' in [p.name for p in selected_endpoint.parameters] and 'file_id' not in pre_extracted_params:
+        state_files = state.get('uploaded_files', []) if 'state' in locals() else []
+        fallback_id = None
+        for file_obj in state_files:
+            file_dict = file_obj if isinstance(file_obj, dict) else file_obj.__dict__
+            if file_dict.get('file_type') == 'spreadsheet' or file_dict.get('file_name', '').lower().endswith(('.csv', '.xlsx', '.xls')):
+                fid = file_dict.get('file_id') or file_dict.get('content_id')
+                if fid:
+                    fallback_id = fid
+                    logger.info(f"📎 [FILE_ID_INJECTION] Using fallback spreadsheet file_id from state: {fid}")
+                    break
+        if fallback_id:
+            pre_extracted_params['file_id'] = fallback_id
+        else:
+            logger.error(f"❌ [FILE_ID_INJECTION] file_id required but not found in uploaded_files or state for endpoint {endpoint_path}")
+    else:
+        if 'file_id' not in [p.name for p in selected_endpoint.parameters]:
+            logger.info(f"🔍 [FILE_ID_INJECTION] Skipped - file_id not in endpoint parameters")
+        elif 'file_id' in pre_extracted_params:
+            logger.info(f"🔍 [FILE_ID_INJECTION] Skipped - file_id already extracted: {pre_extracted_params['file_id']}")
+        elif not uploaded_files:
+            logger.warning(f"⚠️ [FILE_ID_INJECTION] Skipped - no uploaded files available")
     
     # AUTO-INJECT: Instruction for execute_pandas endpoint
     if '/execute_pandas' in endpoint_path and 'instruction' in [p.name for p in selected_endpoint.parameters]:
@@ -3260,6 +3297,31 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
         if 'question' not in pre_extracted_params:
             pre_extracted_params['question'] = planned_task.task_description
             logger.info(f"✅ AUTO-INJECTED question for /nl_query: {planned_task.task_description}")
+    
+    # **EXPLICIT ROUTING FIX**: Ensure summary/analyze tasks use /nl_query for spreadsheet agent
+    task_lower = planned_task.task_name.lower()
+    task_desc_lower = planned_task.task_description.lower() if planned_task.task_description else ""
+    analysis_keywords = ['summarize', 'summary', 'analyze', 'analysis', 'describe', 'explain', 'review', 'insights', 'examine']
+    is_analysis_task = any(keyword in task_lower or keyword in task_desc_lower for keyword in analysis_keywords)
+    
+    if is_analysis_task and 'spreadsheet' in agent_details.name.lower() and '/nl_query' not in endpoint_path:
+        logger.warning(f"⚠️ ROUTING CORRECTION: Task '{planned_task.task_name}' appears to be analysis but endpoint is '{endpoint_path}'")
+        logger.warning(f"⚠️ This should use /nl_query endpoint. Attempting to find and use it...")
+        
+        # Try to find nl_query endpoint in agent's endpoints
+        nl_query_endpoint = next((ep for ep in agent_details.endpoints if '/nl_query' in str(ep.endpoint)), None)
+        if nl_query_endpoint:
+            logger.info(f"✅ Found /nl_query endpoint, correcting routing...")
+            selected_endpoint = nl_query_endpoint
+            endpoint_path = str(nl_query_endpoint.endpoint)
+            # Ensure downstream request uses the corrected endpoint + method + URL
+            endpoint_url = f"{base_url}{endpoint_path}" if base_url else endpoint_path
+            http_method = nl_query_endpoint.http_method.upper()
+            logger.info(f"✅ ROUTE CORRECTION applied: endpoint={endpoint_path}, method={http_method}, url={endpoint_url}")
+            # Auto-inject question parameter
+            if 'question' not in pre_extracted_params:
+                pre_extracted_params['question'] = planned_task.task_description
+                logger.info(f"✅ AUTO-INJECTED question for corrected /nl_query route: {planned_task.task_description}")
 
     
     # Check if all required parameters are already extracted
@@ -3678,6 +3740,8 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                     request_format = get_request_format(selected_endpoint, connection_config)
                     use_form_data = request_format == 'form'
                     logger.info(f"[REQUEST_FORMAT] Endpoint: {endpoint_path}, format: {request_format}, use_form_data: {use_form_data}")
+                    logger.info(f"[PAYLOAD_DEBUG] Payload keys: {list(payload.keys()) if isinstance(payload, dict) else 'not a dict'}")
+                    logger.info(f"[PAYLOAD_DEBUG] Payload content: {payload}")
                     
                     if use_form_data:
                         logger.info(f"Using form data for agent '{agent_details.name}'")
@@ -3689,8 +3753,73 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                     response.raise_for_status()
                     result = response.json()
 
+                # **RELAY AGENT LOGS TO ORCHESTRATOR**
+                logger.info(f"")
+                logger.info(f"{'='*80}")
+                logger.info(f"📊 [AGENT RESPONSE] {agent_details.name} - Task: {planned_task.task_name}")
+                logger.info(f"{'='*80}")
+                logger.info(f"  Status: ✅ Success")
+
+                if isinstance(result, dict):
+                    metrics = result.get('metrics') or result.get('execution_metrics')
+                    if metrics:
+                        logger.info(f"")
+                        logger.info(f"  ⏱️  Performance:")
+                        if 'latency_ms' in metrics:
+                            logger.info(f"    Latency: {metrics['latency_ms']:.1f}ms")
+                        if 'rag_retrieval_ms' in metrics:
+                            logger.info(f"    RAG Retrieval: {metrics['rag_retrieval_ms']:.1f}ms")
+                        if 'llm_call_ms' in metrics:
+                            logger.info(f"    LLM Processing: {metrics['llm_call_ms']:.1f}ms")
+                        
+                        if 'tokens_input' in metrics or 'tokens_output' in metrics:
+                            logger.info(f"")
+                            logger.info(f"  💬 Tokens:")
+                            if 'tokens_input' in metrics:
+                                logger.info(f"    Input: {metrics['tokens_input']}")
+                            if 'tokens_output' in metrics:
+                                logger.info(f"    Output: {metrics['tokens_output']}")
+                        
+                        if 'llm_calls' in metrics:
+                            logger.info(f"")
+                            logger.info(f"  🤖 LLM Calls: {metrics['llm_calls']}")
+                        
+                        if 'cache_hit_rate' in metrics:
+                            cache_status = "HIT" if metrics.get('cache_hit') else "MISS"
+                            logger.info(f"")
+                            logger.info(f"  💾 Cache: {cache_status} (Hit Rate: {metrics['cache_hit_rate']:.1f}%)")
+                        
+                        if 'chunks_retrieved' in metrics and metrics['chunks_retrieved'] > 0:
+                            logger.info(f"")
+                            logger.info(f"  📚 RAG Chunks Retrieved: {metrics['chunks_retrieved']}")
+                    
+                    success_msg = result.get('message') or result.get('answer')
+                    if success_msg:
+                        preview = success_msg[:150] + "..." if len(str(success_msg)) > 150 else success_msg
+                        logger.info(f"")
+                        logger.info(f"  📝 Result: {preview}")
+
+                logger.info(f"{'='*80}")
+                logger.info(f"")
+
                 # **INTELLIGENT VALIDATION** for semantic failure
-                is_result_empty = not result or (isinstance(result, list) and not result) or (isinstance(result, dict) and not any(result.values()))
+                is_result_empty = not result or (isinstance(result, list) and not result)
+                
+                if isinstance(result, dict):
+                    # Check for empty canvas display (spreadsheet with no rows)
+                    canvas = result.get('canvas_display') or result.get('result', {}).get('canvas_display')
+                    if canvas and isinstance(canvas, dict):
+                        rows = canvas.get('rows', [])
+                        total_rows = canvas.get('total_rows', len(rows) if rows else 0)
+                        # If canvas exists but has no data rows, it's empty
+                        if total_rows == 0 and canvas.get('canvas_type') == 'spreadsheet':
+                            logger.warning(f"Agent returned spreadsheet canvas with 0 rows. This may be an incorrectly routed task.")
+                            is_result_empty = True
+                    
+                    # Generic empty check - dict has no meaningful values
+                    if not is_result_empty and not any(result.values()):
+                        is_result_empty = True
+                
                 if is_result_empty:
                     logger.warning(f"Agent returned a successful but empty response. Retrying...")
                     failed_attempts.append({"payload": payload, "result": str(result)})

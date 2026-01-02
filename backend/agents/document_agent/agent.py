@@ -25,6 +25,25 @@ from .utils import (
     convert_docx_to_pdf, create_pdf_canvas_display, ensure_directory
 )
 
+# Import metrics display using absolute path
+try:
+    # Add backend to path if needed
+    import sys
+    backend_path = str(Path(__file__).parent.parent.parent)
+    if backend_path not in sys.path:
+        sys.path.insert(0, backend_path)
+    from utils.metrics_display import display_execution_metrics, display_session_metrics
+except ImportError:
+    # If that fails, use importlib to load directly
+    import importlib.util
+    backend_dir = Path(__file__).parent.parent.parent
+    metrics_path = backend_dir / "utils" / "metrics_display.py"
+    spec = importlib.util.spec_from_file_location("metrics_display", metrics_path)
+    metrics_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(metrics_module)
+    display_execution_metrics = metrics_module.display_execution_metrics
+    display_session_metrics = metrics_module.display_session_metrics
+
 logger = logging.getLogger(__name__)
 
 # Get workspace root (3 levels up from this file: agent.py -> document_agent -> agents -> backend -> root)
@@ -174,6 +193,8 @@ class DocumentAgent:
         request_start = time.time()
         self.metrics["api_calls"]["analyze"] += 1
         
+        logger.info(f"🚀 [ANALYZE] Starting document analysis with query: '{request.query[:80]}...'")
+        
         try:
             # Collect all file paths to process
             file_paths = []
@@ -182,13 +203,17 @@ class DocumentAgent:
             elif request.file_path:
                 file_paths.append(request.file_path)
             
+            logger.info(f"📄 [ANALYZE] Processing {len(file_paths)} file(s): {file_paths}")
+            
             # Multi-file batch processing
             if len(file_paths) > 1:
                 self._batch_operations += 1
+                logger.info(f"📚 [ANALYZE] Batch mode: processing {len(file_paths)} files together")
                 result = self._analyze_multiple_files(request, file_paths)
             else:
                 # Single file processing (optimized path)
                 self._files_processed += 1
+                logger.info(f"📄 [ANALYZE] Single file mode: processing {file_paths[0] if file_paths else 'unknown'}")
                 result = self._analyze_single_file(request, file_paths[0] if file_paths else None)
             
             # Track performance metrics
@@ -196,23 +221,36 @@ class DocumentAgent:
             self.metrics["performance"]["total_latency_ms"] += request_latency
             self.metrics["performance"]["requests_completed"] += 1
             
+            logger.info(f"⏱️  [ANALYZE] Request latency: {request_latency:.1f}ms")
+            
             # Update RAG metrics if present in result
             if 'metrics' in result:
                 req_metrics = result['metrics']
-                if req_metrics.get('chunks_retrieved', 0) > 0:
-                    self.metrics["rag"]["chunks_retrieved_total"] += req_metrics['chunks_retrieved']
+                chunks = req_metrics.get('chunks_retrieved', 0)
+                if chunks > 0:
+                    self.metrics["rag"]["chunks_retrieved_total"] += chunks
+                    logger.info(f"📚 [RAG] Retrieved {chunks} chunks from vector store")
                 if req_metrics.get('cache_hit', False):
                     self.metrics["cache"]["hits"] += 1
+                    logger.info(f"💾 [CACHE] HIT for query")
                 else:
                     self.metrics["cache"]["misses"] += 1
+                    logger.info(f"💾 [CACHE] MISS - reprocessing query")
             
             # Track errors
             if not result.get('success', False):
                 self.metrics["errors"]["total"] += 1
-                if 'RAG' in str(result.get('answer', '')):
+                error_msg = result.get('answer', 'Unknown error')
+                if 'RAG' in str(error_msg):
                     self.metrics["errors"]["rag_errors"] += 1
-                elif 'LLM' in str(result.get('answer', '')):
+                    logger.error(f"❌ [ANALYZE] RAG error: {error_msg[:200]}")
+                elif 'LLM' in str(error_msg):
                     self.metrics["errors"]["llm_errors"] += 1
+                    logger.error(f"❌ [ANALYZE] LLM error: {error_msg[:200]}")
+                else:
+                    logger.error(f"❌ [ANALYZE] Analysis failed: {error_msg[:200]}")
+            else:
+                logger.info(f"✅ [ANALYZE] Analysis completed successfully")
             
             # Add execution summary to result
             result['execution_metrics'] = {
@@ -229,11 +267,19 @@ class DocumentAgent:
             # Log detailed execution metrics
             self._log_execution_metrics(result['execution_metrics'], result.get('success', False))
             
+            # Display unified metrics for debugging
+            display_execution_metrics(
+                metrics=result['execution_metrics'],
+                agent_name="Document",
+                operation_name="analyze",
+                success=result.get('success', False)
+            )
+            
             return result
 
         except Exception as e:
             self.metrics["errors"]["total"] += 1
-            logger.error(f"Analysis orchestration failed: {e}", exc_info=True)
+            logger.error(f"❌ [ANALYZE] Critical error: {e}", exc_info=True)
             return {
                 'success': False,
                 'answer': f'Critical error: {str(e)}',

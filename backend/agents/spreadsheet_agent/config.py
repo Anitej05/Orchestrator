@@ -27,11 +27,12 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
-# LLM Models - Priority order: Groq → Cerebras → NVIDIA → Google
-GROQ_MODEL = "llama-3.3-70b-versatile"
+# LLM Models - Priority order: Cerebras → Groq → NVIDIA → Google
+# REVERTED to tested working models (not llama-3.1 which has JSON parsing issues)
+GROQ_MODEL = "openai/gpt-oss-120b"  # Tested working model - avoids JSON parsing failures
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 
-CEREBRAS_MODEL = "llama3.1-70b"
+CEREBRAS_MODEL = "gpt-oss-120b"  # Tested working model - consistently produces valid JSON
 CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
 
 NVIDIA_MODEL = "meta/llama-3.1-70b-instruct"  # NVIDIA NIM
@@ -47,7 +48,8 @@ ANTHROPIC_MODEL = "claude-3-5-haiku-20241022"  # Fast and affordable
 ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
 
 # LLM Settings
-LLM_TEMPERATURE = 0.1
+LLM_TEMPERATURE = 0.1  # Hardcoded - do NOT use config for consistency with old agent
+LLM_MAX_TOKENS_QUERY = 2000  # Consistent with old agent
 LLM_MAX_TOKENS_QUERY = 2000
 LLM_MAX_TOKENS_CODE_GEN = 2000
 LLM_TIMEOUT = 60
