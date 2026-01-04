@@ -44,10 +44,11 @@ class MessageManager:
     """
     
     # Default token budgets for different parts
-    DEFAULT_MAX_TOKENS = 100000  # Total context budget
-    SYSTEM_PROMPT_BUDGET = 3000  # Reserved for system prompt
-    CURRENT_STATE_BUDGET = 8000  # Reserved for current page state
-    HISTORY_BUDGET_RATIO = 0.6  # 60% of remaining for history
+    # REDUCED FURTHER: 30k still causes ~58k char prompts hitting timeouts
+    DEFAULT_MAX_TOKENS = 15000  # Reduced from 30k - forces ~20k char prompts max
+    SYSTEM_PROMPT_BUDGET = 2000  # Reserved for system prompt
+    CURRENT_STATE_BUDGET = 3000  # Reserved for current page state (reduced from 5k)
+    HISTORY_BUDGET_RATIO = 0.5  # 50% of remaining for history
     
     # Tokenizer - using cl100k_base (works with GPT-4, Claude, etc.)
     _encoder = None
@@ -325,7 +326,7 @@ def format_page_content_for_prompt(
     # Interactive elements (high priority - this is what the agent clicks)
     elements = page_content.get('elements', [])
     if elements:
-        elements_header = "\nINTERACTIVE ELEMENTS:\n"
+        elements_header = "\nPAGE ELEMENTS (Interactive & Text):\n"
         parts.append(elements_header)
         current_tokens += count(elements_header)
         
@@ -337,7 +338,9 @@ def format_page_content_for_prompt(
         for i, elem in enumerate(elements):
             role = elem.get('role', 'element')
             name = elem.get('name', '')[:60]
-            xpath = elem.get('xpath', '')[:80]
+            # XPath removed to save tokens (20k+ chars)
+            # The LLM acts by index, so XPath is unnecessary payload
+            # xpath = elem.get('xpath', '')[:80]
             
             # Markers
             interactive_mark = "[INT]" if elem.get('interactive') else ""
@@ -356,7 +359,8 @@ def format_page_content_for_prompt(
             attr_str = " ".join(attr_parts)
             if attr_str: attr_str = f" {{{attr_str}}}"
             
-            elem_text = f"#{i+1} {interactive_mark} {offscreen_mark} [{role}] \"{name}\"{attr_str} {xpath}\n"
+            # Format: #Index [Mark] [Role] "Name" {Attrs}
+            elem_text = f"#{i+1} {interactive_mark} {offscreen_mark} [{role}] \"{name}\"{attr_str}\n"
             elem_tok = count(elem_text)
             
             if element_tokens + elem_tok > element_budget:
@@ -369,21 +373,10 @@ def format_page_content_for_prompt(
         parts.append("".join(element_lines))
         current_tokens += element_tokens
     
-    # Accessibility tree (if budget allows)
-    ax_tree = page_content.get('accessibility_tree', '')
-    if ax_tree and current_tokens < max_tokens * 0.7:
-        tree_budget = max_tokens - current_tokens - 500  # Leave buffer
-        
-        if tree_budget > 500:
-            parts.append("\nACCESSIBILITY TREE:\n")
-            
-            # Truncate tree to fit
-            tree_tokens = count(ax_tree)
-            if tree_tokens > tree_budget:
-                # Rough truncation by characters
-                char_budget = tree_budget * 4  # ~4 chars per token
-                ax_tree = ax_tree[:char_budget] + "\n... (truncated)"
-            
-            parts.append(ax_tree)
+    # Accessibility tree - REMOVED for efficiency
+    # It duplicates the element list and bloats the prompt, causing rate limits.
+    # We rely on 'INTERACTIVE ELEMENTS' and visual context instead.
+    # ax_tree = page_content.get('accessibility_tree', '')
+    # if ax_tree...
     
     return "".join(parts)

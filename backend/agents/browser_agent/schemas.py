@@ -14,7 +14,9 @@ class AtomicAction(BaseModel):
         "navigate", "click", "type", "scroll", "extract", "done",
         "hover", "press", "wait", "go_back", "go_forward", "save_screenshot", 
         "save_info", "skip_subtask", "select", "upload_file", "download_file",
-        "run_js", "press_keys"
+        "run_js", "press_keys",
+        # Persistent memory actions
+        "save_credential", "get_credential", "save_learning"
     ]
     params: Dict[str, Any] = Field(default_factory=dict)
 
@@ -82,10 +84,26 @@ class BrowserTask(BaseModel):
 
 
 class BrowserResult(BaseModel):
-    """Final result"""
+    """
+    Final result - Minimal & Flexible Schema
+    
+    REQUIRED (for orchestrator routing):
+    - success: bool - determines success/failure routing
+    - task_summary: str - human-readable result for LLM interpretation
+    
+    OPTIONAL (flexible content):
+    - extracted_data: any dict - LLM interprets this, can have any structure
+    - actions_taken: optional - for debugging/logging only
+    - error: optional - only when errors occur
+    - metrics: optional - performance data
+    """
+    # REQUIRED - Orchestrator needs these for routing decisions
     success: bool
     task_summary: str
-    actions_taken: List[Dict[str, Any]] = Field(default_factory=list)
-    extracted_data: Optional[Dict[str, Any]] = None
+    
+    # FLEXIBLE - Content varies by task, LLM interprets
+    extracted_data: Optional[Any] = None  # Can be any structure
+    actions_taken: Optional[Any] = None   # Optional, any format
     error: Optional[str] = None
-    metrics: Dict[str, Any] = Field(default_factory=dict)
+    metrics: Optional[Dict[str, Any]] = None
+

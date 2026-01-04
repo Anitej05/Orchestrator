@@ -6,9 +6,16 @@ import { Button } from "@/components/ui/button"
 import { SignInButton, SignOutButton, useUser, UserButton } from "@clerk/nextjs"
 import { ThemeToggle } from "./theme-toggle"
 import { Bot } from "lucide-react"
+import { useEffect, useState } from "react"
 
 export default function Navbar() {
   const { isSignedIn, user } = useUser()
+  const [mounted, setMounted] = useState(false)
+
+  // Prevent hydration mismatch by only rendering UserButton after mount
+  useEffect(() => {
+    setMounted(true)
+  }, [])
 
   return (
     <nav className="fixed top-0 left-0 w-full z-[100] h-16 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800/30 flex items-center justify-between px-6">
@@ -36,7 +43,7 @@ export default function Navbar() {
           <ThemeToggle />
         </div>
         <div className="scale-110">
-          <UserButton afterSignOutUrl="/sign-in" />
+          {mounted && <UserButton afterSignOutUrl="/sign-in" />}
         </div>
       </div>
     </nav>

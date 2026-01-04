@@ -2624,6 +2624,16 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
     # Match endpoint by path only (not full URL)
     selected_endpoint = next((ep for ep in agent_details.endpoints if str(ep.endpoint) == endpoint_path), None)
     
+    # FALLBACK: If path-only match fails, try matching the path suffix
+    # This handles cases where LLM generates "/browse" but agent has "http://localhost:8090/browse"
+    if not selected_endpoint and endpoint_path.startswith('/'):
+        selected_endpoint = next(
+            (ep for ep in agent_details.endpoints if str(ep.endpoint).endswith(endpoint_path)),
+            None
+        )
+        if selected_endpoint:
+            logger.info(f"✅ Matched endpoint by path suffix: {endpoint_path} → {selected_endpoint.endpoint}")
+    
     # CRITICAL FIX: Override http_method with the correct one from agent config
     # LLM sometimes suggests GET when agent requires POST
     if selected_endpoint:
@@ -3175,11 +3185,28 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                     
                     logger.info(f"✅ Browser task completed (push-based streaming)")
                     
-                    # Return the final result
+                    # Build a rich result that includes structured extracted data
+                    # This ensures the final response LLM can reference specific findings
+                    task_result = result_data.get('task_summary', 'Task completed')
+                    
+                    # If we have extracted items, append a summary of them to the result
+                    extracted_data = result_data.get('extracted_data', {})
+                    if extracted_data and isinstance(extracted_data, dict):
+                        items = extracted_data.get('items', [])
+                        if items:
+                            task_result += f"\n\n📊 Extracted {len(items)} items:\n"
+                            for item in items[:10]:  # Limit to first 10 items
+                                if 'structured_info' in item:
+                                    info = item['structured_info']
+                                    verified = "✓" if info.get('verified', False) else "⚠️"
+                                    task_result += f"  {verified} {info.get('key', 'unknown')}: {str(info.get('value', ''))[:150]}\n"
+                    
+                    # Return the final result with enriched result field
                     return {
                         "task_name": planned_task.task_name,
-                        "result": result_data.get('task_summary', 'Task completed'),
+                        "result": task_result,  # Now includes structured data summary
                         "raw_response": result_data,
+                        "extracted_data": extracted_data,  # Also include raw for programmatic access
                         "status_code": response.status_code,
                         "screenshot_files": result_data.get('screenshot_files', [])
                     }

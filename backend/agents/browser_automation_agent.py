@@ -1,12 +1,18 @@
 # agents/browser_automation_agent.py
 # SOTA WRAPPER - Delegates to agents/browser_agent/agent.py
 
+# CRITICAL: Fix Windows asyncio subprocess issue with Playwright
+# Must be set BEFORE any other asyncio imports
+import sys
+import asyncio
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import os
 import logging
-import asyncio
 from pathlib import Path
 from dotenv import load_dotenv
 

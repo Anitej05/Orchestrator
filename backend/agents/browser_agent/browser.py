@@ -68,6 +68,7 @@ class Browser:
         self.profile_name = profile_name
         self._stealth_enabled = True
         self._download_handler: Optional[Callable] = None
+        self._browser_pids: set = set()  # Track PIDs for safe cleanup
     
     @property
     def profile_dir(self) -> Path:
@@ -100,26 +101,50 @@ class Browser:
         try:
             self.playwright = await async_playwright().start()
             
-            # Stealth launch args
+            # Launch args for STABILITY and stealth
+            # These prevent Windows "closed pipe" errors and browser crashes
             launch_args = [
+                # Stealth
                 '--disable-blink-features=AutomationControlled',
-                '--disable-dev-shm-usage',
+                '--disable-infobars',
+                
+                # STABILITY - Prevent crashes (critical for Windows)
+                '--disable-gpu',  # GPU can cause crashes
+                '--disable-gpu-sandbox',
+                '--disable-software-rasterizer',
+                '--disable-dev-shm-usage',  # Crucial for stability
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
-                '--disable-infobars',
-                '--window-size=1280,800',
                 '--disable-extensions',
+                '--disable-background-networking',
+                '--disable-background-timer-throttling',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-renderer-backgrounding',
+                '--disable-features=TranslateUI',  # Disable translate popups
+                '--disable-ipc-flooding-protection',
+                # NOTE: --single-process removed - it causes crashes!
+                
+                # POPUP & TAB PREVENTION
+                '--block-new-web-contents',  # Block popups from creating new tabs
+                '--disable-popup-blocking',  # Let us handle popups ourselves
+                '--disable-features=Prerender2',  # Disable prerendering (creates hidden tabs)
+                '--disable-features=NetworkService',  # Reduces background page creation
+                
+                # Window
+                '--window-size=1280,800',
             ]
             
             if stealth:
                 launch_args.extend([
-                    '--disable-blink-features=AutomationControlled',
                     '--exclude-switches=enable-automation',
                 ])
             
             self.browser = await self.playwright.chromium.launch(
                 headless=headless,
-                args=launch_args
+                args=launch_args,
+                handle_sigint=False,  # Let Python handle signals
+                handle_sigterm=False,
+                handle_sighup=False,
             )
             
             # Context options with realistic fingerprint
@@ -149,14 +174,16 @@ class Browser:
             self.context.set_default_navigation_timeout(CONFIG.NAVIGATION_TIMEOUT)
             self.context.set_default_timeout(CONFIG.CLICK_TIMEOUT)
             
-            # Auto-switch to new pages (handling new tabs)
-            self.context.on("page", self._handle_new_page)
-            
             self.page = await self.context.new_page()
             
             # Inject stealth scripts before any navigation
             if stealth:
                 await self._apply_stealth(self.page)
+            
+            # Auto-switch to new pages (handling new tabs) - wrap async handler properly
+            # MOVED: Register listener AFTER creating main page to prevent 'handle_new_page'
+            # from killing the startup page (race condition fix)
+            self.context.on("page", lambda page: asyncio.create_task(self._handle_new_page(page)))
             
             # Setup download handler
             if on_download:
@@ -180,48 +207,321 @@ class Browser:
             logger.warning(f"Failed to apply stealth: {e}")
 
     async def _handle_new_page(self, page: Page):
-        """Handle new page/tab creation with proper stabilization"""
+        """Handle new page/tab creation - auto-close ads/popups, only switch if needed.
+        
+        We don't blindly switch to every new page because:
+        1. Ads/popups create new pages we don't want
+        2. About:blank pages are placeholders
+        3. Switching away from a working page breaks the agent
+        """
         try:
-            logger.info(f"🌐 New tab detected! switching context...")
+            new_url = page.url  # Get URL immediately, don't wait
             
-            # Apply stealth to new page
+            # FAST PATH: Close blank pages immediately (common ad pattern)
+            # CRITICAL FIX: Don't close if it's the ONLY page (startup race condition)
+            # or if it's the main page we just created
+            is_startup_page = (self.page == page)
+            if (new_url in ['about:blank', ''] or not new_url.startswith('http')) and not is_startup_page:
+                logger.info(f"🔕 Auto-closing blank popup tab")
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+                return
+            
+            # Wait briefly for URL to stabilize
+            try:
+                await page.wait_for_load_state("commit", timeout=1000)  # Much faster!
+            except Exception:
+                pass
+            
+            new_url = page.url  # Re-check after commit
+            
+            # Apply stealth regardless (in case we do switch later)
             if self._stealth_enabled:
                 await self._apply_stealth(page)
             
-            # Wait for DOM content first
-            await page.wait_for_load_state("domcontentloaded", timeout=10000)
+            # Check if current page is still usable
+            current_ok = False
+            if self.page:
+                try:
+                    if not self.page.is_closed() and self.page.url and self.page.url.startswith('http'):
+                        current_ok = True
+                except Exception:
+                    pass
             
-            # Then wait briefly for network to settle (with short timeout to not block)
-            try:
-                await page.wait_for_load_state("networkidle", timeout=3000)
-            except Exception:
-                pass  # Network didn't settle, but that's okay
+            if current_ok:
+                # Current page is fine - check if this is likely an ad and close it
+                is_likely_ad = any(kw in new_url.lower() for kw in [
+                    'ad', 'click', 'track', 'redirect', 'banner', 'advert', 'popup',
+                    'doubleclick', 'googlesyndication', 'facebook.com/tr', 'analytics'
+                ])
+                
+                if is_likely_ad:
+                    logger.info(f"🗑️ Auto-closing popup/ad tab: {new_url[:50]}...")
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
+                    return
+                
+                # Not an ad, but still don't want to switch
+                logger.info(f"📑 New tab opened (keeping current focus): {new_url[:50]}")
+                if self._download_handler:
+                    page.on("download", self._download_handler)
+                return
             
+            # Current page is dead/closed - switch to new page
+            logger.info(f"🔄 Switching to new tab (current page unavailable): {new_url[:60]}")
             await page.bring_to_front()
             self.page = page
             
-            # Setup download handler on new page too
             if self._download_handler:
                 page.on("download", self._download_handler)
                 
-            logger.info(f"✅ Switched to new tab: {page.url}")
         except Exception as e:
-            logger.warning(f"Failed to switch to new page: {e}")
+            logger.debug(f"New page handling skipped: {e}")
     
     def get_active_page(self) -> Optional[Page]:
-        """Get the currently active page, checking all open tabs"""
+        """Get the currently active page, checking all open tabs.
+        CRITICAL: Also updates self.page to keep the reference fresh.
+        Returns None if no usable page found (caller should recover).
+        """
         if not self.context:
-            return self.page
+            try:
+                if self.page and not self.page.is_closed() and self.page.url:
+                    return self.page
+            except Exception:
+                pass
+            return None
+            
         try:
             pages = self.context.pages
             if pages:
-                # Return the last page (most recently opened)
                 for p in reversed(pages):
-                    if not p.is_closed():
-                        return p
-            return self.page
+                    try:
+                        if not p.is_closed() and p.url:
+                            # Auto-update self.page to this valid page
+                            if self.page != p:
+                                self.page = p
+                                logger.debug(f"📌 Updated active page reference to: {p.url[:50]}")
+                            return p
+                    except Exception:
+                        continue
+            
+            # Fallback to self.page
+            try:
+                if self.page and not self.page.is_closed():
+                    return self.page
+            except Exception:
+                pass
+                
+            return None
         except Exception:
-            return self.page
+            return None
+    
+    async def _kill_orphaned_browsers(self):
+        """Kill only the Chromium processes we launched (not user's Chrome)."""
+        import os
+        import signal
+        
+        if not self._browser_pids:
+            return
+        
+        killed = []
+        for pid in list(self._browser_pids):
+            try:
+                os.kill(pid, 0)  # Check if alive
+                os.kill(pid, signal.SIGTERM)
+                killed.append(pid)
+                self._browser_pids.discard(pid)
+            except (OSError, ProcessLookupError):
+                self._browser_pids.discard(pid)
+            except Exception as e:
+                logger.debug(f"Could not kill PID {pid}: {e}")
+        
+        if killed:
+            logger.info(f"🧹 Killed orphaned browser PIDs: {killed}")
+    
+    async def recover_page(self, target_url: str = None) -> Optional[Page]:
+        """Create a new page when all existing pages are stale.
+        If context is also dead, recreates the context.
+        If browser is dead, restarts the browser.
+        Optionally navigates to target_url if provided.
+        """
+        new_page = None
+        
+        # Try 1: Create page from existing context
+        if self.context:
+            try:
+                new_page = await self.context.new_page()
+                if self._stealth_enabled:
+                    await self._apply_stealth(new_page)
+                if self._download_handler:
+                    new_page.on("download", self._download_handler)
+                self.page = new_page
+                logger.info("✅ New page created successfully")
+            except Exception as e:
+                logger.warning(f"⚠️ Context is dead ({e}), recreating context...")
+                new_page = None
+        
+        # Try 2: Recreate context from existing browser
+        if not new_page and self.browser:
+            try:
+                logger.info("🔄 Recreating browser context...")
+                context_options = {
+                    'viewport': {'width': 1280, 'height': 800},
+                    'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'accept_downloads': True,
+                }
+                
+                # Try to restore session if available
+                if self.storage_state_path.exists():
+                    try:
+                        context_options['storage_state'] = str(self.storage_state_path)
+                    except Exception:
+                        pass
+                
+                self.context = await self.browser.new_context(**context_options)
+                self.context.on("page", lambda page: asyncio.create_task(self._handle_new_page(page)))
+                
+                new_page = await self.context.new_page()
+                if self._stealth_enabled:
+                    await self._apply_stealth(new_page)
+                if self._download_handler:
+                    new_page.on("download", self._download_handler)
+                self.page = new_page
+                logger.info("✅ New page created successfully")
+            except Exception as e:
+                logger.warning(f"⚠️ Browser is dead ({e}), restarting browser...")
+                new_page = None
+        
+        # Try 3: Full browser restart
+        if not new_page:
+            new_page = await self._restart_browser(target_url)
+            # NOTE: Do NOT return early here - let navigation happen below!
+        
+        # Navigate to target URL if provided and page is ready
+        # This is CRITICAL for recovery - restores the last known URL
+        if new_page and target_url and target_url.startswith('http'):
+            try:
+                logger.info(f"🔄 Restoring URL after recovery: {target_url[:60]}...")
+                await new_page.goto(target_url, wait_until='domcontentloaded', timeout=30000)
+                await asyncio.sleep(2)  # Extra wait for page to fully load
+                logger.info(f"✅ Recovered and navigated to: {target_url}")
+            except Exception as nav_err:
+                logger.warning(f"Post-recovery navigation failed: {nav_err}")
+        
+        return new_page
+    
+    async def _restart_browser(self, target_url: str = None) -> Optional[Page]:
+        """Restart the browser instance when it crashes."""
+        try:
+            logger.info("🔄 BROWSER RESTART - relaunching browser instance...")
+            
+            # 1. Clean up old browser/context gracefully
+            try:
+                if self.context:
+                    await self.context.close()
+                if self.browser:
+                    await self.browser.close()
+            except Exception:
+                pass
+            
+            # 2. Force-kill any orphaned Chromium processes we launched
+            await self._kill_orphaned_browsers()
+            
+            # 3. Relaunch browser with STABILITY flags (same as initial launch)
+            launch_args = [
+                # Stealth
+                '--disable-blink-features=AutomationControlled',
+                '--disable-infobars',
+                
+                # STABILITY - Prevent crashes (critical for Windows)
+                '--disable-gpu',
+                '--disable-gpu-sandbox',
+                '--disable-software-rasterizer',
+                '--disable-dev-shm-usage',
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-extensions',
+                '--disable-background-networking',
+                '--disable-background-timer-throttling',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-renderer-backgrounding',
+                '--disable-features=TranslateUI',
+                '--disable-ipc-flooding-protection',
+                # NOTE: --single-process removed - it causes crashes!
+                
+                # POPUP & TAB PREVENTION
+                '--block-new-web-contents',  # Block popups from creating new tabs
+                '--disable-popup-blocking',  # Let us handle popups ourselves
+                '--disable-features=Prerender2',  # Disable prerendering (creates hidden tabs)
+                '--disable-features=NetworkService',  # Reduces background page creation
+                
+                # Window
+                '--window-size=1280,800',
+            ]
+            
+            if self._stealth_enabled:
+                launch_args.extend([
+                    '--exclude-switches=enable-automation',
+                ])
+            
+            if not self.playwright:
+                self.playwright = await async_playwright().start()
+
+            self.browser = await self.playwright.chromium.launch(
+                headless=False,
+                args=launch_args,
+                handle_sigint=False,
+                handle_sigterm=False,
+                handle_sighup=False,
+            )
+            
+            # Track the new browser's PID
+            try:
+                if hasattr(self.browser, '_impl_obj') and hasattr(self.browser._impl_obj, '_process'):
+                    pid = self.browser._impl_obj._process.pid
+                    self._browser_pids.add(pid)
+                    logger.debug(f"📝 Tracking new browser PID: {pid}")
+            except Exception:
+                pass
+            
+            # Create new context
+            context_options = {
+                'viewport': {'width': 1280, 'height': 800},
+                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'accept_downloads': True,
+            }
+            
+            # Restore session if available
+            if self.storage_state_path.exists():
+                try:
+                    context_options['storage_state'] = str(self.storage_state_path)
+                except Exception:
+                    pass
+            
+            self.context = await self.browser.new_context(**context_options)
+            self.context.on("page", lambda page: asyncio.create_task(self._handle_new_page(page)))
+            
+            new_page = await self.context.new_page()
+            if self._stealth_enabled:
+                await self._apply_stealth(new_page)
+            if self._download_handler:
+                new_page.on("download", self._download_handler)
+            
+            self.page = new_page
+            
+            # NOTE: Do NOT auto-navigate here - let the agent control navigation
+            logger.info("✅ Browser fully restarted (blank page ready)")
+            
+            return new_page
+            
+        except Exception as e:
+            logger.error(f"❌ Browser restart failed: {e}")
+            return None
+
     
     async def navigate(self, url: str, timeout: int = None) -> bool:
         """Navigate to URL with smart waiting"""

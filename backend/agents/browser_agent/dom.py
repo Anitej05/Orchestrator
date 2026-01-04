@@ -8,6 +8,7 @@ Extract page content with:
 """
 
 import logging
+import asyncio
 from typing import List, Dict, Any, Optional
 from playwright.async_api import Page
 
@@ -19,7 +20,8 @@ class DOMExtractor:
     
     # Configuration
     MAX_IFRAME_DEPTH = 3  # Maximum depth for nested iframes
-    MAX_IFRAMES = 10      # Maximum number of iframes to process
+    MAX_IFRAMES = 3       # Reduced from 10 - skip most ad/tracking iframes
+    MAX_ELEMENTS = 150    # Limit elements to prevent prompt bloat (~58k chars seen with 300+ elements)
     
     async def get_page_content(self, page: Page) -> Dict[str, Any]:
         """Get comprehensive page content for LLM, including iFrame contents"""
@@ -66,6 +68,12 @@ class DOMExtractor:
                     )
                     all_elements.extend(elements)
                     
+                    # Enforce MAX_ELEMENTS limit to prevent prompt bloat
+                    if len(all_elements) >= self.MAX_ELEMENTS:
+                        all_elements = all_elements[:self.MAX_ELEMENTS]
+                        logger.info(f"🚫 Element limit reached ({self.MAX_ELEMENTS}), stopping extraction")
+                        break
+                    
                     if not is_main:
                         frame_info.append({
                             'id': frame_id,
@@ -83,11 +91,25 @@ class DOMExtractor:
                     frame_tag = f"[{el.get('frame_id', 'main')}] " if el.get('frame_id') != 'main' else ""
                     logger.info(f"  [{i+1}] {frame_tag}{el.get('role', '?')}: '{el.get('name', '')[:30]}' → {el.get('xpath', 'NO XPATH')}")
             
-            # Get accessibility tree (semantic structure) - main frame only for now
-            a11y_tree = await self._get_accessibility_tree(page)
+            # Get accessibility tree (semantic structure) - safe-guarded
+            try:
+                # Limit timeout to prevent pipe hangs/crashes on massive pages
+                a11y_tree = await asyncio.wait_for(self._get_accessibility_tree(page), timeout=2.0)
+            except Exception as e:
+                logger.warning(f"A11y tree extraction failed or timed out: {e}")
+                a11y_tree = ""
             
             # Detect overlays, modals, popups
             overlay_info = await self._detect_overlays(page)
+            
+            # Discover working selectors for LLM (NEW)
+            from .selector_discovery import get_selector_discovery
+            discovery = get_selector_discovery()
+            try:
+                selector_hints = await discovery.discover_patterns(page)
+            except Exception as disc_err:
+                logger.warning(f"Selector discovery failed: {disc_err}")
+                selector_hints = {}
             
             # Create page observation summary for memory
             observation_summary = self._create_observation_summary(all_elements, overlay_info, title)
@@ -105,7 +127,8 @@ class DOMExtractor:
                 'viewport_height': scroll_info.get('innerHeight', 0),
                 'frames': frame_info,  # Info about iframes found
                 'overlays': overlay_info,  # Detected modals/popups
-                'observation_summary': observation_summary  # Key observations for memory
+                'observation_summary': observation_summary,  # Key observations for memory
+                'selector_hints': selector_hints  # NEW: Discovered selector patterns
             }
         except Exception as e:
             logger.error(f"Failed to get page content: {e}")
@@ -160,6 +183,16 @@ class DOMExtractor:
                 
                 # Skip about:blank frames (usually placeholders)
                 if frame.url == 'about:blank':
+                    continue
+                
+                # Skip ad/tracking iframes by URL pattern
+                ad_patterns = ['doubleclick', 'googlesyndication', 'googleadservices', 
+                               'facebook.com/tr', 'analytics', 'tracking', 'adserver', 
+                               'adsystem', 'advertising', 'criteo', 'outbrain', 'taboola',
+                               'amazon-adsystem', 'pubmatic', 'rubiconproject']
+                frame_url_lower = frame.url.lower()
+                if any(pattern in frame_url_lower for pattern in ad_patterns):
+                    logger.debug(f"Skipping ad/tracking iframe: {frame.url[:60]}")
                     continue
                 
                 # Check if frame is detached
@@ -334,7 +367,7 @@ class DOMExtractor:
             tree_lines = format_node(snapshot)
             
             # Limit output to prevent huge prompts
-            MAX_LINES = 500  # Increased from 150 - show more structure
+            MAX_LINES = 1000  # Increased from 500 - show more structure
             if len(tree_lines) > MAX_LINES:
                 tree_lines = tree_lines[:MAX_LINES]
                 tree_lines.append("... (truncated for brevity)")
@@ -378,7 +411,7 @@ class DOMExtractor:
                     }
                     
                     // 2. Viewport Intersection Check with Buffer
-                    // Capture elements slightly off-screen to handle edges better
+                    // REVERTED to 50px (original safe value) to fix "Closed Pipe" crash
                     const buffer = 50;
                     const inViewport = (
                         rect.bottom > -buffer &&
@@ -390,28 +423,137 @@ class DOMExtractor:
                     return inViewport;
                 }
 
-                // Helper: Check if element is interactive (Enhanced Heuristic)
-                function isInteractive(el, style) {
+                // Helper: Check if element is interactive (COMPREHENSIVE Heuristic)
+                // Goal: NEVER miss a clickable element - prefer false positives over false negatives
+                function isInteractive(el, style, rect) {
                     const tag = el.tagName.toLowerCase();
                     const role = el.getAttribute('role');
                     
-                    // 1. Native interactive elements
-                    if (['a', 'button', 'select', 'textarea', 'input', 'details', 'summary', 'option'].includes(tag)) return true;
+                    // 1. Native interactive elements - ALWAYS interactive
+                    const nativeInteractive = ['a', 'button', 'select', 'textarea', 'input', 'details', 'summary', 'option', 'label', 'area', 'audio', 'video', 'embed', 'object', 'iframe'];
+                    if (nativeInteractive.includes(tag)) {
+                        return true;
+                    }
                     
-                    // 2. ARIA interactive roles
-                    if (['button', 'link', 'menuitem', 'switch', 'checkbox', 'radio', 'tab', 'treeitem', 'gridcell', 'slider', 'spinbutton', 'combobox', 'searchbox', 'textbox'].includes(role)) return true;
+                    // 2. ARIA interactive roles - ALWAYS interactive
+                    const interactiveRoles = ['button', 'link', 'menuitem', 'menuitemcheckbox', 'menuitemradio', 'switch', 'checkbox', 'radio', 'tab', 'treeitem', 'option', 'slider', 'spinbutton', 'combobox', 'searchbox', 'textbox', 'listbox', 'menu', 'tree', 'grid', 'gridcell', 'row', 'dialog', 'alertdialog', 'progressbar', 'scrollbar', 'tooltip', 'application'];
+                    if (interactiveRoles.includes(role)) {
+                        return true;
+                    }
                     
-                    // 3. User interaction indicators
-                    if (el.getAttribute('onclick') || el.getAttribute('data-action') || el.getAttribute('data-testid')) return true;
+                    // 3. Contenteditable elements - editable = interactive
+                    if (el.isContentEditable || el.getAttribute('contenteditable') === 'true') {
+                        return true;
+                    }
                     
-                    // 4. Focusable elements
-                    if (el.tabIndex >= 0) return true;
+                    // 4. HTML event handler attributes - DEFINITELY interactive
+                    const eventAttrs = ['onclick', 'onmousedown', 'onmouseup', 'ontouchstart', 'ontouchend', 'ondblclick', 'onkeydown', 'onkeyup', 'onkeypress', 'onfocus', 'onblur'];
+                    for (const attr of eventAttrs) {
+                        if (el.hasAttribute(attr)) return true;
+                    }
                     
-                    // 5. Visual indicators (cursor: pointer)
-                    // Be careful: some layout divs have pointer cursor but aren't interactive
-                    if (style.cursor === 'pointer') return true;
+                    // 5. JavaScript-attached onclick handler (catches React, Vue, etc.)
+                    // This is the KEY check for modern frameworks
+                    if (typeof el.onclick === 'function') {
+                        return true;
+                    }
+                    
+                    // 6. Framework-specific click attributes (Angular, Vue, Alpine, HTMX, etc.)
+                    const frameworkAttrs = ['ng-click', '@click', 'v-on:click', 'data-action', 'data-onclick', 'x-on:click', 'hx-get', 'hx-post', 'hx-trigger', 'wire:click'];
+                    for (const attr of frameworkAttrs) {
+                        if (el.hasAttribute(attr)) return true;
+                    }
+                    
+                    // 7. Data attributes that often indicate interactivity
+                    const interactiveDataAttrs = ['data-toggle', 'data-dismiss', 'data-target', 'data-slide', 'data-bs-toggle', 'data-bs-dismiss', 'data-fancybox', 'data-lightbox', 'data-modal', 'data-popup'];
+                    for (const attr of interactiveDataAttrs) {
+                        if (el.hasAttribute(attr)) return true;
+                    }
+                    
+                    // 8. Focusable elements (positive tabindex)
+                    if (el.tabIndex > 0) {
+                        return true;
+                    }
+                    
+                    // 9. Elements with tabindex=0 - explicitly made focusable = likely interactive
+                    if (el.tabIndex === 0) {
+                        return true;
+                    }
+                    
+                    // 10. Cursor pointer check - RELAXED but with size constraint
+                    // Accept cursor:pointer for elements with reasonable clickable size (min 15x15 pixels)
+                    if (style.cursor === 'pointer') {
+                        const hasReasonableSize = rect && rect.width >= 15 && rect.height >= 15;
+                        if (hasReasonableSize) {
+                            return true;
+                        }
+                    }
+                    
+                    // 11. Elements with aria-* attributes suggesting interactivity
+                    const interactiveAria = ['aria-expanded', 'aria-pressed', 'aria-haspopup', 'aria-controls', 'aria-owns', 'aria-activedescendant', 'aria-selected', 'aria-checked'];
+                    for (const attr of interactiveAria) {
+                        if (el.hasAttribute(attr)) return true;
+                    }
+                    
+                    // 12. Draggable elements
+                    if (el.draggable === true || el.getAttribute('draggable') === 'true') {
+                        return true;
+                    }
+                    
+                    // 13. SVG interactive elements (if they have title or are focusable)
+                    if (['svg', 'path', 'g', 'circle', 'rect'].includes(tag)) {
+                        // SVG is interactive if parent is link/button (handled by parent aggregation)
+                        // or if it has explicit interaction attributes
+                        if (el.tabIndex >= 0 || el.hasAttribute('onclick') || typeof el.onclick === 'function') {
+                            return true;
+                        }
+                        // For SVG, rely on parent aggregation (checked separately)
+                        return false;
+                    }
+                    
+                    // 14. List items in menu/listbox context
+                    if (tag === 'li') {
+                        const parent = el.parentElement;
+                        if (parent) {
+                            const parentRole = parent.getAttribute('role');
+                            if (['menu', 'listbox', 'tree', 'tablist'].includes(parentRole)) {
+                                return true;
+                            }
+                        }
+                    }
                     
                     return false;
+                }
+                
+                // Helper: Find the nearest interactive parent element
+                // Used to aggregate child elements into their clickable container
+                function getInteractiveParent(el, maxLevels = 3) {
+                    let current = el.parentElement;
+                    let level = 0;
+                    
+                    while (current && level < maxLevels) {
+                        // Check if this parent is natively interactive
+                        const tag = current.tagName.toLowerCase();
+                        if (['a', 'button', 'select', 'textarea', 'input', 'details', 'summary', 'label'].includes(tag)) {
+                            return current;
+                        }
+                        
+                        // Check for interactive role
+                        const role = current.getAttribute('role');
+                        if (['button', 'link', 'menuitem', 'switch', 'checkbox', 'radio', 'tab', 'option'].includes(role)) {
+                            return current;
+                        }
+                        
+                        // Check for explicit click handler
+                        if (current.hasAttribute('onclick') || current.hasAttribute('ng-click') || current.hasAttribute('@click') || current.hasAttribute('data-action')) {
+                            return current;
+                        }
+                        
+                        current = current.parentElement;
+                        level++;
+                    }
+                    
+                    return null; // No interactive parent found
                 }
 
                 // Helper: Generate robust XPath (Shadow DOM aware)
@@ -439,6 +581,7 @@ class DOMExtractor:
 
                 // Helper: Recursive DOM Walker with heading context
                 let currentHeading = '';  // Track the most recent heading we've seen
+                const markedParents = new Set(); // Track already-marked interactive parents
                 
                 function walk(root, depth=0) {
                     if (depth > 20) return; // Prevent infinite recursion
@@ -463,11 +606,63 @@ class DOMExtractor:
                                 // Extract RICH attributes
                                 const rect = el.getBoundingClientRect();
                                 const tag = el.tagName.toLowerCase();
-                                const isClickable = isInteractive(el, style);
+                                const isClickable = isInteractive(el, style, rect);
                                 
-                                // Clean text extraction
+                                // REVISED LOGIC: Include ALL visible elements with text
+                                // Parent aggregation ONLY marks the parent as interactive, but we STILL process children for text
+                                let targetEl = el;
+                                let targetRect = rect;
+                                let targetTag = tag;
+                                let targetIsClickable = isClickable;
+                                
+                                // If this element is not interactive, check if parent is
+                                // But DON'T skip children - just mark their interactivity status
+                                if (!isClickable) {
+                                    const interactiveParent = getInteractiveParent(el);
+                                    if (interactiveParent && !markedParents.has(interactiveParent)) {
+                                        // Mark the parent as the click target
+                                        markedParents.add(interactiveParent);
+                                        // Add the parent SEPARATELY if not already processed
+                                        const parentRect = interactiveParent.getBoundingClientRect();
+                                        const parentTag = interactiveParent.tagName.toLowerCase();
+                                        const parentText = (interactiveParent.innerText || '').trim().substring(0, 300);
+                                        
+                                        // Only add parent if visible and has meaningful content
+                                        if (parentRect.width > 0 && parentRect.height > 0) {
+                                            const absoluteY = parentRect.y + window.scrollY;
+                                            results.push({
+                                                role: interactiveParent.getAttribute('role') || parentTag,
+                                                tag: parentTag,
+                                                name: parentText || '(clickable)',
+                                                text_content: parentText,
+                                                xpath: getXPath(interactiveParent),
+                                                x: Math.round(parentRect.x + parentRect.width / 2),
+                                                y: Math.round(absoluteY + parentRect.height / 2),
+                                                dist: Math.abs(absoluteY - viewportCenterY),
+                                                section: currentHeading,
+                                                frame_id: frameId,
+                                                interactive: true,
+                                                is_parent_click_target: true
+                                            });
+                                        }
+                                    }
+                                    // NOTE: We DON'T continue/skip here - we still process the current element
+                                }
+                                
+                                // Clean text extraction from current element (not parent)
                                 let text = (el.innerText || el.value || el.placeholder || el.getAttribute('aria-label') || el.title || el.alt || '').trim();
-                                text = text.replace(/\s+/g, ' ').substring(0, 150); // Collapse whitespace
+                                
+                                // SAFETY: Skip huge text (base64, JSON blobs, etc) - truncate to 300 chars
+                                if (text.length > 500) {
+                                    // Check for base64 or JSON patterns
+                                    if (text.includes('base64') || text.startsWith('data:') || text.startsWith('{') || text.startsWith('[')) {
+                                        text = '[large data blob filtered]';
+                                    } else {
+                                        text = text.substring(0, 1000) + '...';
+                                    }
+                                } else {
+                                    text = text.replace(/\\s+/g, ' ').substring(0, 300); // Reverted to 300 for stability
+                                }
                                 
                                 // Capture State
                                 const state = [];
@@ -477,11 +672,39 @@ class DOMExtractor:
                                 if (el.selected || el.getAttribute('aria-selected') === 'true') state.push('[selected]');
                                 if (el.getAttribute('aria-pressed') === 'true') state.push('[pressed]');
                                 
+                                // New: Completeness States (Form & Interaction)
+                                if (el.required || el.getAttribute('aria-required') === 'true') state.push('[required]');
+                                if (el.readOnly || el.getAttribute('aria-readonly') === 'true') state.push('[readonly]');
+                                if (el.getAttribute('aria-invalid') === 'true') state.push('[invalid]');
+                                
+                                // New: Scrollability Check - DISABLED COMPLETELY
+                                // User requested removal to prevent crashes
+                                // let isScrollable = false;
+                                // if (['div', 'ul', ...].includes(tag)) { ... }
+                                // if (isScrollable) state.push('[scrollable]');
+                                
                                 const stateStr = state.join(' ');
                                 const displayName = (stateStr + ' ' + text).trim() || '(no-text)';
                                 
-                                // Only meaningful elements (skip empty divs unless clickable)
-                                if (text || isClickable || tag === 'input' || tag === 'img') {
+                                // SMART ELEMENT INCLUSION:
+                                // 1. ALWAYS include: interactive elements, inputs, images, headings
+                                // 2. ONLY include containers (div/span/p) IF they have meaningful text
+                                // 3. Skip technical tags entirely
+                                
+                                const alwaysIncludeTags = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'a', 'button', 'input', 'select', 'textarea', 'img', 'label'];
+                                const containerTags = ['div', 'span', 'p', 'li', 'td', 'th', 'strong', 'em', 'b', 'i', 'article', 'section', 'figure', 'figcaption', 'main', 'aside'];
+                                const skipElement = ['defs', 'clipPath', 'mask', 'style', 'script', 'noscript', 'meta', 'link', 'head', 'svg', 'path', 'g', 'circle', 'rect', 'line', 'polygon', 'polyline'].includes(tag);
+                                
+                                // Require minimum 3 chars of text for non-interactive containers
+                                const hasMeaningfulText = text && text.length >= 3;
+                                
+                                const shouldInclude = !skipElement && (
+                                    targetIsClickable ||                        // Interactive = always
+                                    alwaysIncludeTags.includes(tag) ||          // Headings, buttons, inputs, imgs = always
+                                    (containerTags.includes(tag) && hasMeaningfulText)  // Containers ONLY with text
+                                );
+                                
+                                if (shouldInclude) {
                                     const absoluteY = rect.y + window.scrollY;
                                     
                                     results.push({
@@ -495,16 +718,16 @@ class DOMExtractor:
                                         dist: Math.abs(absoluteY - viewportCenterY),
                                         section: currentHeading,
                                         frame_id: frameId,
-                                        interactive: isClickable,
+                                        interactive: targetIsClickable,
                                         attributes: {
                                             type: el.type,
                                             placeholder: el.placeholder,
-                                            href: el.href,
-                                            src: el.src,
+                                            href: el.href ? (el.href.length > 100 ? el.href.substring(0, 100) + '...' : el.href) : undefined,
+                                            src: el.src ? (el.src.startsWith('data:') ? '[base64 image]' : el.src.substring(0, 100)) : undefined,
                                             alt: el.alt,
                                             title: el.title,
                                             target: el.target,
-                                            value: el.value, 
+                                            value: el.value,
                                             class: el.className ? el.className.toString().substring(0, 50) : '',
                                             testId: el.getAttribute('data-testid')
                                         }
@@ -528,14 +751,26 @@ class DOMExtractor:
                     return a.x - b.x; // Same line (LTR)
                 });
                 
-                // Deduplicate strictly
+                // Deduplicate with Interactive Prioritization
+                // If two elements have exact same coords and text, keep the INTERACTIVE one.
                 const unique = [];
-                const seen = new Set();
+                const seen = new Map(); // Key -> index in 'unique' array
+                
                 for (let r of results) {
                     const key = `${r.x},${r.y},${r.name}`;
                     if (!seen.has(key)) {
-                        seen.add(key);
+                        seen.set(key, unique.length);
                         unique.push(r);
+                    } else {
+                        // Collision! Check if we should upgrade to the new element
+                        const idx = seen.get(key);
+                        const existing = unique[idx];
+                        
+                        // PRIORITIZE INTERACTIVE ELEMENTS
+                        // If new is interactive and existing is not, replace it.
+                        if (r.interactive && !existing.interactive) {
+                            unique[idx] = r;
+                        }
                     }
                 }
 
@@ -592,40 +827,102 @@ class DOMExtractor:
         try:
             overlay_data = await page.evaluate('''() => {
                 // PRODUCTION-GRADE OVERLAY DETECTION
-                // Only detect TRUE blocking modals, not dropdowns/flyouts/nav elements
+                // Detect TRUE blocking modals including role="dialog" and common patterns
                 
                 const viewportWidth = window.innerWidth;
                 const viewportHeight = window.innerHeight;
                 const overlays = [];
                 const closeButtons = [];
                 
-                // METHOD 1: Check for aria-modal="true" (the CORRECT way to mark a blocking modal)
+                // HELPER: Find close buttons in element
+                function findCloseButtons(container) {
+                    const closeBtns = container.querySelectorAll(
+                        '[aria-label*="close" i], [aria-label*="dismiss" i], [aria-label*="cancel" i], ' +
+                        'button[class*="close"], [class*="close-btn"], [class*="modal-close"], ' +
+                        'button:has(svg), [class*="dismiss"], [data-testid*="close"], ' +
+                        'button:contains("Cancel"), button:contains("Close"), button:contains("×")'
+                    );
+                    closeBtns.forEach(btn => {
+                        if (btn.offsetParent !== null) {
+                            closeButtons.push({ 
+                                text: btn.textContent?.trim().substring(0, 20) || btn.getAttribute('aria-label') || 'X',
+                                xpath: '//' + btn.tagName.toLowerCase() + '[@class="' + btn.className + '"]'
+                            });
+                        }
+                    });
+                }
+                
+                // METHOD 1: Check for aria-modal="true"
                 const ariaModals = document.querySelectorAll('[aria-modal="true"]');
                 for (const el of ariaModals) {
                     const style = window.getComputedStyle(el);
                     const rect = el.getBoundingClientRect();
                     
-                    // Must be visible AND in viewport AND substantial size
                     if (style.display === 'none' || style.visibility === 'hidden') continue;
-                    if (rect.width < 100 || rect.height < 100) continue;  // Too small = not a modal
+                    if (rect.width < 100 || rect.height < 100) continue;
                     if (rect.right < 0 || rect.bottom < 0 || rect.left > viewportWidth || rect.top > viewportHeight) continue;
                     
-                    // This is a REAL blocking modal
                     overlays.push({
                         tag: el.tagName.toLowerCase(),
                         id: el.id || null,
                         type: 'aria-modal',
+                        title: el.querySelector('h1, h2, h3, [class*="title"]')?.textContent?.trim()?.substring(0, 50),
                         width: Math.round(rect.width),
                         height: Math.round(rect.height)
                     });
+                    findCloseButtons(el);
+                }
+                
+                // METHOD 2: Check for role="dialog" or role="alertdialog" (like eBay's modal!)
+                const roleDialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"]');
+                for (const el of roleDialogs) {
+                    // Skip if already found as aria-modal
+                    if (el.getAttribute('aria-modal') === 'true') continue;
                     
-                    // Find close buttons
-                    const closeBtns = el.querySelectorAll('[aria-label*="close" i], [aria-label*="dismiss" i], button[class*="close"], [class*="close-btn"]');
-                    closeBtns.forEach(btn => {
-                        if (btn.offsetParent !== null) {
-                            closeButtons.push({ text: btn.textContent?.trim().substring(0, 20) || 'X' });
-                        }
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    
+                    if (style.display === 'none' || style.visibility === 'hidden') continue;
+                    if (rect.width < 100 || rect.height < 100) continue;
+                    if (rect.right < 0 || rect.bottom < 0 || rect.left > viewportWidth || rect.top > viewportHeight) continue;
+                    
+                    overlays.push({
+                        tag: el.tagName.toLowerCase(),
+                        id: el.id || null,
+                        type: 'role-dialog',
+                        title: el.querySelector('h1, h2, h3, [class*="title"], [class*="heading"]')?.textContent?.trim()?.substring(0, 50),
+                        width: Math.round(rect.width),
+                        height: Math.round(rect.height)
                     });
+                    findCloseButtons(el);
+                }
+                
+                // METHOD 3: Common modal class patterns (fallback)
+                if (overlays.length === 0) {
+                    const commonModals = document.querySelectorAll(
+                        '.modal:not(.modal-backdrop), .popup, .dialog, [class*="modal-content"], ' +
+                        '[class*="overlay-content"], [class*="lightbox"], [data-testid*="modal"]'
+                    );
+                    for (const el of commonModals) {
+                        const style = window.getComputedStyle(el);
+                        const rect = el.getBoundingClientRect();
+                        const zIndex = parseInt(style.zIndex) || 0;
+                        
+                        if (style.display === 'none' || style.visibility === 'hidden') continue;
+                        if (rect.width < 150 || rect.height < 100) continue;
+                        if (zIndex < 100) continue;  // Must have some z-index
+                        if (rect.right < 0 || rect.bottom < 0 || rect.left > viewportWidth || rect.top > viewportHeight) continue;
+                        
+                        overlays.push({
+                            tag: el.tagName.toLowerCase(),
+                            id: el.id || null,
+                            className: el.className?.substring?.(0, 50),
+                            type: 'class-modal',
+                            title: el.querySelector('h1, h2, h3')?.textContent?.trim()?.substring(0, 50),
+                            zIndex: zIndex
+                        });
+                        findCloseButtons(el);
+                    }
                 }
                 
                 // METHOD 2: Check for fullscreen semi-transparent backdrop with VERY high z-index

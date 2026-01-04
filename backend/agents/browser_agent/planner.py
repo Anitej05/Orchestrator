@@ -25,17 +25,41 @@ class Planner:
 MAIN TASK: {task}
 
 GUIDELINES:
-1. **BE CONCISE**. Create the MINIMUM number of steps possible.
-2. Merge navigation and waiting.
-3. Merge search and interaction.
-4. Merge analysis, extraction, and verification into a single "Analyze" or "Extract" step.
-5. For "Go to X and describe Y", it should be just 2 steps: "Navigate to X", "Analyze Y".
+1. **KEEP IT SIMPLE**. Prefer broad, flexible subtasks over many small ones.
+2. **AVOID OVERLY SPECIFIC STEPS** like "Apply brand filters" or "Click sort dropdown". 
+   - Instead use: "Search and browse results"
+3. **COMBINE related actions**: Search + browse + extract = ONE step
+4. For shopping/search tasks, use this pattern:
+   - "Navigate to [site] and search for [query]"
+   - "Browse results and save relevant items with prices"
+   - (Optional) "Verify and finalize findings"
+5. **DO NOT create steps for optional actions** like filtering, sorting, scrolling.
+   - Those are tactics, not subtasks!
+
+GOOD EXAMPLE (for "find best gaming laptops under $1500"):
+{{
+    "subtasks": [
+        "Navigate to Amazon and search for gaming laptops under $1500",
+        "Browse results and save top laptops with prices and specs"
+    ]
+}}
+
+BAD EXAMPLE (too specific):
+{{
+    "subtasks": [
+        "Navigate to Amazon",
+        "Search for gaming laptops",
+        "Apply brand filters for Asus, Acer, MSI",  ← TOO SPECIFIC!
+        "Sort by price",  ← TOO SPECIFIC!
+        "Extract top 5 results"
+    ]
+}}
 
 Respond with valid JSON only:
 {{
     "subtasks": [
-        "Navigate to https://www.google.com",
-        "Analyze the doodle image and description"
+        "subtask 1",
+        "subtask 2"
     ]
 }}
 """

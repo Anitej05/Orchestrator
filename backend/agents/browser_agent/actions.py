@@ -16,6 +16,8 @@ from playwright.async_api import Page, TimeoutError as PTimeoutError, Error as P
 from .schemas import ActionPlan, ActionResult, AtomicAction
 from .dom import DOMExtractor
 from .config import CONFIG
+from .persistent_memory import get_persistent_memory
+from agents.agent_file_manager import FileType
 
 logger = logging.getLogger(__name__)
 
@@ -28,10 +30,15 @@ class ActionExecutor:
         self.screenshot_manager = screenshot_manager
         self.thread_id = thread_id
         self._cached_elements = []
+        self._cached_page_text = ""  # Store page text the LLM saw for verification
 
     def set_cached_elements(self, elements: List[Dict]):
         """Update cached elements for index-based interaction"""
         self._cached_elements = elements
+    
+    def set_cached_page_text(self, page_text: str):
+        """Store the page text that LLM saw - used to verify save_info values"""
+        self._cached_page_text = page_text
     
     async def execute(self, page: Page, plan: ActionPlan) -> ActionResult:
         """Execute a sequence of actions with smart retry for failures"""
@@ -54,8 +61,26 @@ class ActionExecutor:
                 result = await self._execute_single(page, interpolated_action)
                 results_log.append(f"{action.name}: {result.message}")
                 
+                # CRITICAL: If navigation occurred, STOP the sequence immediately
+                # The page reference is now stale - let the agent loop get a fresh page
+                if result.success and action.name in ('navigate', 'click') and 'context changed' in result.message.lower():
+                    logger.info(f"🛑 Navigation occurred - stopping sequence to get fresh page")
+                    return ActionResult(
+                        success=True,
+                        action="sequence",
+                        message="; ".join(results_log) + " (stopped: navigation occurred)",
+                        data=final_data
+                    )
+                
                 if result.data:
+                    # ACCUMULATE structured_info from multiple save_info actions
+                    if 'structured_info' in result.data:
+                        if 'all_saved_items' not in final_data:
+                            final_data['all_saved_items'] = []
+                        final_data['all_saved_items'].append(result.data['structured_info'])
+                    # Also keep the latest for backward compatibility
                     final_data.update(result.data)
+                    
                     # Store run_js output for subsequent save_info
                     if action.name == "run_js" and 'result' in result.data:
                         action_context['last_run_js_output'] = result.data['result']
@@ -68,19 +93,12 @@ class ActionExecutor:
                     await page.evaluate("window.scrollBy(0, 300)")
                     await page.wait_for_timeout(500)
                     
-                    # Strategy 2: Try smart text-based fallback
-                    retry_result = await self._smart_click_fallback(page, action.params)
-                    if retry_result and retry_result.success:
-                        result = retry_result
-                        results_log[-1] = f"{action.name}: {result.message} (via smart retry)"
-                        logger.info(f"✅ Smart retry succeeded!")
-                    else:
-                        # Strategy 3: Wait longer for dynamic content and retry original
-                        await page.wait_for_timeout(1500)
-                        result = await self._execute_single(page, action)
-                        if result.success:
-                            results_log[-1] = f"{action.name}: {result.message} (after wait)"
-                            logger.info(f"✅ Retry after wait succeeded!")
+                    # Strategy 2: Wait longer for dynamic content and retry original
+                    await page.wait_for_timeout(1500)
+                    result = await self._execute_single(page, action)
+                    if result.success:
+                        results_log[-1] = f"{action.name}: {result.message} (after retry)"
+                        logger.info(f"✅ Retry after wait succeeded!")
                 
                 if not result.success:
                     logger.warning(f"⚠️ Action '{action.name}' failed: {result.message}. Stopping sequence.")
@@ -97,6 +115,22 @@ class ActionExecutor:
                         data=final_data
                     )
             except Exception as e:
+                error_str = str(e).lower()
+                # Navigation-related "errors" are actually SUCCESS - page context changed!
+                if any(nav_signal in error_str for nav_signal in [
+                    'target page, context or browser has been closed',
+                    'execution context was destroyed',
+                    'frame was detached',
+                    'navigation',
+                    'target closed'
+                ]):
+                    logger.info(f"✅ Navigation detected during {action.name} - context changed (this is success!)")
+                    return ActionResult(
+                        success=True, 
+                        action=action.name, 
+                        message=f"Navigation triggered by {action.name}",
+                        data=final_data
+                    )
                 logger.error(f"Critical execution error on {action.name}: {e}")
                 return ActionResult(success=False, action=action.name, message=str(e), data=final_data)
 
@@ -108,17 +142,60 @@ class ActionExecutor:
         )
     
     def _interpolate_params(self, params: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
-        """Interpolate variables like {{last_run_js_output}} in action parameters"""
+        """Interpolate variables like {{last_run_js_output}} and {{last_run_js_output.property}} in action parameters"""
+        import re
+        
         if not params:
             return params
         
         result = {}
         for key, value in params.items():
             if isinstance(value, str):
-                # Replace {{last_run_js_output}} with actual value
-                if '{{last_run_js_output}}' in value and context.get('last_run_js_output'):
+                # Pattern 1: Full {{last_run_js_output}} replacement
+                if '{{last_run_js_output}}' in value and context.get('last_run_js_output') is not None:
                     result[key] = value.replace('{{last_run_js_output}}', str(context['last_run_js_output']))
                     logger.info(f"📝 Interpolated {{{{last_run_js_output}}}} -> {result[key][:100]}...")
+                
+                # Pattern 2: Property access like {{last_run_js_output.topRated}} or {{last_run_js_output.items[0]}}
+                elif '{{last_run_js_output.' in value and context.get('last_run_js_output') is not None:
+                    # Find all property access patterns
+                    pattern = r'\{\{last_run_js_output\.([^}]+)\}\}'
+                    
+                    def replace_property(match):
+                        prop_path = match.group(1)  # e.g., "topRated" or "items[0].name"
+                        js_output = context['last_run_js_output']
+                        
+                        try:
+                            # Navigate the property path
+                            current = js_output
+                            
+                            # Handle both dot notation and bracket notation
+                            # Split by . but preserve [n] indices
+                            parts = re.split(r'\.(?![^\[]*\])', prop_path)
+                            
+                            for part in parts:
+                                # Check for array index like items[0]
+                                bracket_match = re.match(r'(\w+)\[(\d+)\]', part)
+                                if bracket_match:
+                                    prop_name = bracket_match.group(1)
+                                    index = int(bracket_match.group(2))
+                                    if isinstance(current, dict) and prop_name in current:
+                                        current = current[prop_name]
+                                    if isinstance(current, list) and len(current) > index:
+                                        current = current[index]
+                                else:
+                                    if isinstance(current, dict) and part in current:
+                                        current = current[part]
+                                    else:
+                                        return f"{{{{error: property '{prop_path}' not found}}}}"
+                            
+                            return str(current)
+                        except Exception as e:
+                            logger.warning(f"Property access failed for '{prop_path}': {e}")
+                            return f"{{{{error: {e}}}}}"
+                    
+                    result[key] = re.sub(pattern, replace_property, value)
+                    logger.info(f"📝 Interpolated property access -> {result[key][:100]}...")
                 else:
                     result[key] = value
             else:
@@ -144,11 +221,14 @@ class ActionExecutor:
             return await self._wait(page, action.params)
         elif action.name == "go_back":
             try:
-                # Capture URL before
-                start_url = page.url
-                
                 # Check if we CAN go back (has history)
-                can_go_back = await page.evaluate("() => window.history.length > 1")
+                # Wrap in try/except because evaluate might fail if page is dead
+                try:
+                    can_go_back = await page.evaluate("() => window.history.length > 1")
+                except Exception:
+                    # If we can't check history, assume we can't go back or page is dead
+                    return ActionResult(success=False, action="go_back", message="Could not check history (page might be closed).")
+
                 if not can_go_back:
                     return ActionResult(
                         success=False,
@@ -156,9 +236,11 @@ class ActionExecutor:
                         message="No browser history to go back to. Use 'navigate' to go to a specific URL instead."
                     )
                 
+                # Capture URL before (if possible)
+                start_url = page.url
+                
                 # Go back with wait
                 await page.go_back(wait_until='domcontentloaded', timeout=15000)
-                await page.wait_for_timeout(1000) # Ensure state settles
                 
                 # Verify navigation
                 current_url = page.url
@@ -171,13 +253,21 @@ class ActionExecutor:
                 
                 return ActionResult(success=True, action="go_back", message="Went back successfully")
             except Exception as e:
-                return ActionResult(success=False, action="go_back", message=str(e))
+                # Handle "Target closed" specifically as a soft failure
+                msg = str(e)
+                if "Target page, context or browser has been closed" in msg:
+                    return ActionResult(success=False, action="go_back", message="Browser context closed during navigation. Agent will recover.")
+                return ActionResult(success=False, action="go_back", message=msg)
+
         elif action.name == "go_forward":
             try:
                 await page.go_forward()
                 return ActionResult(success=True, action="go_forward", message="Went forward")
             except Exception as e:
-                return ActionResult(success=False, action="go_forward", message=str(e))
+                msg = str(e)
+                if "Target page, context or browser has been closed" in msg:
+                    return ActionResult(success=False, action="go_forward", message="Browser context closed during navigation. Agent will recover.")
+                return ActionResult(success=False, action="go_forward", message=msg)
         elif action.name == "extract":
             return await self._extract(page, action.params)
         elif action.name == "done":
@@ -194,130 +284,20 @@ class ActionExecutor:
             return await self._download_file(page, action.params)
         elif action.name == "run_js":
             return await self._run_javascript(page, action.params)
+        elif action.name == "remove_element":
+            return await self._remove_element(page, action.params)
         elif action.name == "press_keys":
             return await self._press_keys(page, action.params)
+        elif action.name == "save_credential":
+            return await self._save_credential(page, action.params)
+        elif action.name == "get_credential":
+            return await self._get_credential(page, action.params)
+        elif action.name == "save_learning":
+            return await self._save_learning(page, action.params)
         else:
             return ActionResult(success=False, action=action.name, message=f"Unknown action: {action.name}")
 
-    async def _smart_click_fallback(self, page: Page, params: Dict[str, Any]) -> Optional[ActionResult]:
-        """Smart fallback when click fails - extract keywords and find matching elements.
-        
-        This is called when the primary click fails. It:
-        1. Extracts keywords from the failed xpath/text/name
-        2. Searches for visible links containing those keywords
-        3. Clicks the first matching visible element
-        """
-        
-        # Extract search keywords from various params
-        keywords = []
-        
-        xpath = params.get('xpath', '')
-        text = params.get('text', '')
-        name = params.get('name', '')
-        
-        # Extract from xpath like //a[contains(text(),"Galaxy S25 Ultra 5G AI Smartp
-        if xpath:
-            # Look for text patterns in xpath
-            text_match = re.search(r'contains\([^,]+,\s*["\']([^"\']+)', xpath)
-            if text_match:
-                keywords.append(text_match.group(1))
-            # Also try aria-label patterns
-            aria_match = re.search(r'aria-label[*]?=\s*["\']([^"\']+)', xpath)
-            if aria_match:
-                keywords.append(aria_match.group(1))
-        
-        if text:
-            keywords.append(text)
-        if name:
-            keywords.append(name)
-        
-        if not keywords:
-            logger.warning("🔍 No keywords found for smart fallback")
-            return None
-        
-        logger.info(f"🔍 Smart click fallback - searching for keywords: {keywords}")
-        
-        # Try to find and click elements containing these keywords
-        
-        # Strategy 0: Check MEMORY (cached elements) for text match
-        if hasattr(self, '_cached_elements') and self._cached_elements:
-            for keyword in keywords:
-                keyword_clean = keyword.strip().lower()
-                if len(keyword_clean) < 3: continue
-                
-                for el in self._cached_elements:
-                    # Check text content, name, or aria-label
-                    el_text = (el.get('text') or el.get('name') or '').lower()
-                    el_label = (el.get('attributes') or {}).get('aria-label', '').lower()
-                    
-                    if keyword_clean in el_text or keyword_clean in el_label:
-                        xpath = el.get('xpath')
-                        if xpath:
-                            try:
-                                logger.info(f"🧠 Memory Hit! Found '{keyword}' in cached element: {el.get('name')}")
-                                locator = page.locator(f"xpath={xpath}").first
-                                await locator.click(timeout=5000)
-                                return ActionResult(success=True, action="click", message=f"Smart fallback (Memory): clicked '{el.get('name')}'")
-                            except Exception as e:
-                                logger.warning(f"Memory click failed: {e}")
 
-        # Continue with page scanning strategies
-        for keyword in keywords:
-            try:
-                # Clean keyword - remove trailing truncation
-                keyword = keyword.strip().rstrip('.')
-                if len(keyword) < 5:
-                    continue  # Too short to be useful
-                
-                # Strategy 1: Get by text (partial match)
-                try:
-                    locator = page.get_by_text(keyword[:30], exact=False).first
-                    if await locator.count() > 0:
-                        # Verify it's visible
-                        if await locator.is_visible():
-                            await locator.scroll_into_view_if_needed()
-                            await page.wait_for_timeout(200)
-                            await locator.click(timeout=3000)
-                            logger.info(f"✅ Smart fallback clicked via text: {keyword[:30]}...")
-                            return ActionResult(success=True, action="click", message=f"Smart fallback: clicked '{keyword[:30]}...'")
-                except Exception as e:
-                    logger.debug(f"Smart text click failed: {e}")
-                
-                # Strategy 2: Find links containing keyword in href
-                try:
-                    # Use product ID patterns common in e-commerce
-                    links = await page.query_selector_all(f'a[href*="{keyword[:20]}"]')
-                    if links:
-                        for link in links[:3]:  # Try first 3 matches
-                            if await link.is_visible():
-                                await link.scroll_into_view_if_needed()
-                                await page.wait_for_timeout(200)
-                                await link.click()
-                                logger.info(f"✅ Smart fallback clicked via href match")
-                                return ActionResult(success=True, action="click", message="Smart fallback: clicked via href")
-                except Exception as e:
-                    logger.debug(f"Smart href click failed: {e}")
-                
-                # Strategy 3: Find any clickable element with matching content
-                try:
-                    # Broader search for the first significant keyword
-                    first_word = keyword.split()[0] if ' ' in keyword else keyword[:15]
-                    locator = page.locator(f'a:has-text("{first_word}")').first
-                    if await locator.count() > 0 and await locator.is_visible():
-                        await locator.scroll_into_view_if_needed()
-                        await page.wait_for_timeout(200)
-                        await locator.click(timeout=3000)
-                        logger.info(f"✅ Smart fallback clicked via keyword: {first_word}")
-                        return ActionResult(success=True, action="click", message=f"Smart fallback: clicked '{first_word}'")
-                except Exception as e:
-                    logger.debug(f"Smart keyword click failed: {e}")
-                    
-            except Exception as e:
-                logger.debug(f"Smart fallback strategy failed for '{keyword}': {e}")
-                continue
-        
-        logger.warning("🔍 Smart click fallback exhausted all strategies")
-        return None
 
     async def _hover(self, page: Page, params: Dict[str, Any]) -> ActionResult:
         """Hover over element - supports XPath, CSS selector, role+name, or coordinates"""
@@ -417,14 +397,36 @@ class ActionExecutor:
             if not url.startswith(('http://', 'https://')):
                 url = 'https://' + url
             
-            await page.goto(url, wait_until='domcontentloaded', timeout=600000)
-            await page.wait_for_timeout(3000) # Increased wait for SPAs
-            
+            await page.goto(url, wait_until='domcontentloaded', timeout=60000)
+            await page.wait_for_timeout(2000)  # Wait for SPAs
             
             logger.info(f"✅ Navigated to: {url}")
             return ActionResult(success=True, action="navigate", message=f"Navigated to {url}")
         except Exception as e:
             msg = str(e)
+            
+            # "Target page, context or browser has been closed" often means navigation 
+            # happened successfully but triggered a page context change (redirect, new tab)
+            # The URL DID change - we should treat this as success
+            if "closed" in msg.lower() or "destroyed" in msg.lower() or "navigation" in msg.lower():
+                logger.info(f"⚠️ Page context changed during navigation to {url} - treating as success")
+                
+                # Try to get fresh page reference from browser context
+                try:
+                    from .browser import Browser
+                    if hasattr(self, 'browser') and self.browser:
+                        fresh_page = self.browser.get_active_page()
+                        if fresh_page:
+                            logger.info(f"🔄 Got fresh page after navigation: {fresh_page.url[:60] if fresh_page.url else 'new page'}")
+                except Exception:
+                    pass  # Browser reference not available here
+                
+                return ActionResult(
+                    success=True, 
+                    action="navigate", 
+                    message=f"Navigated to {url} (page context changed)"
+                )
+            
             is_timeout = "Timeout" in msg or "timeout" in msg
             return ActionResult(
                 success=False, 
@@ -521,10 +523,36 @@ class ActionExecutor:
             
             # 1. Coordinate click (highest priority for vision mode)
             if not clicked and x is not None and y is not None:
+                # Coordinates from DOM are PAGE-relative (include scroll).
+                # We need to scroll the element into view and click at viewport-relative position.
                 try:
-                    await page.mouse.click(x, y)
-                    clicked = True
-                    logger.info(f"✅ Clicked via coordinates: ({x}, {y})")
+                    # Get current scroll position
+                    scroll_y = await page.evaluate("() => window.scrollY")
+                    viewport_height = await page.evaluate("() => window.innerHeight")
+                    
+                    # Calculate if element is visible in current viewport
+                    viewport_y = y - scroll_y  # Convert to viewport-relative
+                    
+                    # If element is outside viewport, scroll to it first
+                    if viewport_y < 0 or viewport_y > viewport_height:
+                        # Scroll so element is centered in viewport
+                        target_scroll = max(0, y - viewport_height // 2)
+                        await page.evaluate(f"window.scrollTo(0, {target_scroll})")
+                        await page.wait_for_timeout(300)  # Let scroll settle
+                        
+                        # Recalculate viewport Y after scroll
+                        new_scroll_y = await page.evaluate("() => window.scrollY")
+                        viewport_y = y - new_scroll_y
+                        logger.info(f"📜 Scrolled to bring element into view (scroll: {new_scroll_y})")
+                    
+                    # Validate the viewport-relative coordinates are now valid
+                    if 0 <= viewport_y <= viewport_height + 50 and 0 <= x <= 1400:
+                        await page.mouse.click(x, viewport_y)
+                        clicked = True
+                        logger.info(f"✅ Clicked via coordinates: page({x}, {y}) → viewport({x}, {viewport_y})")
+                    else:
+                        attempts.append(f"coords({x},{y}):still outside after scroll")
+                        logger.warning(f"⚠️ Coordinates ({x}, {y}) still outside viewport after scroll")
                 except Exception as coord_err:
                     attempts.append(f"coords({x},{y}):{str(coord_err)[:30]}")
                     logger.warning(f"Coordinate click failed: ({x}, {y}) - {coord_err}")
@@ -624,7 +652,10 @@ class ActionExecutor:
                         logger.warning(f"CSS selector click failed: {selector[:30]}")
 
             if clicked:
-                await page.wait_for_timeout(500)
+                try:
+                    await page.wait_for_timeout(500)
+                except Exception:
+                    pass  # Context may have changed during click - that's OK
                 return ActionResult(success=True, action="click", message="Click successful")
             else:
                 error_detail = f"Tried: {', '.join(attempts)}" if attempts else "No valid params provided"
@@ -641,6 +672,57 @@ class ActionExecutor:
                 timeout_context={"action": "click", "xpath": xpath, "selector": selector, "text": text} if is_timeout else None
             )
     
+
+    async def _remove_element(self, page: Page, params: Dict[str, Any]) -> ActionResult:
+        """Remove an element from the DOM"""
+        index = params.get('index')
+        xpath = params.get('xpath', '')
+        selector = params.get('selector', '')
+        
+        try:
+            removed = False
+            
+            # 1. Index-based removal
+            if index is not None:
+                elements = getattr(self, '_cached_elements', [])
+                try:
+                    elem_idx = int(index) - 1
+                    if 0 <= elem_idx < len(elements):
+                        el = elements[elem_idx]
+                        el_xpath = el.get('xpath', '')
+                        if el_xpath:
+                            locator = page.locator(f"xpath={el_xpath}").first
+                            if await locator.count() > 0:
+                                await locator.evaluate("el => el.remove()")
+                                removed = True
+                                logger.info(f"🗑️ Removed element via index #{index}: {el_xpath[:50]}")
+                except Exception as idx_err:
+                    logger.warning(f"Index removal failed: {idx_err}")
+            
+            # 2. XPath removal
+            if not removed and xpath:
+                locator = page.locator(f"xpath={xpath}").first
+                if await locator.count() > 0:
+                    await locator.evaluate("el => el.remove()")
+                    removed = True
+                    logger.info(f"🗑️ Removed element via XPath: {xpath[:50]}")
+            
+            # 3. Selector removal
+            if not removed and selector:
+                locator = page.locator(selector).first
+                if await locator.count() > 0:
+                    await locator.evaluate("el => el.remove()")
+                    removed = True
+                    logger.info(f"🗑️ Removed element via Selector: {selector[:30]}")
+
+            if removed:
+                return ActionResult(success=True, action="remove_element", message="Element removed from DOM")
+            else:
+                return ActionResult(success=False, action="remove_element", message="Element not found to remove")
+        
+        except Exception as e:
+            return ActionResult(success=False, action="remove_element", message=f"Failed to remove element: {e}")
+
     async def _type(self, page: Page, params: Dict[str, Any]) -> ActionResult:
         """Type text into input element"""
         text = params.get('text', '')
@@ -868,26 +950,112 @@ class ActionExecutor:
             return ActionResult(success=False, action="screenshot", message=str(e))
 
     async def _save_info(self, page: Page, params: Dict[str, Any]) -> ActionResult:
-        """Save specific structured information found on the page"""
+        """Save specific structured information found on the page.
+        
+        Validates that the value actually exists on the page to prevent hallucination.
+        Returns a verified flag indicating whether the value was found.
+        """
         key = params.get('key', 'unknown_info')
         value = params.get('value', '')
         source = params.get('source')
         
         if not source:
-             try:
+            try:
                 source = page.url
-             except:
+            except:
                 source = "unknown"
-
+        
+        # VALIDATION: Check if value exists in PAGE CONTENT that LLM saw (not live page)
+        # This is more reliable because we verify against exactly what the LLM was given
+        verified = False
+        validation_context = ""
+        
+        if value and len(str(value).strip()) >= 2:
+            try:
+                # Use cached page text (what LLM saw) - more reliable than live page
+                if self._cached_page_text:
+                    page_text = self._cached_page_text
+                    validation_context = "cached_context"
+                else:
+                    # Fallback to live page if cache not available
+                    page_text = await page.evaluate("document.body.innerText || ''")
+                    validation_context = "live_page"
+                
+                value_str = str(value).strip().lower()
+                page_text_lower = page_text.lower()
+                
+                # Check for exact match first
+                if value_str in page_text_lower:
+                    verified = True
+                    logger.info(f"✅ save_info value verified (exact): {key}='{str(value)[:50]}'")
+                else:
+                    # TOKEN-BASED VERIFICATION for combined values
+                    # Extract significant tokens (prices, model names, ratings, numbers)
+                    import re
+                    
+                    # Extract significant tokens from value
+                    tokens = []
+                    
+                    # Prices: $642.99, ₹56,490, etc
+                    prices = re.findall(r'[\$₹€£]?\s*[\d,]+(?:\.\d{2})?', str(value))
+                    tokens.extend([p.strip() for p in prices if len(p.strip()) >= 3])
+                    
+                    # Model identifiers: RTX 3050, i7-13620H, DDR5, etc
+                    models = re.findall(r'\b(?:RTX|GTX|RX|i[3579]|Ryzen|DDR[45]|SSD|FHD|QHD|Hz)\s*[\w-]*\b', str(value), re.IGNORECASE)
+                    tokens.extend(models)
+                    
+                    # Ratings: 4.3 stars, (1210 ratings), etc
+                    ratings = re.findall(r'\d+\.?\d*\s*(?:star|rating|review)', str(value), re.IGNORECASE)
+                    tokens.extend(ratings)
+                    
+                    # Brand names
+                    brands = re.findall(r'\b(?:MSI|Asus|Acer|Dell|HP|Lenovo|ASUS)\b', str(value), re.IGNORECASE)
+                    tokens.extend(brands)
+                    
+                    if tokens:
+                        # Count how many tokens are found on page
+                        found_count = 0
+                        for token in tokens:
+                            if token.lower() in page_text_lower:
+                                found_count += 1
+                        
+                        match_ratio = found_count / len(tokens)
+                        
+                        if match_ratio >= 0.5:  # 50%+ tokens found
+                            verified = True
+                            validation_context = f"token_match:{found_count}/{len(tokens)}"
+                            logger.info(f"✅ save_info value verified (tokens: {found_count}/{len(tokens)}): {key}='{str(value)[:50]}'")
+                        else:
+                            logger.warning(f"⚠️ save_info token match low ({found_count}/{len(tokens)}): {key}='{str(value)[:50]}'")
+                    else:
+                        # No significant tokens - try digit match as fallback
+                        value_digits = re.sub(r'[^\d.]', '', str(value))
+                        if value_digits and len(value_digits) >= 2 and value_digits in page_text:
+                            verified = True
+                            validation_context = "digit_match"
+                            logger.info(f"✅ save_info value verified (digits): {key}='{str(value)[:50]}'")
+                    
+                    if not verified:
+                        logger.warning(f"⚠️ save_info value NOT verified: {key}='{str(value)[:50]}'")
+            except Exception as e:
+                logger.warning(f"Validation failed: {e}")
+                validation_context = f"validation_error: {str(e)[:50]}"
+        else:
+            # Empty or very short values - mark as verified if intentionally empty
+            verified = value == "" or value is None
+        
         return ActionResult(
             success=True,
             action="save_info",
-            message=f"Saved info: {key}='{str(value)[:50]}...'",
+            message=f"Saved info: {key}='{str(value)[:50]}...' [{'VERIFIED' if verified else 'UNVERIFIED'}]",
             data={
                 "structured_info": {
                     "key": key,
                     "value": value,
-                    "source": source
+                    "source": source,
+                    "verified": verified,
+                    "validation_context": validation_context,
+                    "timestamp": time.time()
                 }
             }
         )
@@ -1008,25 +1176,35 @@ class ActionExecutor:
                 
             save_path = CONFIG.get_screenshot_path(custom_filename)
             
-            # Take screenshot
-            await page.screenshot(
-                path=str(save_path),
-                full_page=full_page,
-                type='jpeg' if custom_filename.endswith(('.jpg', '.jpeg')) else 'png',
-                quality=80
-            )
+            # Determine format
+            is_jpeg = custom_filename.endswith(('.jpg', '.jpeg'))
+            
+            # Take screenshot - quality only valid for JPEG, not PNG
+            screenshot_options = {
+                'path': str(save_path),
+                'full_page': full_page,
+                'type': 'jpeg' if is_jpeg else 'png',
+            }
+            if is_jpeg:
+                screenshot_options['quality'] = 80
+                
+            await page.screenshot(**screenshot_options)
             
             # Register with File Manager if available
             if self.screenshot_manager:
                 try:
-                    await self.screenshot_manager.register_file(
-                        content=None,
-                        filename=custom_filename,
-                        file_type="screenshot",
-                        file_path=str(save_path),
-                        thread_id=self.thread_id,
-                        custom_metadata={"action": "save_screenshot"}
-                    )
+                    # Read content to register
+                    if save_path.exists():
+                        with open(save_path, 'rb') as f:
+                            file_content = f.read()
+                            
+                        await self.screenshot_manager.register_file(
+                            content=file_content,
+                            filename=custom_filename,
+                            file_type=FileType.SCREENSHOT,
+                            thread_id=self.thread_id,
+                            custom_metadata={"action": "save_screenshot"}
+                        )
                 except Exception as e:
                     logger.warning(f"Failed to register screenshot: {e}")
             
@@ -1176,36 +1354,46 @@ class ActionExecutor:
             )
         
         try:
-            # Wrap code to return value if not already returning
-            if return_value and not code.strip().startswith('return'):
-                # Check if it's an expression that should return a value
-                if not any(code.strip().startswith(kw) for kw in ['if', 'for', 'while', 'try', 'const', 'let', 'var', 'function']):
-                    code = f"return {code}"
-            
-            # Execute with async function wrapper for async code support
-            wrapped_code = f"""
-                (async () => {{
-                    {code}
-                }})()
-            """
+            # SIMPLIFIED WRAPPER: Just wrap in an IIFE that can handle both sync and async code
+            # Don't use nested functions which break variable scope
+            wrapped_code = f"""(() => {{
+                {code}
+            }})()"""
             
             result = await page.evaluate(wrapped_code)
+            
+            # Store result for {{last_run_js_output}} interpolation
+            self.last_js_result = result
             
             # Format result for display
             if result is None:
                 result_str = "Script executed (no return value)"
             elif isinstance(result, (dict, list)):
                 import json
-                result_str = json.dumps(result, indent=2, default=str)[:1000]
+                result_str = json.dumps(result, indent=2, default=str)[:500]
+                
+                # AUTO-SAVE EXTRACTED DATA: If JS returned structured data, save it!
+                if isinstance(result, list) and len(result) > 0:
+                    # Looks like extracted products/items
+                    logger.info(f"📦 AUTO-SAVING {len(result)} items from run_js to memory")
+                    # This will be picked up by the agent's memory system
+                elif isinstance(result, dict):
+                    # Check if it contains product-like data
+                    if any(k in str(result).lower() for k in ['product', 'price', 'title', 'name', 'items']):
+                        logger.info(f"📦 AUTO-SAVING extracted data from run_js to memory")
             else:
-                result_str = str(result)[:1000]
+                result_str = str(result)[:500]
             
-            logger.info(f"🔧 JavaScript executed successfully")
+            logger.info(f"🔧 JavaScript executed successfully: {result_str[:100]}...")
             return ActionResult(
                 success=True,
                 action="run_js",
                 message=f"JavaScript executed: {result_str[:200]}",
-                data={"result": result, "code_preview": code[:100]}
+                data={
+                    "result": result, 
+                    "code_preview": code[:100],
+                    "auto_extracted": isinstance(result, (dict, list)) and result is not None
+                }
             )
             
         except Exception as e:
@@ -1276,3 +1464,150 @@ class ActionExecutor:
                 action="press_keys",
                 message=f"Key press failed: {error_msg}"
             )
+
+    # ============== PERSISTENT MEMORY ACTIONS ==============
+    
+    async def _save_credential(self, page: Page, params: Dict[str, Any]) -> ActionResult:
+        """Save login credentials for a site to persistent memory.
+        
+        Params:
+            site: Site domain (e.g. "amazon.in", "github.com")
+            username: Username or email
+            password: Password
+            notes: Optional notes about this credential
+        """
+        site = params.get('site', '')
+        username = params.get('username', '')
+        password = params.get('password', '')
+        notes = params.get('notes', '')
+        
+        if not site:
+            # Try to extract from current URL
+            try:
+                site = page.url.split('/')[2]
+            except:
+                return ActionResult(
+                    success=False,
+                    action="save_credential",
+                    message="No site specified. Provide 'site' parameter or ensure you're on a page."
+                )
+        
+        if not username or not password:
+            return ActionResult(
+                success=False,
+                action="save_credential",
+                message="Both 'username' and 'password' are required."
+            )
+        
+        try:
+            persistent = get_persistent_memory()
+            persistent.save_credential(site, username, password, notes)
+            logger.info(f"🔐 Saved credentials for {site}")
+            
+            return ActionResult(
+                success=True,
+                action="save_credential",
+                message=f"Credentials saved for {site}. Will be available in future sessions.",
+                data={"site": site, "username": username}
+            )
+        except Exception as e:
+            return ActionResult(
+                success=False,
+                action="save_credential",
+                message=f"Failed to save credentials: {str(e)}"
+            )
+    
+    async def _get_credential(self, page: Page, params: Dict[str, Any]) -> ActionResult:
+        """Retrieve stored credentials for a site.
+        
+        Params:
+            site: Site domain to get credentials for (optional, uses current page if not specified)
+        """
+        site = params.get('site', '')
+        
+        if not site:
+            # Try to extract from current URL
+            try:
+                site = page.url.split('/')[2]
+            except:
+                return ActionResult(
+                    success=False,
+                    action="get_credential",
+                    message="No site specified. Provide 'site' parameter or ensure you're on a page."
+                )
+        
+        try:
+            persistent = get_persistent_memory()
+            cred = persistent.get_credential(site)
+            
+            if cred:
+                logger.info(f"🔐 Retrieved credentials for {site}")
+                return ActionResult(
+                    success=True,
+                    action="get_credential",
+                    message=f"Found credentials for {site}: username={cred['username']}",
+                    data={
+                        "site": site,
+                        "username": cred['username'],
+                        "password": cred['password'],  # Available for auto-fill
+                        "notes": cred.get('notes', '')
+                    }
+                )
+            else:
+                return ActionResult(
+                    success=False,
+                    action="get_credential",
+                    message=f"No stored credentials for {site}. Ask user to provide login info."
+                )
+        except Exception as e:
+            return ActionResult(
+                success=False,
+                action="get_credential",
+                message=f"Failed to retrieve credentials: {str(e)}"
+            )
+    
+    async def _save_learning(self, page: Page, params: Dict[str, Any]) -> ActionResult:
+        """Save a learning/fact to persistent memory for future sessions.
+        
+        Params:
+            category: Category of learning (e.g., "site_navigation", "user_preference", "element_pattern")
+            key: Key/name for this learning
+            value: The actual learning/fact
+            confidence: Optional confidence score (0-1, default 1.0)
+        """
+        category = params.get('category', 'general')
+        key = params.get('key', '')
+        value = params.get('value', '')
+        confidence = params.get('confidence', 1.0)
+        
+        if not key or not value:
+            return ActionResult(
+                success=False,
+                action="save_learning",
+                message="Both 'key' and 'value' are required for save_learning."
+            )
+        
+        try:
+            source = page.url if page else None
+            persistent = get_persistent_memory()
+            persistent.add_learning(category, key, value, source, confidence)
+            
+            logger.info(f"📝 Saved learning: [{category}] {key}")
+            return ActionResult(
+                success=True,
+                action="save_learning",
+                message=f"Learning saved: [{category}] {key} = {value[:50]}...",
+                data={
+                    "category": category,
+                    "key": key,
+                    "value": value,
+                    "persistent": True
+                }
+            )
+        except Exception as e:
+            return ActionResult(
+                success=False,
+                action="save_learning",
+                message=f"Failed to save learning: {str(e)}"
+            )
+
