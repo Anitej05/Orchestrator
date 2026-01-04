@@ -182,9 +182,9 @@ class VisionClient:
                 img = img.resize(new_size, Image.LANCZOS)
                 logger.info(f"📐 Resized image from {img.width}x{img.height} to {new_size[0]}x{new_size[1]}")
             
-            # Encode as JPEG for smaller size (70% quality is good balance)
+            # Encode as JPEG for smaller size (85% quality per user request)
             output = io.BytesIO()
-            img.save(output, format='JPEG', quality=70, optimize=True)
+            img.save(output, format='JPEG', quality=85, optimize=True)
             modified_b64 = base64.b64encode(output.getvalue()).decode()
             
             logger.info(f"🎨 SoM overlay: marked {len(mark_mapping)} elements, image size: {len(modified_b64)} chars")
@@ -267,6 +267,12 @@ Use vision when:
 - Navigation is icon-based without text labels
 - Modal/popup elements overlay the main content
 
+### 5. USE HIERARCHY FOR CONTEXT
+You also receive a "PAGE HIERARCHY" tree. Use it to:
+- Understand grouping (what belongs to what)
+- Identify headings and sections not obvious visually
+- Confirm text that might be hard to read in the image
+
 ## OUTPUT RULES
 1. Your response MUST be valid JSON starting with { and ending with }
 2. NO text before or after JSON
@@ -309,7 +315,7 @@ For clicks: use {"mark": N} where N is the bounding box number"""
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": f"data:image/png;base64,{marked_screenshot}"
+                                "url": f"data:image/jpeg;base64,{marked_screenshot}"
                             }
                         }
                     ]
@@ -380,9 +386,8 @@ For clicks: use {"mark": N} where N is the bounding box number"""
                         self.nvidia.chat.completions.create(
                             model=self.model_nvidia,
                             messages=nvidia_messages,  # OpenAI format with image_url
-                            temperature=0.1
                         ),
-                        timeout=30.0
+                        timeout=90.0
                     )
                     if response and response.choices:
                         nvidia_content = response.choices[0].message.content
@@ -402,7 +407,7 @@ For clicks: use {"mark": N} where N is the bounding box number"""
                     logger.info(f"🎨 Falling back to Ollama vision: {self.model} (30s timeout)")
                     
                     # Direct httpx call with native Ollama format
-                    async with httpx.AsyncClient(timeout=30.0) as client:
+                    async with httpx.AsyncClient(timeout=90.0) as client:
                         ollama_response = await client.post(
                             self.ollama_base_url,
                             headers={
@@ -500,11 +505,28 @@ For clicks: use {"mark": N} where N is the bounding box number"""
         task: str,
         page_url: str
     ) -> Optional[str]:
-        """Analyze/describe an image on the page"""
+        """Analyze/describe an image on the page (Compressed)"""
         
         if not self.available:
             return None
-        
+            
+        # COMPRESS raw screenshot if needed
+        # analyze_image often receives raw PNGs which are huge (2-4MB)
+        try:
+            if len(screenshot_base64) > 500000: # If > ~375KB
+                img_bytes = base64.b64decode(screenshot_base64)
+                img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
+                if img.width > 1024:
+                    ratio = 1024 / img.width
+                    img = img.resize((1024, int(img.height * ratio)), Image.LANCZOS)
+                
+                output = io.BytesIO()
+                img.save(output, format='JPEG', quality=85, optimize=True)
+                screenshot_base64 = base64.b64encode(output.getvalue()).decode()
+                logger.info(f"📉 Compressed analyze_image input to {len(screenshot_base64)} chars")
+        except Exception as e:
+            logger.warning(f"Failed to compress analyze_image input: {e}")
+
         try:
             prompt = f"""Analyze this screenshot and describe what you see.
 
@@ -528,7 +550,7 @@ Provide a detailed description of what you observe."""
                                 "role": "user",
                                 "content": [
                                     {"type": "text", "text": prompt},
-                                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_base64}"}}
+                                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{screenshot_base64}"}}
                                 ]
                             }
                         ],
@@ -631,6 +653,9 @@ CURRENT STATE:
 • Title: {page_content.get('title', '')}
 • Step: {step}
 • Scroll: {page_content.get('scroll_position', 0)}px / {page_content.get('max_scroll', 0)}px ({page_content.get('scroll_percent', 100)}% down)
+
+PAGE HIERARCHY (Semantic Structure):
+{page_content.get('unified_page_tree', '(hierarchy unavailable)')}
 
 SET-OF-MARK LEGEND (elements visible in screenshot):
 {mark_legend if mark_legend else "(no marks available)"}

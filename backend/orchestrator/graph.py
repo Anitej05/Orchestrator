@@ -589,13 +589,34 @@ def _summarize_completed_tasks_for_context(completed_tasks: List[Dict]) -> List[
                         summary["page_content"] = extracted["text_content"][:2000]
                     if "title" in extracted:
                         summary["page_title"] = extracted["title"]
-            
-            # Include actions summary
+                    
+                    
+                    # ---------------------------------------------------------
+                    # CRITICAL FIX: Preserve FULL structured data
+                    # User explicitly requested "literally complete" data
+                    # ---------------------------------------------------------
+                    if "all_saved_items" in extracted:
+                        # Pass the complete list - Orchestrator/LLM will decide validation
+                        summary["extracted_items"] = extracted["all_saved_items"]
+                    
+                    if "structured_info" in extracted:
+                        summary["structured_info"] = extracted["structured_info"]
+                    
+                    # Also preserve any other keys in extracted data just in case
+                    for k, v in extracted.items():
+                        if k not in ["text_content", "all_saved_items", "structured_info", "title", "url"]:
+                            summary[k] = v
+                    # ---------------------------------------------------------
+
+            # Include COMPLETE actions summary
+            # User wants to know all steps performed
             if "actions_taken" in raw_response:
                 actions = raw_response["actions_taken"]
                 summary["actions_count"] = len(actions)
-                # Just include action types, not full details
-                summary["actions"] = [a.get("action", "unknown") for a in actions[:5]]
+                # Pass full action details including parameters and success status
+                summary["actions"] = actions 
+        
+        # Include error info if present
         
         # Include error info if present
         if isinstance(result, dict) and "error" in result:

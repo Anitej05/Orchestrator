@@ -9,7 +9,7 @@ import re
 import json
 import asyncio
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
@@ -99,10 +99,12 @@ class LLMClient:
         for attempt in range(MAX_RETRIES):
             prompt = self._build_prompt(task, page_content, history, step, last_parse_error)
             
-            response = await self._call_llm(prompt)
+            response, usage = await self._call_llm(prompt)
             
             if response:
                 result = self._parse_action(response)
+                # Attach usage stats to the plan
+                result.usage = usage
                 if result.confidence > 0.3:  # Valid parse
                     return result
                 else:
@@ -197,34 +199,30 @@ class LLMClient:
                         f"messages: {stats['history_messages']}, "
                         f"failures: {stats['failures_count']}")
         
-        # Get the hierarchical page structure (A11y tree with grouping)
-        # This is for CONTEXT only - shows page structure
-        a11y_tree = page_content.get('a11y_tree', '')
+        # Get unified page tree (combines a11y hierarchy + elements + selectors)
+        # This is the NEW approach - one unified structure instead of separate sections
+        unified_page_tree = page_content.get('unified_page_tree', '')
         
-        # Build INTERACTIVE ELEMENTS section - this is the SOURCE OF TRUTH for clicking
-        elements = page_content.get('elements', [])
-        elements_str = ""
-        if elements:
-            elem_lines = []
-            for idx, el in enumerate(elements[:300]):  # Increased from 150 - let LLM see more
-                role = el.get('role', 'element')
-                # Limit output to prevent huge prompts
-                MAX_LINES = 1000  # Increased from 500 - show more structurext
-                name = el.get('name', '')[:100]  # Increased from 50 - show full text
-                section = el.get('section', '')
-                elem_idx = idx + 1  # 1-indexed
+        # Fallback: Build elements string if unified tree not available
+        if not unified_page_tree:
+            elements = page_content.get('elements', [])
+            if elements:
+                elem_lines = []
+                for idx, el in enumerate(elements[:200]):  # Limit to 200
+                    role = el.get('role', 'element')
+                    name = el.get('name', '')[:60]
+                    elem_idx = idx + 1
+                    xpath = el.get('xpath', '')
+                    
+                    if name:
+                        line = f"#{elem_idx} [{role}] \"{name}\""
+                        if xpath and len(xpath) < 50:
+                            line += f" → {xpath}"
+                    else:
+                        line = f"#{elem_idx} [{role}]"
+                    elem_lines.append(line)
                 
-                # Build compact element line
-                if name:
-                    line = f"#{elem_idx} [{role}] \"{name}\""
-                    if section:
-                        line += f" [under: {section[:30]}]"
-                else:
-                    line = f"#{elem_idx} [{role}] (no text)"
-                
-                elem_lines.append(line)
-            
-            elements_str = "\n".join(elem_lines)
+                unified_page_tree = "\n".join(elem_lines)
         
         # Build OVERLAY/MODAL section - CRITICAL for intelligent modal handling
         overlay_info = page_content.get('overlays', page_content.get('overlay_info', {}))
@@ -232,19 +230,17 @@ class LLMClient:
         if overlay_info and overlay_info.get('hasOverlay'):
             overlays = overlay_info.get('overlays', [])
             close_btns = overlay_info.get('closeButtons', [])
-            overlay_lines = ["🚨 MODAL/OVERLAY DETECTED - You should dismiss this before continuing!"]
-            for ov in overlays[:3]:  # Show up to 3 overlays
+            overlay_lines = ["🚨 MODAL/OVERLAY DETECTED - Dismiss before continuing!"]
+            for ov in overlays[:3]:
                 title = ov.get('title', 'Unknown')
                 ov_type = ov.get('type', 'modal')
                 overlay_lines.append(f"  • Type: {ov_type}, Title: \"{title}\"")
             if close_btns:
-                overlay_lines.append(f"  • Close buttons: {[btn.get('text', 'X') for btn in close_btns[:3]]}")
-            overlay_lines.append("  → Use press_keys: 'Escape' OR click the Cancel/Close/X button")
+                overlay_lines.append(f"  • Close: {[btn.get('text', 'X') for btn in close_btns[:3]]}")
+            overlay_lines.append("  → Use press_keys: 'Escape' OR click Close/X button")
             overlay_str = "\n".join(overlay_lines)
         
         # Build scroll position context
-        scroll_pos = page_content.get('scroll_position', 0)
-        max_scroll = page_content.get('max_scroll', 0)
         scroll_pct = page_content.get('scroll_percent', 100)
         
         if scroll_pct == 0:
@@ -253,13 +249,6 @@ class LLMClient:
             scroll_hint = "📍 AT BOTTOM - no more content below"
         else:
             scroll_hint = f"📍 {scroll_pct}% scrolled - can scroll up/down"
-        
-        # Build selector hints section (from discovery)
-        selector_hints_str = ""
-        selector_hints = page_content.get('selector_hints', {})
-        if selector_hints and selector_hints.get('repeatingPatterns'):
-            from .selector_discovery import get_selector_discovery
-            selector_hints_str = get_selector_discovery().format_for_prompt(selector_hints)
         
         # Build the current context prompt (system prompt is sent separately)
         prompt = f"""
@@ -272,16 +261,12 @@ class LLMClient:
 {f'''
 {overlay_str}
 ''' if overlay_str else ''}
+{self._format_selector_hints(page_content.get('selector_hints'))}
 ═══════════════════════════════════════════════════════════════════════════════
-🔘 INTERACTIVE ELEMENTS (use #N index to click)
+📄 PAGE (use #N index to click elements)
 ═══════════════════════════════════════════════════════════════════════════════
-{elements_str if elements_str else "(no elements detected)"}
+{unified_page_tree if unified_page_tree else "(no elements detected)"}
 
-═══════════════════════════════════════════════════════════════════════════════
-📖 PAGE STRUCTURE (context only - shows grouping)
-═══════════════════════════════════════════════════════════════════════════════
-{a11y_tree if a11y_tree else "(Page structure not available)"}
-{selector_hints_str}
 ═══════════════════════════════════════════════════════════════════════════════
 📜 PREVIOUS ACTIONS
 ═══════════════════════════════════════════════════════════════════════════════
@@ -297,11 +282,84 @@ NOW RESPOND WITH YOUR ACTION (JSON ONLY):"""
         
         return prompt
     
-    async def call_llm_direct(self, prompt: str) -> Optional[str]:
+    def _format_selector_hints(self, hints: Optional[Dict[str, Any]]) -> str:
+        """Format discovered selectors for the prompt"""
+        if not hints:
+            return ""
+            
+        lines = []
+        # Handle the new 'patterns' style extracted by selector_discovery.py
+        # It typically returns: {'patterns': [{'selector': '.foo', 'count': 10}, ...]}
+        # Or sometimes a flat dict. Let's handle both safely.
+        
+        if isinstance(hints, dict):
+            # 1. Recommended "Semantic" patterns
+            if 'recommended' in hints:
+                lines.append("✨ RECOMMENDED SELECTORS (High Confidence):")
+                for k, v in hints.get('recommended', {}).items():
+                     lines.append(f"  • {k}: {v}")
+            
+            # 2. Semantic Content Maps (Titles, Prices, etc.) - CRITICAL for extraction
+            content_selectors = hints.get('contentSelectors', {}) or hints.get('content_selectors', {})
+            if content_selectors:
+                lines.append("\n🏷️ SEMANTIC CONTENT MAPS:")
+                for category, items in content_selectors.items():
+                    # items is a list of dicts: [{'selector': '.foo', 'count': 5, 'sample': '...'}]
+                    if items and isinstance(items, list):
+                        top_item = items[0]
+                        sel = top_item.get('selector')
+                        sample = top_item.get('sample')
+                        if sel:
+                            lines.append(f"  • {category.upper()}: {sel} (e.g., '{sample}')")
+
+            # 3. Complete Container Schema (Nested Structure)
+            # This shows: "Inside .product-card, we have .title, .price, etc."
+            selector_map = hints.get('selectorMap', {}) or hints.get('selector_map', {})
+            container = selector_map.get('container')
+            if container:
+                lines.append(f"\n📦 FOUND LIST SCHEMA (Container: '{container}'):")
+                child_selectors = selector_map.get('childSelectors', [])
+                if child_selectors:
+                    # Sort by meaningfulness (price, text)
+                    sorted_children = sorted(child_selectors, key=lambda x: (x.get('likelyPrice', False), x.get('hasContent', False)), reverse=True)[:5]
+                    for child in sorted_children:
+                        sel = child.get('selector')
+                        tag = child.get('tag', 'element')
+                        sample = (child.get('samples', []) or [''])[0]
+                        lines.append(f"  • Child: {sel} <{tag}> (e.g., '{sample}')")
+
+            # 3. Data Attributes (Robust technical hooks)
+            data_attrs = hints.get('dataAttributes', []) or hints.get('data_attributes', [])
+            if data_attrs:
+                # Top 5 most frequent data attributes
+                lines.append("\n⚓ DATA ATTRIBUTES (Robust Hooks):")
+                # Format: [{'attr': 'data-testid', 'count': 10}, ...]
+                sorted_attrs = sorted(data_attrs, key=lambda x: x.get('count', 0), reverse=True)[:5]
+                for dp in sorted_attrs:
+                    lines.append(f"  • [{dp.get('attr')}] ({dp.get('count')} elements)")
+
+            # 4. General patterns (Fallback)
+            patterns = hints.get('patterns', []) or hints.get('general', [])
+            if patterns:
+                lines.append("\n🔍 DISCOVERED PATTERNS (Repeating Structures):")
+                # Take top 5 patterns by count
+                sorted_pats = sorted(patterns, key=lambda x: x.get('count', 0), reverse=True)[:5]
+                for p in sorted_pats:
+                    sel = p.get('selector')
+                    count = p.get('count', 0)
+                    if sel:
+                        lines.append(f"  • {sel} ({count} items)")
+                        
+        if not lines:
+            return ""
+            
+        return "\n" + "\n".join(lines) + "\n"
+    
+    async def call_llm_direct(self, prompt: str) -> Tuple[Optional[str], Optional[Dict[str, int]]]:
         """Directly call LLM with prompt (for planning/analysis)"""
         return await self._call_llm(prompt)
     
-    async def _call_llm(self, prompt: str, use_system_prompt: bool = True) -> Optional[str]:
+    async def _call_llm(self, prompt: str, use_system_prompt: bool = True) -> Tuple[Optional[str], Optional[Dict[str, int]]]:
         """Call LLM with smart provider rotation. Immediately switches on rate limits."""
         import time
         
@@ -372,7 +430,8 @@ NOW RESPOND WITH YOUR ACTION (JSON ONLY):"""
                     # SUCCESS: Update start index for NEXT call to be this key + 1
                     # This ensures we distribute load across all keys over time
                     self._cerebras_key_index = (key_idx + 1) % num_keys
-                    return content
+                    usage = response.usage.model_dump() if response.usage else None
+                    return content, usage
                 else:
                     logger.warning(f"⚠️ Cerebras key #{key_idx+1} returned empty content")
             
@@ -418,7 +477,8 @@ NOW RESPOND WITH YOUR ACTION (JSON ONLY):"""
                     content = self._strip_thinking_content(content)
                     logger.info(f"✅ NVIDIA response ({len(content)} chars)")
                     logger.debug(f"===== FULL RESPONSE START =====\n{content}\n===== FULL RESPONSE END =====")
-                    return content
+                    usage = response.usage.model_dump() if response.usage else None
+                    return content, usage
                 else:
                     logger.warning("⚠️ NVIDIA returned empty content")
             
@@ -456,7 +516,8 @@ NOW RESPOND WITH YOUR ACTION (JSON ONLY):"""
                 if content:
                     logger.info(f"✅ Groq response ({len(content)} chars)")
                     logger.debug(f"===== FULL RESPONSE START =====\n{content}\n===== FULL RESPONSE END =====")
-                    return content
+                    usage = response.usage.model_dump() if response.usage else None
+                    return content, usage
                 else:
                     logger.warning("⚠️ Groq returned empty content")
             
@@ -475,7 +536,7 @@ NOW RESPOND WITH YOUR ACTION (JSON ONLY):"""
             logger.info(f"⏭️ Skipping Groq (rate limited for {remaining}s more)")
         
         logger.error("❌ All LLMs failed!")
-        return None
+        return None, None
     
     def _strip_thinking_content(self, content: str) -> str:
         """Strip thinking tags from model output, including interleaved thinking.
@@ -551,7 +612,7 @@ Respond with ONLY valid JSON:
     "reasoning": "Brief reason why"
 }}"""
             
-            response = await self._call_llm(prompt)
+            response, _ = await self._call_llm(prompt)
             if not response:
                 return default_decision
                 

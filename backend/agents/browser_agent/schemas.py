@@ -53,6 +53,10 @@ class ActionPlan(BaseModel):
         default=None,
         description="A NEW list of subtasks to replace the current remaining plan (Dynamic Replanning)"
     )
+    usage: Optional[Dict[str, int]] = Field(
+        default=None, 
+        description="Token usage stats (prompt_tokens, completion_tokens, total_tokens)"
+    )
 
 
 class ActionResult(BaseModel):

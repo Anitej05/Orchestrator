@@ -3,13 +3,16 @@
 
 # CRITICAL: Fix Windows asyncio subprocess issue with Playwright
 # Must be set BEFORE any other asyncio imports
-import sys
-import asyncio
-if sys.platform == 'win32':
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
+
+
+# CRITICAL: Fix Windows asyncio subprocess issue with Playwright
+# Must be set BEFORE any other asyncio imports
+
+import sys
 import os
 import logging
+
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
@@ -171,7 +174,7 @@ async def browse(request: BrowseRequest, headless: bool = False, enable_streamin
         return BrowseResponse(
             success=result.success,
             task_summary=result.task_summary,
-            actions_taken=result.actions_taken, # SOTA result.actions_taken is List[Dict]
+            actions_taken=result.actions_taken or [], # Ensure list even if None
             extracted_data=result.extracted_data,
             screenshot_files=screenshots, 
             downloaded_files=downloads,

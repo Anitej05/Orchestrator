@@ -63,7 +63,7 @@ Respond with valid JSON only:
     ]
 }}
 """
-        response = await self.llm.call_llm_direct(prompt)
+        response, _ = await self.llm.call_llm_direct(prompt)
         if not response:
             logger.error("Failed to generate plan.")
             return []
@@ -187,7 +187,7 @@ If should_replan is false, new_subtasks can be empty.
 """
 
         try:
-            response = await self.llm.call_llm_direct(prompt)
+            response, _ = await self.llm.call_llm_direct(prompt)
             if not response:
                 logger.warning("Replanning LLM returned no response")
                 return False, []

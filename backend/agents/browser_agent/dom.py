@@ -21,7 +21,7 @@ class DOMExtractor:
     # Configuration
     MAX_IFRAME_DEPTH = 3  # Maximum depth for nested iframes
     MAX_IFRAMES = 3       # Reduced from 10 - skip most ad/tracking iframes
-    MAX_ELEMENTS = 150    # Limit elements to prevent prompt bloat (~58k chars seen with 300+ elements)
+    MAX_ELEMENTS = 250    # Increased to 250 per user request
     
     async def get_page_content(self, page: Page) -> Dict[str, Any]:
         """Get comprehensive page content for LLM, including iFrame contents"""
@@ -94,7 +94,13 @@ class DOMExtractor:
             # Get accessibility tree (semantic structure) - safe-guarded
             try:
                 # Limit timeout to prevent pipe hangs/crashes on massive pages
-                a11y_tree = await asyncio.wait_for(self._get_accessibility_tree(page), timeout=2.0)
+                # Use unified tree builder directly with correct context dict
+                tree_context = {
+                    'elements': all_elements,
+                    'viewport_height': scroll_info.get('innerHeight', 1000),
+                    'max_scroll': scroll_info.get('maxScrollY', 0)
+                }
+                a11y_tree = await asyncio.wait_for(self.build_unified_page_tree(page, tree_context, mode='text'), timeout=5.0)
             except Exception as e:
                 logger.warning(f"A11y tree extraction failed or timed out: {e}")
                 a11y_tree = ""
@@ -231,22 +237,84 @@ class DOMExtractor:
         return "".join(c for c in text if not (0xE000 <= ord(c) <= 0xF8FF)).strip()
 
     async def _get_accessibility_tree(self, page: Page) -> str:
-        """Get accessibility tree formatted as hierarchical grouped structure.
+        """DEPRECATED: Use build_unified_page_tree instead.
+        Kept for backward compatibility during transition."""
+        return await self.build_unified_page_tree(page, [], mode='text')
+    
+    async def build_unified_page_tree(
+        self, 
+        page: Page, 
+        page_content: Dict[str, Any],
+        mode: str = 'text',
+        selector_hints: Dict[str, Any] = None
+    ) -> str:
+        """
+        Build a unified hierarchical page representation combining:
+        - Semantic structure from accessibility tree
+        - Interactive elements with clickable indices
+        - Optimal selectors (XPath, CSS, or index)
+        - Discovered semantic roles (Title, Price, etc.)
         
-        NOTE: This tree is for CONTEXT ONLY - it shows page structure and grouping.
-        The actual clickable indices come from the INTERACTIVE ELEMENTS list.
+        Args:
+            page: Playwright page
+            elements: List of extracted interactive elements with indices
+            mode: 'text' (full hierarchy) or 'vision' (simplified for visual models)
+            selector_hints: Discovered CSS patterns from selector_discovery
+        
+        Returns:
+            Formatted string for LLM prompt
         """
         try:
-            snapshot = await page.accessibility.snapshot(interesting_only=False)  # Show ALL nodes
+            elements = page_content.get('elements', [])
+            
+            snapshot = await page.accessibility.snapshot(interesting_only=False)
             if not snapshot:
-                return "(No accessibility tree available)"
+                return self._format_elements_fallback(elements, mode)
+            
+            # --- PRE-PROCESS SELECTOR HINTS ---
+            semantic_map = {}  # class/selector -> semantic label (e.g. "TITLE")
+            if selector_hints:
+                content_sels = selector_hints.get('contentSelectors', {})
+                for item in content_sels.get('titles', []):
+                    cls = item['selector'].replace('.', '')
+                    semantic_map[cls] = "TITLE"
+                for item in content_sels.get('prices', []):
+                    cls = item['selector'].replace('.', '')
+                    semantic_map[cls] = "PRICE"
+                for item in content_sels.get('ratings', []):
+                    cls = item['selector'].replace('.', '')
+                    semantic_map[cls] = "RATING"
+            
+            # Build element lookup by name for merging with a11y tree
+            element_lookup = {}
+            for idx, el in enumerate(elements):
+                name = el.get('name', '').strip().lower()
+                # Also index by role for generic matches if name is empty
+                key_name = name if name else f"__role__{el.get('role', '')}"
+                
+                if key_name not in element_lookup:
+                    element_lookup[key_name] = []
+                
+                # Check for semantic tags from discovery
+                semantic_tag = ""
+                el_classes = el.get('attributes', {}).get('class', '').split()
+                for cls in el_classes:
+                    if cls in semantic_map:
+                        semantic_tag = semantic_map[cls]
+                        break
+                
+                element_lookup[key_name].append({
+                    'index': idx + 1,  # 1-indexed
+                    'element': el,
+                    'semantic_tag': semantic_tag
+                })
             
             # Roles that indicate a logical group/container
             GROUP_ROLES = {
-                'article', 'listitem', 'group', 'region', 'section', 
-                'dialog', 'tabpanel', 'menubar', 'menu', 'toolbar',
-                'navigation', 'banner', 'main', 'complementary', 'form',
-                'grid', 'row', 'gridcell', 'treegrid', 'treeitem'
+                'navigation', 'banner', 'main', 'complementary', 'contentinfo',
+                'article', 'section', 'region', 'form', 'search',
+                'dialog', 'tabpanel', 'menu', 'menubar', 'toolbar',
+                'list', 'listitem', 'grid', 'row'
             }
             
             # Roles that are interactive/clickable
@@ -254,136 +322,233 @@ class DOMExtractor:
                 'button', 'link', 'textbox', 'checkbox', 'radio', 
                 'combobox', 'menuitem', 'option', 'switch', 'tab',
                 'searchbox', 'spinbutton', 'slider', 'menuitemcheckbox',
-                'menuitemradio'
+                'menuitemradio', 'img'  # Images can be clickable
             }
             
-            # NOTE: No longer skipping any roles - show ALL to the LLM
-            # SKIP_ROLES removed - was {'none', 'generic', 'LineBreak', 'presentation'}
+            # Track which elements we've matched
+            matched_indices = set()
+            lines = []
             
-            # Track count for summary
-            interactive_count = [0]
+            def get_best_selector(el: Dict) -> str:
+                """Get the best selector, prioritizing Index > CSS > XPath."""
+                # Note: Index is implicit in the tree format "#N"
+                
+                # Try to find a simple class selector if it matches
+                attributes = el.get('attributes', {})
+                el_id = attributes.get('id')
+                if el_id:
+                    return f" → #{el_id}"
+                
+                # Fallback to XPath
+                xpath = el.get('xpath', '')
+                if not xpath or xpath == 'NO XPATH':
+                    return ''
+                if len(xpath) > 60:
+                    return '' 
+                return f" → {xpath}"
             
-            def format_node(node: Dict, depth: int = 0) -> List[str]:
-                """Recursively format node with smart grouping - NO DEPTH LIMIT"""
+            def format_node(node: Dict, depth: int = 0) -> None:
+                """Recursively format node with unified hierarchy."""
                 role = node.get('role', '')
                 name = self._clean_text(node.get('name', ''))
                 children = node.get('children', [])
                 
-                # Process ALL roles - no skipping
-                # (Previously skipped noise roles, now showing everything)
+                # Calculate indent (increased depth limit to 20 as requested)
+                indent = "│ " * min(depth, 20)
                 
-                lines = []
-                indent = "  " * min(depth, 8)  # Cap indent at 8 levels for readability
+                # Try to match with extracted elements
+                name_lower = name.strip().lower()
+                lookup_key = name_lower if name_lower else f"__role__{role}"
                 
-                # Extract state flags
+                matched_el = None
+                matched_idx = None
+                matched_semantic = ""
+                
+                if lookup_key in element_lookup:
+                    for match in element_lookup[lookup_key]:
+                        if match['index'] not in matched_indices:
+                            matched_el = match['element']
+                            matched_idx = match['index']
+                            matched_semantic = match['semantic_tag']
+                            matched_indices.add(matched_idx)
+                            break
+                
+                # Determine node type
+                is_group = role in GROUP_ROLES
+                is_interactive = role in INTERACTIVE_ROLES or matched_el is not None
+                
+                # STATE indicators
                 states = []
                 if node.get('checked') is True: states.append('✓')
                 elif node.get('checked') == 'mixed': states.append('◐')
                 if node.get('expanded') is True: states.append('▼')
                 elif node.get('expanded') is False: states.append('▶')
                 if node.get('disabled'): states.append('⊘')
-                if node.get('selected'): states.append('●')
                 state_str = ''.join(states)
                 
-                # Determine if this is a group container
-                is_group = role in GROUP_ROLES
-                is_interactive = role in INTERACTIVE_ROLES
-                
-                # Build the node line
+                # BUILD THE LINE
                 if is_group and children:
-                    # GROUP HEADER - shows what kind of container this is
-                    group_label = name[:60] if name else role.upper()
-                    lines.append(f"{indent}┌─ {role}: {group_label}")
+                    # === GROUP CONTAINER ===
+                    group_icon = self._get_group_icon(role)
+                    label = name[:50] if name else role.upper()
+                    lines.append(f"{indent}├── {group_icon} {label}")
                     
-                    # Process children with increased indent
+                    sibling_counts = {}
                     for child in children:
-                        lines.extend(format_node(child, depth + 1))
-                    
-                    lines.append(f"{indent}└─")  # Close group
+                        # Smart List Compression
+                        c_role = child.get('role', 'element')
+                        sibling_counts[c_role] = sibling_counts.get(c_role, 0) + 1
+                        if sibling_counts[c_role] > 5:
+                            if sibling_counts[c_role] == 6:
+                                remaining = len(children) - 5
+                                lines.append(f"{indent}│   ... [{remaining} more '{c_role}' items. Use 'run_js' to extract all, or scroll to see more]")
+                            continue
+                        
+                        format_node(child, depth + 1)
                     
                 elif is_interactive:
-                    # CLICKABLE ELEMENT - NO INDEX (use elements list for clicking)
-                    interactive_count[0] += 1
-                    
-                    # Format based on role - descriptive only
-                    if role == 'link':
-                        display = f'🔗 "{name}"' if name else f'🔗 (link)'
-                    elif role == 'button':
-                        display = f'🔘 "{name}"' if name else f'🔘 (button)'
-                    elif role in ('textbox', 'searchbox'):
-                        placeholder = name or 'text input'
-                        display = f'📝 [{placeholder}]'
-                    elif role in ('checkbox', 'radio'):
-                        display = f'{state_str} {role}: "{name}"'
-                    elif role == 'combobox':
-                        display = f'📋 dropdown: "{name}"'
+                    # === INTERACTIVE ELEMENT ===
+                    if matched_el:
+                        # We have an extracted element with index
+                        idx_str = f"#{matched_idx}"
+                        selector = get_best_selector(matched_el) if mode == 'text' else ''
+                        
+                        # --- ENHANCED TAGGING ---
+                        tags = []
+                        if matched_semantic: tags.append(matched_semantic)
+                        
+                        # Spatial Tags
+                        y = matched_el.get('y', 0)
+                        vh = page_content.get('viewport_height', 1000)
+                        if y < 150: tags.append("TOP")
+                        elif y > 2000 and y > (page_content.get('max_scroll', 0) - 500): tags.append("BOTTOM")
+                        
+                        # State Tags
+                        if matched_el.get('sticky'): tags.append("STICKY")
+                        if matched_el.get('modal'): tags.append("MODAL")
+                        if matched_el.get('error'): tags.append("ERROR")
+                        
+                        sem_tag = f" [{' '.join(tags)}]" if tags else ""
+                        
+                        if role == 'link':
+                            line = f"{indent}├── {idx_str} 🔗 \"{name[:40]}\"{sem_tag}{selector}"
+                        elif role == 'button':
+                            line = f"{indent}├── {idx_str} 🔘 \"{name[:40]}\"{sem_tag}{selector}"
+                        elif role in ('textbox', 'searchbox'):
+                            line = f"{indent}├── {idx_str} 📝 [{name[:30] or 'input'}]{sem_tag}{selector}"
+                        elif role in ('img', 'image'):
+                            line = f"{indent}├── {idx_str} 🖼️ \"{name[:40]}\"{sem_tag}{selector}"
+                        elif role in ('checkbox', 'radio'):
+                            line = f"{indent}├── {idx_str} {state_str} {role}: \"{name[:30]}\"{sem_tag}{selector}"
+                        elif role == 'combobox':
+                            line = f"{indent}├── {idx_str} 📋 \"{name[:30]}\"{sem_tag}{selector}"
+                        else:
+                            line = f"{indent}├── {idx_str} [{role}] \"{name[:40]}\"{sem_tag}{selector}"
+                        
+                        lines.append(line)
                     else:
-                        display = f'[{role}] "{name}"' if name else f'[{role}]'
+                        # Interactive but not extracted (maybe off-screen)
+                        if name and mode == 'text':
+                            lines.append(f"{indent}├── [{role}] \"{name[:40]}\" (not in viewport)")
                     
-                    if state_str and role not in ('checkbox', 'radio'):
-                        display += f' {state_str}'
-                    
-                    lines.append(f"{indent}{display}")
-                    
-                    # If interactive element has children (rare but possible)
+                    # Process children
                     for child in children:
-                        lines.extend(format_node(child, depth + 1))
-                    
+                        format_node(child, depth + 1)
+                        
                 elif role == 'heading':
-                    # HEADING - important for context
-                    level = node.get('level', '')
+                    # === HEADING ===
+                    level = node.get('level', 1)
                     if name:
-                        lines.append(f"{indent}{'#' * (level or 1)} {name}")
+                        lines.append(f"{indent}{'#' * level} {name[:60]}")
                     for child in children:
-                        lines.extend(format_node(child, depth))
+                        format_node(child, depth)
+                        
+                elif role in ('text', 'StaticText') and name and len(name.strip()) > 3:
+                    # === STATIC TEXT (context) ===
+                    if mode == 'text':
+                        display = name[:80] + "..." if len(name) > 80 else name
+                        lines.append(f'{indent}│ "{display}"')
+                        
+                elif role == 'image' and name:
+                    # === IMAGE (may be clickable) ===
+                    lines.append(f"{indent}├── 🖼️ {name[:50]}")
                     
-                elif role in ('text', 'StaticText') and name:
-                    # Static text - only include if meaningful (not just whitespace)
-                    if len(name.strip()) > 2:
-                        # Truncate long text
-                        display_text = name[:80] + "..." if len(name) > 80 else name
-                        lines.append(f"{indent}\"{display_text}\"")
-                    
-                elif role == 'image':
-                    # Image with alt text
+                elif children:
+                    # Just process children without adding a line for this node
+                    for child in children:
+                        format_node(child, depth)
+            
+            # Process the tree
+            format_node(snapshot)
+            
+            # Add any elements that weren't matched to the tree
+            unmatched = []
+            for idx, el in enumerate(elements):
+                if (idx + 1) not in matched_indices:
+                    unmatched.append((idx + 1, el))
+            
+            if unmatched and mode == 'text':
+                lines.append("")
+                lines.append("── OTHER ELEMENTS ──")
+                for idx, el in unmatched[:30]:  # Limit unmatched
+                    role = el.get('role', 'element')
+                    name = el.get('name', '')[:40]
+                    selector = get_best_selector(el)
                     if name:
-                        lines.append(f"{indent}🖼️ {name[:50]}")
-                    
-                elif name or children:
-                    # Other roles with content
-                    if name:
-                        lines.append(f"{indent}[{role}] {name[:60]}")
-                    
-                    for child in children:
-                        lines.extend(format_node(child, depth + 1 if name else depth))
-                
-                else:
-                    # Just process children without adding a line
-                    for child in children:
-                        lines.extend(format_node(child, depth))
-                
-                return lines
+                        lines.append(f"  #{idx} [{role}] \"{name}\"{selector}")
+                    else:
+                        lines.append(f"  #{idx} [{role}]{selector}")
             
-            tree_lines = format_node(snapshot)
+            # Truncate if too long
+            MAX_LINES = 600 if mode == 'vision' else 800
+            if len(lines) > MAX_LINES:
+                lines = lines[:MAX_LINES]
+                lines.append(f"... ({len(elements) - MAX_LINES} more elements)")
             
-            # Limit output to prevent huge prompts
-            MAX_LINES = 1000  # Increased from 500 - show more structure
-            if len(tree_lines) > MAX_LINES:
-                tree_lines = tree_lines[:MAX_LINES]
-                tree_lines.append("... (truncated for brevity)")
-            
-            # Add summary header
-            result_lines = [
-                f"PAGE STRUCTURE (context only - use INTERACTIVE ELEMENTS for clicking)",
-                "─" * 50,
-            ]
-            result_lines.extend(tree_lines)
-            
-            return "\n".join(result_lines)
+            return "\n".join(lines)
             
         except Exception as e:
-            logger.warning(f"Failed to get a11y tree: {e}")
-            return "(Accessibility tree unavailable)"
+            logger.warning(f"Failed to build unified tree: {e}")
+            return self._format_elements_fallback(elements, mode)
+    
+    def _get_group_icon(self, role: str) -> str:
+        """Get icon for group/container roles."""
+        icons = {
+            'navigation': '🧭',
+            'banner': '🔝',
+            'main': '📄',
+            'complementary': '📎',
+            'contentinfo': '📋',
+            'form': '📝',
+            'search': '🔍',
+            'dialog': '💬',
+            'menu': '☰',
+            'menubar': '☰',
+            'toolbar': '🔧',
+            'list': '📑',
+            'article': '📰',
+            'section': '§',
+            'region': '▢',
+        }
+        return icons.get(role, '📦')
+    
+    def _format_elements_fallback(self, elements: List[Dict], mode: str) -> str:
+        """Fallback format when a11y tree is unavailable."""
+        lines = ["── INTERACTIVE ELEMENTS ──"]
+        
+        for idx, el in enumerate(elements[:200]):
+            role = el.get('role', 'element')
+            name = el.get('name', '')[:50]
+            xpath = el.get('xpath', '')
+            
+            if mode == 'text' and xpath and len(xpath) < 60:
+                line = f"#{idx+1} [{role}] \"{name}\" → {xpath}"
+            else:
+                line = f"#{idx+1} [{role}] \"{name}\"" if name else f"#{idx+1} [{role}]"
+            
+            lines.append(line)
+        
+        return "\n".join(lines)
     
     async def _get_interactive_elements_from_frame(
         self, 
@@ -707,6 +872,12 @@ class DOMExtractor:
                                 if (shouldInclude) {
                                     const absoluteY = rect.y + window.scrollY;
                                     
+                                    // EXTRACT DYNAMIC STATE (New)
+                                    const isSticky = style.position === 'sticky' || style.position === 'fixed';
+                                    const zIndex = parseInt(style.zIndex) || 0;
+                                    const isModal = el.getAttribute('role') === 'dialog' || el.classList.contains('modal') || zIndex > 900;
+                                    const isError = style.color === 'rgb(255, 0, 0)' || el.getAttribute('aria-invalid') === 'true';
+                                    
                                     results.push({
                                         role: el.getAttribute('role') || tag,
                                         tag: tag,
@@ -718,6 +889,12 @@ class DOMExtractor:
                                         dist: Math.abs(absoluteY - viewportCenterY),
                                         section: currentHeading,
                                         frame_id: frameId,
+                                        interactive: targetIsClickable,
+                                        // Include new dynamic states
+                                        sticky: isSticky,
+                                        zIndex: zIndex,
+                                        modal: isModal,
+                                        error: isError,
                                         interactive: targetIsClickable,
                                         attributes: {
                                             type: el.type,

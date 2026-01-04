@@ -8,9 +8,13 @@ import time
 import uuid
 import base64
 import logging
-import asyncioimport psutil
-import osfrom typing import Dict, Any, List, Optional
+import asyncio
+import psutil
+import os
+import json
+from typing import Dict, Any, List, Optional
 import httpx
+import websockets
 
 # Suppress noisy httpx logging (canvas updates)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -86,10 +90,11 @@ class BrowserAgent:
         # Robust Lock for Page Access (prevents race conditions)
         self.page_access_lock = asyncio.Lock()
         self.streaming_task = None
+        self.screenshot_ws = None  # WebSocket connection for screenshot streaming
         self.stuck_count = 0  # Track consecutive stuck warnings
         self.previous_url = ""  # Track URL changes to detect progress
         self.recent_downloads = [] # Track downloads in the current step
-        self.known_elements = {} # Memory of elements by URL: {url: {xpath: elem}}
+        self.known_elements = {} # Memory of elements by URL: {url: elem}
         self._active_downloads = set() # Track active background downloads
         
         # Repeated Action Detection
@@ -176,6 +181,16 @@ class BrowserAgent:
             "resource": {
                 "peak_memory_mb": 0,
                 "current_memory_mb": 0
+            },
+            "tokens": {
+                "prompt": 0,
+                "completion": 0,
+                "total": 0
+            },
+            "dom": {
+                "total_elements": 0,
+                "snapshots": 0,
+                "avg_elements": 0
             }
         }
 
@@ -283,6 +298,7 @@ class BrowserAgent:
 
     async def _stream_loop(self):
         """Background task for smooth visual streaming (1fps)"""
+        logger.error("📹 STARTING STREAM LOOP CHECK")
         logger.info("📹 Starting background stream loop")
         while self.is_running:
             try:
@@ -296,12 +312,13 @@ class BrowserAgent:
                     if self.browser.page:
                         # Capture screenshot to memory (fast, no file save)
                         try:
-                            # Use JPEG with aggressive compression for streaming (50%)
+                            # Use JPEG with aggressive compression for streaming (25% quality, 50% scale)
                             screenshot_bytes = await self.browser.page.screenshot(
                                 timeout=2000, 
                                 type='jpeg',
-                                quality=50,
-                                full_page=False
+                                quality=25,
+                                full_page=False,
+                                scale='css'  # Use CSS pixels (smaller on high DPI)
                             )
                             screenshot_b64 = base64.b64encode(screenshot_bytes).decode()
                             
@@ -321,37 +338,47 @@ class BrowserAgent:
         logger.info("🛑 Stream loop stopped")
 
     async def _push_state_update(self, screenshot_b64: Optional[str], step: int):
-        """Push update to orchestrator. Pass screenshot_b64=None to clear canvas."""
-        if not self.thread_id or not self.backend_url:
+        """Push update to orchestrator via WebSocket. Pass screenshot_b64=None to clear canvas."""
+        if not self.thread_id or not self.screenshot_ws:
             return
             
         try:
-            # Serialize plan (Legacy format for Frontend: 'subtask', 'status')
-            plan_data = []
-            if screenshot_b64:
-                plan_data = [
-                    {"subtask": t.description, "status": t.status} 
-                    for t in self.memory.plan
-                ]
-            
+            # Build payload
             payload = {
-                "thread_id": self.thread_id,
-                "screenshot_data": screenshot_b64,
+                "screenshot_data": screenshot_b64 or "",
                 "url": self.browser.page.url if self.browser.page and screenshot_b64 else "",
                 "step": step,
-                "task": self.task if screenshot_b64 else "Session Ended",
-                "task_plan": plan_data, # Send empty if clearing
+                "task_plan": [
+                    {"subtask": t.description, "status": t.status} 
+                    for t in self.memory.plan
+                ] if screenshot_b64 else [],
                 "current_action": self.current_action_description if screenshot_b64 else "Session Ended"
             }
-
-            async with httpx.AsyncClient() as client:
-                await client.post(
-                    f"{self.backend_url}/api/canvas/update",
-                    json=payload,
-                    timeout=2.0
-                )
+            
+            # Send via WebSocket (fast, no HTTP overhead)
+            await self.screenshot_ws.send(json.dumps(payload))
+        except websockets.exceptions.ConnectionClosed:
+            logger.warning("Screenshot WebSocket disconnected, attempting reconnect...")
+            await self._connect_screenshot_ws()
         except Exception as e:
-            logger.debug(f"Streaming failed: {e}")
+            logger.error(f"Streaming failed: {e}")
+
+    async def _connect_screenshot_ws(self):
+        """Connect to orchestrator's screenshot WebSocket for streaming"""
+        if not self.thread_id or not self.backend_url:
+            return
+        
+        try:
+            # Convert http:// to ws:// for WebSocket
+            ws_url = self.backend_url.replace("http://", "ws://").replace("https://", "wss://")
+            ws_endpoint = f"{ws_url}/ws/screenshots/{self.thread_id}"
+            
+            logger.info(f"📸 Connecting to screenshot WebSocket: {ws_endpoint}")
+            self.screenshot_ws = await websockets.connect(ws_endpoint, ping_interval=None)
+            logger.info(f"📸 Screenshot WebSocket connected for thread {self.thread_id}")
+        except Exception as e:
+            logger.error(f"Failed to connect screenshot WebSocket: {e}")
+            self.screenshot_ws = None
 
     async def run(self) -> BrowserResult:
         """Execute the browser automation task"""
@@ -362,6 +389,10 @@ class BrowserAgent:
         # 1. Initialize Browser
         if not await self.browser.launch(headless=self.headless, on_download=self._handle_download):
             return BrowserResult(success=False, task_summary="Browser launch failed", error="Browser launch failed")
+        
+        # Connect screenshot WebSocket for streaming
+        if self.thread_id:
+            await self._connect_screenshot_ws()
         
         # Start Streaming Loop
         if self.thread_id:
@@ -411,6 +442,8 @@ class BrowserAgent:
                 
                 # CRITICAL: Capture URL immediately for recovery purposes
                 # This MUST happen before any operations that might cause context to become stale
+                last_error = None  # Track last error for prompt injection
+                
                 if active_page:
                     try:
                         immediate_url = active_page.url
@@ -486,6 +519,17 @@ class BrowserAgent:
                     
                     # UPDATE CACHE for ACTIONS (CRITICAL for index-based clicks)
                     self.executor.set_cached_elements(page_content['elements'])
+                    
+                    # BUILD UNIFIED PAGE TREE (combines a11y hierarchy + elements + selectors)
+                    try:
+                        page_content['unified_page_tree'] = await self.dom.build_unified_page_tree(
+                            active_page, 
+                            page_content,
+                            mode='text'
+                        )
+                    except Exception as tree_err:
+                        logger.warning(f"Unified tree build failed: {tree_err}")
+                        page_content['unified_page_tree'] = ""
                 
                 # Get URL early for blank page detection
                 current_url = page_content.get('url', '')
@@ -641,7 +685,6 @@ class BrowserAgent:
                     action = await self.vision.plan_action_with_vision(
                         vision_task_context, screenshot_b64, page_content, self.memory.history, step
                     )
-<<<<<<< HEAD
                     
                     # VISION OBSERVATION CAPTURE: Extract findings from vision reasoning
                     # This fixes the issue where vision describes what it sees but doesn't call save_info
@@ -652,21 +695,22 @@ class BrowserAgent:
                         if any(trigger in action.reasoning.lower() for trigger in data_triggers):
                             logger.info("📷 Vision provided observation - auto-adding to memory")
                             self.memory.add_observation(f"vision_step_{step}", action.reasoning[:500])
-=======
-                    self.metrics["llm_calls"]["vision"] += 1
-                    self.metrics["llm_calls"]["total"] += 1
-                    self.metrics["vision"]["vision_analyses"] += 1
->>>>>>> c9713164f9882279022cbef6246c0c5ebe09deb2
                 
                 if not action:
                     if use_vision: logger.info("⚠️ Vision failed, falling back to TEXT")
                     logger.info("📝 Using TEXT LLM for action planning")
                     text_task_context = f"Main Task: {self.task}\nCurrent Subtask: {current_subtask.description}\n{action_prompt_context}"
                     action = await self.llm.plan_action(
-                        text_task_context, page_content, self.memory.history, step
+                        text_task_context, page_content, self.memory.history, step, last_error=last_error
                     )
                     self.metrics["llm_calls"]["planning"] += 1
                     self.metrics["llm_calls"]["total"] += 1
+                    
+                    # Track Token Usage
+                    if action.usage:
+                        self.metrics["tokens"]["prompt"] += action.usage.get("prompt_tokens", 0)
+                        self.metrics["tokens"]["completion"] += action.usage.get("completion_tokens", 0)
+                        self.metrics["tokens"]["total"] += action.usage.get("total_tokens", 0)
 
                 action_names = [a.name for a in action.actions]
                 logger.info(f"💭 Action Sequence: {action_names} | 💡 {action.reasoning[:100]}...")
@@ -709,12 +753,22 @@ class BrowserAgent:
 
                 # Cache elements and page text on executor for verification
                 self.executor._cached_elements = page_content.get('elements', [])
-<<<<<<< HEAD
+                
+                # Update DOM Metrics
+                element_count = len(self.executor._cached_elements)
+                self.metrics['dom']['total_elements'] += element_count
+                self.metrics['dom']['snapshots'] += 1
+                if self.metrics['dom']['snapshots'] > 0:
+                    self.metrics['dom']['avg_elements'] = self.metrics['dom']['total_elements'] / self.metrics['dom']['snapshots']
                 self.executor.set_cached_page_text(page_content.get('body_text', ''))
                 
                 # Track this action for blocklist (in case we get stuck later)
                 action_name = action.actions[0].name if action.actions else "unknown"
                 self._last_executed_action = f"{action_name}: {str(action)[:80]}"
+                
+                # Track start time for metrics
+                action_start = time.time()
+                self.metrics["actions"]["total"] += 1
                 
                 # CRITICAL: Use Lock to prevent stream loop from accessing page during action
                 # This prevents the race condition that was causing browser crashes!
@@ -741,20 +795,6 @@ class BrowserAgent:
                         logger.info(f"✅ Page loaded and ready")
                     except Exception as load_err:
                         logger.debug(f"Page load wait skipped: {load_err}")
-=======
-                
-                # Track actions by type
-                action_start = time.time()
-                for act in action.actions:
-                    action_type = act.name
-                    if action_type in self.metrics["actions"]:
-                        self.metrics["actions"][action_type] += 1
-                    else:
-                        self.metrics["actions"]["other"] += 1
-                    self.metrics["actions"]["total"] += 1
-                
-                result = await self.executor.execute(active_page, action)
->>>>>>> c9713164f9882279022cbef6246c0c5ebe09deb2
                 
                 # Track action timing
                 action_time = (time.time() - action_start) * 1000
@@ -941,7 +981,8 @@ class BrowserAgent:
                             # NOTE: We need to pass this multiplier to executor, but for now we'll just try again
                             # ideally executor should accept custom timeout
                             logger.info(f"🔄 Retrying {result.action} with extended wait...")
-                            result = await self.executor.execute(active_page, action)
+                            async with self.page_access_lock:
+                                result = await self.executor.execute(active_page, action)
                             retry_count += 1
                         elif decision.get('decision') == 'SKIP':
                             logger.warning("⏭️ LLM decided to SKIP failed action.")
@@ -978,6 +1019,9 @@ class BrowserAgent:
                     if action.completed_subtasks:
                         for tid in action.completed_subtasks:
                             self.memory.mark_completed(tid, f"Completed via sequence '{action_names}'")
+
+                    # Reset error state on success
+                    last_error = None
 
                     has_done = any(a.name == "done" for a in action.actions)
                     has_extract = any(a.name == "extract" for a in action.actions)
@@ -1061,6 +1105,9 @@ class BrowserAgent:
                     self.metrics["errors"]["total"] += 1
                     logger.warning(f"⚠️ Sequence Failed at {result.action}: {result.message}")
                     
+                    # Capture error for next prompt iteration
+                    last_error = f"Action '{result.action}' failed: {result.message}"
+                    
                     # Check if we should trigger intelligent replanning
                     should_replan = await self.planner.should_replan_after_failure(
                         self.memory, 
@@ -1112,17 +1159,13 @@ class BrowserAgent:
             self.metrics["errors"]["total"] += 1
             self.metrics["errors"]["browser_errors"] += 1
             logger.error(f"❌ Critical Agent Failure: {e}", exc_info=True)
-<<<<<<< HEAD
+            self._log_execution_metrics(False)
             return BrowserResult(
                 success=False, 
                 task_summary=f"Critical failure: {str(e)}", 
                 error=str(e),
                 extracted_data={"merged": {}, "items": [], "stats": {}, "persistent_memory": {}}
             )
-=======
-            self._log_execution_metrics(False)
-            return BrowserResult(success=False, task_summary=f"Critical failure: {str(e)}", error=str(e))
->>>>>>> c9713164f9882279022cbef6246c0c5ebe09deb2
         finally:
             # Final wait for downloads before closing
             await self._wait_for_downloads()
@@ -1230,7 +1273,7 @@ Respond with JSON ONLY:
 }}"""
 
         try:
-            response = await self.llm.call_llm_direct(prompt)  # No token limit
+            response, _ = await self.llm.call_llm_direct(prompt)  # No token limit
             if response:
                 import json
                 import re
@@ -1423,8 +1466,6 @@ Respond with JSON ONLY:
              
         return result
 
-<<<<<<< HEAD
-=======
     def get_metrics(self) -> Dict[str, Any]:
         """Get comprehensive agent metrics."""
         uptime_seconds = time.time() - self._metrics_start_time if hasattr(self, '_metrics_start_time') else 0
@@ -1489,12 +1530,12 @@ Respond with JSON ONLY:
         logger.info(f"  Pages Visited: {self.metrics['navigation']['pages_visited']}")
         logger.info(f"  Unique URLs: {len(self.metrics['navigation']['unique_urls'])}")
         
-        # LLM Calls
+        # LLM Calls & Tokens
         logger.info("")
-        logger.info("LLM Calls:")
-        logger.info(f"  Total: {self.metrics['llm_calls']['total']}")
-        logger.info(f"  Planning: {self.metrics['llm_calls']['planning']}")
-        logger.info(f"  Vision: {self.metrics['llm_calls']['vision']}")
+        logger.info("LLM & Cost:")
+        logger.info(f"  Calls: {self.metrics['llm_calls']['total']} (Plan: {self.metrics['llm_calls']['planning']}, Vision: {self.metrics['llm_calls']['vision']})")
+        if self.metrics['tokens']['total'] > 0:
+            logger.info(f"  Tokens: {self.metrics['tokens']['total']:,} (In: {self.metrics['tokens']['prompt']:,}, Out: {self.metrics['tokens']['completion']:,})")
         if self.metrics['llm_calls']['failures'] > 0:
             logger.info(f"  Failures: {self.metrics['llm_calls']['failures']}")
         
@@ -1504,6 +1545,13 @@ Respond with JSON ONLY:
             logger.info("Vision:")
             logger.info(f"  Screenshots: {self.metrics['vision']['screenshots_taken']}")
             logger.info(f"  Analyses: {self.metrics['vision']['vision_analyses']}")
+            
+        # DOM & Complexity
+        if self.metrics['dom']['snapshots'] > 0:
+            avg_dom = self.metrics['dom']['avg_elements']
+            logger.info("")
+            logger.info("Page Complexity:")
+            logger.info(f"  Avg Elements: {avg_dom:.0f}")
         
         # Errors
         if self.metrics['errors']['total'] > 0:
@@ -1521,4 +1569,4 @@ Respond with JSON ONLY:
         logger.info(f"  Peak Memory: {self.metrics['resource']['peak_memory_mb']:.1f} MB")
         logger.info("")
 
->>>>>>> c9713164f9882279022cbef6246c0c5ebe09deb2
+
