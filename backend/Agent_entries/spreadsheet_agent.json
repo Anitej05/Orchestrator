@@ -3,20 +3,21 @@
   "owner_id": "orbimesh-vendor",
   "name": "Spreadsheet Agent",
   "description": "PRIORITY AGENT for ALL CSV and Excel files (.csv, .xlsx, .xls). Use this agent EXCLUSIVELY for any spreadsheet file. Handles display, analysis, and modification. DO NOT use Document Agent for CSV files.",
-  "requires_credentials": false,
-  "price_per_call_usd": 0.002,
-  "status": "active",
   "agent_type": "http_rest",
+  "version": "1.0.0",
+  "status": "active",
+  "price_per_call_usd": 0.002,
+  "requires_credentials": false,
+  "credential_fields": [],
   "connection_config": {
-    "base_url": "http://localhost:8041",
-    "request_format": "form"
+    "base_url": "http://localhost:8041"
   },
   "endpoints": [
     {
       "endpoint": "/upload",
       "http_method": "POST",
       "request_format": "form",
-      "description": "Upload a spreadsheet file (CSV or Excel). This MUST be called first before any other endpoint. Returns a file_id required for all subsequent operations. Use when user provides a CSV or Excel file.",
+      "description": "Upload CSV/XLSX and register it for queries and edits.",
       "parameters": [
         {
           "name": "file",
@@ -30,7 +31,7 @@
       "endpoint": "/display",
       "http_method": "POST",
       "request_format": "form",
-      "description": "Display spreadsheet data in a visual canvas. Does NOT modify data. Use when user wants to VIEW, SEE, or SHOW the spreadsheet without making changes.",
+      "description": "Render a spreadsheet preview (first rows/columns) to the canvas.",
       "parameters": [
         {
           "name": "file_id",
@@ -56,7 +57,7 @@
       "endpoint": "/execute_pandas",
       "http_method": "POST",
       "request_format": "form",
-      "description": "Execute ANY data modification using natural language. Supports: adding columns (Sl.No., Total, averages), renaming/deleting columns, filtering, sorting, grouping, calculations, and ANY data transformation. Use for ADD, REMOVE, RENAME, CALCULATE, SUM, AVERAGE, FILTER, SORT, GROUP operations.",
+      "description": "Run pandas code or natural-language instructions to transform the sheet and persist the result.",
       "parameters": [
         {
           "name": "file_id",
@@ -82,7 +83,7 @@
       "endpoint": "/query",
       "http_method": "POST",
       "request_format": "form",
-      "description": "Filter data or create new columns from expressions (e.g., 'age > 30' or 'Total = A + B'). Use for simple filtering and column calculations.",
+      "description": "Answer structured queries (SQL-like) over the current sheet.",
       "parameters": [
         {
           "name": "file_id",
@@ -102,7 +103,7 @@
       "endpoint": "/nl_query",
       "http_method": "POST",
       "request_format": "json",
-      "description": "Ask analytical questions about the data in plain English. Use for questions like 'What is the average?', 'How many rows?', 'Who has the highest value?'. NOT for modifications.",
+      "description": "Answer natural language questions about the sheet with reasoning steps.",
       "parameters": [
         {
           "name": "file_id",
@@ -128,7 +129,7 @@
       "endpoint": "/get_summary",
       "http_method": "POST",
       "request_format": "form",
-      "description": "Get spreadsheet metadata: headers, data types, row count, and preview of first 5 rows. Use to understand structure before operations.",
+      "description": "Provide a quick summary: rows, columns, and headline stats.",
       "parameters": [
         {
           "name": "file_id",
@@ -142,7 +143,7 @@
       "endpoint": "/get_column_stats",
       "http_method": "POST",
       "request_format": "form",
-      "description": "Get descriptive statistics for a numeric column (min, max, mean, std, etc.).",
+      "description": "Compute per-column stats and type information.",
       "parameters": [
         {
           "name": "file_id",
@@ -162,7 +163,7 @@
       "endpoint": "/transform",
       "http_method": "POST",
       "request_format": "form",
-      "description": "Apply predefined transformations with explicit parameters. Use for structured operations like filter, sort, group, drop_duplicates, fillna.",
+      "description": "Apply common transformations (filter, sort, rename, add columns) via a compact request.",
       "parameters": [
         {
           "name": "file_id",
@@ -183,44 +184,17 @@
           "description": "JSON string with operation parameters."
         }
       ]
-    },
-    {
-      "endpoint": "/create",
-      "http_method": "POST",
-      "request_format": "json",
-      "description": "CREATE a new spreadsheet from raw text, CSV data, or by transforming existing content using LLM. Use when: orchestrator passes data to create a CSV/Excel, user wants to convert text to spreadsheet, or generate sample data.",
-      "parameters": [
-        {
-          "name": "content",
-          "param_type": "string",
-          "required": false,
-          "description": "Raw text, CSV data, or natural language content to transform into a spreadsheet."
-        },
-        {
-          "name": "reference_file_id",
-          "param_type": "string",
-          "required": false,
-          "description": "File ID of an existing file to use as source data."
-        },
-        {
-          "name": "instruction",
-          "param_type": "string",
-          "required": false,
-          "description": "Natural language instruction for how to structure the data (e.g., 'Extract key metrics as columns')."
-        },
-        {
-          "name": "output_format",
-          "param_type": "string",
-          "required": false,
-          "description": "Output format: 'csv' or 'xlsx'. Default: 'csv'."
-        },
-        {
-          "name": "output_filename",
-          "param_type": "string",
-          "required": false,
-          "description": "Filename for the created spreadsheet."
-        }
-      ]
     }
-  ]
+  ],
+  "tool_functions": null,
+  "tool_registry": null,
+  "tags": [],
+  "category": null,
+  "icon": null,
+  "documentation_url": null,
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nYOUR_PUBLIC_KEY_HERE\n-----END PUBLIC KEY-----",
+  "capabilities": {
+    "categories": [],
+    "all_keywords": []
+  }
 }

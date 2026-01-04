@@ -14,6 +14,14 @@ from models import Agent, AgentEndpoint, AgentCapability, EndpointParameter, Sta
 from schemas import AgentCard
 import logging
 
+# Import schema validation
+try:
+    from agent_schemas import validate_agent_schema, validate_agent_file
+    SCHEMA_VALIDATION_AVAILABLE = True
+except ImportError:
+    logger.warning("agent_schemas module not found - validation will be skipped")
+    SCHEMA_VALIDATION_AVAILABLE = False
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
@@ -235,6 +243,13 @@ def sync_agent_entries(verbose: bool = True):
     with SessionLocal() as db:
         for json_file in agent_files:
             try:
+                # Validate agent schema first
+                if SCHEMA_VALIDATION_AVAILABLE and verbose:
+                    is_valid, error_msg, validated_schema = validate_agent_file(str(json_file))
+                    if not is_valid:
+                        logger.warning(f"⚠️  Schema validation warning for {json_file.name}: {error_msg}")
+                        logger.warning("    Proceeding with sync anyway (backward compatibility)")
+                
                 # Load agent data
                 with open(json_file, 'r', encoding='utf-8') as f:
                     agent_data = json.load(f)
@@ -293,17 +308,130 @@ def sync_agent_entries(verbose: bool = True):
         "errors": errors
     }
 
+def validate_agent(agent_id: str, verbose: bool = True):
+    """
+    Validate a single agent schema.
+    
+    Args:
+        agent_id: Agent ID (filename without .json)
+        verbose: Print detailed output
+        
+    Returns:
+        bool: True if valid, False otherwise
+    """
+    if not SCHEMA_VALIDATION_AVAILABLE:
+        logger.error("❌ Schema validation not available (agent_schemas module not found)")
+        return False
+    
+    agent_file = AGENT_ENTRIES_DIR / f"{agent_id}.json"
+    
+    if not agent_file.exists():
+        logger.error(f"❌ Agent file not found: {agent_file}")
+        return False
+    
+    if verbose:
+        logger.info("=" * 60)
+        logger.info(f"Validating agent: {agent_id}")
+        logger.info("=" * 60)
+    
+    is_valid, error_msg, validated_schema = validate_agent_file(str(agent_file))
+    
+    if is_valid:
+        if verbose:
+            logger.info(f"✅ Agent schema is valid!")
+            logger.info(f"   Name: {validated_schema.name}")
+            logger.info(f"   Type: {validated_schema.agent_type.value}")
+            logger.info(f"   Version: {validated_schema.version}")
+            logger.info(f"   Categories: {len(validated_schema.capabilities.categories)}")
+            logger.info("=" * 60)
+        return True
+    else:
+        logger.error(f"❌ Validation failed:")
+        logger.error(f"   {error_msg}")
+        logger.info("=" * 60)
+        return False
+
+
+def validate_all_agents(verbose: bool = True):
+    """
+    Validate all agent schemas.
+    
+    Args:
+        verbose: Print detailed output
+        
+    Returns:
+        dict: Summary of validation
+    """
+    if not SCHEMA_VALIDATION_AVAILABLE:
+        logger.error("❌ Schema validation not available (agent_schemas module not found)")
+        return {"valid": 0, "invalid": 0, "errors": ["Schema validation module not found"]}
+    
+    if verbose:
+        logger.info("=" * 60)
+        logger.info("Validating all agents...")
+        logger.info("=" * 60)
+    
+    # Find all JSON files (excluding templates)
+    agent_files = [f for f in AGENT_ENTRIES_DIR.glob("*.json") if not f.parent.name == "templates"]
+    
+    if not agent_files:
+        logger.warning(f"⚠️  No agent JSON files found in {AGENT_ENTRIES_DIR}")
+        return {"valid": 0, "invalid": 0, "errors": []}
+    
+    valid_count = 0
+    invalid_count = 0
+    errors = []
+    
+    for json_file in agent_files:
+        is_valid, error_msg, validated_schema = validate_agent_file(str(json_file))
+        
+        if is_valid:
+            if verbose:
+                logger.info(f"✅ {json_file.name}")
+            valid_count += 1
+        else:
+            if verbose:
+                logger.error(f"❌ {json_file.name}")
+                logger.error(f"   {error_msg}")
+            invalid_count += 1
+            errors.append(f"{json_file.name}: {error_msg}")
+    
+    # Summary
+    if verbose:
+        logger.info("=" * 60)
+        logger.info("Validation Summary")
+        logger.info("=" * 60)
+        logger.info(f"✅ Valid: {valid_count}")
+        logger.info(f"❌ Invalid: {invalid_count}")
+        if errors:
+            logger.info("\nErrors:")
+            for error in errors:
+                logger.error(f"   - {error}")
+        logger.info("=" * 60)
+    
+    return {
+        "valid": valid_count,
+        "invalid": invalid_count,
+        "errors": errors
+    }
+
+
 def main():
     """Main entry point for CLI usage"""
     import argparse
     
-    parser = argparse.ArgumentParser(description="Manage agent database synchronization")
+    parser = argparse.ArgumentParser(description="Manage agent database synchronization and validation")
     parser.add_argument(
         'action',
-        choices=['sync', 'create-tables'],
+        choices=['sync', 'create-tables', 'validate', 'validate-all'],
         nargs='?',
         default='sync',
         help='Action to perform (default: sync)'
+    )
+    parser.add_argument(
+        'agent_id',
+        nargs='?',
+        help='Agent ID for validate action (e.g., mail_agent)'
     )
     parser.add_argument(
         '--quiet',
@@ -320,6 +448,16 @@ def main():
             sys.exit(1)
     elif args.action == 'create-tables':
         create_tables()
+    elif args.action == 'validate':
+        if not args.agent_id:
+            logger.error("❌ Agent ID required for validate action")
+            logger.error("Usage: python manage.py validate <agent_id>")
+            sys.exit(1)
+        is_valid = validate_agent(args.agent_id, verbose=not args.quiet)
+        sys.exit(0 if is_valid else 1)
+    elif args.action == 'validate-all':
+        result = validate_all_agents(verbose=not args.quiet)
+        sys.exit(0 if result['invalid'] == 0 else 1)
 
 if __name__ == "__main__":
     main()

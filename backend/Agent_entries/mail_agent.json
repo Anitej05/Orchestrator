@@ -3,6 +3,10 @@
   "owner_id": "orbimesh-vendor",
   "name": "Mail Agent",
   "description": "Gmail integration via Composio. Read, send, search, and manage emails with full Gmail API capabilities.",
+  "agent_type": "http_rest",
+  "version": "1.0.0",
+  "status": "active",
+  "price_per_call_usd": 0.005,
   "requires_credentials": true,
   "credential_fields": [
     {
@@ -22,9 +26,6 @@
       "placeholder": "Gmail-xxxxx"
     }
   ],
-  "price_per_call_usd": 0.005,
-  "status": "active",
-  "agent_type": "http_rest",
   "connection_config": {
     "base_url": "http://localhost:8040"
   },
@@ -32,7 +33,7 @@
     {
       "endpoint": "/fetch_emails",
       "http_method": "POST",
-      "description": "Fetch/search emails from Gmail inbox. Use for 'Check my emails', 'Show unread emails', 'Find emails from John'.",
+      "description": "List recent emails with sender, subject, labels, and snippet metadata.",
       "parameters": [
         {
           "name": "query",
@@ -63,7 +64,7 @@
     {
       "endpoint": "/send_email",
       "http_method": "POST",
-      "description": "Send a new email with optional attachments and HTML formatting. Use for 'Send email to X about Y', 'Email John with the report'.",
+      "description": "Send an email with optional attachments already uploaded.",
       "parameters": [
         {
           "name": "to",
@@ -124,7 +125,7 @@
     {
       "endpoint": "/get_message",
       "http_method": "POST",
-      "description": "Get full message details by ID. Use to read a specific email's full content.",
+      "description": "Fetch a specific email body and headers by message ID.",
       "parameters": [
         {
           "name": "message_id",
@@ -149,7 +150,7 @@
     {
       "endpoint": "/add_label",
       "http_method": "POST",
-      "description": "Add labels to emails. Use for 'Mark email as important', 'Star this email'.",
+      "description": "Apply one or more labels to an email by message ID.",
       "parameters": [
         {
           "name": "message_ids",
@@ -174,7 +175,7 @@
     {
       "endpoint": "/delete_message",
       "http_method": "POST",
-      "description": "Delete emails by message ID. Use for 'Delete this email', 'Remove message'.",
+      "description": "Move an email to trash by message ID.",
       "parameters": [
         {
           "name": "message_ids",
@@ -193,7 +194,7 @@
     {
       "endpoint": "/get_attachment",
       "http_method": "POST",
-      "description": "Download a specific email attachment.",
+      "description": "Download a specific attachment from a message.",
       "parameters": [
         {
           "name": "message_id",
@@ -218,7 +219,7 @@
     {
       "endpoint": "/fetch_sent_emails",
       "http_method": "POST",
-      "description": "Fetch emails you have sent. Use for 'Show my sent emails', 'What emails did I send?'.",
+      "description": "List recently sent emails with metadata.",
       "parameters": [
         {
           "name": "max_results",
@@ -243,7 +244,7 @@
     {
       "endpoint": "/get_sent_email",
       "http_method": "POST",
-      "description": "Get a specific sent email by message ID with full content.",
+      "description": "Fetch a specific sent email by ID.",
       "parameters": [
         {
           "name": "message_id",
@@ -262,13 +263,13 @@
     {
       "endpoint": "/get_last_sent_email",
       "http_method": "POST",
-      "description": "Get the most recently sent email. Use for 'What was my last email?', 'Check if email was sent'.",
+      "description": "Get the most recently sent email.",
       "parameters": []
     },
     {
       "endpoint": "/download_attachments",
       "http_method": "POST",
-      "description": "Download all attachments from an email. Returns file paths for analysis.",
+      "description": "Download all attachments for a message as files.",
       "parameters": [
         {
           "name": "message_id",
@@ -281,7 +282,7 @@
     {
       "endpoint": "/search_emails_with_attachments",
       "http_method": "POST",
-      "description": "Search for emails that have attachments. Use for 'Find emails with attachments'.",
+      "description": "Search emails that contain attachments matching a query.",
       "parameters": [
         {
           "name": "max_results",
@@ -294,7 +295,7 @@
     {
       "endpoint": "/compose_html_email",
       "http_method": "POST",
-      "description": "Send a professionally formatted HTML email using templates. Use for 'Send a professional email', 'Create a newsletter'.",
+      "description": "Generate HTML email content from a prompt.",
       "parameters": [
         {
           "name": "to",
@@ -361,7 +362,7 @@
     {
       "endpoint": "/format_email_content",
       "http_method": "POST",
-      "description": "Format email content with styles (markdown to HTML, bullet points, numbered lists).",
+      "description": "Format and tidy email content (HTML/text) before sending.",
       "parameters": [
         {
           "name": "content",
@@ -380,8 +381,19 @@
     {
       "endpoint": "/email_templates",
       "http_method": "GET",
-      "description": "List available email templates and their descriptions.",
+      "description": "Retrieve reusable email templates.",
       "parameters": []
     }
-  ]
+  ],
+  "tool_functions": null,
+  "tool_registry": null,
+  "tags": [],
+  "category": null,
+  "icon": null,
+  "documentation_url": null,
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nYOUR_PUBLIC_KEY_HERE\n-----END PUBLIC KEY-----",
+  "capabilities": {
+    "categories": [],
+    "all_keywords": []
+  }
 }

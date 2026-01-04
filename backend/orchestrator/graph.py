@@ -24,6 +24,7 @@ import re
 import base64
 import numpy as np
 import textwrap
+import psutil
 from pathlib import Path
 from contextlib import redirect_stdout, redirect_stderr
 from pydantic import BaseModel, Field, ValidationError, create_model
@@ -33,7 +34,270 @@ from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, AI
 from langchain_cerebras import ChatCerebras
 from langchain_nvidia_ai_endpoints import ChatNVIDIA
 from langchain_groq import ChatGroq
-from typing import Protocol, Any
+from typing import Protocol, Any, Dict
+
+# Global orchestrator metrics
+ORCHESTRATOR_METRICS = {
+    "requests": {
+        "total": 0,
+        "successful": 0,
+        "failed": 0
+    },
+    "agents": {
+        "total_calls": 0,
+        "by_agent": {},
+        "successful_calls": 0,
+        "failed_calls": 0
+    },
+    "performance": {
+        "total_latency_ms": 0,
+        "avg_latency_ms": 0,
+        "requests_completed": 0
+    },
+    "errors": {
+        "total": 0,
+        "planning_errors": 0,
+        "execution_errors": 0,
+        "agent_errors": 0
+    },
+    "resource": {
+        "peak_memory_mb": 0,
+        "current_memory_mb": 0
+    },
+    "start_time": time.time()
+}
+
+def get_orchestrator_metrics() -> Dict[str, Any]:
+    """Get comprehensive orchestrator metrics."""
+    uptime_seconds = time.time() - ORCHESTRATOR_METRICS["start_time"]
+    
+    total_requests = ORCHESTRATOR_METRICS["requests"]["total"]
+    success_rate = (
+        (ORCHESTRATOR_METRICS["requests"]["successful"] / total_requests * 100) 
+        if total_requests > 0 else 0
+    )
+    
+    # Update resource metrics
+    process = psutil.Process()
+    ORCHESTRATOR_METRICS["resource"]["current_memory_mb"] = process.memory_info().rss / 1024 / 1024
+    
+    return {
+        "uptime_seconds": uptime_seconds,
+        "requests": ORCHESTRATOR_METRICS["requests"].copy(),
+        "agents": ORCHESTRATOR_METRICS["agents"].copy(),
+        "success_rate": success_rate,
+        "performance": ORCHESTRATOR_METRICS["performance"].copy(),
+        "errors": ORCHESTRATOR_METRICS["errors"].copy(),
+        "resource": ORCHESTRATOR_METRICS["resource"].copy()
+    }
+
+def log_orchestrator_metrics(operation: str, success: bool):
+    """Log orchestrator metrics with clean formatting."""
+    status_emoji = "✅" if success else "❌"
+    
+    logging.info("")
+    logging.info(f"{status_emoji} ORCHESTRATOR METRICS - {operation}")
+    logging.info("")
+    
+    # Requests
+    logging.info("Requests:")
+    logging.info(f"  Total: {ORCHESTRATOR_METRICS['requests']['total']}")
+    logging.info(f"  Successful: {ORCHESTRATOR_METRICS['requests']['successful']}")
+    logging.info(f"  Failed: {ORCHESTRATOR_METRICS['requests']['failed']}")
+    success_rate = (ORCHESTRATOR_METRICS['requests']['successful'] / ORCHESTRATOR_METRICS['requests']['total'] * 100) if ORCHESTRATOR_METRICS['requests']['total'] > 0 else 0
+    logging.info(f"  Success Rate: {success_rate:.1f}%")
+    
+    # Agent Calls
+    logging.info("")
+    logging.info("Agent Calls:")
+    logging.info(f"  Total: {ORCHESTRATOR_METRICS['agents']['total_calls']}")
+    logging.info(f"  Successful: {ORCHESTRATOR_METRICS['agents']['successful_calls']}")
+    logging.info(f"  Failed: {ORCHESTRATOR_METRICS['agents']['failed_calls']}")
+    
+    # Top agents used
+    if ORCHESTRATOR_METRICS['agents']['by_agent']:
+        logging.info("")
+        logging.info("Top Agents Used:")
+        sorted_agents = sorted(
+            ORCHESTRATOR_METRICS['agents']['by_agent'].items(),
+            key=lambda x: x[1],
+            reverse=True
+        )[:5]
+        for agent_name, count in sorted_agents:
+            logging.info(f"  {agent_name}: {count} calls")
+    
+    # Performance
+    logging.info("")
+    logging.info("Performance:")
+    logging.info(f"  Requests Completed: {ORCHESTRATOR_METRICS['performance']['requests_completed']}")
+    logging.info(f"  Total Time: {ORCHESTRATOR_METRICS['performance']['total_latency_ms']:.0f} ms")
+    if ORCHESTRATOR_METRICS['performance']['requests_completed'] > 0:
+        logging.info(f"  Avg Time: {ORCHESTRATOR_METRICS['performance']['avg_latency_ms']:.0f} ms")
+    
+    # Errors
+    if ORCHESTRATOR_METRICS['errors']['total'] > 0:
+        logging.info("")
+        logging.info("Errors:")
+        logging.info(f"  Total: {ORCHESTRATOR_METRICS['errors']['total']}")
+        logging.info(f"  Planning: {ORCHESTRATOR_METRICS['errors']['planning_errors']}")
+        logging.info(f"  Execution: {ORCHESTRATOR_METRICS['errors']['execution_errors']}")
+        logging.info(f"  Agent: {ORCHESTRATOR_METRICS['errors']['agent_errors']}")
+    
+    # Resources
+    logging.info("")
+    logging.info("Resources:")
+    logging.info(f"  Current Memory: {ORCHESTRATOR_METRICS['resource']['current_memory_mb']:.1f} MB")
+    logging.info(f"  Peak Memory: {ORCHESTRATOR_METRICS['resource']['peak_memory_mb']:.1f} MB")
+    logging.info("")
+
+# Configure logger early so helper functions can use it
+import logging
+logger = logging.getLogger("AgentOrchestrator")
+
+# ========== HELPER FUNCTIONS ==========
+
+def get_agent_catalog(db):
+    """
+    Build a comprehensive agent catalog from the database.
+    Consolidates duplicate catalog-building logic from parse_prompt and agent_directory_search.
+    
+    Returns:
+        tuple: (agent_catalog: list, agent_lookup: dict, capability_texts: list)
+    """
+    from models import Agent, AgentCapability
+    from sqlalchemy.orm import joinedload
+    
+    # Fetch all active agents with full details
+    query = db.query(Agent).options(
+        joinedload(Agent.endpoints).joinedload(AgentEndpoint.parameters)
+    ).filter(Agent.status == 'active')
+    
+    all_agents = query.all()
+    logger.info(f"Fetched {len(all_agents)} active agents for catalog")
+    
+    agent_catalog = []
+    agent_lookup = {}
+    capability_texts = []
+    
+    for agent in all_agents:
+        # Build endpoints info
+        endpoints_info = []
+        for ep in agent.endpoints:
+            endpoints_info.append({
+                "endpoint": ep.endpoint,
+                "http_method": ep.http_method,
+                "description": ep.description
+            })
+        
+        # Add to catalog
+        agent_info = {
+            "id": agent.id,
+            "name": agent.name,
+            "description": agent.description,
+            "capabilities": agent.capabilities,
+            "rating": agent.rating,
+            "price_per_call_usd": agent.price_per_call_usd,
+            "endpoints": endpoints_info
+        }
+        agent_catalog.append(agent_info)
+        agent_lookup[agent.id] = agent
+        
+        # Collect capabilities
+        capability_texts.extend(agent.capabilities)
+    
+    return agent_catalog, agent_lookup, capability_texts
+
+
+def validate_required_endpoint(task_name: str, task_desc: str, agent_endpoints: list) -> tuple:
+    """
+    Validate if an agent has the required endpoint for a given task.
+    Consolidates triple validation logic from agent_directory_search, rank_agents, and validate_agent_endpoints.
+    
+    Args:
+        task_name: Task name (lowercase)
+        task_desc: Task description (lowercase)
+        agent_endpoints: List of endpoint strings
+    
+    Returns:
+        tuple: (required_endpoint: str or None, endpoint_type: str, has_endpoint: bool)
+    """
+    required_endpoint = None
+    endpoint_type = "unknown"
+    
+    # Check for document editing operations
+    if any(word in task_name or word in task_desc for word in ['edit', 'modify', 'update', 'change', 'revise', 'rewrite']):
+        if any(word in task_name or word in task_desc for word in ['document', 'doc', 'docx', 'pdf', 'txt', 'resume', 'report', 'file']):
+            required_endpoint = '/edit'
+            endpoint_type = 'document editing'
+    
+    # Check for document analysis operations
+    elif any(word in task_name or word in task_desc for word in ['analyze', 'question', 'query', 'search', 'find', 'extract', 'read']):
+        if any(word in task_name or word in task_desc for word in ['document', 'doc', 'docx', 'pdf', 'txt']):
+            required_endpoint = '/analyze'
+            endpoint_type = 'document analysis'
+    
+    # Check for document creation operations
+    elif any(word in task_name or word in task_desc for word in ['create', 'generate', 'write', 'compose']):
+        if any(word in task_name or word in task_desc for word in ['document', 'doc', 'docx', 'report']):
+            required_endpoint = '/create'
+            endpoint_type = 'document creation'
+    
+    # Check for web browsing operations
+    elif any(word in task_name or word in task_desc for word in ['browse', 'navigate', 'visit', 'scrape', 'web', 'website', 'url']):
+        required_endpoint = '/browse'
+        endpoint_type = 'web browsing'
+    
+    # Check if agent has the required endpoint
+    has_endpoint = required_endpoint is None or required_endpoint in agent_endpoints
+    
+    return required_endpoint, endpoint_type, has_endpoint
+
+
+def inject_file_parameters(task, uploaded_files: list, original_prompt: str, logger):
+    """
+    Auto-inject file parameters (vector_store_path, file_path, file_id, query) into task payload.
+    Consolidates triple parameter injection logic from plan_execution.
+    
+    Args:
+        task: PlannedTask object with primary.payload
+        uploaded_files: List of FileObject dicts
+        original_prompt: Original user query for auto-query injection
+        logger: Logger instance
+    
+    Returns:
+        None (modifies task.primary.payload in-place)
+    """
+    if not task.primary.payload:
+        task.primary.payload = {}
+    
+    # Collect all document files with vector stores
+    vector_store_paths = []
+    for file_obj in uploaded_files:
+        file_dict = file_obj if isinstance(file_obj, dict) else (file_obj.__dict__ if hasattr(file_obj, '__dict__') else {})
+        if file_dict.get('file_type') == 'document' and file_dict.get('vector_store_path'):
+            vector_store_paths.append(file_dict['vector_store_path'])
+    
+    # Auto-inject vector_store_path(s) for document tasks
+    if vector_store_paths:
+        if len(vector_store_paths) == 1:
+            # Single document: use vector_store_path (backward compatible)
+            if 'vector_store_path' not in task.primary.payload:
+                task.primary.payload['vector_store_path'] = vector_store_paths[0]
+                logger.info(f"✅ AUTO-INJECTED vector_store_path for '{task.task_name}': {vector_store_paths[0]}")
+        else:
+            # Multiple documents: use vector_store_paths array
+            if 'vector_store_paths' not in task.primary.payload:
+                task.primary.payload['vector_store_paths'] = vector_store_paths
+                logger.info(f"✅ AUTO-INJECTED {len(vector_store_paths)} vector_store_paths for '{task.task_name}'")
+                logger.info(f"   Files: {[os.path.basename(p) for p in vector_store_paths]}")
+    
+    # Auto-inject query if not provided
+    if 'query' not in task.primary.payload:
+        if any(word in original_prompt.lower() for word in ['what', 'summarize', 'summary', 'about', 'describe', 'analyze']):
+            task.primary.payload['query'] = original_prompt
+            logger.info(f"✅ AUTO-INJECTED query for '{task.task_name}': {original_prompt}")
+
+# ========== END HELPER FUNCTIONS ==========
 
 # Define a protocol for the invoke_json method to help with type checking
 class JsonInvoker(Protocol):
@@ -189,6 +453,9 @@ def _summarize_completed_tasks_for_context(completed_tasks: List[Dict]) -> List[
         result = task.get("result", {})
         raw_response = task.get("raw_response", {})
         
+        # Log the actual result for debugging
+        logger.info(f"🔍 Task '{task.get('task_name')}' result type: {type(result).__name__}, keys: {result.keys() if isinstance(result, dict) else 'N/A'}")
+        
         # Check if this is a document task - preserve important information
         task_name = task.get("task_name", "")
         is_document_task = any(keyword in task_name for keyword in [
@@ -258,6 +525,22 @@ def _summarize_completed_tasks_for_context(completed_tasks: List[Dict]) -> List[
                 max_length = 5000
                 summary["result"] = answer_text[:max_length] + ("..." if len(answer_text) > max_length else "")
                 logger.info(f"📝 Document answer extracted: length={len(answer_text)}, truncated_to={len(summary['result'])}")
+            # Special handling for spreadsheet nl_query results with nested "result.result.answer" structure
+            elif "success" in result and result.get("success") and isinstance(result.get("result"), dict):
+                # Spreadsheet agent returns: {success: true, result: {answer: "...", question: "...", ...}}
+                nested_result = result.get("result", {})
+                if "answer" in nested_result:
+                    answer_text = nested_result["answer"]
+                    max_length = 5000
+                    summary["result"] = answer_text[:max_length] + ("..." if len(answer_text) > max_length else "")
+                    logger.info(f"📊 Spreadsheet answer extracted from nested result: length={len(answer_text)}, truncated_to={len(summary['result'])}")
+                else:
+                    # Fallback - keep the whole nested result if it's small enough
+                    result_str = json.dumps(nested_result, default=str)
+                    if len(result_str) < 2000:
+                        summary["result"] = nested_result
+                    else:
+                        summary["result"] = str(nested_result)[:500] + "..."
             else:
                 # Check if result is structured data (small dict with simple values like numbers, bools, short strings)
                 # This preserves API responses, stock data, weather data, etc.
@@ -682,6 +965,10 @@ CACHE_DURATION_SECONDS = 30  # 30 seconds for faster development
 # OPTIMIZATION: GET request cache for agent responses
 get_request_cache = {}
 GET_CACHE_DURATION_SECONDS = 300  # 5 minutes
+
+# === CIRCUIT BREAKER: Prevent infinite replan loops ===
+MAX_REPLAN_ATTEMPTS = 3  # Maximum number of replan attempts before aborting
+INITIAL_REPLAN_COUNT = 0  # Initialize replan counter at 0
 
 # --- New File-Based Memory Functions ---
 def save_plan_to_file(state: dict):
@@ -1118,6 +1405,16 @@ def parse_prompt(state: State):
     logger.info(f"[PARSE_PROMPT_DEBUG] Capabilities count: {len(capability_texts)}, first 5: {capability_texts[:5]}")
     logger.info(f"[PARSE_PROMPT_DEBUG] Original prompt: '{state['original_prompt']}'")
 
+    # Get tool descriptions for LLM context
+    tool_descriptions = ""
+    try:
+        from orchestrator.tool_registry import get_tool_descriptions
+        tool_descriptions = get_tool_descriptions()
+        logger.info(f"[PARSE_PROMPT_DEBUG] Loaded tool descriptions")
+    except ImportError:
+        logger.debug("Tool registry not available")
+        tool_descriptions = "(No direct tools available - all tasks will use agents)"
+
 
     # Initialize both primary and fallback LLMs
     primary_llm = ChatCerebras(model="gpt-oss-120b")
@@ -1181,10 +1478,16 @@ def parse_prompt(state: State):
         {agent_catalogue_str if agent_catalogue_str else "No agents currently available"}
         ---
         
+        **AVAILABLE DIRECT TOOLS (Fast, stateless operations):**
+        These tools can handle simple queries without needing full agent services. Prefer these for straightforward data retrieval:
+        {tool_descriptions}
+        
         **ENDPOINT-AWARE TASK CREATION:**
         - Look at the endpoints above to understand what each agent can do
+        - For simple data queries (stock quotes, news, Wikipedia), use the exact tool capability names shown above
+        - For complex operations (document editing, spreadsheet analysis, browser automation), use the agent endpoints
         - For local service health checks (like "browser agent health"), use the browser agent to navigate to the actual endpoint (e.g., http://localhost:8090/health)
-        - Match your task to an agent's actual endpoints, not abstract capabilities
+        - Match your task to an agent's actual endpoints or tool capabilities, not abstract descriptions
 
 
         Follow these rules:
@@ -1310,6 +1613,113 @@ def parse_prompt(state: State):
         "needs_complex_processing": True  # Complex processing needed if we got here
     }
 
+
+async def classify_and_route_to_tools(state: State):
+    """
+    TIER 1: INTENT CLASSIFICATION AND TOOL-FIRST ROUTING
+    
+    This node runs BEFORE agent selection to check if simple tasks can be handled by direct tools.
+    
+    Industry standard approach:
+    1. Pattern-match common queries (stock prices, news, wiki) -> instant tool selection
+    2. File-based routing (documents, spreadsheets) -> skip tool routing  
+    3. Tool validation (check required params available) -> route to tool or continue to agents
+    
+    Benefits:
+    - 70%+ of queries handled by fast deterministic tools (no LLM agent selection needed)
+    - 5-10x faster response times for common queries
+    - 50%+ cost reduction (fewer LLM calls)
+    """
+    from orchestrator.intent_classifier import classify_intent
+    from orchestrator.tool_router import route_to_tool
+    from orchestrator.tool_registry import execute_tool
+    
+    original_prompt = state.get('original_prompt', '')
+    parsed_tasks = state.get('parsed_tasks', [])
+    uploaded_files = state.get('uploaded_files', [])
+    
+    logger.info(f"🎯 CLASSIFY_AND_ROUTE: Starting intent classification for prompt: {original_prompt[:100]}...")
+    print(f"🎯 CLASSIFY_AND_ROUTE: Analyzing {len(parsed_tasks)} tasks")
+    
+    # Track which tasks can be handled by tools
+    tool_routed_tasks = []
+    agent_required_tasks = []
+    
+    for task in parsed_tasks:
+        task_prompt = f"{task.task_name}: {task.task_description}"
+        
+        # STEP 1: Classify intent
+        intent = classify_intent(task_prompt, uploaded_files)
+        logger.info(f"📊 Intent for '{task.task_name}': {intent.category} (confidence={intent.confidence:.2f}, tool_hint={intent.tool_hint})")
+        print(f"📊 Intent: {intent.category} | Tool: {intent.tool_hint} | Confidence: {intent.confidence:.2f}")
+        
+        # STEP 2: Try to route to tool
+        routing_decision = route_to_tool(intent, context={"state": state})
+        
+        if routing_decision.use_tool:
+            logger.info(f"✅ TOOL ROUTING: '{task.task_name}' -> Tool '{routing_decision.tool_name}' ({routing_decision.reasoning})")
+            print(f"✅ TOOL SELECTED: {routing_decision.tool_name}")
+            
+            # Execute tool immediately
+            try:
+                logger.info(f"🔧 Executing tool '{routing_decision.tool_name}' with params: {routing_decision.tool_params}")
+                result = await execute_tool(routing_decision.tool_name, routing_decision.tool_params)
+                
+                # Check if tool execution succeeded AND result doesn't contain an error
+                tool_result = result.get("result")
+                has_tool_error = isinstance(tool_result, dict) and "error" in tool_result
+                
+                if result.get("success") and not has_tool_error:
+                    logger.info(f"✅ Tool execution SUCCESS for '{routing_decision.tool_name}'")
+                    print(f"✅ TOOL SUCCESS: {routing_decision.tool_name}")
+                    
+                    # Add to completed tasks
+                    completed_task = CompletedTask(
+                        task_name=task.task_name,
+                        task_description=task.task_description,
+                        agent_name=f"Tool: {routing_decision.tool_name}",
+                        result=tool_result,
+                        success=True,
+                        execution_time=0.5,  # Fast tool execution
+                        error=None
+                    )
+                    tool_routed_tasks.append(completed_task)
+                elif has_tool_error:
+                    # Tool returned an error in its result - treat as failure
+                    error_msg = tool_result.get("error", "Unknown tool error")
+                    logger.warning(f"⚠️ Tool returned error for '{routing_decision.tool_name}': {error_msg}")
+                    print(f"⚠️ TOOL ERROR RESULT: {routing_decision.tool_name} - {error_msg}")
+                    agent_required_tasks.append(task)
+                else:
+                    # Tool execution failed - fallback to agent
+                    logger.warning(f"⚠️ Tool execution FAILED for '{routing_decision.tool_name}': {result.get('error')}")
+                    print(f"⚠️ TOOL FAILED: {routing_decision.tool_name} - falling back to agent")
+                    agent_required_tasks.append(task)
+                    
+            except Exception as e:
+                logger.error(f"❌ Tool execution ERROR for '{routing_decision.tool_name}': {e}", exc_info=True)
+                print(f"❌ TOOL ERROR: {routing_decision.tool_name} - falling back to agent")
+                agent_required_tasks.append(task)
+        else:
+            # Tool routing declined - continue to agent selection
+            logger.info(f"➡️ AGENT ROUTING: '{task.task_name}' -> {routing_decision.reasoning}")
+            print(f"➡️ AGENT REQUIRED: {routing_decision.reasoning}")
+            agent_required_tasks.append(task)
+    
+    # Update state
+    completed_tasks = state.get('completed_tasks', [])
+    completed_tasks.extend(tool_routed_tasks)
+    
+    logger.info(f"🎯 ROUTING SUMMARY: {len(tool_routed_tasks)} tasks handled by tools, {len(agent_required_tasks)} tasks need agents")
+    print(f"🎯 SUMMARY: ✅ {len(tool_routed_tasks)} tool tasks | ➡️ {len(agent_required_tasks)} agent tasks")
+    
+    return {
+        "completed_tasks": completed_tasks,
+        "parsed_tasks": agent_required_tasks,  # Only tasks that need agents
+        "tool_routed_count": len(tool_routed_tasks)
+    }
+
+
 async def agent_directory_search(state: State):
     """
     LLM-BASED SEMANTIC AGENT SELECTION (Primary) with vector similarity as fallback.
@@ -1337,45 +1747,23 @@ async def agent_directory_search(state: State):
     
     db = SessionLocal()
     try:
-        from models import Agent, AgentCapability
-        from sqlalchemy.orm import joinedload
+        # Use helper to build agent catalog (consolidates duplicate logic)
+        agent_catalog, agent_lookup, _ = get_agent_catalog(db)
         
-        # Fetch ALL active agents with their full details
-        query = db.query(Agent).options(
-            joinedload(Agent.endpoints).joinedload(AgentEndpoint.parameters)
-        ).filter(Agent.status == 'active')
-        
-        # Apply user expectations filters
-        if 'price' in user_expectations:
+        # Apply user expectations filters to catalog
+        if user_expectations.get('price'):
             max_price = user_expectations['price']
-            query = query.filter(Agent.price_per_call_usd <= max_price)
+            agent_catalog = [a for a in agent_catalog if a['price_per_call_usd'] <= max_price]
         
-        if 'rating' in user_expectations:
+        if user_expectations.get('rating'):
             min_rating = user_expectations['rating']
-            query = query.filter(Agent.rating >= min_rating)
+            agent_catalog = [a for a in agent_catalog if a['rating'] >= min_rating]
         
-        all_agents = query.all()
-        logger.info(f"Fetched {len(all_agents)} active agents for LLM-based selection")
+        logger.info(f"Fetched {len(agent_catalog)} active agents for LLM-based selection")
         
-        if not all_agents:
+        if not agent_catalog:
             logger.warning("No active agents found in database")
             return {"candidate_agents": {}, "parsing_error_feedback": "No active agents available in the system."}
-        
-        # Build agent catalog for LLM (lightweight: id, name, description, capabilities only)
-        agent_catalog = []
-        agent_lookup = {}  # For quick lookup after LLM selection
-        
-        for agent in all_agents:
-            agent_info = {
-                "id": agent.id,
-                "name": agent.name,
-                "description": agent.description,
-                "capabilities": agent.capabilities,
-                "rating": agent.rating,
-                "price_per_call_usd": agent.price_per_call_usd
-            }
-            agent_catalog.append(agent_info)
-            agent_lookup[agent.id] = agent
         
         # Use LLM to select agents for each task
         primary_llm = ChatGroq(model="llama-3.3-70b-versatile") if os.getenv("GROQ_API_KEY") else ChatCerebras(model="llama-3.3-70b")
@@ -1391,7 +1779,7 @@ async def agent_directory_search(state: State):
         
         # LLM prompt for semantic agent selection
         prompt = f'''
-You are an expert at matching tasks to the most appropriate agents based on their capabilities.
+You are an expert at matching tasks to the most appropriate agents based on their capabilities and available endpoints.
 
 **ORIGINAL USER REQUEST:**
 "{original_prompt}"
@@ -1405,14 +1793,29 @@ You are an expert at matching tasks to the most appropriate agents based on thei
 **INSTRUCTIONS:**
 For each task, select ALL agents that could potentially handle it, ranked from best to worst match.
 
-**CRITICAL RULES:**
-1. **Respect Explicit User Preferences**: If the user explicitly mentions wanting to use a specific type of agent (e.g., "use browser automation", "use the browser agent", "automate with browser"), you MUST prioritize agents that match that preference.
-2. **Semantic Matching**: Match based on the meaning and intent, not just keyword overlap. For example:
-   - "browse a website" → browser automation agent (NOT just web search)
+**CRITICAL RULES (in priority order):**
+1. **ENDPOINT REQUIREMENT MATCHING (MANDATORY - HIGHEST PRIORITY)**:
+   - First, identify what type of operation the task requires:
+     * Document editing/modification tasks → MUST have /edit endpoint
+     * Document analysis/Q&A tasks → MUST have /analyze endpoint  
+     * Document creation tasks → MUST have /create endpoint
+     * Web browsing/navigation tasks → MUST have /browse endpoint
+     * Spreadsheet operations → MUST have spreadsheet-related endpoints
+   - **DO NOT select agents that lack the required endpoint**, even if their description sounds relevant!
+   - Check the "endpoints" array for each agent to verify they have the necessary endpoint
+   - Example: For "edit document" task, ONLY select agents with /edit endpoint
+
+2. **Respect Explicit User Preferences**: If the user explicitly mentions wanting to use a specific type of agent (e.g., "use browser automation", "use the browser agent"), you MUST prioritize agents that match that preference AND have the required endpoints.
+
+3. **Semantic Matching**: Match based on the meaning and intent, not just keyword overlap. For example:
+   - "browse a website" → browser automation agent with /browse endpoint (NOT document agents)
+   - "edit a document" → document agent with /edit endpoint (NOT browser agents)
    - "search for information" → web search agent
    - "automate clicking on a page" → browser automation agent
-3. **Capability Depth**: Prefer agents with more specific/relevant capabilities over generic ones.
-4. **Include Multiple Candidates**: Include 2-4 candidate agents per task when possible, so the ranking step can make the final choice.
+
+4. **Capability Depth**: Prefer agents with more specific/relevant capabilities over generic ones.
+
+5. **Include Multiple Candidates**: Include 2-4 candidate agents per task when possible, so the ranking step can make the final choice. But all candidates MUST have the required endpoint.
 
 **OUTPUT FORMAT:**
 Return a JSON object where keys are task names and values are arrays of agent IDs (ordered best to worst):
@@ -1421,7 +1824,7 @@ Return a JSON object where keys are task names and values are arrays of agent ID
     "task_name_2": ["best_agent_id", ...]
 }}
 
-Only include agents that are genuinely capable of handling the task. If no agent can handle a task, use an empty array.
+Only include agents that have the required endpoint AND are genuinely capable of handling the task. If no agent meets both criteria, use an empty array.
 '''
         
         # Schema for LLM response
@@ -1494,7 +1897,8 @@ Only include agents that are genuinely capable of handling the task. If no agent
             
         except Exception as e:
             logger.error(f"LLM-based agent selection failed: {e}. Falling back to text-based search.")
-            # Fallback to simple text-based matching
+            # Fallback to simple text-based matching - reconstruct all_agents list from agent_lookup
+            all_agents = list(agent_lookup.values())
             candidate_agents_map = await _fallback_text_search(parsed_tasks, all_agents, agent_lookup)
         
         # Check for tasks with no agents found
@@ -1633,6 +2037,15 @@ def rank_agents(state: State):
             # ENHANCED: Provide rich metadata for intelligent ranking
             agents_metadata = []
             for agent in candidate_agents:
+                # Include actual endpoints so LLM can match task requirements to available endpoints
+                endpoints_info = []
+                if agent.endpoints:
+                    for ep in agent.endpoints:
+                        endpoints_info.append({
+                            'endpoint': ep.endpoint if isinstance(ep, dict) else ep.endpoint,
+                            'method': ep.http_method if isinstance(ep, dict) else ep.http_method
+                        })
+                
                 agents_metadata.append({
                     'id': agent.id,
                     'name': agent.name,
@@ -1641,7 +2054,7 @@ def rank_agents(state: State):
                     'rating': agent.rating,
                     'price_per_call_usd': agent.price_per_call_usd,
                     'status': agent.status,
-                    'endpoints_count': len(agent.endpoints)
+                    'endpoints': endpoints_info  # Include actual endpoints, not just count
                 })
             
             conversation_context = f"\n**Conversation Context:**\n{conversation_history}\n" if conversation_history else ""
@@ -1658,14 +2071,15 @@ def rank_agents(state: State):
             {json.dumps(agents_metadata, indent=2)}
 
             **Ranking Criteria (in order of importance):**
-            1. **Capability Match** (Most Important): How well does the agent's description and capabilities match the task?
-            2. **Quality/Rating**: Higher rated agents are generally more reliable (scale 0-5)
-            3. **Price**: Consider user's budget if specified, otherwise prefer reasonable pricing
-            4. **Task Complexity**: Match agent sophistication to task complexity
+            1. **Endpoint Availability** (Most Critical): Does the agent have the specific endpoints needed for this task? (e.g., /edit for editing, /analyze for analysis)
+            2. **Capability Match**: How well does the agent's description and capabilities match the task?
+            3. **Quality/Rating**: Higher rated agents are generally more reliable (scale 0-5)
+            4. **Price**: Consider user's budget if specified, otherwise prefer reasonable pricing
             5. **Status**: Prefer active agents
 
             **Instructions:**
             - Rank ALL agents from best to worst
+            - PRIORITIZE: If a task requires a specific endpoint (like /edit for document editing), prefer agents that have that endpoint
             - Consider trade-offs (e.g., "Agent A is slightly more expensive but has much better ratings")
             - If user specified budget/rating preferences, prioritize those
             - Provide brief reasoning for your top choice
@@ -1723,6 +2137,63 @@ def rank_agents(state: State):
     logger.info("Agent ranking complete.")
     logger.debug(f"Final agent selections: {[p for p in serializable_pairs]}")
     return {"task_agent_pairs": serializable_pairs}
+
+def validate_agent_endpoints(state: State):
+    """
+    Post-ranking validation to ensure selected agents have required endpoints.
+    Swaps in fallback agents if primary agent lacks the necessary endpoint.
+    Acts as a safety net to prevent endpoint mismatches.
+    """
+    task_agent_pairs = state.get('task_agent_pairs', [])
+    validated_pairs = []
+    
+    logger.info(f"Validating endpoints for {len(task_agent_pairs)} task-agent pairs")
+    
+    for pair_dict in task_agent_pairs:
+        pair = TaskAgentPair.model_validate(pair_dict)
+        task_name = pair.task_name.lower()
+        task_desc = pair.task_description.lower()
+        
+        # Get primary agent endpoints as list of strings
+        agent_endpoints = [ep.endpoint if isinstance(ep, dict) else ep.endpoint for ep in pair.primary.endpoints]
+        
+        # Use helper function to validate endpoint requirements
+        required_endpoint, endpoint_type, has_endpoint = validate_required_endpoint(
+            task_name, task_desc, agent_endpoints
+        )
+        
+        # Validate primary agent has required endpoint
+        if required_endpoint and not has_endpoint:
+            logger.warning(f"❌ VALIDATION FAILED: Agent '{pair.primary.name}' lacks required endpoint '{required_endpoint}' for {endpoint_type} task '{task_name}'")
+            logger.warning(f"   Agent has endpoints: {agent_endpoints}")
+            
+            # Try to find a fallback agent with the required endpoint
+            swapped = False
+            for i, fallback in enumerate(pair.fallbacks):
+                fallback_endpoints = [ep.endpoint if isinstance(ep, dict) else ep.endpoint for ep in fallback.endpoints]
+                _, _, fallback_has_endpoint = validate_required_endpoint(task_name, task_desc, fallback_endpoints)
+                
+                if fallback_has_endpoint:
+                    logger.info(f"✅ VALIDATION FIX: Swapping to fallback agent '{fallback.name}' which has '{required_endpoint}' endpoint")
+                    # Swap primary with this fallback
+                    old_primary = pair.primary
+                    pair.primary = fallback
+                    pair.fallbacks[i] = old_primary
+                    swapped = True
+                    break
+            
+            if not swapped:
+                logger.error(f"❌ CRITICAL: No available agent has the required '{required_endpoint}' endpoint for task '{task_name}'")
+                logger.error(f"   This task will likely fail during execution!")
+        elif required_endpoint:
+            logger.info(f"✅ VALIDATION PASSED: Agent '{pair.primary.name}' has required endpoint '{required_endpoint}' for {endpoint_type}")
+        else:
+            logger.debug(f"⚪ No specific endpoint requirement detected for task '{task_name}'")
+        
+        validated_pairs.append(pair.model_dump(mode='json'))
+    
+    logger.info("Endpoint validation complete.")
+    return {"task_agent_pairs": validated_pairs}
 
 def plan_execution(state: State, config: RunnableConfig):
     '''
@@ -2053,6 +2524,7 @@ def plan_execution(state: State, config: RunnableConfig):
                 
                 # AUTO-INJECT PARAMETERS: Fill in parameters from uploaded files BEFORE serialization
                 uploaded_files = state.get("uploaded_files", [])
+                original_prompt = state.get('original_prompt', '')
                 logger.info(f"🔍 DEBUG: uploaded_files count={len(uploaded_files)}, response.plan exists={response.plan is not None}, plan length={len(response.plan) if response.plan else 0}")
                 
                 if uploaded_files and response.plan:
@@ -2067,44 +2539,9 @@ def plan_execution(state: State, config: RunnableConfig):
                                     task.primary.payload = {}
                                 task.primary.payload.update(parsed_task.parameters)
                                 logger.info(f"Using pre-extracted parameters for '{task.task_name}': {task.primary.payload}")
-                            elif not task.primary.payload:
-                                task.primary.payload = {}
                             
-                            # Auto-inject vector_store_path for document tasks
-                            logger.info(f"🔍 Checking {len(uploaded_files)} files for vector_store_path injection")
-                            
-                            # Collect ALL vector store paths for documents
-                            vector_store_paths = []
-                            for file_obj in uploaded_files:
-                                file_dict = file_obj if isinstance(file_obj, dict) else (file_obj.__dict__ if hasattr(file_obj, '__dict__') else {})
-                                logger.info(f"🔍 File: {file_dict.get('file_name')}, type={file_dict.get('file_type')}, has_vector_store={bool(file_dict.get('vector_store_path'))}")
-                                if file_dict.get('file_type') == 'document' and file_dict.get('vector_store_path'):
-                                    vector_store_paths.append(file_dict['vector_store_path'])
-                            
-                            # Inject ALL vector store paths (not just first one)
-                            if vector_store_paths:
-                                if len(vector_store_paths) == 1:
-                                    # Single document: use vector_store_path (backward compatible)
-                                    if 'vector_store_path' not in task.primary.payload:
-                                        task.primary.payload['vector_store_path'] = vector_store_paths[0]
-                                        logger.info(f"✅ AUTO-INJECTED vector_store_path for '{task.task_name}': {vector_store_paths[0]}")
-                                else:
-                                    # Multiple documents: use vector_store_paths array
-                                    if 'vector_store_paths' not in task.primary.payload:
-                                        task.primary.payload['vector_store_paths'] = vector_store_paths
-                                        logger.info(f"✅ AUTO-INJECTED {len(vector_store_paths)} vector_store_paths for '{task.task_name}'")
-                                        logger.info(f"   Files: {[os.path.basename(p) for p in vector_store_paths]}")
-                                    else:
-                                        logger.info(f"⏭️ vector_store_paths already in payload, skipping injection")
-                            else:
-                                logger.info(f"⏭️ No document files with vector stores found")
-                            
-                            # Auto-inject query if not provided
-                            if 'query' not in task.primary.payload:
-                                original_prompt = state.get('original_prompt', '')
-                                if any(word in original_prompt.lower() for word in ['what', 'summarize', 'summary', 'about', 'describe', 'analyze']):
-                                    task.primary.payload['query'] = original_prompt
-                                    logger.info(f"✅ AUTO-INJECTED query for '{task.task_name}': {original_prompt}")
+                            # Use helper function to inject file parameters (consolidates duplicate logic)
+                            inject_file_parameters(task, uploaded_files, original_prompt, logger)
                 
                 serializable_plan = [[task.model_dump(mode='json') for task in batch] for batch in (response.plan or [])]
                 output_state = {
@@ -2139,6 +2576,7 @@ def plan_execution(state: State, config: RunnableConfig):
                 
                 # AUTO-INJECT PARAMETERS: Fill in parameters from uploaded files BEFORE serialization
                 uploaded_files = state.get("uploaded_files", [])
+                original_prompt = state.get('original_prompt', '')
                 if uploaded_files and simple_plan:
                     logger.info(f"AUTO-INJECT (simple_plan path 1): Processing {len(uploaded_files)} uploaded files")
                     for task in simple_plan:
@@ -2150,24 +2588,9 @@ def plan_execution(state: State, config: RunnableConfig):
                                 task.primary.payload = {}
                             task.primary.payload.update(parsed_task.parameters)
                             logger.info(f"Using pre-extracted parameters for '{task.task_name}': {task.primary.payload}")
-                        elif not task.primary.payload:
-                            task.primary.payload = {}
                         
-                        # Auto-inject vector_store_path for document tasks
-                        for file_obj in uploaded_files:
-                            file_dict = file_obj if isinstance(file_obj, dict) else (file_obj.__dict__ if hasattr(file_obj, '__dict__') else {})
-                            if file_dict.get('file_type') == 'document' and file_dict.get('vector_store_path'):
-                                if 'vector_store_path' not in task.primary.payload:
-                                    task.primary.payload['vector_store_path'] = file_dict['vector_store_path']
-                                    logger.info(f"✅ AUTO-INJECTED vector_store_path for '{task.task_name}': {file_dict['vector_store_path']}")
-                                break
-                        
-                        # Auto-inject query if not provided
-                        if 'query' not in task.primary.payload:
-                            original_prompt = state.get('original_prompt', '')
-                            if any(word in original_prompt.lower() for word in ['what', 'summarize', 'summary', 'about', 'describe', 'analyze']):
-                                task.primary.payload['query'] = original_prompt
-                                logger.info(f"✅ AUTO-INJECTED query for '{task.task_name}': {original_prompt}")
+                        # Use helper function to inject file parameters (consolidates duplicate logic)
+                        inject_file_parameters(task, uploaded_files, original_prompt, logger)
                 
                 if simple_plan:
                     serializable_plan = [[task.model_dump(mode='json') for task in simple_plan]]
@@ -2203,6 +2626,7 @@ def plan_execution(state: State, config: RunnableConfig):
                 
                 # AUTO-INJECT PARAMETERS: Fill in parameters from uploaded files BEFORE serialization
                 uploaded_files = state.get("uploaded_files", [])
+                original_prompt = state.get('original_prompt', '')
                 if uploaded_files and simple_plan:
                     logger.info(f"AUTO-INJECT (simple_plan path 2): Processing {len(uploaded_files)} uploaded files")
                     for task in simple_plan:
@@ -2214,24 +2638,9 @@ def plan_execution(state: State, config: RunnableConfig):
                                 task.primary.payload = {}
                             task.primary.payload.update(parsed_task.parameters)
                             logger.info(f"Using pre-extracted parameters for '{task.task_name}': {task.primary.payload}")
-                        elif not task.primary.payload:
-                            task.primary.payload = {}
                         
-                        # Auto-inject vector_store_path for document tasks
-                        for file_obj in uploaded_files:
-                            file_dict = file_obj if isinstance(file_obj, dict) else (file_obj.__dict__ if hasattr(file_obj, '__dict__') else {})
-                            if file_dict.get('file_type') == 'document' and file_dict.get('vector_store_path'):
-                                if 'vector_store_path' not in task.primary.payload:
-                                    task.primary.payload['vector_store_path'] = file_dict['vector_store_path']
-                                    logger.info(f"✅ AUTO-INJECTED vector_store_path for '{task.task_name}': {file_dict['vector_store_path']}")
-                                break
-                        
-                        # Auto-inject query if not provided
-                        if 'query' not in task.primary.payload:
-                            original_prompt = state.get('original_prompt', '')
-                            if any(word in original_prompt.lower() for word in ['what', 'summarize', 'summary', 'about', 'describe', 'analyze']):
-                                task.primary.payload['query'] = original_prompt
-                                logger.info(f"✅ AUTO-INJECTED query for '{task.task_name}': {original_prompt}")
+                        # Use helper function to inject file parameters (consolidates duplicate logic)
+                        inject_file_parameters(task, uploaded_files, original_prompt, logger)
                 
                 if simple_plan:
                     serializable_plan = [[task.model_dump(mode='json') for task in simple_plan]]
@@ -2790,16 +3199,26 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
         
         # Ensure file_path is present for document edits
         if 'file_path' not in pre_extracted_params and uploaded_files:
-            # ✅ ENHANCED: Check for valid file_path (not None)
+            # ✅ ENHANCED: Check for valid file_path (not None) and use absolute path
             for file_obj in uploaded_files:
                 file_dict = file_obj if isinstance(file_obj, dict) else file_obj.__dict__
                 if file_dict.get('file_type') == 'document':
                     candidate_path = file_dict.get('file_path')
                     # Validate candidate_path is not None/empty
                     if candidate_path and candidate_path.strip():
-                        pre_extracted_params['file_path'] = candidate_path
-                        logger.info(f"✅ AUTO-INJECTED file_path for /edit: {candidate_path}")
-                        break
+                        # ✅ CRITICAL FIX: Ensure path is absolute and exists
+                        # Handle both relative and absolute paths
+                        if not os.path.isabs(candidate_path):
+                            # Convert relative path to absolute
+                            candidate_path = os.path.abspath(candidate_path)
+                        
+                        # Verify file exists
+                        if os.path.exists(candidate_path):
+                            pre_extracted_params['file_path'] = candidate_path
+                            logger.info(f"✅ AUTO-INJECTED absolute file_path for /edit: {candidate_path}")
+                            break
+                        else:
+                            logger.warning(f"⚠️ File does not exist at path: {candidate_path}")
                     else:
                         logger.warning(f"⚠️ Found document file but file_path is None or empty: {file_dict}")
             
@@ -2812,15 +3231,26 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
     
     # AUTO-INJECT: Spreadsheet file_id for spreadsheet agent endpoints
     # PRIORITY: Files uploaded in the current turn (is_current_turn=True) should be used first
+    logger.info(f"🔍 [FILE_ID_INJECTION] Checking auto-injection for endpoint: {endpoint_path}")
+    logger.info(f"🔍 [FILE_ID_INJECTION] Endpoint parameters: {[p.name for p in selected_endpoint.parameters]}")
+    logger.info(f"🔍 [FILE_ID_INJECTION] file_id in params: {'file_id' in [p.name for p in selected_endpoint.parameters]}")
+    logger.info(f"🔍 [FILE_ID_INJECTION] file_id already extracted: {'file_id' in pre_extracted_params}")
+    logger.info(f"🔍 [FILE_ID_INJECTION] uploaded_files count: {len(uploaded_files) if uploaded_files else 0}")
+    
     if 'file_id' in [p.name for p in selected_endpoint.parameters] and 'file_id' not in pre_extracted_params and uploaded_files:
+        logger.info(f"🔍 [FILE_ID_INJECTION] Conditions met, searching for spreadsheet files...")
         # First pass: look for current turn spreadsheet files
         current_turn_file = None
         fallback_file = None
         
-        for file_obj in uploaded_files:
+        for idx, file_obj in enumerate(uploaded_files):
             file_dict = file_obj if isinstance(file_obj, dict) else file_obj.__dict__
+            logger.info(f"🔍 [FILE_ID_INJECTION] File {idx+1}: name={file_dict.get('file_name')}, type={file_dict.get('file_type')}, is_current={file_dict.get('is_current_turn')}")
+            
             if file_dict.get('file_type') == 'spreadsheet' or file_dict.get('file_name', '').lower().endswith(('.csv', '.xlsx', '.xls')):
                 file_id = file_dict.get('file_id') or file_dict.get('content_id')
+                logger.info(f"🔍 [FILE_ID_INJECTION] Found spreadsheet file with file_id: {file_id}")
+                
                 if file_id:
                     # Prioritize current turn files
                     if file_dict.get('is_current_turn'):
@@ -2830,6 +3260,7 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                     elif not fallback_file:
                         # Keep as fallback if no current turn file found
                         fallback_file = file_id
+                        logger.info(f"📎 Found fallback spreadsheet file_id: {file_id}")
         
         # Use current turn file if available, otherwise use fallback
         selected_file_id = current_turn_file or fallback_file
@@ -2839,6 +3270,31 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                 logger.info(f"✅ AUTO-INJECTED file_id for spreadsheet (CURRENT TURN): {selected_file_id}")
             else:
                 logger.info(f"✅ AUTO-INJECTED file_id for spreadsheet (fallback): {selected_file_id}")
+        else:
+            logger.error(f"❌ [FILE_ID_INJECTION] No valid file_id found despite having {len(uploaded_files)} uploaded files")
+    # Fallback: if file_id still missing, try last uploaded spreadsheet from state
+    if 'file_id' in [p.name for p in selected_endpoint.parameters] and 'file_id' not in pre_extracted_params:
+        state_files = state.get('uploaded_files', []) if 'state' in locals() else []
+        fallback_id = None
+        for file_obj in state_files:
+            file_dict = file_obj if isinstance(file_obj, dict) else file_obj.__dict__
+            if file_dict.get('file_type') == 'spreadsheet' or file_dict.get('file_name', '').lower().endswith(('.csv', '.xlsx', '.xls')):
+                fid = file_dict.get('file_id') or file_dict.get('content_id')
+                if fid:
+                    fallback_id = fid
+                    logger.info(f"📎 [FILE_ID_INJECTION] Using fallback spreadsheet file_id from state: {fid}")
+                    break
+        if fallback_id:
+            pre_extracted_params['file_id'] = fallback_id
+        else:
+            logger.error(f"❌ [FILE_ID_INJECTION] file_id required but not found in uploaded_files or state for endpoint {endpoint_path}")
+    else:
+        if 'file_id' not in [p.name for p in selected_endpoint.parameters]:
+            logger.info(f"🔍 [FILE_ID_INJECTION] Skipped - file_id not in endpoint parameters")
+        elif 'file_id' in pre_extracted_params:
+            logger.info(f"🔍 [FILE_ID_INJECTION] Skipped - file_id already extracted: {pre_extracted_params['file_id']}")
+        elif not uploaded_files:
+            logger.warning(f"⚠️ [FILE_ID_INJECTION] Skipped - no uploaded files available")
     
     # AUTO-INJECT: Instruction for execute_pandas endpoint
     if '/execute_pandas' in endpoint_path and 'instruction' in [p.name for p in selected_endpoint.parameters]:
@@ -2851,6 +3307,31 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
         if 'question' not in pre_extracted_params:
             pre_extracted_params['question'] = planned_task.task_description
             logger.info(f"✅ AUTO-INJECTED question for /nl_query: {planned_task.task_description}")
+    
+    # **EXPLICIT ROUTING FIX**: Ensure summary/analyze tasks use /nl_query for spreadsheet agent
+    task_lower = planned_task.task_name.lower()
+    task_desc_lower = planned_task.task_description.lower() if planned_task.task_description else ""
+    analysis_keywords = ['summarize', 'summary', 'analyze', 'analysis', 'describe', 'explain', 'review', 'insights', 'examine']
+    is_analysis_task = any(keyword in task_lower or keyword in task_desc_lower for keyword in analysis_keywords)
+    
+    if is_analysis_task and 'spreadsheet' in agent_details.name.lower() and '/nl_query' not in endpoint_path:
+        logger.warning(f"⚠️ ROUTING CORRECTION: Task '{planned_task.task_name}' appears to be analysis but endpoint is '{endpoint_path}'")
+        logger.warning(f"⚠️ This should use /nl_query endpoint. Attempting to find and use it...")
+        
+        # Try to find nl_query endpoint in agent's endpoints
+        nl_query_endpoint = next((ep for ep in agent_details.endpoints if '/nl_query' in str(ep.endpoint)), None)
+        if nl_query_endpoint:
+            logger.info(f"✅ Found /nl_query endpoint, correcting routing...")
+            selected_endpoint = nl_query_endpoint
+            endpoint_path = str(nl_query_endpoint.endpoint)
+            # Ensure downstream request uses the corrected endpoint + method + URL
+            endpoint_url = f"{base_url}{endpoint_path}" if base_url else endpoint_path
+            http_method = nl_query_endpoint.http_method.upper()
+            logger.info(f"✅ ROUTE CORRECTION applied: endpoint={endpoint_path}, method={http_method}, url={endpoint_url}")
+            # Auto-inject question parameter
+            if 'question' not in pre_extracted_params:
+                pre_extracted_params['question'] = planned_task.task_description
+                logger.info(f"✅ AUTO-INJECTED question for corrected /nl_query route: {planned_task.task_description}")
 
     
     # Check if all required parameters are already extracted
@@ -3073,22 +3554,34 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                             payload['query'] = planned_task.task_description
                             logger.info(f"🔧 AUTO-INJECT: query = '{planned_task.task_description}' (from task)")
                     
-                    # Auto-inject vector_store_path(s) from uploaded_files
+                    # Auto-inject vector_store_path(s) from uploaded_files with validation
                     doc_files = [f for f in uploaded_files if f.get('file_type') == 'document']
                     
                     if doc_files:
-                        # Filter for valid vector_store_path values (not None, not empty)
+                        # Filter for valid vector_store_path values (not None, not empty, exists on disk)
                         vector_paths = []
                         for f in doc_files:
                             vs_path = f.get('vector_store_path')
-                            if vs_path and vs_path.strip():
-                                vector_paths.append(vs_path)
-                            elif f.get('file_path') and f.get('file_path').strip():
-                                # Fallback: use file_path if vector_store_path is None/empty
-                                logger.warning(f"Document '{f.get('file_name')}' has None vector_store_path, using file_path: {f.get('file_path')}")
-                                vector_paths.append(f['file_path'])
+                            file_path = f.get('file_path')
+                            file_name = f.get('file_name', 'unknown')
+                            
+                            # Validate vector_store_path first
+                            if vs_path and isinstance(vs_path, str) and vs_path.strip():
+                                # Check if path exists on disk
+                                if os.path.exists(vs_path):
+                                    vector_paths.append(vs_path)
+                                    logger.info(f"✅ Validated vector_store_path for '{file_name}': {vs_path}")
+                                else:
+                                    logger.warning(f"⚠️ vector_store_path does not exist for '{file_name}': {vs_path}")
+                            # Fallback: use file_path if vector_store_path is invalid
+                            elif file_path and isinstance(file_path, str) and file_path.strip():
+                                if os.path.exists(file_path):
+                                    logger.warning(f"Document '{file_name}' has invalid vector_store_path, using file_path: {file_path}")
+                                    vector_paths.append(file_path)
+                                else:
+                                    logger.error(f"❌ file_path does not exist for '{file_name}': {file_path}")
                             else:
-                                logger.error(f"Document '{f.get('file_name')}' has both None vector_store_path AND file_path")
+                                logger.error(f"❌ Document '{file_name}' has no valid paths (vs_path={vs_path}, file_path={file_path})")
                         
                         if vector_paths:
                             if len(vector_paths) == 1:
@@ -3102,7 +3595,7 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                                     payload['vector_store_paths'] = vector_paths
                                     logger.info(f"🔧 AUTO-INJECT: vector_store_paths = {vector_paths}")
                         else:
-                            logger.error(f"AUTO-INJECTION FAILED: Found {len(doc_files)} documents but no valid paths. Files: {[f.get('file_name') for f in doc_files]}")
+                            logger.error(f"❌ AUTO-INJECTION FAILED: Found {len(doc_files)} documents but no valid paths. Files: {[f.get('file_name') for f in doc_files]}")
                 
                 # CRITICAL VALIDATION: Ensure required parameters are present
                 # This prevents NoneType errors when agents expect file paths
@@ -3245,21 +3738,37 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                 else:  # POST
                     # Check if agent expects form data instead of JSON
                     # Priority: endpoint-specific > agent connection_config > default (json)
-                    use_form_data = False
+                    # Unified request format resolution
+                    def get_request_format(endpoint, connection_cfg):
+                        """Get request format with proper fallback logic."""
+                        # Try endpoint-specific format (highest priority)
+                        endpoint_format = None
+                        # Check dict access first (most common for DB objects)
+                        if isinstance(endpoint, dict):
+                            endpoint_format = endpoint.get('request_format')
+                        elif hasattr(endpoint, 'request_format'):
+                            endpoint_format = endpoint.request_format
+                        elif hasattr(endpoint, '__dict__') and 'request_format' in endpoint.__dict__:
+                            endpoint_format = endpoint.__dict__['request_format']
+                        
+                        if endpoint_format and endpoint_format.strip():
+                            logger.info(f"✅ Using endpoint-specific request_format: {endpoint_format}")
+                            return endpoint_format
+                        
+                        # Fall back to agent-level format
+                        if connection_cfg and isinstance(connection_cfg, dict):
+                            agent_format = connection_cfg.get('request_format', 'json')
+                            logger.info(f"Using agent-level request_format: {agent_format}")
+                            return agent_format
+                        
+                        logger.info(f"No request_format found. Defaulting to 'json'")
+                        return 'json'
                     
-                    # First check endpoint-specific request_format (highest priority)
-                    endpoint_format = getattr(selected_endpoint, 'request_format', None)
-                    logger.info(f"[REQUEST_FORMAT_DEBUG] Endpoint: {endpoint_path}, selected_endpoint.request_format={endpoint_format}")
-                    logger.info(f"[REQUEST_FORMAT_DEBUG] selected_endpoint type: {type(selected_endpoint)}, has request_format attr: {hasattr(selected_endpoint, 'request_format')}")
-                    
-                    if endpoint_format:
-                        use_form_data = endpoint_format == 'form'
-                        logger.info(f"Using endpoint-specific request_format: {endpoint_format} -> use_form_data={use_form_data}")
-                    else:
-                        # Fall back to agent connection_config
-                        if connection_config and isinstance(connection_config, dict):
-                            use_form_data = connection_config.get('request_format', 'json') == 'form'
-                            logger.info(f"Using agent connection_config request_format: {connection_config.get('request_format')} -> use_form_data={use_form_data}")
+                    request_format = get_request_format(selected_endpoint, connection_config)
+                    use_form_data = request_format == 'form'
+                    logger.info(f"[REQUEST_FORMAT] Endpoint: {endpoint_path}, format: {request_format}, use_form_data: {use_form_data}")
+                    logger.info(f"[PAYLOAD_DEBUG] Payload keys: {list(payload.keys()) if isinstance(payload, dict) else 'not a dict'}")
+                    logger.info(f"[PAYLOAD_DEBUG] Payload content: {payload}")
                     
                     if use_form_data:
                         logger.info(f"Using form data for agent '{agent_details.name}'")
@@ -3271,8 +3780,73 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                     response.raise_for_status()
                     result = response.json()
 
+                # **RELAY AGENT LOGS TO ORCHESTRATOR**
+                logger.info(f"")
+                logger.info(f"{'='*80}")
+                logger.info(f"📊 [AGENT RESPONSE] {agent_details.name} - Task: {planned_task.task_name}")
+                logger.info(f"{'='*80}")
+                logger.info(f"  Status: ✅ Success")
+
+                if isinstance(result, dict):
+                    metrics = result.get('metrics') or result.get('execution_metrics')
+                    if metrics:
+                        logger.info(f"")
+                        logger.info(f"  ⏱️  Performance:")
+                        if 'latency_ms' in metrics:
+                            logger.info(f"    Latency: {metrics['latency_ms']:.1f}ms")
+                        if 'rag_retrieval_ms' in metrics:
+                            logger.info(f"    RAG Retrieval: {metrics['rag_retrieval_ms']:.1f}ms")
+                        if 'llm_call_ms' in metrics:
+                            logger.info(f"    LLM Processing: {metrics['llm_call_ms']:.1f}ms")
+                        
+                        if 'tokens_input' in metrics or 'tokens_output' in metrics:
+                            logger.info(f"")
+                            logger.info(f"  💬 Tokens:")
+                            if 'tokens_input' in metrics:
+                                logger.info(f"    Input: {metrics['tokens_input']}")
+                            if 'tokens_output' in metrics:
+                                logger.info(f"    Output: {metrics['tokens_output']}")
+                        
+                        if 'llm_calls' in metrics:
+                            logger.info(f"")
+                            logger.info(f"  🤖 LLM Calls: {metrics['llm_calls']}")
+                        
+                        if 'cache_hit_rate' in metrics:
+                            cache_status = "HIT" if metrics.get('cache_hit') else "MISS"
+                            logger.info(f"")
+                            logger.info(f"  💾 Cache: {cache_status} (Hit Rate: {metrics['cache_hit_rate']:.1f}%)")
+                        
+                        if 'chunks_retrieved' in metrics and metrics['chunks_retrieved'] > 0:
+                            logger.info(f"")
+                            logger.info(f"  📚 RAG Chunks Retrieved: {metrics['chunks_retrieved']}")
+                    
+                    success_msg = result.get('message') or result.get('answer')
+                    if success_msg:
+                        preview = success_msg[:150] + "..." if len(str(success_msg)) > 150 else success_msg
+                        logger.info(f"")
+                        logger.info(f"  📝 Result: {preview}")
+
+                logger.info(f"{'='*80}")
+                logger.info(f"")
+
                 # **INTELLIGENT VALIDATION** for semantic failure
-                is_result_empty = not result or (isinstance(result, list) and not result) or (isinstance(result, dict) and not any(result.values()))
+                is_result_empty = not result or (isinstance(result, list) and not result)
+                
+                if isinstance(result, dict):
+                    # Check for empty canvas display (spreadsheet with no rows)
+                    canvas = result.get('canvas_display') or result.get('result', {}).get('canvas_display')
+                    if canvas and isinstance(canvas, dict):
+                        rows = canvas.get('rows', [])
+                        total_rows = canvas.get('total_rows', len(rows) if rows else 0)
+                        # If canvas exists but has no data rows, it's empty
+                        if total_rows == 0 and canvas.get('canvas_type') == 'spreadsheet':
+                            logger.warning(f"Agent returned spreadsheet canvas with 0 rows. This may be an incorrectly routed task.")
+                            is_result_empty = True
+                    
+                    # Generic empty check - dict has no meaningful values
+                    if not is_result_empty and not any(result.values()):
+                        is_result_empty = True
+                
                 if is_result_empty:
                     logger.warning(f"Agent returned a successful but empty response. Retrying...")
                     failed_attempts.append({"payload": payload, "result": str(result)})
@@ -3411,7 +3985,9 @@ async def execute_confirmed_task(state: State, config: RunnableConfig):
     
     # If no canvas display from agent but this is a document edit, fetch the display
     file_path = pending_task.get('file_path')
-    if not canvas_display and file_path and agent_name == 'document_analysis_agent':
+    primary_agent = task_pair.primary if task_pair else None
+    agent_is_document = 'document' in agent_name.lower() or (primary_agent and 'document' in (primary_agent.name or '').lower())
+    if not canvas_display and file_path and agent_is_document:
         logger.info(f"🔄 Auto-displaying updated document after edit: {file_path}")
         try:
             import httpx
@@ -3499,6 +4075,71 @@ async def execute_batch(state: State, config: RunnableConfig):
     async def try_task_with_fallbacks(planned_task: PlannedTask):
         nonlocal task_events  # Ensure we're modifying the outer scope's task_events
         
+        # PRIORITY 1: Check if this task can be handled by a direct tool (faster than agents)
+        try:
+            from orchestrator.tool_registry import is_tool_capable, execute_tool
+            
+            if is_tool_capable(planned_task.task_name):
+                logger.info(f"🔧 Task '{planned_task.task_name}' can be handled by direct tool - using tool instead of agent")
+                task_start_time = time.time()
+                
+                # EMIT: Task started event
+                started_event = {
+                    "event_type": "task_started",
+                    "task_name": planned_task.task_name,
+                    "agent_name": "DirectTool",
+                    "timestamp": task_start_time
+                }
+                task_events.append(started_event)
+                
+                if task_event_callback:
+                    try:
+                        await task_event_callback(started_event)
+                    except Exception as e:
+                        logger.error(f"Failed to stream task_started event: {e}")
+                
+                # Execute the tool
+                tool_result = await execute_tool(planned_task.task_name, planned_task.parameters or {})
+                
+                task_end_time = time.time()
+                execution_time = round(task_end_time - task_start_time, 2)
+                
+                if tool_result.get('success'):
+                    logger.info(f"✅ Tool execution successful for '{planned_task.task_name}' in {execution_time}s")
+                    
+                    # EMIT: Task completed event
+                    completed_event = {
+                        "event_type": "task_completed",
+                        "task_name": planned_task.task_name,
+                        "agent_name": tool_result.get('tool_name', 'DirectTool'),
+                        "execution_time": execution_time,
+                        "timestamp": task_end_time
+                    }
+                    task_events.append(completed_event)
+                    
+                    if task_event_callback:
+                        try:
+                            await task_event_callback(completed_event)
+                        except Exception as e:
+                            logger.error(f"Failed to stream task_completed event: {e}")
+                    
+                    return {
+                        "task_name": planned_task.task_name,
+                        "result": tool_result.get('result'),
+                        "raw_response": tool_result,
+                        "execution_time": execution_time,
+                        "agent_used": tool_result.get('tool_name', 'DirectTool'),
+                        "status": "completed"
+                    }
+                else:
+                    logger.warning(f"⚠️ Tool execution failed for '{planned_task.task_name}': {tool_result.get('error')}")
+                    # Fall through to agent execution
+        except ImportError:
+            logger.debug("Tool registry not available - falling back to agent execution")
+        except Exception as e:
+            logger.warning(f"Tool execution error for '{planned_task.task_name}': {e} - falling back to agent")
+        
+        # PRIORITY 2: Use agent-based execution (for complex/stateful tasks)
         # ROBUST FIX: Check if PlannedTask already has agent info embedded
         if hasattr(planned_task, 'primary') and planned_task.primary:
             # Task has embedded agent info - use it directly
@@ -3582,6 +4223,46 @@ async def execute_batch(state: State, config: RunnableConfig):
                         logger.error(error_msg)
                         return {"task_name": planned_task.task_name, "result": error_msg}
 
+        # CHECK FOR CREATION TASK: Document/Spreadsheet creation routes
+        # Import here to avoid circular dependency
+        try:
+            from orchestrator.creation_handler import is_creation_task, validate_creation_task, build_creation_payload, execute_creation_task_async
+            
+            is_creation, creation_type = is_creation_task(planned_task)
+            
+            if is_creation:
+                logger.info(f"🎨 CREATION TASK DETECTED: task_name='{planned_task.task_name}', type='{creation_type}'")
+                
+                # Validate creation task has required parameters
+                is_valid, validation_error = validate_creation_task(planned_task, creation_type)
+                if not is_valid:
+                    logger.error(f"❌ Creation task validation failed: {validation_error}")
+                    return {
+                        "task_name": planned_task.task_name,
+                        "result": f"Creation task validation failed: {validation_error}",
+                        "status": "failed",
+                        "execution_time": 0,
+                        "agent_used": "CreationHandler"
+                    }
+                
+                # Execute creation task directly via HTTP endpoint
+                thread_id = config.get("configurable", {}).get("thread_id") if config else None
+                task_result = await execute_creation_task_async(planned_task, creation_type, thread_id)
+                
+                if task_result.get('status') == 'success':
+                    logger.info(f"✅ Creation task completed: {planned_task.task_name}")
+                    task_result['agent_used'] = 'CreationEndpoint'
+                    return task_result
+                else:
+                    logger.error(f"❌ Creation task failed: {task_result.get('result')}")
+                    return task_result
+        
+        except ImportError as e:
+            logger.warning(f"Creation handler not available: {e}. Proceeding with regular agent execution.")
+        except Exception as e:
+            logger.error(f"Error in creation task handling: {e}. Falling back to regular execution.")
+        
+        # REGULAR AGENT EXECUTION: If not a creation task, proceed normally
         agents_to_try = [original_task_pair.primary] + original_task_pair.fallbacks
         final_error_result = None
         
@@ -3835,6 +4516,7 @@ async def execute_batch(state: State, config: RunnableConfig):
     # Check if any task requires confirmation
     requires_confirmation = any(cd.get('requires_confirmation') for cd in canvas_displays)
     pending_confirmation_task = None
+    confirmation_eval_status = None
     
     print(f"!!! EXECUTE_BATCH: canvas_displays count={len(canvas_displays)}, requires_confirmation={requires_confirmation} !!!")
     logger.info(f"Canvas displays collected: {len(canvas_displays)}, requires_confirmation: {requires_confirmation}")
@@ -3848,6 +4530,8 @@ async def execute_batch(state: State, config: RunnableConfig):
                     'agent_name': cd.get('agent_name'),
                     'canvas_display': cd
                 }
+                # Set special eval_status for confirmation flow
+                confirmation_eval_status = "awaiting_confirmation"
                 print(f"!!! EXECUTE_BATCH: ⏸️  Setting pending_confirmation=True for task: {cd.get('task_name')} !!!")
                 logger.info(f"⏸️  Execution paused - waiting for confirmation on task: {cd.get('task_name')}")
                 break
@@ -3859,7 +4543,8 @@ async def execute_batch(state: State, config: RunnableConfig):
         "task_events": task_events,  # Include task status events for real-time updates
         "canvas_displays": canvas_displays,  # Include canvas displays from agents
         "pending_confirmation": requires_confirmation,
-        "pending_confirmation_task": pending_confirmation_task
+        "pending_confirmation_task": pending_confirmation_task,
+        "eval_status": confirmation_eval_status if requires_confirmation else None  # Set awaiting_confirmation or clear
     }
 
     # Add new uploaded files if any were registered
@@ -4040,21 +4725,21 @@ def evaluate_agent_response(state: State):
         # REACTIVE ROUTING: Handle different statuses
         if evaluation.status == "failed":
             # Check replan count to prevent infinite loops
-            replan_count = state.get("replan_count", 0)
-            MAX_REPLANS = 3  # Maximum number of replans before giving up
+            replan_count = state.get("replan_count", INITIAL_REPLAN_COUNT)
             
-            if replan_count >= MAX_REPLANS:
-                print(f"!!! EVALUATE: Max replans ({MAX_REPLANS}) reached - stopping auto-replan !!!")
+            if replan_count >= MAX_REPLAN_ATTEMPTS:
+                print(f"!!! EVALUATE: Max replans ({MAX_REPLAN_ATTEMPTS}) reached - stopping auto-replan !!!")
                 logger.error(f"Task '{task_to_evaluate['task_name']}' failed after {replan_count} replans. Stopping auto-replan.")
                 return {
                     "pending_user_input": False,
                     "question_for_user": None,
                     "eval_status": "complete",  # Mark as complete to stop the loop
-                    "final_response": f"I attempted to complete the task '{task_to_evaluate['task_name']}' but encountered repeated failures. The last error was: {task_to_evaluate.get('result', 'Unknown error')}"
+                    "final_response": f"I attempted to complete the task '{task_to_evaluate['task_name']}' but encountered repeated failures. The last error was: {task_to_evaluate.get('result', 'Unknown error')}",
+                    "replan_count": replan_count  # Preserve replan count in state
                 }
             
-            print(f"!!! EVALUATE: Task FAILED - triggering auto-replan (attempt {replan_count + 1}/{MAX_REPLANS}) !!!")
-            logger.warning(f"Task '{task_to_evaluate['task_name']}' failed. Triggering auto-replan (attempt {replan_count + 1}/{MAX_REPLANS}).")
+            print(f"!!! EVALUATE: Task FAILED - triggering auto-replan (attempt {replan_count + 1}/{MAX_REPLAN_ATTEMPTS}) !!!")
+            logger.warning(f"Task '{task_to_evaluate['task_name']}' failed. Triggering auto-replan (attempt {replan_count + 1}/{MAX_REPLAN_ATTEMPTS}).")
             logger.warning(f"Replan feedback: {evaluation.feedback_for_replanning}")
             
             return {
@@ -4090,13 +4775,24 @@ def evaluate_agent_response(state: State):
         elif evaluation.status == "partial_success":
             print(f"!!! EVALUATE: Task PARTIALLY successful - continuing !!!")
             logger.info(f"Task '{task_to_evaluate['task_name']}' partially successful: {evaluation.reasoning}")
-            # Reset replan count on success
-            return {"replan_count": 0}
+            # Don't reset replan count on partial success - only on complete success
+            # Partial success might need retries for remaining parts
+            current_replan_count = state.get("replan_count", INITIAL_REPLAN_COUNT)
+            return {
+                "replan_count": current_replan_count,  # Preserve count
+                "eval_status": "partial_success",
+                "replan_reason": None
+            }
         
         else:  # complete
             print(f"!!! EVALUATE: Task COMPLETE !!!")
             logger.info(f"Task '{task_to_evaluate['task_name']}' completed successfully")
-            # Reset replan count on success
+            # Reset replan count on success and clear any previous failure state
+            return {
+                "replan_count": 0,
+                "eval_status": "complete",
+                "replan_reason": None
+            }
             
             # Check if this is a browser task with screenshots
             task_result = task_to_evaluate.get('result', {})
@@ -4757,6 +5453,106 @@ def generate_text_answer(state: State):
         logger.info(f"Added AI message. Total messages: {len(updated_messages)}")
         return {"final_response": final_response, "messages": updated_messages}
 
+
+async def collect_agent_metrics(completed_tasks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Collect metrics from agent services based on completed tasks.
+    Aggregates API calls, LLM calls, cache stats, and timing info.
+    
+    Args:
+        completed_tasks: List of completed task dictionaries with agent URLs
+    
+    Returns:
+        Dictionary with aggregated metrics from all agents
+    """
+    logger.info("=== COLLECT_AGENT_METRICS: Starting collection ===")
+    
+    # Extract unique agent URLs from completed tasks
+    agent_urls = set()
+    for task in completed_tasks:
+        agent_url = task.get("agent_url")
+        if agent_url:
+            # Normalize URL - remove trailing slashes and /api suffixes
+            base_url = agent_url.rstrip('/').replace('/api', '')
+            agent_urls.add(base_url)
+    
+    if not agent_urls:
+        logger.info("No agent URLs found in completed tasks")
+        return {"agents": [], "total_api_calls": 0, "total_llm_calls": 0}
+    
+    logger.info(f"Found {len(agent_urls)} unique agent URLs: {agent_urls}")
+    
+    # Collect metrics from each agent
+    agent_metrics = []
+    total_api_calls = 0
+    total_llm_calls = 0
+    
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        for agent_url in agent_urls:
+            try:
+                metrics_url = f"{agent_url}/metrics"
+                logger.info(f"Fetching metrics from {metrics_url}")
+                
+                response = await client.get(metrics_url)
+                response.raise_for_status()
+                
+                data = response.json()
+                
+                # Handle different response formats (ApiResponse vs direct metrics)
+                if "result" in data:
+                    metrics = data["result"]
+                elif "metrics" in data:
+                    metrics = data["metrics"]
+                else:
+                    metrics = data
+                
+                # Extract key metrics
+                api_calls = metrics.get("api_calls", {})
+                llm_calls = metrics.get("llm_calls", {})
+                
+                # Sum API calls
+                if isinstance(api_calls, dict):
+                    agent_total_api = sum(v for v in api_calls.values() if isinstance(v, (int, float)))
+                else:
+                    agent_total_api = 0
+                
+                # Sum LLM calls
+                if isinstance(llm_calls, dict):
+                    agent_total_llm = llm_calls.get("total", 0) if "total" in llm_calls else sum(v for v in llm_calls.values() if isinstance(v, (int, float)))
+                elif isinstance(llm_calls, (int, float)):
+                    agent_total_llm = llm_calls
+                else:
+                    agent_total_llm = 0
+                
+                total_api_calls += agent_total_api
+                total_llm_calls += agent_total_llm
+                
+                agent_metrics.append({
+                    "agent_url": agent_url,
+                    "metrics": metrics,
+                    "total_api_calls": agent_total_api,
+                    "total_llm_calls": agent_total_llm
+                })
+                
+                logger.info(f"✅ Collected metrics from {agent_url}: {agent_total_api} API calls, {agent_total_llm} LLM calls")
+                
+            except httpx.HTTPError as e:
+                logger.warning(f"Failed to fetch metrics from {agent_url}: {e}")
+            except Exception as e:
+                logger.error(f"Error collecting metrics from {agent_url}: {e}")
+    
+    result = {
+        "agents": agent_metrics,
+        "total_api_calls": total_api_calls,
+        "total_llm_calls": total_llm_calls,
+        "agents_queried": len(agent_metrics),
+        "agents_failed": len(agent_urls) - len(agent_metrics)
+    }
+    
+    logger.info(f"=== COLLECT_AGENT_METRICS: Complete - {result['total_api_calls']} API calls, {result['total_llm_calls']} LLM calls ===")
+    return result
+
+
 def generate_final_response(state: State):
     """
     UNIFIED FINAL RESPONSE: Generates both text and canvas in a single optimized call.
@@ -4767,6 +5563,26 @@ def generate_final_response(state: State):
     print(f"!!! GENERATE_FINAL_RESPONSE: has_canvas={state.get('has_canvas')}, canvas_type={state.get('canvas_type')} !!!")
     print(f"!!! GENERATE_FINAL_RESPONSE: canvas_data exists={state.get('canvas_data') is not None}, canvas_content exists={state.get('canvas_content') is not None} !!!")
     
+    # Collect agent metrics if enabled via environment variable
+    agent_metrics = None
+    if os.getenv("INCLUDE_AGENT_METRICS", "false").lower() == "true":
+        try:
+            completed_tasks = state.get('completed_tasks', [])
+            if completed_tasks:
+                logger.info("🔍 Collecting agent metrics...")
+                # Run async function in sync context
+                import asyncio
+                try:
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                
+                agent_metrics = loop.run_until_complete(collect_agent_metrics(completed_tasks))
+                logger.info(f"✅ Agent metrics collected: {agent_metrics.get('total_api_calls', 0)} API calls, {agent_metrics.get('total_llm_calls', 0)} LLM calls")
+        except Exception as e:
+            logger.error(f"Failed to collect agent metrics: {e}")
+    
     # Check if confirmation is pending - if so, skip text generation and just show canvas
     if state.get('pending_confirmation'):
         logger.info("⏸️ Confirmation pending - skipping text generation, showing canvas only")
@@ -4774,7 +5590,7 @@ def generate_final_response(state: State):
         print(f"!!! GENERATE_FINAL_RESPONSE: canvas_type={state.get('canvas_type')}, canvas_title={state.get('canvas_title')} !!!")
         # Don't set final_response to avoid adding a message to chat
         # The canvas will show the confirmation UI
-        return {
+        result = {
             "final_response": "",  # Empty to avoid chat message
             "messages": state.get('messages', []),
             "needs_canvas": False,
@@ -4787,6 +5603,9 @@ def generate_final_response(state: State):
             "pending_confirmation_task": state.get('pending_confirmation_task'),
             "canvas_confirmation_message": state.get('canvas_confirmation_message') or "Review the changes and confirm to apply them to the document"
         }
+        if agent_metrics:
+            result["agent_metrics"] = agent_metrics
+        return result
     
     # Check if canvas was already set by evaluate_agent_response (e.g., browser screenshots)
     # or by preprocess_files (e.g., uploaded documents)
@@ -4795,7 +5614,7 @@ def generate_final_response(state: State):
         logger.info("Canvas already set by previous node, preserving it")
         # Still need to generate the text response
         text_result = generate_text_answer(state)
-        return {
+        result = {
             "final_response": text_result.get('final_response', ''),
             "messages": text_result.get('messages', []),
             "needs_canvas": False,  # Canvas already rendered
@@ -4805,6 +5624,9 @@ def generate_final_response(state: State):
             "canvas_data": state.get('canvas_data'),
             "canvas_title": state.get('canvas_title')
         }
+        if agent_metrics:
+            result["agent_metrics"] = agent_metrics
+        return result
     
     # Initialize both primary and fallback LLMs
     primary_llm = ChatCerebras(model="gpt-oss-120b")
@@ -5004,7 +5826,8 @@ def generate_final_response(state: State):
                 "has_canvas": True,
                 "canvas_type": response.canvas_type,
                 "canvas_content": canvas_content,  # Keep full content for immediate display
-                "_canvas_artifact_ref": canvas_artifact_ref  # Store reference for later retrieval
+                "_canvas_artifact_ref": canvas_artifact_ref,  # Store reference for later retrieval
+                "agent_metrics": agent_metrics
             }
         else:
             logger.info("Text-only response generated")
@@ -5017,6 +5840,8 @@ def generate_final_response(state: State):
                 result["has_canvas"] = False
                 result["canvas_type"] = None
                 result["canvas_content"] = None
+            if agent_metrics:
+                result["agent_metrics"] = agent_metrics
             return result
             
     except Exception as e:
@@ -5725,7 +6550,7 @@ def route_after_analysis(state: State):
 
 
 def route_after_parse(state: State):
-    '''Route after parsing: handle direct responses, no tasks, or proceed to search.'''
+    '''Route after parsing: handle direct responses, no tasks, or proceed to tool routing.'''
     # OPTIMIZATION: Short-circuit for direct responses (chitchat)
     if state.get('needs_complex_processing') is False and state.get('final_response'):
         logger.info("Direct response available. Short-circuiting to save_history.")
@@ -5734,7 +6559,9 @@ def route_after_parse(state: State):
     if not state.get('parsed_tasks'):
         logger.warning("No tasks were parsed from prompt. Routing to ask_user for clarification.")
         return "ask_user"
-    return "agent_directory_search"
+    
+    # NEW: Route to tool classification first (tool-first approach)
+    return "classify_and_route_to_tools"
 
 def should_continue_or_finish(state: State):
     '''REACTIVE ROUTER: Runs after execution and evaluation to decide the next step.'''
@@ -5743,9 +6570,16 @@ def should_continue_or_finish(state: State):
     task_plan = state.get('task_plan')
     eval_status = state.get("eval_status")
     replan_reason = state.get("replan_reason")
+    replan_count = state.get("replan_count", 0)
     
-    print(f"!!! SHOULD_CONTINUE_OR_FINISH: eval_status={eval_status}, pending={pending}, pending_confirmation={pending_confirmation}, replan_reason={replan_reason}, task_plan_length={len(task_plan) if task_plan else 0} !!!")
-    logger.info(f"Reactive Router: eval_status={eval_status}, pending={pending}, pending_confirmation={pending_confirmation}, replan={bool(replan_reason)}, plan_length={len(task_plan) if task_plan else 0}")
+    print(f"!!! SHOULD_CONTINUE_OR_FINISH: eval_status={eval_status}, pending={pending}, pending_confirmation={pending_confirmation}, replan_reason={replan_reason}, replan_count={replan_count}, task_plan_length={len(task_plan) if task_plan else 0} !!!")
+    logger.info(f"Reactive Router: eval_status={eval_status}, pending={pending}, pending_confirmation={pending_confirmation}, replan={bool(replan_reason)}, replan_count={replan_count}, plan_length={len(task_plan) if task_plan else 0}")
+    
+    # CIRCUIT BREAKER: If max replans reached, force finish
+    if replan_count >= 3:  # MAX_REPLAN_ATTEMPTS
+        print(f"!!! CIRCUIT BREAKER: Max replans reached ({replan_count}), forcing finish !!!")
+        logger.warning(f"Circuit breaker triggered: {replan_count} replans. Forcing completion.")
+        return "generate_final_response"
     
     # CANVAS CONFIRMATION FIX: If confirmation is pending, go to generate_final_response to show canvas
     if pending_confirmation:
@@ -5784,8 +6618,10 @@ builder.add_node("save_history", save_conversation_history)
 builder.add_node("analyze_request", analyze_request)
 builder.add_node("parse_prompt", parse_prompt)  # OPTIMIZED: Super-parser (3-in-1)
 builder.add_node("preprocess_files", preprocess_files)
+builder.add_node("classify_and_route_to_tools", classify_and_route_to_tools)  # NEW: Tool-first routing
 builder.add_node("agent_directory_search", agent_directory_search)  # OPTIMIZED: Internal DB search
 builder.add_node("rank_agents", rank_agents)  # OPTIMIZED: Enhanced LLM ranking
+builder.add_node("validate_agent_endpoints", validate_agent_endpoints)  # SAFETY NET: Endpoint validation
 builder.add_node("plan_execution", plan_execution)
 builder.add_node("pause_for_plan_approval", pause_for_plan_approval)
 builder.add_node("validate_plan_for_execution", validate_plan_for_execution)
@@ -5814,12 +6650,39 @@ builder.add_edge("preprocess_files", "parse_prompt")
 
 builder.add_conditional_edges("parse_prompt", route_after_parse, {
     "ask_user": "ask_user",
-    "agent_directory_search": "agent_directory_search",
+    "classify_and_route_to_tools": "classify_and_route_to_tools",  # NEW: Tool-first routing
     "save_history": "save_history"  # Short-circuit for direct responses
 })
 
+# NEW: Route after tool classification
+def route_after_tool_routing(state: State):
+    """
+    After tool routing, decide:
+    - If all tasks handled by tools -> generate final response
+    - If some tasks need agents -> continue to agent selection
+    """
+    agent_required_tasks = state.get('parsed_tasks', [])
+    tool_routed_count = state.get('tool_routed_count', 0)
+    
+    if not agent_required_tasks:
+        # All tasks handled by tools - skip agent selection
+        logger.info("✅ All tasks handled by tools - skipping agent selection")
+        print("✅ ALL TASKS COMPLETED BY TOOLS - generating response")
+        return "generate_final_response"
+    else:
+        # Some tasks need agents - continue to agent selection
+        logger.info(f"➡️ {len(agent_required_tasks)} tasks need agents - continuing to agent selection")
+        print(f"➡️ {len(agent_required_tasks)} tasks require agents")
+        return "agent_directory_search"
+
+builder.add_conditional_edges("classify_and_route_to_tools", route_after_tool_routing, {
+    "agent_directory_search": "agent_directory_search",
+    "generate_final_response": "generate_final_response"
+})
+
 builder.add_edge("agent_directory_search", "rank_agents")
-builder.add_edge("rank_agents", "plan_execution")
+builder.add_edge("rank_agents", "validate_agent_endpoints")
+builder.add_edge("validate_agent_endpoints", "plan_execution")
 
 # Simple routing: if planning mode, stop for approval; otherwise continue
 def route_after_plan_creation(state: State):

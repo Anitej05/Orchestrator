@@ -17,6 +17,7 @@ class StatusEnum(str, enum.Enum):
 class AgentType(str, enum.Enum):
     HTTP_REST = "http_rest"   # Legacy OpenAPI/REST agents
     MCP_HTTP = "mcp_http"     # Modern MCP Servers
+    TOOL = "tool"             # Direct Python function calls via LangChain @tool
 
 class AuthType(str, enum.Enum):
     NONE = "none"

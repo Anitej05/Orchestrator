@@ -2,15 +2,22 @@
   "id": "document_analysis_agent",
   "owner_id": "orbimesh-vendor",
   "name": "Orbimesh Document Analysis Agent",
-  "description": "For WORD DOCUMENTS (DOCX, TXT, PDF) ONLY. NOT for spreadsheets - use Spreadsheet Agent for CSV/Excel. Supports Q&A, display, and Word editing.",
-  "price_per_call_usd": 0.005,
+  "description": "Professional WORD DOCUMENT processing agent for DOCX, TXT, and PDF files ONLY. NOT for spreadsheets (CSV, Excel) - use Spreadsheet Agent for those. Capabilities: RAG-based Q&A, document display, advanced Word editing (formatting, tables, images, lists).",
+  "agent_type": "http_rest",
+  "version": "1.0.0",
   "status": "active",
-  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA3FcU8hPhmFLgez6qPf801aQahasAlG5S4MPb16nWJPA=\n-----END PUBLIC KEY-----",
+  "price_per_call_usd": 0.005,
+  "requires_credentials": false,
+  "credential_fields": [],
+  "connection_config": {
+    "base_url": "http://localhost:8070",
+    "timeout": 60
+  },
   "endpoints": [
     {
-      "endpoint": "http://localhost:8070/analyze",
+      "endpoint": "/analyze",
       "http_method": "POST",
-      "description": "Answer questions about a document's content using RAG. Use for 'What is this document about?', 'Summarize the key points', 'Find mentions of X'. NOT for editing.",
+      "description": "Extract text, tables, and metadata from uploaded documents (PDF, DOCX, images) into structured form.",
       "parameters": [
         {
           "name": "vector_store_path",
@@ -33,9 +40,9 @@
       ]
     },
     {
-      "endpoint": "http://localhost:8070/display",
+      "endpoint": "/display",
       "http_method": "POST",
-      "description": "Display a document (PDF, DOCX, TXT) in the canvas. Use for 'Show me this document', 'Display the file'.",
+      "description": "Render document previews or extracted content to the canvas for inspection.",
       "parameters": [
         {
           "name": "file_path",
@@ -46,9 +53,9 @@
       ]
     },
     {
-      "endpoint": "http://localhost:8070/create",
+      "endpoint": "/create",
       "http_method": "POST",
-      "description": "CREATE a new document. Can use raw content, transform an existing file, or generate from instructions using LLM. Use for 'Create a document about X', 'Write a report', 'Convert PDF to DOCX'.",
+      "description": "Generate a new document from a prompt and optional template.",
       "parameters": [
         {
           "name": "content",
@@ -89,9 +96,9 @@
       ]
     },
     {
-      "endpoint": "http://localhost:8070/edit",
+      "endpoint": "/edit",
       "http_method": "POST",
-      "description": "Edit a document using natural language. Supports formatting, adding content, tables, images, headers, footers, hyperlinks, page breaks. Use for 'Make headings bold', 'Add a table', 'Change font color'.",
+      "description": "Apply edits (insert/replace/delete text or tables) to an existing document and persist the changes.",
       "parameters": [
         {
           "name": "file_path",
@@ -108,9 +115,9 @@
       ]
     },
     {
-      "endpoint": "http://localhost:8070/undo",
+      "endpoint": "/undo",
       "http_method": "POST",
-      "description": "Undo the last edit to a document. Restores previous version.",
+      "description": "Undo the last edit in the current document session.",
       "parameters": [
         {
           "name": "file_path",
@@ -121,9 +128,9 @@
       ]
     },
     {
-      "endpoint": "http://localhost:8070/redo",
+      "endpoint": "/redo",
       "http_method": "POST",
-      "description": "Redo a previously undone edit. Restores next version.",
+      "description": "Redo a previously undone edit in the current session.",
       "parameters": [
         {
           "name": "file_path",
@@ -134,17 +141,28 @@
       ]
     },
     {
-      "endpoint": "http://localhost:8070/history",
+      "endpoint": "/history",
       "http_method": "POST",
-      "description": "Get version history for a document. Shows all saved versions with timestamps and descriptions.",
+      "description": "List edit history and versions for the active document.",
       "parameters": [
         {
           "name": "file_path",
           "param_type": "string",
           "required": true,
-          "description": "Path to document"
+          "description": "Path to the document."
         }
       ]
     }
-  ]
+  ],
+  "tool_functions": null,
+  "tool_registry": null,
+  "tags": [],
+  "category": null,
+  "icon": null,
+  "documentation_url": null,
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA3FcU8hPhmFLgez6qPf801aQahasAlG5S4MPb16nWJPA=\n-----END PUBLIC KEY-----",
+  "capabilities": {
+    "categories": [],
+    "all_keywords": []
+  }
 }

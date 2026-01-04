@@ -2,21 +2,28 @@
   "id": "custom_browser_agent",
   "owner_id": "orbimesh-vendor",
   "name": "Custom Browser Automation Agent",
-  "description": "A powerful browser automation agent with multi-provider LLM fallback, vision capabilities, and live screenshot streaming. Can navigate websites, interact with elements, extract information, and stream real-time browser activity.",
-  "price_per_call_usd": 0.01,
+  "description": "Browser automation agent for WEB NAVIGATION ONLY. Cannot process local files, documents, or spreadsheets. Use ONLY for: navigating websites, clicking web elements, submitting forms, extracting data from web pages, and streaming live browser screenshots. Multi-provider LLM fallback (Cerebras → Groq → NVIDIA) and vision capabilities (Ollama → NVIDIA). NOT for document editing, spreadsheet manipulation, or local file processing.",
+  "agent_type": "http_rest",
+  "version": "1.0.0",
   "status": "active",
-  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA3FcU8hPhmFLgez6qPf801aQahasAlG5S4MPb16nWJPA=\n-----END PUBLIC KEY-----",
+  "price_per_call_usd": 0.01,
+  "requires_credentials": false,
+  "credential_fields": [],
+  "connection_config": {
+    "base_url": "http://localhost:8090",
+    "timeout": 120
+  },
   "endpoints": [
     {
-      "endpoint": "http://localhost:8090/browse",
+      "endpoint": "/browse",
       "http_method": "POST",
-      "description": "Execute any browser automation task with live streaming. Use this to: navigate to ANY URL (including localhost endpoints like http://localhost:8090/health for health checks), search websites, click elements, fill forms, extract data from web pages, take screenshots, and interact with any web-based interface. Supports real-time screenshot streaming to canvas. Examples: 'Go to leetcode.com and find contests', 'Navigate to http://localhost:8000/docs and show the API', 'Search Amazon for headphones and find the cheapest'.",
+      "description": "Drive a live browser session: navigate URLs, click/type, submit forms, extract structured data, and stream screenshots to the canvas for oversight.",
       "parameters": [
         {
           "name": "task",
           "param_type": "string",
           "required": true,
-          "description": "Natural language task description for the browser agent. Be specific about the URL and what to do."
+          "description": "The task description for the browser agent (e.g., 'Go to leetcode.com/contest and find upcoming contests')."
         },
         {
           "name": "max_steps",
@@ -32,5 +39,16 @@
         }
       ]
     }
-  ]
+  ],
+  "tool_functions": null,
+  "tool_registry": null,
+  "tags": [],
+  "category": null,
+  "icon": null,
+  "documentation_url": null,
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA3FcU8hPhmFLgez6qPf801aQahasAlG5S4MPb16nWJPA=\n-----END PUBLIC KEY-----",
+  "capabilities": {
+    "categories": [],
+    "all_keywords": []
+  }
 }

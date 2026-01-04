@@ -389,11 +389,11 @@ function HomeContent() {
       />
       
       <SidebarInset className={!open ? "ml-16" : ""}>
-        <div className="h-screen pt-[64px] bg-gradient-to-br from-gray-50 to-gray-100 dark:from-gray-950 dark:to-gray-900 relative flex flex-col transition-all duration-300">
+        <div className="h-screen pt-[64px] bg-gradient-to-br from-gray-50 to-gray-100 dark:from-gray-950 dark:to-gray-900 relative flex flex-col transition-all duration-300 max-h-screen overflow-hidden">
           {/* Main Content Area - Resizable */}
-          <ResizablePanelGroup direction="horizontal" className="flex-1 overflow-hidden">
-            <ResizablePanel defaultSize={45} minSize={35} maxSize={60}>
-              <main className="h-full p-6">
+          <ResizablePanelGroup direction="horizontal" className="flex-1 overflow-hidden max-h-full">
+            <ResizablePanel defaultSize={45} minSize={35} maxSize={60} className="overflow-hidden">
+              <main className="h-full p-6 overflow-auto">
                 <TaskBuilder
                   onWorkflowComplete={handleInteractiveWorkflowComplete}
                   onOrchestrationComplete={handleOrchestrationComplete}
@@ -412,7 +412,7 @@ function HomeContent() {
 
             <ResizableHandle withHandle />
 
-            <ResizablePanel defaultSize={50} maxSize={65} minSize={35}>
+            <ResizablePanel defaultSize={50} maxSize={65} minSize={35} className="overflow-hidden">
               <OrchestrationDetailsSidebar
                 ref={sidebarRef}
                 executionResults={executionResults}

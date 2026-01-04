@@ -98,5 +98,8 @@ class State(TypedDict):
     # Evaluation fields
     eval_status: Annotated[Optional[str], overwrite_reducer]
     replan_reason: Annotated[Optional[str], overwrite_reducer]
-    replan_count: Annotated[int, overwrite_reducer]  # Track number of replans to prevent infinite loops
+    replan_count: Annotated[int, overwrite_reducer]
+    
+    # Tool routing fields (Phase 1 implementation)
+    tool_routed_count: Annotated[int, overwrite_reducer]  # Number of tasks handled by direct tools  # Track number of replans to prevent infinite loops
     task_events: Annotated[List[Dict], overwrite_reducer]

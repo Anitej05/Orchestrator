@@ -8,19 +8,32 @@ import asyncio
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
 import os
 import logging
 from pathlib import Path
+from typing import Optional, List, Dict, Any
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+# Add parent directory to path for imports when running as standalone
+CURRENT_DIR = Path(__file__).parent
+BACKEND_DIR = CURRENT_DIR.parent
+sys.path.insert(0, str(BACKEND_DIR))
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 from dotenv import load_dotenv
 
 # Import standardized file manager 
 try:
-    from agents.agent_file_manager import AgentFileManager, FileType, FileStatus
+    from agents.utils.agent_file_manager import AgentFileManager, FileType, FileStatus
 except ImportError:
-    from agent_file_manager import AgentFileManager, FileType, FileStatus
+    try:
+        from utils.agent_file_manager import AgentFileManager, FileType, FileStatus
+    except ImportError:
+        logger.error("Failed to import agent_file_manager from any location")
+        raise
 
 # Import New SOTA Agent
 from agents.browser_agent.agent import BrowserAgent as SotaBrowserAgent

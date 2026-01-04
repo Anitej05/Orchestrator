@@ -5,16 +5,25 @@ Provides email reading, sending, and management capabilities.
 """
 
 import os
+import sys
 import asyncio
 import logging
 import base64
 import re
+import time
+import psutil
 from typing import Dict, Any, Optional, List
+from pathlib import Path
+
+# Add parent directory to path for imports when running as standalone
+CURRENT_DIR = Path(__file__).parent
+BACKEND_DIR = CURRENT_DIR.parent
+sys.path.insert(0, str(BACKEND_DIR))
+
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 import httpx
-from pathlib import Path
 
 load_dotenv()
 
@@ -24,9 +33,13 @@ logger = logging.getLogger(__name__)
 
 # Import standardized file manager
 try:
-    from agents.agent_file_manager import AgentFileManager, FileType, FileStatus
+    from agents.utils.agent_file_manager import AgentFileManager, FileType, FileStatus
 except ImportError:
-    from agent_file_manager import AgentFileManager, FileType, FileStatus
+    try:
+        from utils.agent_file_manager import AgentFileManager, FileType, FileStatus
+    except ImportError:
+        logger.error("Failed to import agent_file_manager from any location")
+        raise
 
 # Configuration
 COMPOSIO_API_KEY = os.getenv("COMPOSIO_API_KEY")
@@ -354,6 +367,43 @@ class GmailClient:
             auto_cleanup=True,
             cleanup_interval_hours=6
         )
+        
+        # Initialize metrics
+        self._metrics_start_time = time.time()
+        self.metrics = {
+            "emails": {
+                "fetched": 0,
+                "sent": 0,
+                "read": 0,
+                "deleted": 0,
+                "total_operations": 0
+            },
+            "attachments": {
+                "downloaded": 0,
+                "uploaded": 0,
+                "total_size_mb": 0
+            },
+            "api_calls": {
+                "total": 0,
+                "successful": 0,
+                "failed": 0,
+                "by_operation": {}
+            },
+            "performance": {
+                "total_latency_ms": 0,
+                "avg_latency_ms": 0,
+                "operations_completed": 0
+            },
+            "errors": {
+                "total": 0,
+                "api_errors": 0,
+                "processing_errors": 0
+            },
+            "resource": {
+                "peak_memory_mb": 0,
+                "current_memory_mb": 0
+            }
+        }
     
     def _html_to_text(self, html: str) -> str:
         """Convert HTML to plain text by stripping tags"""
@@ -522,6 +572,20 @@ class GmailClient:
                     
                     logger.info(f"Saved attachment via file manager: {metadata.file_id} ({filename})")
                     
+                    # Track attachment download
+                    self.metrics["attachments"]["downloaded"] += 1
+                    file_size_mb = len(decoded) / (1024 * 1024)
+                    self.metrics["attachments"]["total_size_mb"] += file_size_mb
+                    
+                    # Update resource metrics
+                    process = psutil.Process()
+                    current_memory = process.memory_info().rss / 1024 / 1024
+                    self.metrics["resource"]["current_memory_mb"] = current_memory
+                    self.metrics["resource"]["peak_memory_mb"] = max(
+                        self.metrics["resource"]["peak_memory_mb"],
+                        current_memory
+                    )
+                    
                     # Return orchestrator-compatible format
                     return metadata.to_orchestrator_format()
             
@@ -535,6 +599,10 @@ class GmailClient:
         """Process email response to extract clean content and handle attachments"""
         try:
             if tool_name == "GMAIL_FETCH_EMAILS":
+                # Track fetched emails
+                self.metrics["emails"]["fetched"] += 1
+                self.metrics["emails"]["total_operations"] += 1
+                
                 # Process list of emails
                 messages = data.get("messages", [])
                 processed_messages = []
@@ -662,6 +730,8 @@ class GmailClient:
             logger.info(f"Email send result: {result}")
             
             if result.get("successful") or result.get("successfull"):
+                self.metrics["emails"]["sent"] += 1
+                self.metrics["emails"]["total_operations"] += 1
                 return {
                     "success": True,
                     "data": result.get("data", {}),
@@ -686,11 +756,16 @@ class GmailClient:
         Returns:
             Tool execution result
         """
+        call_start = time.time()
+        operation_type = tool_name.replace("GMAIL_", "").lower()
+        
         try:
             # Use Composio Python SDK
             from composio import Composio, Action
             
             if not self.api_key:
+                self.metrics["errors"]["total"] += 1
+                self.metrics["errors"]["api_errors"] += 1
                 return {
                     "success": False,
                     "error": "Missing COMPOSIO_API_KEY"
@@ -699,6 +774,12 @@ class GmailClient:
             logger.info(f"Calling Gmail tool via Composio SDK: {tool_name}")
             logger.info(f"Parameters: {parameters}")
             
+            # Track API call
+            self.metrics["api_calls"]["total"] += 1
+            if operation_type not in self.metrics["api_calls"]["by_operation"]:
+                self.metrics["api_calls"]["by_operation"][operation_type] = 0
+            self.metrics["api_calls"]["by_operation"][operation_type] += 1
+            
             # Initialize Composio client
             client = Composio(api_key=self.api_key)
             
@@ -706,6 +787,9 @@ class GmailClient:
             try:
                 action_enum = getattr(Action, tool_name)
             except AttributeError:
+                self.metrics["errors"]["total"] += 1
+                self.metrics["errors"]["api_errors"] += 1
+                self.metrics["api_calls"]["failed"] += 1
                 return {
                     "success": False,
                     "error": f"Unknown action: {tool_name}"
@@ -720,10 +804,20 @@ class GmailClient:
             
             logger.info(f"SDK Response: {str(result)[:200]}...")
             
+            # Track latency
+            latency_ms = (time.time() - call_start) * 1000
+            self.metrics["performance"]["total_latency_ms"] += latency_ms
+            self.metrics["performance"]["operations_completed"] += 1
+            self.metrics["performance"]["avg_latency_ms"] = (
+                self.metrics["performance"]["total_latency_ms"] / 
+                self.metrics["performance"]["operations_completed"]
+            )
+            
             # Parse the result
             if isinstance(result, dict):
                 # Check for success indicators
                 if result.get("successful") or result.get("successfull"):
+                    self.metrics["api_calls"]["successful"] += 1
                     raw_data = result.get("data", result)
                     
                     # Process email content to extract clean text and handle attachments
@@ -731,14 +825,25 @@ class GmailClient:
                     
                     return {"success": True, "data": processed_data}
                 elif "error" in result:
+                    self.metrics["api_calls"]["failed"] += 1
+                    self.metrics["errors"]["total"] += 1
+                    self.metrics["errors"]["api_errors"] += 1
                     return {"success": False, "error": result["error"]}
                 else:
                     # Assume success if no error
+                    self.metrics["api_calls"]["successful"] += 1
                     return {"success": True, "data": result}
             else:
+                self.metrics["api_calls"]["successful"] += 1
                 return {"success": True, "data": result}
                     
         except Exception as e:
+            latency_ms = (time.time() - call_start) * 1000
+            self.metrics["performance"]["total_latency_ms"] += latency_ms
+            self.metrics["performance"]["operations_completed"] += 1
+            self.metrics["api_calls"]["failed"] += 1
+            self.metrics["errors"]["total"] += 1
+            self.metrics["errors"]["api_errors"] += 1
             logger.error(f"Gmail tool call failed: {e}", exc_info=True)
             return {"success": False, "error": str(e)}
     
@@ -826,6 +931,85 @@ class GmailClient:
         except Exception as e:
             logger.error(f"Failed to download attachments: {e}")
             return {"success": False, "error": str(e)}
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get comprehensive mail agent metrics."""
+        uptime_seconds = time.time() - self._metrics_start_time
+        
+        total_api_calls = self.metrics["api_calls"]["total"]
+        success_rate = (
+            (self.metrics["api_calls"]["successful"] / total_api_calls * 100) 
+            if total_api_calls > 0 else 0
+        )
+        
+        # Update resource metrics
+        process = psutil.Process()
+        self.metrics["resource"]["current_memory_mb"] = process.memory_info().rss / 1024 / 1024
+        
+        return {
+            "uptime_seconds": uptime_seconds,
+            "emails": self.metrics["emails"].copy(),
+            "attachments": self.metrics["attachments"].copy(),
+            "api_calls": self.metrics["api_calls"].copy(),
+            "success_rate": success_rate,
+            "performance": self.metrics["performance"].copy(),
+            "errors": self.metrics["errors"].copy(),
+            "resource": self.metrics["resource"].copy()
+        }
+
+    def _log_execution_metrics(self, operation: str, success: bool):
+        """Log execution metrics with clean formatting."""
+        status_emoji = "✅" if success else "❌"
+        
+        logger.info("")
+        logger.info(f"{status_emoji} MAIL AGENT METRICS - {operation}")
+        logger.info("")
+        
+        # Emails
+        logger.info("Email Operations:")
+        logger.info(f"  Fetched: {self.metrics['emails']['fetched']}")
+        logger.info(f"  Sent: {self.metrics['emails']['sent']}")
+        logger.info(f"  Read: {self.metrics['emails']['read']}")
+        logger.info(f"  Total: {self.metrics['emails']['total_operations']}")
+        
+        # Attachments
+        if self.metrics['attachments']['downloaded'] > 0 or self.metrics['attachments']['uploaded'] > 0:
+            logger.info("")
+            logger.info("Attachments:")
+            logger.info(f"  Downloaded: {self.metrics['attachments']['downloaded']}")
+            logger.info(f"  Total Size: {self.metrics['attachments']['total_size_mb']:.2f} MB")
+        
+        # API Calls
+        logger.info("")
+        logger.info("API Calls:")
+        logger.info(f"  Total: {self.metrics['api_calls']['total']}")
+        logger.info(f"  Successful: {self.metrics['api_calls']['successful']}")
+        logger.info(f"  Failed: {self.metrics['api_calls']['failed']}")
+        success_rate = (self.metrics['api_calls']['successful'] / self.metrics['api_calls']['total'] * 100) if self.metrics['api_calls']['total'] > 0 else 0
+        logger.info(f"  Success Rate: {success_rate:.1f}%")
+        
+        # Performance
+        logger.info("")
+        logger.info("Performance:")
+        logger.info(f"  Operations: {self.metrics['performance']['operations_completed']}")
+        logger.info(f"  Total Time: {self.metrics['performance']['total_latency_ms']:.0f} ms")
+        if self.metrics['performance']['operations_completed'] > 0:
+            logger.info(f"  Avg Time: {self.metrics['performance']['avg_latency_ms']:.0f} ms")
+        
+        # Errors
+        if self.metrics['errors']['total'] > 0:
+            logger.info("")
+            logger.info("Errors:")
+            logger.info(f"  Total: {self.metrics['errors']['total']}")
+            logger.info(f"  API Errors: {self.metrics['errors']['api_errors']}")
+            logger.info(f"  Processing Errors: {self.metrics['errors']['processing_errors']}")
+        
+        # Resources
+        logger.info("")
+        logger.info("Resources:")
+        logger.info(f"  Current Memory: {self.metrics['resource']['current_memory_mb']:.1f} MB")
+        logger.info(f"  Peak Memory: {self.metrics['resource']['peak_memory_mb']:.1f} MB")
+        logger.info("")
 
 # Global client instance
 gmail_client = GmailClient()

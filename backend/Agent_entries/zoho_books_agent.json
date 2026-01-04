@@ -3,52 +3,12 @@
   "owner_id": "orbimesh-vendor",
   "name": "Zoho Books Agent - Pharmaceutical",
   "description": "Comprehensive Zoho Books integration for pharmaceutical companies. Automates invoice creation, management, customer handling, and pharmaceutical-specific operations with batch tracking, expiry dates, and regulatory compliance. Handles all invoice automation tasks including creation, updates, sending, payment tracking, and customer/item management.",
-  "capabilities": [
-    "create invoice",
-    "update invoice",
-    "get invoice",
-    "list invoices",
-    "delete invoice",
-    "send invoice",
-    "mark invoice as sent",
-    "mark invoice as paid",
-    "create customer",
-    "update customer",
-    "get customer",
-    "list customers",
-    "create item",
-    "update item",
-    "get item",
-    "list items",
-    "create payment",
-    "get payment",
-    "list payments",
-    "pharmaceutical invoice",
-    "batch number tracking",
-    "expiry date management",
-    "drug name tracking",
-    "regulatory compliance",
-    "pharmaceutical inventory",
-    "invoice automation",
-    "invoice management",
-    "customer management",
-    "payment tracking",
-    "estimate creation",
-    "estimate management",
-    "recurring invoice",
-    "invoice template",
-    "bulk invoice creation",
-    "invoice approval workflow",
-    "convert estimate to invoice",
-    "pharmaceutical compliance",
-    "drug batch tracking",
-    "regulatory license tracking",
-    "controlled substance tracking",
-    "prescription drug management"
-  ],
-  "price_per_call_usd": 0.01,
-  "status": "active",
   "agent_type": "http_rest",
+  "version": "1.0.0",
+  "status": "active",
+  "price_per_call_usd": 0.01,
+  "requires_credentials": false,
+  "credential_fields": [],
   "connection_config": {
     "base_url": "http://localhost:8050"
   },
@@ -506,7 +466,7 @@
           "name": "storage_conditions",
           "param_type": "string",
           "required": false,
-          "description": "Storage conditions (e.g., '2-8°C', 'Room temperature')"
+          "description": "Storage conditions (e.g., '2-8\u00c2\u00b0C', 'Room temperature')"
         },
         {
           "name": "hazard_class",
@@ -783,7 +743,16 @@
       "description": "Health check endpoint. Returns connection status, API domain, organization ID, and rate limit usage.",
       "parameters": []
     }
-  ]
+  ],
+  "tool_functions": null,
+  "tool_registry": null,
+  "tags": [],
+  "category": null,
+  "icon": null,
+  "documentation_url": null,
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nYOUR_PUBLIC_KEY_HERE\n-----END PUBLIC KEY-----",
+  "capabilities": {
+    "categories": [],
+    "all_keywords": []
+  }
 }
-
-
