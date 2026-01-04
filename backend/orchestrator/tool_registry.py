@@ -408,7 +408,8 @@ def initialize_tools():
         from tools.wiki_tools import (
             search_wikipedia,
             get_wikipedia_summary,
-            get_wikipedia_section
+            get_wikipedia_section,
+            get_wikipedia_images
         )
         
         register_tool(search_wikipedia, [
@@ -426,6 +427,13 @@ def initialize_tools():
         register_tool(get_wikipedia_section, [
             "get wikipedia section",
             "wiki section"
+        ], "wiki")
+        
+        register_tool(get_wikipedia_images, [
+            "get wikipedia images",
+            "wikipedia images",
+            "wiki images",
+            "images from wikipedia page"
         ], "wiki")
         
         logger.info("✅ Registered wikipedia tools")

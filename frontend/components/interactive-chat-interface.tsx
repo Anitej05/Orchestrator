@@ -582,11 +582,11 @@ export function InteractiveChatInterface({
               />
             </div>
             <div className="flex space-x-2">
-              {/* Plan Approval Buttons - Show for both planning mode and saved workflows */}
-              {(state.approval_required || ((state.metadata?.currentStage === 'validating' || state.status === 'planning_complete') && onAcceptPlan)) ? (
+              {/* Plan Approval Buttons - Only show when in planning mode with approval required, or executing saved workflows */}
+              {((planningMode && state.approval_required) || ((state.metadata?.currentStage === 'validating' || state.status === 'planning_complete') && onAcceptPlan && state.metadata?.from_workflow)) ? (
                 <>
-                  {/* Only show Modify button for non-saved workflows and not in planning mode */}
-                  {!state.metadata?.from_workflow && !state.approval_required && (
+                  {/* Only show Modify button for non-saved workflows when in planning mode */}
+                  {planningMode && !state.metadata?.from_workflow && (
                     <Button 
                       type="button"
                       variant="outline" 
@@ -598,7 +598,7 @@ export function InteractiveChatInterface({
                     </Button>
                   )}
                   
-                  {/* Always show Accept button when approval is needed */}
+                  {/* Show Accept button when approval is needed in planning mode or for saved workflows */}
                   <Button 
                     type="button"
                     size="sm" 

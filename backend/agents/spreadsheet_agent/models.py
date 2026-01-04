@@ -1,7 +1,7 @@
 """
 Pydantic models for requests, responses, and data structures
 """
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from pydantic import BaseModel, Field, model_serializer
 import numpy as np
 
@@ -13,6 +13,7 @@ class ApiResponse(BaseModel):
     success: bool
     result: Optional[Any] = None
     error: Optional[str] = None
+    canvas_display: Optional[Dict[str, Any]] = None  # For orchestrator approval integration
     
     @model_serializer
     def serialize_model(self):
@@ -34,7 +35,8 @@ class ApiResponse(BaseModel):
         return {
             'success': self.success,
             'result': convert_numpy(self.result),
-            'error': self.error
+            'error': self.error,
+            'canvas_display': self.canvas_display
         }
 
 
@@ -85,6 +87,23 @@ class QueryPlan(BaseModel):
     reasoning: str
 
 
+class ObservationData(BaseModel):
+    """Observation data showing before/after state of spreadsheet operations"""
+    before_shape: Tuple[int, int]  # (rows, cols)
+    after_shape: Tuple[int, int]
+    before_columns: List[str]
+    after_columns: List[str]
+    before_sample: List[Dict[str, Any]]  # First 3 rows
+    after_sample: List[Dict[str, Any]]
+    changes_summary: str
+    columns_added: List[str] = []
+    columns_removed: List[str] = []
+    columns_renamed: Dict[str, str] = {}  # old -> new
+    rows_added: int = 0
+    rows_removed: int = 0
+    data_modified: bool = False
+
+
 class QueryResult(BaseModel):
     """Result of a natural language query"""
     question: str
@@ -94,6 +113,8 @@ class QueryResult(BaseModel):
     success: bool
     error: Optional[str] = None
     execution_metrics: Optional[Dict[str, Any]] = None  # Add metrics field
+    final_dataframe: Optional[Any] = None  # Store the modified DataFrame
+    observation: Optional[ObservationData] = None  # Track changes made
     
     class Config:
         arbitrary_types_allowed = True

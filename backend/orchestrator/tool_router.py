@@ -100,7 +100,8 @@ class ToolRouter:
         # Get required parameters
         required_params = self.tool_registry.get_required_params(tool_name)
         
-        # Check if all required params are available
+        # Check if all required params are available in intent.entities
+        # This now includes both re-extracted entities AND pre-extracted task.parameters
         available_params = set(intent.entities.keys())
         missing = set(required_params) - available_params
         
@@ -112,7 +113,7 @@ class ToolRouter:
                 missing = missing - set(inferred.keys())
         
         if missing:
-            logger.warning(f"Tool '{tool_name}' missing required params: {missing}")
+            logger.warning(f"Tool '{tool_name}' missing required params: {missing}. Available: {available_params}")
             return ToolRoutingDecision(
                 use_tool=False,
                 tool_name=tool_name,
@@ -122,6 +123,7 @@ class ToolRouter:
             )
         
         # All params available - route to tool
+        logger.info(f"✅ Tool '{tool_name}' validated with params: {list(available_params)}")
         return ToolRoutingDecision(
             use_tool=True,
             tool_name=tool_name,

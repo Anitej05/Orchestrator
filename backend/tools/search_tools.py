@@ -26,7 +26,7 @@ def _get_groq_llm():
 
 
 @tool
-async def web_search_and_summarize(
+def web_search_and_summarize(
     query: str,
     include_domains: Optional[List[str]] = None,
     exclude_domains: Optional[List[str]] = None
@@ -59,9 +59,9 @@ async def web_search_and_summarize(
         if search_settings:
             model_kwargs["search_settings"] = search_settings
         
-        # Bind kwargs and invoke
+        # Bind kwargs and invoke (using sync invoke)
         bound_llm = llm.bind(**model_kwargs)
-        response = await bound_llm.ainvoke([HumanMessage(content=query)])
+        response = bound_llm.invoke([HumanMessage(content=query)])
         
         answer = response.content
         if not isinstance(answer, str):

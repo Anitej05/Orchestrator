@@ -85,3 +85,35 @@ def get_wikipedia_section(title: str, section: str) -> Dict:
         return {"error": f"Page '{title}' does not exist"}
     except Exception as e:
         return {"error": f"Failed to get section: {str(e)}"}
+
+
+@tool
+def get_wikipedia_images(title: str) -> Dict:
+    """
+    Get all image URLs from a Wikipedia page.
+    
+    Args:
+        title: The exact title of the Wikipedia page
+        
+    Returns:
+        Dictionary with title and list of image URLs
+    """
+    try:
+        page = wikipedia.page(title, auto_suggest=False, redirect=True)
+        
+        if not page.images:
+            return {"error": f"No images found on page '{title}'"}
+        
+        return {
+            "title": page.title,
+            "images": page.images
+        }
+    except wikipedia.exceptions.PageError:
+        return {"error": f"Page '{title}' does not exist"}
+    except wikipedia.exceptions.DisambiguationError as e:
+        return {
+            "error": f"Title '{title}' is ambiguous",
+            "options": e.options[:10]  # Limit to first 10 options
+        }
+    except Exception as e:
+        return {"error": f"Failed to get images: {str(e)}"}

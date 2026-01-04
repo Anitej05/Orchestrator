@@ -73,16 +73,6 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
     const browserView = (conversationState as any).browser_view;
     const taskStatuses = conversationState.task_statuses || {};
     
-    // Debug logging for canvas state
-    console.log('🎨 Sidebar canvas state:', {
-        hasCanvas,
-        canvasType,
-        hasCanvasContent: !!canvasContent,
-        hasCanvasData: !!canvasData,
-        canvasDataKeys: canvasData ? Object.keys(canvasData) : [],
-        hasBrowserView: !!browserView
-    });
-    
     // Determine which canvas to display - viewed canvas takes precedence
     // Browser view is now shown in chat interface, not in canvas
     // Support both canvas_content (string) and canvas_data (structured object)

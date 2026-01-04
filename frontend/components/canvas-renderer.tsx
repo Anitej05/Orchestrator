@@ -7,7 +7,7 @@ import { FileText, Table, Mail, FileCode, Image as ImageIcon, File, Undo2, Redo2
 import { Button } from '@/components/ui/button'
 
 interface CanvasRendererProps {
-  canvasType: 'html' | 'markdown' | 'pdf' | 'spreadsheet' | 'email_preview' | 'document' | 'image' | 'json'
+  canvasType: 'html' | 'markdown' | 'pdf' | 'spreadsheet' | 'spreadsheet_plan' | 'email_preview' | 'document' | 'image' | 'json'
   canvasContent?: string  // For legacy HTML/markdown content
   canvasData?: Record<string, any>  // For structured data (preferred)
   canvasTitle?: string
@@ -181,6 +181,122 @@ export function CanvasRenderer({
       switch (canvasType) {
         case 'email_preview':
           return renderEmailPreview(canvasData)
+
+        case 'spreadsheet_plan':
+          // Render spreadsheet execution plan for approval
+          const planActions = canvasData.rows || []
+          const planHeaders = canvasData.headers || ['Step', 'Action', 'Description']
+          const planSummary = canvasData.plan_summary || ''
+          const estimatedSteps = canvasData.estimated_steps || planActions.length
+
+          return (
+            <div className="flex flex-col h-full bg-white dark:bg-gray-900">
+              {/* Header */}
+              <div className="bg-gradient-to-r from-blue-600 to-blue-500 px-4 py-3 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <Table className="w-5 h-5 text-white" />
+                  <div>
+                    <h3 className="text-white font-semibold text-sm">Spreadsheet Execution Plan</h3>
+                    <div className="flex items-center gap-3 text-xs text-blue-100">
+                      <span>{estimatedSteps} estimated operations</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Plan Summary */}
+              {planSummary && (
+                <div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 px-4 py-3">
+                  <p className="text-sm text-blue-900 dark:text-blue-100 font-medium">Plan Summary</p>
+                  <p className="text-sm text-blue-800 dark:text-blue-200 mt-1">{planSummary}</p>
+                </div>
+              )}
+
+              {/* Warning Banner */}
+              {requiresConfirmation && (
+                <div className="bg-amber-50 dark:bg-amber-900/20 border-l-4 border-amber-500 px-4 py-3">
+                  <div className="flex items-start">
+                    <svg className="h-5 w-5 text-amber-500 mt-0.5" viewBox="0 0 20 20" fill="currentColor">
+                      <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                    </svg>
+                    <div className="ml-3">
+                      <p className="text-sm font-medium text-amber-800 dark:text-amber-200">
+                        {confirmationMessage || 'Review the plan and approve to execute changes'}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Actions Table */}
+              <div className="flex-1 overflow-auto">
+                <table className="w-full border-collapse">
+                  <thead className="sticky top-0 z-10">
+                    <tr className="bg-gray-100 dark:bg-gray-800">
+                      {planHeaders.map((header: string, idx: number) => (
+                        <th
+                          key={idx}
+                          className="border border-gray-300 dark:border-gray-600 px-4 py-3 text-left text-xs font-semibold text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-800"
+                        >
+                          {header}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {planActions.map((row: string[], rowIdx: number) => (
+                      <tr
+                        key={rowIdx}
+                        className={`${rowIdx % 2 === 0 ? 'bg-white dark:bg-gray-900' : 'bg-gray-50 dark:bg-gray-800/50'}`}
+                      >
+                        {row.map((cell: string, cellIdx: number) => (
+                          <td
+                            key={cellIdx}
+                            className="border border-gray-300 dark:border-gray-600 px-4 py-3 text-sm text-gray-900 dark:text-gray-100"
+                          >
+                            {cellIdx === 0 ? (
+                              <span className="font-semibold text-blue-600 dark:text-blue-400">{cell}</span>
+                            ) : cellIdx === 1 ? (
+                              <span className="font-medium text-gray-700 dark:text-gray-300">{cell}</span>
+                            ) : (
+                              <span className="text-gray-600 dark:text-gray-400">{cell}</span>
+                            )}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Confirmation Buttons */}
+              {requiresConfirmation && (onConfirm || onCancel) && (
+                <div className="border-t border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
+                  <div className="flex justify-end gap-3">
+                    {onCancel && (
+                      <button
+                        onClick={onCancel}
+                        className="px-6 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 font-medium transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    )}
+                    {onConfirm && (
+                      <button
+                        onClick={onConfirm}
+                        className="px-6 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors flex items-center gap-2"
+                      >
+                        <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                        </svg>
+                        Approve & Execute
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          )
 
         case 'spreadsheet':
           // Render spreadsheet from structured data - Excel-like styling

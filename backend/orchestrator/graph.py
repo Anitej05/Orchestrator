@@ -22,10 +22,12 @@ import time
 import os
 import re
 import base64
+import uuid
 import numpy as np
 import textwrap
 import psutil
 from pathlib import Path
+from functools import lru_cache
 from contextlib import redirect_stdout, redirect_stderr
 from pydantic import BaseModel, Field, ValidationError, create_model
 from pydantic.networks import HttpUrl
@@ -66,6 +68,42 @@ ORCHESTRATOR_METRICS = {
     },
     "start_time": time.time()
 }
+
+
+@lru_cache(maxsize=256)
+def _get_registry_request_format(agent_id: str, endpoint_path: str) -> str | None:
+    """Fallback to Agent_entries metadata when DB endpoint records are missing request_format."""
+    try:
+        normalized_endpoint_path = (endpoint_path or "").strip()
+        if normalized_endpoint_path and not normalized_endpoint_path.startswith('/'):
+            normalized_endpoint_path = '/' + normalized_endpoint_path
+
+        backend_dir = Path(__file__).resolve().parents[1]
+        entry_path = backend_dir / 'Agent_entries' / f'{agent_id}.json'
+        if not entry_path.exists():
+            return None
+
+        data = json.loads(entry_path.read_text(encoding='utf-8'))
+        if not isinstance(data, dict):
+            return None
+
+        for ep in data.get('endpoints', []) or []:
+            if not isinstance(ep, dict):
+                continue
+
+            ep_path = (ep.get('endpoint') or "").strip()
+            if ep_path and not ep_path.startswith('/'):
+                ep_path = '/' + ep_path
+
+            if ep_path == normalized_endpoint_path:
+                rf = ep.get('request_format')
+                if isinstance(rf, str) and rf.strip():
+                    return rf.strip()
+                return None
+
+        return None
+    except Exception:
+        return None
 
 def get_orchestrator_metrics() -> Dict[str, Any]:
     """Get comprehensive orchestrator metrics."""
@@ -1312,7 +1350,18 @@ def parse_prompt(state: State):
     1. Chitchat detection (direct response)
     2. Task parsing with parameter extraction
     3. Title generation (first turn only)
+    
+    Also: Extract and preserve owner from config into state for downstream nodes
     """
+    # --- Extract owner from config if available and preserve in state ---
+    # Owner is only available on initial conversation (from WebSocket/HTTP request)
+    # For continuation, we may need to retrieve from database later
+    owner = state.get("owner")  # Check if already in state
+    if not owner and hasattr(state, '_config'):
+        # Try to extract from state's config if not already in state dict
+        owner = state._config.get("owner") if hasattr(state, '_config') else None
+    logger.info(f"[PARSE_PROMPT] Owner info in state: {owner}")
+    
     # --- Create a formatted history of the conversation ---
     history = ""
     if messages := state.get('messages'):
@@ -1326,8 +1375,9 @@ def parse_prompt(state: State):
     # Check if this is the first turn (for title generation)
     is_first_turn = not state.get("messages") or len(state.get("messages")) == 0
     
-    capability_texts, _ = get_all_capabilities()
-    capabilities_list_str = ", ".join(f"'{c}'" for c in capability_texts)
+    # SKIP: Capabilities system temporarily disabled - causes validation infinite loop
+    # capability_texts, _ = get_all_capabilities()
+    # capabilities_list_str = ", ".join(f"'{c}'" for c in capability_texts)
     
     # Get lean agent catalogue for smarter task parsing
     agent_catalogue = get_lean_agent_catalogue()
@@ -1402,7 +1452,8 @@ def parse_prompt(state: State):
     else:
         logger.info("[PARSE_PROMPT_DEBUG] No uploaded_files in state")
     
-    logger.info(f"[PARSE_PROMPT_DEBUG] Capabilities count: {len(capability_texts)}, first 5: {capability_texts[:5]}")
+    # SKIP: Debug log for capabilities - system temporarily disabled
+    # logger.info(f"[PARSE_PROMPT_DEBUG] Capabilities count: {len(capability_texts)}, first 5: {capability_texts[:5]}")
     logger.info(f"[PARSE_PROMPT_DEBUG] Original prompt: '{state['original_prompt']}'")
 
     # Get tool descriptions for LLM context
@@ -1570,7 +1621,8 @@ def parse_prompt(state: State):
                 "suggested_title": response.suggested_title,
                 "needs_complex_processing": False,  # Flag to skip orchestration
                 "parsing_error_feedback": None,
-                "parse_retry_count": 0
+                "parse_retry_count": 0,
+                "owner": owner  # Preserve owner even for direct responses
             }
 
         if not response or not response.tasks:
@@ -1594,7 +1646,8 @@ def parse_prompt(state: State):
                 "user_expectations": {},
                 "parsing_error_feedback": None,
                 "parse_retry_count": state.get('parse_retry_count', 0) + 1,
-                "final_response": f"Sorry, I'm currently experiencing high traffic or technical issues with the underlying services. Please try again later. Error: {str(e)}"
+                "final_response": f"Sorry, I'm currently experiencing high traffic or technical issues with the underlying services. Please try again later. Error: {str(e)}",
+                "owner": owner  # Preserve owner in error cases too
             }
         else:
             # This is likely a user input issue
@@ -1610,7 +1663,8 @@ def parse_prompt(state: State):
         "parsing_error_feedback": None,
         "parse_retry_count": current_retry_count + 1,
         "suggested_title": getattr(response, 'suggested_title', None) if response else None,
-        "needs_complex_processing": True  # Complex processing needed if we got here
+        "needs_complex_processing": True,  # Complex processing needed if we got here
+        "owner": owner  # Preserve owner for downstream nodes (user thread registration)
     }
 
 
@@ -1632,7 +1686,8 @@ async def classify_and_route_to_tools(state: State):
     """
     from orchestrator.intent_classifier import classify_intent
     from orchestrator.tool_router import route_to_tool
-    from orchestrator.tool_registry import execute_tool
+    from orchestrator.tool_registry import execute_tool, get_tool_registry
+    from orchestrator.parameter_validator import ParameterValidator
     
     original_prompt = state.get('original_prompt', '')
     parsed_tasks = state.get('parsed_tasks', [])
@@ -1641,64 +1696,109 @@ async def classify_and_route_to_tools(state: State):
     logger.info(f"🎯 CLASSIFY_AND_ROUTE: Starting intent classification for prompt: {original_prompt[:100]}...")
     print(f"🎯 CLASSIFY_AND_ROUTE: Analyzing {len(parsed_tasks)} tasks")
     
+    # Initialize parameter validator
+    tool_registry = get_tool_registry()
+    param_validator = ParameterValidator(tool_registry)
+    
     # Track which tasks can be handled by tools
     tool_routed_tasks = []
     agent_required_tasks = []
     
     for task in parsed_tasks:
+        # CRITICAL FIX: Use Task.parameters directly (pre-extracted by LLM)
+        # Only use task_prompt for intent classification, not parameter extraction
         task_prompt = f"{task.task_name}: {task.task_description}"
+        task_params = dict(task.parameters) if task.parameters else {}  # Pre-extracted by LLM
         
-        # STEP 1: Classify intent
+        logger.info(f"🔍 [ROUTE] Task: {task.task_name} | Pre-extracted params: {task_params}")
+        
+        # STEP 1: Classify intent (for tool selection, not parameter extraction)
         intent = classify_intent(task_prompt, uploaded_files)
         logger.info(f"📊 Intent for '{task.task_name}': {intent.category} (confidence={intent.confidence:.2f}, tool_hint={intent.tool_hint})")
         print(f"📊 Intent: {intent.category} | Tool: {intent.tool_hint} | Confidence: {intent.confidence:.2f}")
         
+        # CRITICAL: Merge pre-extracted parameters with intent entities
+        # Pre-extracted params take priority (they're from LLM parse, not re-extracted)
+        merged_entities = {**intent.entities, **task_params}
+        intent.entities = merged_entities
+        logger.info(f"🔀 [MERGE] Intent entities merged: {merged_entities}")
+        
         # STEP 2: Try to route to tool
-        routing_decision = route_to_tool(intent, context={"state": state})
+        routing_decision = route_to_tool(intent, context={"state": state, "task_params": task_params})
         
         if routing_decision.use_tool:
             logger.info(f"✅ TOOL ROUTING: '{task.task_name}' -> Tool '{routing_decision.tool_name}' ({routing_decision.reasoning})")
             print(f"✅ TOOL SELECTED: {routing_decision.tool_name}")
             
-            # Execute tool immediately
+            # STEP 2.5: Validate parameters using ParameterValidator
+            tool_name = routing_decision.tool_name
+            param_context = param_validator.validate_and_merge(
+                task=task,
+                tool_name=tool_name,
+                intent_params=merged_entities
+            )
+            
+            if not param_context.is_valid:
+                logger.warning(f"⚠️ Tool '{tool_name}' parameter validation failed: {param_context.validation_errors}")
+                print(f"⚠️ PARAM VALIDATION FAILED: {tool_name} - {param_context.validation_errors}")
+                agent_required_tasks.append(task)
+                continue
+            
+            # Validate parameters before execution
+            if routing_decision.missing_params:
+                logger.warning(f"⚠️ Tool '{tool_name}' has missing params: {routing_decision.missing_params}")
+                print(f"⚠️ MISSING PARAMS: {tool_name} - {routing_decision.missing_params}")
+                agent_required_tasks.append(task)
+                continue
+            
+            # Execute tool immediately with validated parameters
             try:
-                logger.info(f"🔧 Executing tool '{routing_decision.tool_name}' with params: {routing_decision.tool_params}")
-                result = await execute_tool(routing_decision.tool_name, routing_decision.tool_params)
+                logger.info(f"🔧 Executing tool '{tool_name}' with validated params: {param_context.merged_params}")
+                result = await execute_tool(tool_name, param_context.merged_params)
                 
-                # Check if tool execution succeeded AND result doesn't contain an error
+                # Check if tool execution succeeded
+                if not result.get("success"):
+                    error_msg = result.get("error", "Tool execution failed")
+                    logger.error(f"❌ Tool '{tool_name}' execution failed: {error_msg}")
+                    print(f"❌ TOOL ERROR: {tool_name} - {error_msg}")
+                    agent_required_tasks.append(task)
+                    continue
+                
+                # Check if the tool result contains errors
                 tool_result = result.get("result")
-                has_tool_error = isinstance(tool_result, dict) and "error" in tool_result
+                if isinstance(tool_result, dict) and tool_result.get("status") == "error":
+                    error_msg = tool_result.get("error", "Unknown error in tool result")
+                    logger.error(f"❌ Tool '{tool_name}' returned error: {error_msg}")
+                    print(f"❌ TOOL ERROR: {tool_name} - {error_msg}")
+                    agent_required_tasks.append(task)
+                    continue
                 
-                if result.get("success") and not has_tool_error:
-                    logger.info(f"✅ Tool execution SUCCESS for '{routing_decision.tool_name}'")
-                    print(f"✅ TOOL SUCCESS: {routing_decision.tool_name}")
-                    
-                    # Add to completed tasks
-                    completed_task = CompletedTask(
-                        task_name=task.task_name,
-                        task_description=task.task_description,
-                        agent_name=f"Tool: {routing_decision.tool_name}",
-                        result=tool_result,
-                        success=True,
-                        execution_time=0.5,  # Fast tool execution
-                        error=None
-                    )
-                    tool_routed_tasks.append(completed_task)
-                elif has_tool_error:
-                    # Tool returned an error in its result - treat as failure
-                    error_msg = tool_result.get("error", "Unknown tool error")
-                    logger.warning(f"⚠️ Tool returned error for '{routing_decision.tool_name}': {error_msg}")
-                    print(f"⚠️ TOOL ERROR RESULT: {routing_decision.tool_name} - {error_msg}")
+                if isinstance(tool_result, dict) and "error" in tool_result and not tool_result.get("totalResults"):
+                    # Tool returned error but not marked as status error
+                    error_msg = tool_result.get("error", "Unknown error in tool result")
+                    logger.error(f"❌ Tool '{tool_name}' returned error: {error_msg}")
+                    print(f"❌ TOOL ERROR: {tool_name} - {error_msg}")
                     agent_required_tasks.append(task)
-                else:
-                    # Tool execution failed - fallback to agent
-                    logger.warning(f"⚠️ Tool execution FAILED for '{routing_decision.tool_name}': {result.get('error')}")
-                    print(f"⚠️ TOOL FAILED: {routing_decision.tool_name} - falling back to agent")
-                    agent_required_tasks.append(task)
+                    continue
+                
+                logger.info(f"✅ Tool execution SUCCESS for '{tool_name}'")
+                print(f"✅ TOOL SUCCESS: {tool_name}")
+                
+                # Add to completed tasks
+                completed_task = CompletedTask(
+                    task_name=task.task_name,
+                    task_description=task.task_description,
+                    agent_name=f"Tool: {tool_name}",
+                    result=tool_result,
+                    success=True,
+                    execution_time=0.5,  # Fast tool execution
+                    error=None
+                )
+                tool_routed_tasks.append(completed_task)
                     
             except Exception as e:
-                logger.error(f"❌ Tool execution ERROR for '{routing_decision.tool_name}': {e}", exc_info=True)
-                print(f"❌ TOOL ERROR: {routing_decision.tool_name} - falling back to agent")
+                logger.error(f"❌ Tool execution ERROR for '{tool_name}': {e}", exc_info=True)
+                print(f"❌ TOOL ERROR: {tool_name} - falling back to agent")
                 agent_required_tasks.append(task)
         else:
             # Tool routing declined - continue to agent selection
@@ -2250,8 +2350,9 @@ def plan_execution(state: State, config: RunnableConfig):
                 }
                 available_agents_info.append(agent_info)
         
-        all_capabilities, _ = get_all_capabilities()
-        capabilities_str = ", ".join(all_capabilities)
+        # SKIP: Capabilities system temporarily disabled - causes validation infinite loop
+        # all_capabilities, _ = get_all_capabilities()
+        # capabilities_str = ", ".join(all_capabilities)
 
         # Get recently completed tasks for context
         completed_tasks = state.get('completed_tasks', [])
@@ -2652,6 +2753,65 @@ def plan_execution(state: State, config: RunnableConfig):
                 logger.error(f"Simplified plan creation also failed: {fallback_error}")
                 output_state = {"task_plan": []}
 
+    # === SPREADSHEET AGENT MULTI-STAGE PLANNING FIX ===
+    # Override endpoints for spreadsheet tasks to use /plan_operation for initial propose stage
+    if 'task_plan' in output_state and output_state['task_plan']:
+        logger.info("🗂️  Checking task plan for spreadsheet agent tasks to override endpoints...")
+        
+        # Get task_agent_pairs to find spreadsheet agent tasks
+        task_agent_pair_dicts = state.get('task_agent_pairs', [])
+        spreadsheet_agent_ids = set()
+        
+        # Identify spreadsheet agent IDs
+        for pair_dict in task_agent_pair_dicts:
+            try:
+                pair = TaskAgentPair.model_validate(pair_dict)
+                if 'spreadsheet' in pair.primary.id.lower():
+                    spreadsheet_agent_ids.add(pair.primary.id)
+                    logger.info(f"🗂️  Found spreadsheet agent: {pair.primary.id}")
+            except Exception as e:
+                logger.warning(f"Could not parse task_agent_pair: {e}")
+        
+        # Override endpoints for spreadsheet tasks
+        for batch_idx, batch in enumerate(output_state['task_plan']):
+            for task_idx, task in enumerate(batch):
+                # Check if this task is for a spreadsheet agent
+                primary_id = task.get('primary', {}).get('id') if isinstance(task.get('primary'), dict) else \
+                           (task.primary.id if hasattr(task, 'primary') and hasattr(task.primary, 'id') else None)
+                
+                if primary_id in spreadsheet_agent_ids:
+                    # This is a spreadsheet task - check if we should override endpoint to /plan_operation
+                    current_endpoint = task.get('primary', {}).get('endpoint') if isinstance(task.get('primary'), dict) else \
+                                     (task.primary.endpoint if hasattr(task, 'primary') and hasattr(task.primary, 'endpoint') else None)
+                    
+                    # Only override if current endpoint is NOT already /plan_operation
+                    if current_endpoint and '/plan_operation' not in str(current_endpoint):
+                        logger.info(f"🗂️  [SPREADSHEET] Task '{task.get('task_name')}' (batch {batch_idx}, idx {task_idx}): Overriding endpoint '{current_endpoint}' → '/plan_operation'")
+                        
+                        # Update the endpoint to /plan_operation
+                        if isinstance(task, dict):
+                            if 'primary' not in task:
+                                task['primary'] = {}
+                            task['primary']['endpoint'] = '/plan_operation'
+                            task['primary']['http_method'] = 'POST'
+                            
+                            # Add stage='propose' to payload for initial plan generation
+                            if 'primary' in task and isinstance(task['primary'], dict):
+                                if 'payload' not in task['primary']:
+                                    task['primary']['payload'] = {}
+                                task['primary']['payload']['stage'] = 'propose'
+                                logger.info(f"🗂️  [SPREADSHEET] Added stage='propose' to payload for initial planning")
+                        else:
+                            # PlannedTask object
+                            task.primary.endpoint = '/plan_operation'
+                            task.primary.http_method = 'POST'
+                            if not task.primary.payload:
+                                task.primary.payload = {}
+                            task.primary.payload['stage'] = 'propose'
+                            logger.info(f"🗂️  [SPREADSHEET] Added stage='propose' to payload for initial planning")
+                    else:
+                        logger.info(f"🗂️  [SPREADSHEET] Task '{task.get('task_name')}' already using /plan_operation (no override needed)")
+    
     # Save the new or modified plan to the file system immediately.
     # We create a temporary state to pass the object version of the plan for readable file output.
     temp_state_for_saving = {**state, **output_state}
@@ -2788,8 +2948,11 @@ def validate_plan_for_execution(state: State):
         return {"replan_reason": None, "pending_user_input": False}
     task_plan = [[PlannedTask.model_validate(batch_item) for batch_item in batch] for batch in task_plan_dicts]
 
-    all_capabilities, _ = get_all_capabilities()
-    capabilities_str = ", ".join(all_capabilities)
+    # SKIP: Capabilities validation temporarily disabled
+    # This was causing infinite replan loops because validation LLM couldn't see agent capabilities
+    # Validation now only checks: endpoint availability, required parameters, agent running
+    # all_capabilities, _ = get_all_capabilities()
+    # capabilities_str = ", ".join(all_capabilities)
     
     # Initialize both primary and fallback LLMs
     primary_llm = ChatCerebras(model="gpt-oss-120b")
@@ -2864,7 +3027,6 @@ def validate_plan_for_execution(state: State):
     - Task to Validate: "{task_to_validate.task_description}"
     - Required Parameters for this Task: {required_params}
     {file_context}
-    - All Available System Capabilities: [{capabilities_str}]
 
     **Your Decision Process:**
     1.  **Check Context:** Can all `Required Parameters` (e.g., 'image_path', 'vector_store_path', 'query') be filled using the `Original User Prompt`, `Conversation History`, `Previously Completed Tasks`, or the `Available File Context`? The file paths provided are the values you should use.
@@ -2878,8 +3040,10 @@ def validate_plan_for_execution(state: State):
     3. **If YES (all parameters can be filled):** The task is ready to run. Respond with `status: "ready"` and `reasoning: null`.
     
     4.  **If NO:** Determine the root cause.
-        a. **Can another agent find the missing info?** If a value is missing (e.g., a city name) but a capability like "perform web search and summarize" could find it, respond with `status: "replan_needed"` and a clear `reasoning` (e.g., "Missing coordinates for the city mentioned, which can be found via web search.").
+        a. **Can another agent find the missing info?** If a value is missing (e.g., a city name) but you believe another agent or tool could find it, respond with `status: "replan_needed"` and a clear `reasoning` (e.g., "Missing coordinates for the city mentioned, which could be found via web search.").
         b. **Is user input the only way?** If the information is something only the user would know AND cannot be inferred from context, respond with `status: "user_input_required"` and a clear, direct `question` for the user.
+
+    **NOTE:** Do NOT fail validation just because of missing capabilities. Focus only on whether the required parameters can be filled from available context.
 
     Respond in a valid JSON format conforming to the PlanValidationResult schema.
     '''
@@ -3179,6 +3343,17 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
         if any(word in original_prompt.lower() for word in ['what', 'summarize', 'summary', 'about', 'describe', 'analyze', 'scan', 'extract', 'list', 'find']):
             pre_extracted_params['query'] = original_prompt
             logger.info(f"AUTO-INJECTED query from original prompt: {original_prompt}")
+
+    # AUTO-INJECT: thread_id when supported by endpoint
+    if 'thread_id' in [p.name for p in selected_endpoint.parameters] and 'thread_id' not in pre_extracted_params:
+        thread_id_from_config = None
+        try:
+            thread_id_from_config = config.get('configurable', {}).get('thread_id') if config else None
+        except Exception:
+            thread_id_from_config = None
+        if thread_id_from_config:
+            pre_extracted_params['thread_id'] = thread_id_from_config
+            logger.info(f"✅ AUTO-INJECTED thread_id from config: {thread_id_from_config}")
     
     # NATURAL LANGUAGE FALLBACK: For /edit endpoint, use task description as instruction
     if '/edit' in endpoint_path and 'instruction' in [p.name for p in selected_endpoint.parameters]:
@@ -3285,6 +3460,40 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
             logger.info(f"🔍 [FILE_ID_INJECTION] Skipped - file_id already extracted: {pre_extracted_params['file_id']}")
         elif not uploaded_files:
             logger.warning(f"⚠️ [FILE_ID_INJECTION] Skipped - no uploaded files available")
+
+    # AUTO-INJECT: Spreadsheet /plan_operation requires an instruction
+    # Spreadsheet agent contract:
+    # - stage=propose expects natural-language instruction
+    # - stage=simulate/execute expects JSON instruction with plan_id
+    if endpoint_path == '/plan_operation' and 'instruction' in [p.name for p in selected_endpoint.parameters]:
+        if 'instruction' not in pre_extracted_params:
+            stage = (pre_extracted_params.get('stage') or 'propose').strip().lower()
+
+            if stage == 'propose':
+                instruction_text = planned_task.task_description or state.get('original_prompt', '')
+                if instruction_text:
+                    pre_extracted_params['instruction'] = instruction_text
+                    logger.info(f"✅ AUTO-INJECTED instruction for /plan_operation (propose): {instruction_text}")
+                else:
+                    logger.warning("⚠️ /plan_operation (propose) missing instruction and no task description/original prompt available")
+
+            elif stage in {'simulate', 'execute'}:
+                plan_id = None
+                pending = state.get('pending_confirmation_task') or {}
+                pending_canvas = pending.get('canvas_display') or {}
+                if isinstance(pending_canvas, dict):
+                    plan_id = pending_canvas.get('plan_id')
+                if not plan_id:
+                    plan_id = pre_extracted_params.get('plan_id')
+
+                if plan_id:
+                    if stage == 'simulate':
+                        pre_extracted_params['instruction'] = json.dumps({'plan_id': plan_id})
+                    else:
+                        pre_extracted_params['instruction'] = json.dumps({'plan_id': plan_id, 'force': False})
+                    logger.info(f"✅ AUTO-INJECTED instruction for /plan_operation ({stage}): plan_id={plan_id}")
+                else:
+                    logger.warning(f"⚠️ /plan_operation ({stage}) missing plan_id; cannot auto-build instruction")
     
     # AUTO-INJECT: Instruction for execute_pandas endpoint
     if '/execute_pandas' in endpoint_path and 'instruction' in [p.name for p in selected_endpoint.parameters]:
@@ -3712,7 +3921,7 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                     # Check if agent expects form data instead of JSON
                     # Priority: endpoint-specific > agent connection_config > default (json)
                     # Unified request format resolution
-                    def get_request_format(endpoint, connection_cfg):
+                    def get_request_format(endpoint, connection_cfg, agent_id: str, ep_path: str):
                         """Get request format with proper fallback logic."""
                         # Try endpoint-specific format (highest priority)
                         endpoint_format = None
@@ -3727,6 +3936,12 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                         if endpoint_format and endpoint_format.strip():
                             logger.info(f"✅ Using endpoint-specific request_format: {endpoint_format}")
                             return endpoint_format
+
+                        # Fall back to registry file (Agent_entries) if DB endpoint metadata is missing
+                        registry_format = _get_registry_request_format(agent_id, ep_path)
+                        if registry_format:
+                            logger.info(f"✅ Using registry request_format for {agent_id}{ep_path}: {registry_format}")
+                            return registry_format
                         
                         # Fall back to agent-level format
                         if connection_cfg and isinstance(connection_cfg, dict):
@@ -3737,7 +3952,7 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                         logger.info(f"No request_format found. Defaulting to 'json'")
                         return 'json'
                     
-                    request_format = get_request_format(selected_endpoint, connection_config)
+                    request_format = get_request_format(selected_endpoint, connection_config, agent_details.id, endpoint_path)
                     use_form_data = request_format == 'form'
                     logger.info(f"[REQUEST_FORMAT] Endpoint: {endpoint_path}, format: {request_format}, use_form_data: {use_form_data}")
                     logger.info(f"[PAYLOAD_DEBUG] Payload keys: {list(payload.keys()) if isinstance(payload, dict) else 'not a dict'}")
@@ -3836,6 +4051,13 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                         canvas_display = result.get('result', {}).get('canvas_display')
                     
                     if canvas_display:
+                        # Spreadsheet multi-stage planning: carry plan_id forward for confirmation execution
+                        try:
+                            if isinstance(result.get('result'), dict) and result.get('result', {}).get('plan_id'):
+                                canvas_display['plan_id'] = result.get('result', {}).get('plan_id')
+                        except Exception:
+                            pass
+
                         # CRITICAL FIX: Only access .get() if canvas_display is not None
                         canvas_type = canvas_display.get('canvas_type') if canvas_display else None
                         requires_confirmation = canvas_display.get('requires_confirmation', False) if canvas_display else False
@@ -3928,16 +4150,66 @@ async def execute_confirmed_task(state: State, config: RunnableConfig):
             "pending_confirmation_task": None
         }
     
-    # Create a PlannedTask from the task_pair
+    # Create a PlannedTask from the task_pair with proper ExecutionStep
+    # Default to the first endpoint, but prefer /plan_operation for spreadsheet confirmation.
+    endpoint_to_use = task_pair.primary.endpoints[0] if task_pair.primary.endpoints else None
+    if not endpoint_to_use:
+        logger.error(f"No endpoints available for agent '{agent_name}'")
+        return {
+            "canvas_confirmation_action": None,
+            "canvas_confirmation_task": None,
+            "pending_confirmation": False,
+            "pending_confirmation_task": None
+        }
+
+    is_spreadsheet_agent = 'spreadsheet' in (task_pair.primary.id or '').lower() or 'spreadsheet' in (task_pair.primary.name or '').lower()
+    if is_spreadsheet_agent and task_pair.primary.endpoints:
+        plan_op_endpoint = next((ep for ep in task_pair.primary.endpoints if str(getattr(ep, 'endpoint', '')) == '/plan_operation'), None)
+        if plan_op_endpoint:
+            endpoint_to_use = plan_op_endpoint
+    
+    # Build the ExecutionStep with payload
+    payload = {}
+    
+    # === SPREADSHEET AGENT CONFIRMATION FIX ===
+    # Spreadsheet /plan_operation requires instruction JSON with plan_id for execute stage
+    if is_spreadsheet_agent and str(getattr(endpoint_to_use, 'endpoint', '')) == '/plan_operation':
+        pending_canvas = pending_task.get('canvas_display', {}) if isinstance(pending_task, dict) else {}
+        plan_id = pending_canvas.get('plan_id') if isinstance(pending_canvas, dict) else None
+
+        if not plan_id:
+            logger.error("❌ [SPREADSHEET CONFIRMATION] Missing plan_id in pending_confirmation_task.canvas_display")
+            return {
+                "canvas_confirmation_action": None,
+                "canvas_confirmation_task": None,
+                "pending_confirmation": False,
+                "pending_confirmation_task": None,
+                "has_canvas": False,
+                "canvas_content": None,
+                "canvas_data": None,
+                "final_response": "Couldn't execute the spreadsheet plan because the plan_id was missing. Please re-run planning to regenerate the plan."
+            }
+
+        payload['stage'] = 'execute'
+        payload['instruction'] = json.dumps({"plan_id": plan_id, "force": False})
+        logger.info(f"🗂️  [SPREADSHEET CONFIRMATION] Executing /plan_operation stage='execute' plan_id={plan_id}")
+    
+    from schemas import ExecutionStep
+    execution_step = ExecutionStep(
+        id=str(uuid.uuid4()),
+        http_method=endpoint_to_use.http_method,
+        endpoint=endpoint_to_use.endpoint,
+        payload=payload
+    )
+    
     planned_task = PlannedTask(
         task_name=task_pair.task_name,
         task_description=task_pair.task_description,
-        primary_agent_id=task_pair.primary.id,
-        fallback_agent_ids=[fb.id for fb in task_pair.fallbacks] if task_pair.fallbacks else []
+        primary=execution_step
     )
     
-    # Execute the task with show_preview=False (actually execute)
-    logger.info(f"📧 Executing task '{task_name}' with agent '{agent_name}' (confirmed)")
+    # Execute the task with force_execute=True to actually execute (not preview)
+    logger.info(f"📧 Executing confirmed task '{task_name}' with agent '{agent_name}' (stage='execute' for spreadsheet)")
     result = await run_agent(planned_task, task_pair.primary, state, config, force_execute=True)
     logger.info(f"📊 Task execution result keys: {list(result.keys()) if isinstance(result, dict) else 'not a dict'}")
     logger.info(f"📊 Canvas display in result: {'present' if result.get('canvas_display') else 'missing'}")
@@ -6081,6 +6353,15 @@ def get_serializable_state(state: dict | State, thread_id: str) -> dict:
     logger.info(f"Serialized {len(serializable_messages)} messages for thread {thread_id}")
     logger.info(f"Final response length: {len(state.get('final_response', '')) if state.get('final_response') else 0}")
     
+    # Canvas confirmation fields (needed by frontend to show approve/cancel controls)
+    canvas_requires_confirmation = state.get("canvas_requires_confirmation")
+    if canvas_requires_confirmation is None:
+        cd = state.get("canvas_data")
+        if isinstance(cd, dict):
+            canvas_requires_confirmation = bool(cd.get("requires_confirmation"))
+        else:
+            canvas_requires_confirmation = False
+
     return {
         "thread_id": thread_id,
         "status": "pending_user_input" if state.get("pending_user_input") else "completed",
@@ -6113,6 +6394,12 @@ def get_serializable_state(state: dict | State, thread_id: str) -> dict:
         "canvas_type": state.get("canvas_type"),
         "canvas_title": state.get("canvas_title"),  # Canvas title
         "needs_canvas": state.get("needs_canvas", False),
+
+        # Canvas confirmation fields for the sidebar
+        "pending_confirmation": state.get("pending_confirmation", False),
+        "pending_confirmation_task": serialize_complex_object(state.get("pending_confirmation_task")),
+        "canvas_requires_confirmation": canvas_requires_confirmation,
+        "canvas_confirmation_message": state.get("canvas_confirmation_message"),
         "timestamp": time.time(),
     }
 
@@ -6351,19 +6638,14 @@ def analyze_request(state: State):
     
     # If there's a pending confirmation and user is confirming, clear the confirmation state and proceed with execution
     if pending_confirmation and is_confirmation_message:
-        logger.info(f"✅ User confirmed canvas action for task '{pending_task}'. Clearing confirmation state and proceeding with execution.")
-        print(f"!!! CONFIRMATION DETECTED: Clearing pending_confirmation and routing to execution !!!")
-        print(f"!!! RETURNING: pending_confirmation=False, skip_preview_on_next_execution=True, needs_complex_processing=True !!!")
-        
-        # Clear confirmation state and set flag to skip preview on next execution
-        # DON'T set canvas_confirmation_action as it routes to broken execute_confirmed_task node
+        logger.info(f"✅ User confirmed canvas action. Routing to execute_confirmed_task.")
+        print(f"!!! CONFIRMATION DETECTED: Routing to execute_confirmed_task !!!")
+
         return {
-            "pending_confirmation": False,
-            "pending_confirmation_task": None,
-            "canvas_requires_confirmation": False,
-            "skip_preview_on_next_execution": True,  # Flag to inject show_preview=False in plan_execution
-            "needs_complex_processing": True,  # Force complex processing to execute the task
-            "analysis_reasoning": f"User confirmed the canvas action for task '{pending_task}'. Proceeding with execution without preview."
+            "canvas_confirmation_action": "confirm",
+            "canvas_confirmation_task": (pending_task or {}).get('task_name') if isinstance(pending_task, dict) else None,
+            "needs_complex_processing": True,
+            "analysis_reasoning": "User confirmed the pending canvas action. Executing confirmed task."
         }
     
     # Initialize both primary and fallback LLMs
@@ -6502,6 +6784,11 @@ def route_after_analysis(state: State):
     needs_complex = state.get("needs_complex_processing")
     plan_approved = state.get("plan_approved", False)
     uploaded_files_count = len(state.get("uploaded_files", []))
+
+    # If a canvas confirmation action is present, short-circuit to execute_confirmed_task
+    if state.get('canvas_confirmation_action'):
+        logger.info("🔄 route_after_analysis: canvas_confirmation_action present, routing to execute_confirmed_task")
+        return "execute_confirmed_task"
     
     logger.info(f"🔍 ROUTE_AFTER_ANALYSIS: uploaded_files count = {uploaded_files_count}")
     print(f"!!! ROUTE AFTER ANALYSIS: has_plan={has_plan}, planning_mode={planning_mode}, needs_complex={needs_complex}, plan_approved={plan_approved}, uploaded_files={uploaded_files_count} !!!")
@@ -6616,7 +6903,8 @@ builder.add_conditional_edges("analyze_request", route_after_analysis, {
     "parse_prompt": "parse_prompt",
     "generate_final_response": "generate_final_response",
     "validate_plan_for_execution": "validate_plan_for_execution",
-    "execute_batch": "execute_batch"
+    "execute_batch": "execute_batch",
+    "execute_confirmed_task": "execute_confirmed_task"
 })
 
 builder.add_edge("preprocess_files", "parse_prompt")

@@ -26,6 +26,10 @@ import platform
 import socket
 import re
 
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
+
 # --- Third-party Imports ---
 from fastapi import FastAPI, HTTPException, Depends, status, Query, Response, WebSocket, WebSocketDisconnect, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -938,13 +942,18 @@ async def execute_orchestration(
     files: Optional[List[FileObject]] = None,
     stream_callback=None,
     task_event_callback=None,
-    planning_mode: bool = False
+    planning_mode: bool = False,
+    owner: Optional[Dict[str, str]] = None
 ):
     """
     Unified orchestration logic that correctly persists and merges file context
     across all turns in a conversation. Simplified and more robust version.
+    
+    Args:
+        owner: Dict with user ownership info, e.g. {"user_id": "...", "email": "..."}.
+               Only provided on initial conversation start or when explicitly passed.
     """
-    logger.info(f"Starting orchestration for thread_id: {thread_id}, planning_mode: {planning_mode}")
+    logger.info(f"Starting orchestration for thread_id: {thread_id}, planning_mode: {planning_mode}, owner={owner}")
     
     # PHASE 5: Debug uploaded files state at entry
     if files:
@@ -954,11 +963,14 @@ async def execute_orchestration(
     else:
         logger.info("📂 EXECUTE_ORCHESTRATION: No files received in this request")
 
-    # Build config with task_event_callback if provided
+    # Build config with task_event_callback and owner if provided
     config = {"configurable": {"thread_id": thread_id}}
     if task_event_callback:
         config["configurable"]["task_event_callback"] = task_event_callback
         logger.info(f"✅ Task event callback registered for real-time streaming")
+    if owner:
+        config["configurable"]["owner"] = owner
+        logger.info(f"✅ Owner information provided for orchestration: {owner}")
 
     # Get the current state of the conversation from the in-memory store first (most recent)
     # Fall back to checkpointer if not in memory
@@ -1165,6 +1177,19 @@ async def execute_orchestration(
             "analysis_reasoning": None,
             "planning_mode": planning_mode,  # Set planning mode from parameter
             "plan_approved": current_conversation.get("plan_approved", False) if is_plan_approval else False,
+
+            # Preserve canvas confirmation fields (needed to resume execution on confirm)
+            "pending_confirmation": current_conversation.get("pending_confirmation", False),
+            "pending_confirmation_task": current_conversation.get("pending_confirmation_task"),
+            "canvas_requires_confirmation": current_conversation.get("canvas_requires_confirmation", False),
+            "canvas_confirmation_message": current_conversation.get("canvas_confirmation_message"),
+
+            # Preserve current canvas payload so the UI remains consistent
+            "has_canvas": current_conversation.get("has_canvas", False),
+            "canvas_type": current_conversation.get("canvas_type"),
+            "canvas_content": current_conversation.get("canvas_content"),
+            "canvas_data": current_conversation.get("canvas_data"),
+            "canvas_title": current_conversation.get("canvas_title"),
         }
     
     elif current_conversation:
@@ -2048,22 +2073,31 @@ async def save_workflow(request: Request, thread_id: str, name: str, description
     workflow_id = str(uuid.uuid4())
     
     # The conversation history file structure is flat, not nested under 'state'
-    # Try to get data from the flat structure first, fall back to checkpointer if needed
+    # Extract data from both top-level and metadata locations
     
-    # Check if we have the data directly in history
+    # Check if we have the data directly in history (top-level - preferred)
     task_agent_pairs = history.get("task_agent_pairs", [])
+    task_plan = history.get("task_plan", []) or history.get("plan", [])  # Fallback to "plan"
     original_prompt = history.get("original_prompt", "")
     
-    # If original_prompt is missing, extract from first user message
+    # If data is missing at top-level, try metadata (fallback)
+    if not task_agent_pairs or not task_plan or not original_prompt:
+        metadata = history.get("metadata", {})
+        task_agent_pairs = task_agent_pairs or metadata.get("task_agent_pairs", [])
+        task_plan = task_plan or metadata.get("task_plan", []) or metadata.get("plan", [])
+        original_prompt = original_prompt or metadata.get("original_prompt", "")
+        logger.info(f"📋 Extracted from metadata: task_agent_pairs={len(task_agent_pairs)}, task_plan={len(task_plan)}")
+    
+    # If original_prompt is still missing, extract from first user message
     if not original_prompt:
         messages = history.get("messages", [])
         if messages and len(messages) > 0:
             first_msg = messages[0]
-            if isinstance(first_msg, dict) and first_msg.get("type") == "user":
+            if isinstance(first_msg, dict) and first_msg.get("type") in ["user", "human"]:
                 original_prompt = first_msg.get("content", "")
                 logger.info(f"Extracted original_prompt from first message: '{original_prompt[:50]}...'")
     
-    # If empty, try from metadata or get from checkpointer
+    # If still empty after fallbacks, try from checkpointer
     if not task_agent_pairs or not original_prompt:
         logger.info(f"History file missing data, attempting to load from checkpointer for {thread_id}")
         try:
@@ -2072,15 +2106,19 @@ async def save_workflow(request: Request, thread_id: str, name: str, description
             if checkpoint:
                 checkpoint_state = checkpoint.get("values", {})
                 task_agent_pairs = checkpoint_state.get("task_agent_pairs", task_agent_pairs)
+                task_plan = checkpoint_state.get("task_plan", task_plan)
                 original_prompt = checkpoint_state.get("original_prompt", original_prompt)
                 # Also get other fields from checkpoint
                 history = {**history, **checkpoint_state}
-                logger.info(f"Retrieved workflow data from checkpointer")
+                logger.info(f"✅ Retrieved workflow data from checkpointer")
         except Exception as e:
             logger.warning(f"Could not load from checkpointer: {e}")
     
     # Extract comprehensive blueprint from conversation state
     task_plan = history.get("task_plan", []) or history.get("plan", [])
+    
+    # Log what we're putting in the blueprint for debugging
+    logger.info(f"📋 Blueprint construction: task_agent_pairs_count={len(task_agent_pairs)}, task_plan_count={len(task_plan)}, prompt_len={len(original_prompt)}")
     
     blueprint = {
         "workflow_id": workflow_id,
@@ -2398,16 +2436,26 @@ async def schedule_workflow(workflow_id: str, body: ScheduleWorkflowRequest, req
     if not workflow.blueprint:
         raise HTTPException(
             status_code=400, 
-            detail="Workflow has no blueprint data."
+            detail="Workflow has no blueprint data. Please save the workflow again to capture the execution plan."
         )
     
     has_task_plan = workflow.blueprint.get("task_plan") and len(workflow.blueprint.get("task_plan", [])) > 0
     has_task_agent_pairs = workflow.blueprint.get("task_agent_pairs") and len(workflow.blueprint.get("task_agent_pairs", [])) > 0
     
     if not has_task_plan and not has_task_agent_pairs:
+        # Provide helpful error message with recovery options
+        missing_fields = []
+        if not has_task_plan:
+            missing_fields.append("task_plan")
+        if not has_task_agent_pairs:
+            missing_fields.append("task_agent_pairs")
+        
         raise HTTPException(
             status_code=400, 
-            detail="Workflow has no saved execution plan. Please complete a conversation and save the workflow again to capture the execution plan."
+            detail=f"Workflow has no execution plan. Missing: {', '.join(missing_fields)}. Recovery options: "
+                   f"1) Complete a new conversation with the same prompt and save it again, "
+                   f"2) Use a different workflow that has an execution plan, "
+                   f"3) Run the workflow once to generate a plan before scheduling."
         )
     
     schedule_id = str(uuid.uuid4())
@@ -3053,15 +3101,10 @@ async def websocket_chat(websocket: WebSocket):
                     })
                     continue
                 
-                # User confirmed - resume execution
-                logger.info(f"✅ User confirmed task '{task_name}' - resuming execution")
-                
-                # For canvas confirmation, we'll just re-run the orchestration with the confirmation
-                # The simpler approach is to send a new message that triggers the actual edit
+                # User confirmed - resume execution by treating this as a confirmation prompt
+                logger.info(f"✅ User confirmed task '{task_name}' - resuming orchestration")
+
                 try:
-                    logger.info(f"🔄 User confirmed canvas action for task '{task_name}'")
-                    
-                    # Send update to frontend
                     await websocket.send_json({
                         "node": "canvas_confirmation_processed",
                         "thread_id": thread_id,
@@ -3069,25 +3112,18 @@ async def websocket_chat(websocket: WebSocket):
                             "action": action,
                             "task_name": task_name,
                             "status": "resuming_execution",
-                            "message": f"Applying changes..."
+                            "message": "Applying changes..."
                         },
                         "timestamp": time.time()
                     })
-                    
-                    # The confirmation is acknowledged
-                    # The frontend will send a follow-up message to trigger the actual edit
-                    logger.info(f"✅ Confirmation acknowledged for thread {thread_id}. Waiting for follow-up message.")
-                    
-                except Exception as resume_err:
-                    logger.error(f"Failed to resume execution after confirmation: {resume_err}", exc_info=True)
-                    await websocket.send_json({
-                        "node": "__error__",
-                        "error": f"Failed to resume execution: {str(resume_err)}",
-                        "thread_id": thread_id,
-                        "timestamp": time.time()
-                    })
-                
-                continue  # Continue waiting for messages
+                except Exception as send_err:
+                    logger.debug(f"Failed to send canvas_confirmation_processed update: {send_err}")
+
+                # Feed a confirmation prompt into the normal orchestration flow.
+                # orchestrator.graph.analyze_request will detect pending_confirmation and route accordingly.
+                prompt = "confirm"
+                user_response = None
+                message_type = None
             
             if not prompt and not user_response:
                 await websocket.send_json({
@@ -3287,7 +3323,8 @@ async def websocket_chat(websocket: WebSocket):
                         files=file_objects if file_objects else None,
                         stream_callback=stream_callback,
                         task_event_callback=task_event_callback,
-                        planning_mode=planning_mode
+                        planning_mode=planning_mode,
+                        owner=owner  # Pass owner for user thread registration
                     )
                 except asyncio.TimeoutError as timeout_err:
                     logger.error(f"Orchestration execution timed out for thread_id {thread_id}")

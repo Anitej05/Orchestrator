@@ -54,7 +54,7 @@ class TestAgentInitialization:
         
         # Agent should have session manager with storage
         assert agent.session_manager is not None
-        storage_path = Path('backend/storage/documents')
+        storage_path = Path('storage/documents')
         assert storage_path.exists() or storage_path.parent.exists()
 
 

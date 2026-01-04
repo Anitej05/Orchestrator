@@ -8,8 +8,10 @@ import time
 import uuid
 import base64
 import logging
-import asyncioimport psutil
-import osfrom typing import Dict, Any, List, Optional
+import asyncio
+import psutil
+import os
+from typing import Dict, Any, List, Optional
 import httpx
 
 from .browser import Browser

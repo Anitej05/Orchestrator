@@ -100,6 +100,91 @@
       ]
     },
     {
+      "endpoint": "/simulate_operation",
+      "http_method": "POST",
+      "request_format": "form",
+      "description": "Preview pandas operation without modifying data. Returns simulation with warnings and change summary.",
+      "parameters": [
+        {
+          "name": "file_id",
+          "param_type": "string",
+          "required": true,
+          "description": "The file_id from /upload endpoint."
+        },
+        {
+          "name": "pandas_code",
+          "param_type": "string",
+          "required": true,
+          "description": "Pandas code to simulate (e.g., 'df = df[df[\"Sales\"] > 100]')."
+        }
+      ]
+    },
+    {
+      "endpoint": "/plan_operation",
+      "http_method": "POST",
+      "request_format": "form",
+      "description": "Multi-stage spreadsheet planning with approval workflow: Propose plan -> Revise with feedback -> Simulate preview -> Execute confirmed. Returns canvas_display with requires_confirmation=true at propose stage for orchestrator approval integration. Plan state managed internally by agent via plan_id.",
+      "parameters": [
+        {
+          "name": "file_id",
+          "param_type": "string",
+          "required": true,
+          "description": "The file_id from /upload endpoint."
+        },
+        {
+          "name": "instruction",
+          "param_type": "string",
+          "required": true,
+          "description": "For 'propose' stage: natural language instruction (e.g., 'Add a Total column and filter rows > 1000'). For 'revise': JSON {\"plan_id\": \"uuid\", \"feedback\": \"string\"}. For 'simulate'/'execute': JSON {\"plan_id\": \"uuid\"}."
+        },
+        {
+          "name": "stage",
+          "param_type": "string",
+          "required": false,
+          "description": "Planning stage: 'propose' (returns canvas_display requiring confirmation), 'revise' (adjusts plan based on feedback), 'simulate' (tests on copy, returns before/after), 'execute' (applies to actual data). Default: 'propose'."
+        },
+        {
+          "name": "thread_id",
+          "param_type": "string",
+          "required": false,
+          "description": "Conversation thread ID for multi-turn sessions. Optional."
+        }
+      ],
+      "response_schema": {
+        "propose": {
+          "success": true,
+          "result": {
+            "status": "plan_ready",
+            "plan_id": "uuid string for tracking",
+            "message": "string"
+          },
+          "canvas_display": {
+            "canvas_type": "spreadsheet_plan",
+            "requires_confirmation": true,
+            "canvas_data": {
+              "headers": ["Step", "Action", "Description"],
+              "rows": [["1", "Action Type", "Description"], "..."],
+              "plan_summary": "reasoning",
+              "estimated_steps": 3
+            }
+          }
+        },
+        "execute": {
+          "success": true,
+          "result": {
+            "status": "executed",
+            "execution": {
+              "actions_executed": 3,
+              "success": true
+            },
+            "shape": [100, 5],
+            "columns": ["col1", "col2", "..."],
+            "preview": "[...]"
+          }
+        }
+      }
+    },
+    {
       "endpoint": "/nl_query",
       "http_method": "POST",
       "request_format": "json",

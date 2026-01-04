@@ -28,12 +28,12 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Import modular components
-from .config import STORAGE_DIR, AGENT_PORT, MAX_FILE_SIZE_MB
-from .models import ApiResponse, CreateSpreadsheetRequest, NaturalLanguageQueryRequest
-from .memory import spreadsheet_memory
-from . import session as session_module  # Import module for _thread_local access
-from .session import (
+# Import modular components - using absolute imports
+from agents.spreadsheet_agent.config import STORAGE_DIR, AGENT_PORT, MAX_FILE_SIZE_MB
+from agents.spreadsheet_agent.models import ApiResponse, CreateSpreadsheetRequest, NaturalLanguageQueryRequest
+from agents.spreadsheet_agent.memory import spreadsheet_memory
+from agents.spreadsheet_agent import session as session_module  # Import module for _thread_local access
+from agents.spreadsheet_agent.session import (
     get_conversation_dataframes,
     get_conversation_file_paths,
     ensure_file_loaded,
@@ -41,10 +41,10 @@ from .session import (
     store_dataframe,
     get_dataframe
 )
-from .llm_agent import query_agent
-from .code_generator import generate_modification_code, generate_csv_from_instruction
-from .display import dataframe_to_canvas, format_dataframe_preview
-from .utils import (
+from agents.spreadsheet_agent.llm_agent import query_agent
+from agents.spreadsheet_agent.code_generator import generate_modification_code, generate_csv_from_instruction
+from agents.spreadsheet_agent.display import dataframe_to_canvas, format_dataframe_preview
+from agents.spreadsheet_agent.utils import (
     validate_file,
     load_dataframe,
     dataframe_to_csv,
@@ -80,7 +80,7 @@ except ImportError:
         raise
 
 # Import session manager (now in same directory)
-from .spreadsheet_session_manager import spreadsheet_session_manager
+from agents.spreadsheet_agent.spreadsheet_session_manager import spreadsheet_session_manager
 
 # Create FastAPI app
 app = FastAPI(title="Spreadsheet Agent", version="2.0.0")
@@ -773,6 +773,236 @@ async def execute_pandas(
         raise
     except Exception as e:
         logger.error(f"Execute pandas failed: {e}", exc_info=True)
+        return ApiResponse(success=False, error=str(e))
+
+
+@app.post("/simulate_operation", response_model=ApiResponse)
+async def simulate_operation_endpoint(
+    file_id: str = Form(...),
+    pandas_code: str = Form(...),
+    thread_id: Optional[str] = Form(None)
+):
+    """
+    Simulate a pandas operation without modifying actual data.
+    Returns preview of changes, warnings, and observation data.
+    """
+    try:
+        thread_id = thread_id or "default"
+        
+        if not ensure_file_loaded(file_id, thread_id, file_manager):
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        df = get_dataframe(file_id, thread_id)
+        if df is None:
+            raise HTTPException(status_code=500, detail="Failed to load dataframe")
+        
+        # Import simulation module
+        from agents.spreadsheet_agent.simulate import preview_operation
+        
+        # Run simulation
+        result = preview_operation(df, pandas_code, max_preview_rows=20)
+        
+        return ApiResponse(
+            success=result["success"],
+            result={
+                "simulation": result,
+                "message": "Simulation completed. Review changes before applying." if result["success"] else "Simulation failed."
+            },
+            error=result.get("error")
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Simulation failed: {e}", exc_info=True)
+        return ApiResponse(success=False, error=str(e))
+
+
+@app.post("/plan_operation", response_model=ApiResponse)
+async def plan_operation_endpoint(
+    file_id: str = Form(...),
+    instruction: str = Form(...),
+    thread_id: Optional[str] = Form(None),
+    stage: str = Form("propose")  # propose, revise, simulate, execute
+):
+    """
+    Multi-stage planning endpoint:
+    - propose: Generate initial plan from instruction
+    - revise: Revise plan based on feedback
+    - simulate: Test plan on copy of data
+    - execute: Apply plan to actual data
+    """
+    try:
+        thread_id = thread_id or "default"
+        
+        if not ensure_file_loaded(file_id, thread_id, file_manager):
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        df = get_dataframe(file_id, thread_id)
+        if df is None:
+            raise HTTPException(status_code=500, detail="Failed to load dataframe")
+        
+        # Import planner
+        from agents.spreadsheet_agent.planner import planner
+        
+        # Stage: PROPOSE
+        if stage == "propose":
+            # Generate DataFrame context
+            df_context = {
+                "shape": df.shape,
+                "columns": df.columns.tolist(),
+                "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
+                "sample": df.head(5).to_dict(orient='records')
+            }
+            
+            # Propose plan
+            plan = await planner.propose_plan(df, instruction, df_context)
+            
+            # Format actions as table for display
+            canvas_data = {
+                "headers": ["Step", "Action", "Description"],
+                "rows": [
+                    [
+                        str(i + 1),
+                        action.get("action_type", "unknown").replace("_", " ").title(),
+                        action.get("description", f"Execute {action.get('action_type', 'action')}")
+                    ]
+                    for i, action in enumerate(plan.actions)
+                ]
+            }
+            
+            # Return with canvas_display for orchestrator approval
+            return ApiResponse(
+                success=True,
+                result={
+                    "status": "plan_ready",
+                    "plan_id": plan.plan_id,
+                    "message": f"Generated plan with {len(plan.actions)} actions. Review and approve to execute."
+                },
+                canvas_display={
+                    "canvas_type": "spreadsheet_plan",
+                    "canvas_title": "Spreadsheet Execution Plan",
+                    "canvas_data": canvas_data,
+                    "plan_summary": plan.reasoning,
+                    "estimated_steps": len(plan.actions),
+                    "requires_confirmation": True,
+                    "confirmation_message": "Review the plan and approve to proceed with execution"
+                }
+            )
+        
+        # Stage: REVISE
+        elif stage == "revise":
+            # Get plan_id from instruction (should be formatted as JSON)
+            try:
+                import json
+                logger.info(f"[REVISE] Received instruction: {repr(instruction)}")
+                revision_data = json.loads(instruction)
+                plan_id = revision_data.get("plan_id")
+                feedback = revision_data.get("feedback", "")
+                logger.info(f"[REVISE] Parsed plan_id: {plan_id}, feedback: {feedback}")
+            except Exception as e:
+                logger.error(f"[REVISE] Failed to parse instruction: {e}, instruction={repr(instruction)}")
+                raise HTTPException(status_code=400, detail=f"For 'revise' stage, instruction must be JSON with plan_id and feedback. Error: {str(e)}")
+            
+            # Find plan in history
+            plan = planner.history.get_plan(plan_id)
+            if not plan:
+                raise HTTPException(status_code=404, detail=f"Plan {plan_id} not found")
+            
+            # Revise plan
+            revised_plan = await planner.revise_plan(plan, feedback, df)
+            
+            return ApiResponse(
+                success=True,
+                result={
+                    "plan": revised_plan.to_dict(),
+                    "message": f"Revised plan (revision {len(revised_plan.revisions)}). Review and proceed to 'simulate' stage."
+                }
+            )
+        
+        # Stage: SIMULATE
+        elif stage == "simulate":
+            # Get plan_id from instruction
+            try:
+                import json
+                logger.info(f"[SIMULATE] Received instruction: {repr(instruction)}")
+                sim_data = json.loads(instruction)
+                plan_id = sim_data.get("plan_id")
+                logger.info(f"[SIMULATE] Parsed plan_id: {plan_id}")
+            except Exception as e:
+                logger.error(f"[SIMULATE] Failed to parse instruction: {e}, instruction={repr(instruction)}")
+                raise HTTPException(status_code=400, detail=f"For 'simulate' stage, instruction must be JSON with plan_id. Error: {str(e)}")
+            
+            # Find plan
+            plan = planner.history.get_plan(plan_id)
+            if not plan:
+                raise HTTPException(status_code=404, detail=f"Plan {plan_id} not found")
+            
+            # Simulate plan
+            sim_result = planner.simulate_plan(plan, df)
+            
+            return ApiResponse(
+                success=sim_result["success"],
+                result={
+                    "plan_id": plan_id,
+                    "simulation": sim_result,
+                    "message": "Simulation complete. Review warnings and proceed to 'execute' stage if acceptable." if sim_result["success"] else "Simulation failed. Revise plan."
+                },
+                error=sim_result.get("error")
+            )
+        
+        # Stage: EXECUTE
+        elif stage == "execute":
+            # Get plan_id and force flag from instruction
+            try:
+                import json
+                logger.info(f"[EXECUTE] Received instruction: {repr(instruction)}")
+                exec_data = json.loads(instruction)
+                plan_id = exec_data.get("plan_id")
+                force = exec_data.get("force", False)
+                logger.info(f"[EXECUTE] Parsed plan_id: {plan_id}, force: {force}")
+            except Exception as e:
+                logger.error(f"[EXECUTE] Failed to parse instruction: {e}, instruction={repr(instruction)}")
+                raise HTTPException(status_code=400, detail=f"For 'execute' stage, instruction must be JSON with plan_id and optional force flag. Error: {str(e)}")
+            
+            # Find plan
+            plan = planner.history.get_plan(plan_id)
+            if not plan:
+                raise HTTPException(status_code=404, detail=f"Plan {plan_id} not found")
+            
+            # Execute plan
+            modified_df, exec_result = planner.execute_plan(plan, df, force=force)
+            
+            if exec_result["success"]:
+                # Update dataframe in session
+                store_dataframe(file_id, modified_df, file_paths.get(file_id, ""), thread_id)
+                
+                return ApiResponse(
+                    success=True,
+                    result={
+                        "plan_id": plan_id,
+                        "status": "executed",
+                        "execution": exec_result,
+                        "shape": modified_df.shape,
+                        "columns": modified_df.columns.tolist(),
+                        "preview": modified_df.head(20).to_dict(orient='records'),
+                        "message": f"Plan executed successfully. DataFrame shape: {modified_df.shape}"
+                    }
+                )
+            else:
+                return ApiResponse(
+                    success=False,
+                    error=exec_result.get("error"),
+                    result={"execution": exec_result}
+                )
+        
+        else:
+            raise HTTPException(status_code=400, detail=f"Invalid stage: {stage}. Must be 'propose', 'revise', 'simulate', or 'execute'")
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Plan operation failed: {e}", exc_info=True)
         return ApiResponse(success=False, error=str(e))
 
 

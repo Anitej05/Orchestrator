@@ -332,8 +332,63 @@ User: "How many rows have Feature1 greater than 50?"
 Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": false, "pandas_code": "len(df[df['Feature1'] > 50])", "explanation": "Counting rows where Feature1 exceeds 50", "is_final_answer": true, "final_answer": "There are X rows where Feature1 is greater than 50"}}
 """
     
+    def _validate_code_against_schema(self, df: pd.DataFrame, code: str) -> Optional[str]:
+        """Validate pandas code against DataFrame schema before execution.
+        Returns error message if validation fails, None if valid."""
+        import re
+        
+        actual_columns = set(df.columns)
+        
+        # Extract column references from code
+        # Patterns: df['column'], df["column"], df.column, df['column'].method
+        patterns = [
+            r"df\['([^']+)'\]",  # df['column']
+            r'df\["([^"]+)"\]',  # df["column"]
+            r"df\.([a-zA-Z_][a-zA-Z0-9_]*)",  # df.column (but not df.head, df.groupby, etc.)
+        ]
+        
+        referenced_columns = set()
+        for pattern in patterns:
+            matches = re.findall(pattern, code)
+            referenced_columns.update(matches)
+        
+        # Filter out pandas methods (not actual columns)
+        pandas_methods = {'head', 'tail', 'describe', 'info', 'shape', 'columns', 'dtypes', 
+                         'groupby', 'sort_values', 'query', 'drop', 'rename', 'insert',
+                         'select_dtypes', 'sum', 'mean', 'count', 'max', 'min', 'fillna',
+                         'dropna', 'isnull', 'notnull', 'merge', 'join', 'to_dict', 'copy'}
+        referenced_columns = {col for col in referenced_columns if col not in pandas_methods}
+        
+        # Check for non-existent columns
+        missing_columns = referenced_columns - actual_columns
+        
+        if missing_columns:
+            # Find similar column names (fuzzy match)
+            from difflib import get_close_matches
+            suggestions = {}
+            for missing_col in missing_columns:
+                matches = get_close_matches(missing_col, actual_columns, n=3, cutoff=0.6)
+                if matches:
+                    suggestions[missing_col] = matches
+            
+            error_msg = f"Column(s) not found: {', '.join(missing_columns)}. "
+            error_msg += f"Available columns: {', '.join(sorted(actual_columns))}. "
+            if suggestions:
+                error_msg += "Did you mean: "
+                error_msg += ", ".join([f"'{missing}' -> {matches}" for missing, matches in suggestions.items()])
+            
+            return error_msg
+        
+        return None
+    
     def _safe_execute_pandas(self, df: pd.DataFrame, code: str) -> Tuple[Any, pd.DataFrame, Optional[str]]:
         """Safely execute pandas code and return result or error"""
+        # Pre-execution validation
+        validation_error = self._validate_code_against_schema(df, code)
+        if validation_error:
+            logger.warning(f"⚠️ Code validation failed: {validation_error}")
+            return None, df, validation_error
+        
         try:
             # Create a safe execution environment
             local_vars = {"df": df, "pd": pd}
@@ -351,6 +406,15 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
             # Otherwise, return the df itself as the result (e.g. after filtering)
             return updated_df, updated_df, None
             
+        except KeyError as e:
+            # Enhanced KeyError handling with column suggestions
+            column_name = str(e).strip("'\"")
+            from difflib import get_close_matches
+            similar = get_close_matches(column_name, df.columns, n=3, cutoff=0.6)
+            error_msg = f"Column '{column_name}' not found. Available columns: {', '.join(df.columns)}."
+            if similar:
+                error_msg += f" Did you mean: {', '.join(similar)}?"
+            return None, df, error_msg
         except Exception as e:
             return None, df, str(e)
     
@@ -519,6 +583,11 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
                 
                 # Execute pandas code if provided
                 if pandas_code:
+                    # Capture before state for observation
+                    before_shape = current_df.shape
+                    before_columns = current_df.columns.tolist()
+                    before_sample = current_df.head(3).to_dict(orient="records") if len(current_df) > 0 else []
+                    
                     result, updated_df, error = self._safe_execute_pandas(current_df, pandas_code)
                     
                     if error:
@@ -533,6 +602,34 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
                             "content": f"The code raised an error: {error}\nPlease fix the code and try again."
                         })
                         continue
+                    
+                    # Capture after state and create observation
+                    after_shape = updated_df.shape
+                    after_columns = updated_df.columns.tolist()
+                    after_sample = updated_df.head(3).to_dict(orient="records") if len(updated_df) > 0 else []
+                    
+                    # Calculate changes
+                    cols_added = list(set(after_columns) - set(before_columns))
+                    cols_removed = list(set(before_columns) - set(after_columns))
+                    rows_change = after_shape[0] - before_shape[0]
+                    
+                    changes_parts = []
+                    if cols_added:
+                        changes_parts.append(f"Added columns: {', '.join(cols_added)}")
+                    if cols_removed:
+                        changes_parts.append(f"Removed columns: {', '.join(cols_removed)}")
+                    if rows_change > 0:
+                        changes_parts.append(f"Added {rows_change} rows")
+                    elif rows_change < 0:
+                        changes_parts.append(f"Removed {abs(rows_change)} rows")
+                    if before_shape == after_shape and before_columns == after_columns:
+                        changes_parts.append("Data values modified")
+                    
+                    step_info["observation"] = {
+                        "before_shape": before_shape,
+                        "after_shape": after_shape,
+                        "changes_summary": "; ".join(changes_parts) if changes_parts else "No structural changes"
+                    }
                         
                     # Update our working dataframe
                     current_df = updated_df
@@ -690,6 +787,156 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
         logger.info(f"  📊 Peak Memory:          {self.metrics['resource']['peak_memory_mb']:.1f} MB")
         logger.info("=" * 80)
     
+    async def generate_actions(
+        self,
+        df: pd.DataFrame,
+        instruction: str,
+        df_context: Dict[str, Any] = None
+    ) -> Tuple[List[Dict[str, Any]], str]:
+        """
+        Generate structured actions from natural language instruction.
+        
+        This method uses the LLM to convert natural language instructions
+        into a list of structured action objects (filter, sort, add_column, etc.)
+        instead of raw pandas code.
+        
+        Args:
+            df: DataFrame to generate actions for
+            instruction: Natural language instruction
+            df_context: Pre-computed DataFrame context (optional)
+        
+        Returns:
+            Tuple of (actions_list, reasoning)
+        """
+        if not df_context:
+            df_context = {
+                "shape": df.shape,
+                "columns": df.columns.tolist(),
+                "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
+                "sample": df.head(5).to_dict(orient='records')
+            }
+        
+        # Build action vocabulary system prompt
+        system_prompt = f"""You are an expert at converting natural language instructions into structured spreadsheet actions.
+
+=== DATAFRAME CONTEXT ===
+Shape: {df_context['shape'][0]} rows × {df_context['shape'][1]} columns
+Columns: {', '.join(df_context['columns'])}
+Data Types: {', '.join([f"{col}({dtype})" for col, dtype in df_context['dtypes'].items()])}
+
+Sample Data (first 5 rows):
+{json.dumps(df_context['sample'], indent=2, default=str)}
+
+=== AVAILABLE ACTIONS ===
+
+1. **filter** - Filter rows by condition
+   {{
+     "action_type": "filter",
+     "column": "column_name",
+     "operator": "=="|"!="|">"|"<"|">="|"<="|"contains"|"startswith"|"endswith",
+     "value": "value_to_compare"
+   }}
+
+2. **sort** - Sort by column(s)
+   {{
+     "action_type": "sort",
+     "columns": ["col1", "col2"],
+     "ascending": [true, false]
+   }}
+
+3. **add_column** - Add calculated column
+   {{
+     "action_type": "add_column",
+     "new_column": "TotalScore",
+     "formula": "{{Feature1}} + {{Feature2}}"
+   }}
+
+4. **rename_column** - Rename columns
+   {{
+     "action_type": "rename_column",
+     "old_names": ["OldName1", "OldName2"],
+     "new_names": ["NewName1", "NewName2"]
+   }}
+
+5. **drop_column** - Remove columns
+   {{
+     "action_type": "drop_column",
+     "columns": ["col1", "col2"]
+   }}
+
+6. **groupby** - Group and aggregate
+   {{
+     "action_type": "groupby",
+     "group_by_columns": ["Department"],
+     "aggregate": {{"Salary": "mean", "Age": "count"}}
+   }}
+
+7. **fillna** - Fill missing values
+   {{
+     "action_type": "fillna",
+     "columns": ["col1"],
+     "method": "value"|"forward"|"backward"|"mean"|"median",
+     "fill_value": 0  // only if method is "value"
+   }}
+
+8. **drop_duplicates** - Remove duplicates
+   {{
+     "action_type": "drop_duplicates",
+     "subset": ["col1", "col2"],
+     "keep": "first"|"last"
+   }}
+
+9. **add_serial_number** - Add serial number column
+   {{
+     "action_type": "add_serial_number",
+     "column_name": "Sl.No.",
+     "start": 1,
+     "position": "first"|"last"
+   }}
+
+=== RESPONSE FORMAT (JSON) ===
+{{
+  "reasoning": "Step-by-step explanation of what actions are needed",
+  "actions": [
+    // List of action objects
+  ]
+}}
+
+=== INSTRUCTIONS ===
+1. Analyze the user instruction carefully
+2. Break it down into a sequence of actions
+3. Use the simplest actions that accomplish the goal
+4. Ensure column names match exactly what's in the DataFrame
+5. For calculations, use {{column_name}} syntax in formulas
+6. Return valid JSON only (no markdown)
+
+Now convert this instruction to actions:
+"{instruction}"
+"""
+        
+        messages = [{"role": "system", "content": system_prompt}]
+        
+        try:
+            response_text, _ = self._get_completion(messages, temperature=0.1)
+            
+            # Parse JSON response
+            if "```json" in response_text:
+                response_text = response_text.split("```json")[1].split("```")[0]
+            elif "```" in response_text:
+                response_text = response_text.split("```")[1].split("```")[0]
+            
+            response = json.loads(response_text.strip())
+            
+            actions = response.get("actions", [])
+            reasoning = response.get("reasoning", "")
+            
+            return actions, reasoning
+            
+        except Exception as e:
+            logger.error(f"Failed to generate actions: {e}", exc_info=True)
+            # Return empty action list on failure
+            return [], f"Error generating actions: {str(e)}"
+    
     def get_metrics(self) -> Dict[str, Any]:
         """Get current metrics with computed values."""
         uptime_seconds = time.time() - self._start_time
@@ -712,3 +959,4 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
 
 # Global query agent instance
 query_agent = SpreadsheetQueryAgent()
+

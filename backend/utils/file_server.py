@@ -6,16 +6,16 @@ with path traversal protection, MIME type detection, and smart filename resoluti
 
 Security Features:
 - Path traversal prevention (blocks ../ attempts)
-- Validates all resolved paths stay within backend/storage
+- Validates all resolved paths stay within storage/
 - Requires Clerk JWT authentication
 - Safe error handling without information leakage
 
 Storage Structure:
-- backend/storage/documents/ - Generated/modified documents
-- backend/storage/document_versions/ - Document version history
-- backend/storage/content/ - Generic content files
-- backend/storage/images/ - Generated images
-- backend/storage/spreadsheets/ - Excel/CSV files
+- storage/documents/ - Generated/modified documents
+- storage/document_versions/ - Document version history
+- storage/content/ - Generic content files
+- storage/images/ - Generated images
+- storage/spreadsheets/ - Excel/CSV files
 - Plus other dynamic agent folders
 """
 
@@ -28,8 +28,8 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-# Base storage directory (absolute path for security)
-STORAGE_BASE = Path(__file__).parent.parent / "storage"
+# Base storage directory (absolute path for security) - uses root storage/ folder
+STORAGE_BASE = Path(__file__).parent.parent.parent / "storage"
 STORAGE_BASE = STORAGE_BASE.resolve()  # Resolve to absolute path
 
 # Priority order for filename search (most common first)

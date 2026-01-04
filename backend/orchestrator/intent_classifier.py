@@ -63,9 +63,50 @@ class IntentClassifier:
                     reasoning="Pattern matched: web navigation (requires browser agent)"
                 )
             ),
-            # WEB SEARCH PATTERNS (only for simple search queries without navigation)
+            # NEWS PATTERNS - Must come before generic web search to avoid conflicts
+            # Pattern 1: "news about X", "headlines on Y", "articles regarding Z"
             (
-                re.compile(r"(search|find|lookup)\\s+(for\\s+)?((?:(?!navigate|browse|click).)+)", re.IGNORECASE),
+                re.compile(r"(news|headlines|articles|latest news).*(about|on|regarding|for)", re.IGNORECASE),
+                Intent(
+                    category="data_query",
+                    tool_hint="search_news",
+                    confidence=0.90,
+                    reasoning="Pattern matched: news search query"
+                )
+            ),
+            # Pattern 2: "X news", "Y headlines" (reverse order)
+            (
+                re.compile(r"\\b\\w+\\s+(news|headlines|articles)", re.IGNORECASE),
+                Intent(
+                    category="data_query",
+                    tool_hint="search_news",
+                    confidence=0.88,
+                    reasoning="Pattern matched: news search query (reverse order)"
+                )
+            ),
+            # Pattern 3: "find/search/get news about X"
+            (
+                re.compile(r"(find|search|get|fetch|show).*(news|headlines|articles).*(about|on|for|regarding)", re.IGNORECASE),
+                Intent(
+                    category="data_query",
+                    tool_hint="search_news",
+                    confidence=0.92,
+                    reasoning="Pattern matched: explicit news search request"
+                )
+            ),
+            # Pattern 4: Top headlines
+            (
+                re.compile(r"(top headlines|breaking news|latest headlines|news headlines)", re.IGNORECASE),
+                Intent(
+                    category="data_query",
+                    tool_hint="get_top_headlines",
+                    confidence=0.90,
+                    reasoning="Pattern matched: top headlines query"
+                )
+            ),
+            # WEB SEARCH PATTERNS (only for simple search queries without navigation or news)
+            (
+                re.compile(r"(search|find|lookup)(?!.*\\b(news|headlines|articles)\\b)", re.IGNORECASE),
                 Intent(
                     category="data_query",
                     tool_hint="web_search_and_summarize",
@@ -110,25 +151,6 @@ class IntentClassifier:
                     tool_hint="get_company_info",
                     confidence=0.90,
                     reasoning="Pattern matched: company information query"
-                )
-            ),
-            # NEWS PATTERNS
-            (
-                re.compile(r"(news|headlines|articles|latest news).*(about|on|regarding|for)", re.IGNORECASE),
-                Intent(
-                    category="data_query",
-                    tool_hint="search_news",
-                    confidence=0.90,
-                    reasoning="Pattern matched: news search query"
-                )
-            ),
-            (
-                re.compile(r"(top headlines|breaking news|latest headlines|news headlines)", re.IGNORECASE),
-                Intent(
-                    category="data_query",
-                    tool_hint="get_top_headlines",
-                    confidence=0.90,
-                    reasoning="Pattern matched: top headlines query"
                 )
             ),
             # WIKIPEDIA PATTERNS

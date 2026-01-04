@@ -18,6 +18,7 @@ frontend/.env
 storage/
 backend/storage/
 logs/
+temp/
 
 # IDE
 .vscode/

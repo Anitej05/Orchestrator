@@ -157,24 +157,10 @@ def sync_agent_to_db(db: Session, agent_data: dict, is_new: bool = False):
     # Now delete endpoints
     db.query(AgentEndpoint).filter_by(agent_id=agent_id).delete()
     
-    # Add capabilities with embeddings
-    embedding_model = get_embedding_model()
-    for capability_text in agent.capabilities:
-        if embedding_model:
-            try:
-                embedding = embedding_model.encode(capability_text).tolist()
-            except Exception as e:
-                logger.warning(f"Failed to generate embedding for '{capability_text}': {e}")
-                embedding = [0.0] * 768  # Dummy embedding
-        else:
-            embedding = [0.0] * 768  # Dummy embedding if model not available
-            
-        capability = AgentCapability(
-            agent_id=agent_id,
-            capability_text=capability_text,
-            embedding=embedding
-        )
-        db.add(capability)
+    # SKIP: Capabilities system temporarily disabled
+    # The capabilities field exists in JSON as empty dict for future use
+    # but is not synced to database to avoid validation issues
+    # TODO: Re-enable when capabilities redesign is complete
     
     # Add endpoints and parameters
     for endpoint_data in agent_data.get('endpoints', []):
