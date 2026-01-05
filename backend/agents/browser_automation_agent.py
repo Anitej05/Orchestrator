@@ -1,12 +1,23 @@
 # agents/browser_automation_agent.py
 # SOTA WRAPPER - Delegates to agents/browser_agent/agent.py
 
-import os
+# CRITICAL: Fix Windows asyncio subprocess issue with Playwright
+# Must be set BEFORE any other asyncio imports
+
+
+
+# CRITICAL: Fix Windows asyncio subprocess issue with Playwright
+# Must be set BEFORE any other asyncio imports
+
 import sys
+import os
 import logging
-import asyncio
+
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 
 # Add parent directory to path for imports when running as standalone
 CURRENT_DIR = Path(__file__).parent
@@ -163,7 +174,7 @@ async def browse(request: BrowseRequest, headless: bool = False, enable_streamin
         return BrowseResponse(
             success=result.success,
             task_summary=result.task_summary,
-            actions_taken=result.actions_taken, # SOTA result.actions_taken is List[Dict]
+            actions_taken=result.actions_taken or [], # Ensure list even if None
             extracted_data=result.extracted_data,
             screenshot_files=screenshots, 
             downloaded_files=downloads,

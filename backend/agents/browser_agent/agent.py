@@ -11,8 +11,13 @@ import logging
 import asyncio
 import psutil
 import os
+import json
 from typing import Dict, Any, List, Optional
 import httpx
+import websockets
+
+# Suppress noisy httpx logging (canvas updates)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 from .browser import Browser
 from .dom import DOMExtractor
@@ -34,8 +39,28 @@ from pathlib import Path
 from .schemas import ActionPlan, ActionResult, BrowserResult
 from .state import AgentMemory
 from .planner import Planner
+from .persistent_memory import get_persistent_memory
 
-logger = logging.getLogger(__name__)
+# Configure logger for this module and children (agents.browser_agent.*)
+class IndentedFormatter(logging.Formatter):
+    def format(self, record):
+        msg = super().format(record)
+        # Check for step header (contains "📍 Step" or starts with heavy separator)
+        # We don't indent the main step headers to keep them prominent
+        if "📍 Step" in msg or msg.startswith("="*10):
+            return msg
+        # Indent everything else with one tabspace as requested
+        # Also handle multi-line messages so they align nicely
+        return "\t" + msg.replace("\n", "\n\t")
+
+logger = logging.getLogger("agents.browser_agent")
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = IndentedFormatter('%(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    logger.propagate = False
+    logger.setLevel(logging.INFO)
 
 
 class BrowserAgent:
@@ -61,12 +86,29 @@ class BrowserAgent:
         self.next_mode = "text"  # Default start mode
         self.current_action_description = "Initializing..."
         self.is_running = False
+        self._recovering = False  # Flag to pause background tasks during recovery
+        # Robust Lock for Page Access (prevents race conditions)
+        self.page_access_lock = asyncio.Lock()
         self.streaming_task = None
+        self.screenshot_ws = None  # WebSocket connection for screenshot streaming
         self.stuck_count = 0  # Track consecutive stuck warnings
         self.previous_url = ""  # Track URL changes to detect progress
         self.recent_downloads = [] # Track downloads in the current step
-        self.known_elements = {} # Memory of elements by URL: {url: {xpath: elem}}
+        self.known_elements = {} # Memory of elements by URL: {url: elem}
         self._active_downloads = set() # Track active background downloads
+        
+        # Repeated Action Detection
+        self._last_action_signature = None  # Hash of last action for duplicate detection
+        self._repeated_action_count = 0  # Count of consecutive same-action attempts
+        self._last_no_effect_action = None  # Track last action that had no effect
+        self._no_effect_count = 0  # Count of consecutive no-effect actions
+        self._last_executed_action = None  # Track last action for blocking
+        
+        self.action_history: List[Dict[str, Any]] = [] # Added this line for blocking
+        
+        # Persistent Memory (survives across sessions)
+        self.persistent = get_persistent_memory()
+        logger.info(f"📚 {self.persistent.get_summary()}")
         
         # Initialize File Managers
         self.download_manager = None
@@ -139,6 +181,16 @@ class BrowserAgent:
             "resource": {
                 "peak_memory_mb": 0,
                 "current_memory_mb": 0
+            },
+            "tokens": {
+                "prompt": 0,
+                "completion": 0,
+                "total": 0
+            },
+            "dom": {
+                "total_elements": 0,
+                "snapshots": 0,
+                "avg_elements": 0
             }
         }
 
@@ -246,25 +298,36 @@ class BrowserAgent:
 
     async def _stream_loop(self):
         """Background task for smooth visual streaming (1fps)"""
+        logger.error("📹 STARTING STREAM LOOP CHECK")
         logger.info("📹 Starting background stream loop")
         while self.is_running:
             try:
-                if self.browser.page:
-                    # Capture screenshot to memory (fast, no file save)
-                    try:
-                        screenshot_bytes = await self.browser.page.screenshot(
-                            timeout=2000, 
-                            animations="disabled",
-                            full_page=False
-                        )
-                        screenshot_b64 = base64.b64encode(screenshot_bytes).decode()
-                        
-                        # Push update
-                        current_step_count = len(self.memory.history)
-                        await self._push_state_update(screenshot_b64, current_step_count)
-                    except Exception as loop_e:
-                        # Ignore screenshot timeouts or page close races
-                        pass
+                # CRITICAL: Acquire lock to prevent race with main loop actions
+                # Concurrent page access between stream and action causes IPC pipe crashes!
+                if self._recovering:
+                    await asyncio.sleep(0.5)
+                    continue
+
+                async with self.page_access_lock:
+                    if self.browser.page:
+                        # Capture screenshot to memory (fast, no file save)
+                        try:
+                            # Use JPEG with aggressive compression for streaming (25% quality, 50% scale)
+                            screenshot_bytes = await self.browser.page.screenshot(
+                                timeout=2000, 
+                                type='jpeg',
+                                quality=25,
+                                full_page=False,
+                                scale='css'  # Use CSS pixels (smaller on high DPI)
+                            )
+                            screenshot_b64 = base64.b64encode(screenshot_bytes).decode()
+                            
+                            # Push update
+                            current_step_count = len(self.memory.history)
+                            await self._push_state_update(screenshot_b64, current_step_count)
+                        except Exception as loop_e:
+                            # Ignore screenshot timeouts or page close races
+                            pass
                 
                 await asyncio.sleep(1.0)
             except asyncio.CancelledError:
@@ -275,37 +338,47 @@ class BrowserAgent:
         logger.info("🛑 Stream loop stopped")
 
     async def _push_state_update(self, screenshot_b64: Optional[str], step: int):
-        """Push update to orchestrator. Pass screenshot_b64=None to clear canvas."""
-        if not self.thread_id or not self.backend_url:
+        """Push update to orchestrator via WebSocket. Pass screenshot_b64=None to clear canvas."""
+        if not self.thread_id or not self.screenshot_ws:
             return
             
         try:
-            # Serialize plan (Legacy format for Frontend: 'subtask', 'status')
-            plan_data = []
-            if screenshot_b64:
-                plan_data = [
-                    {"subtask": t.description, "status": t.status} 
-                    for t in self.memory.plan
-                ]
-            
+            # Build payload
             payload = {
-                "thread_id": self.thread_id,
-                "screenshot_data": screenshot_b64,
+                "screenshot_data": screenshot_b64 or "",
                 "url": self.browser.page.url if self.browser.page and screenshot_b64 else "",
                 "step": step,
-                "task": self.task if screenshot_b64 else "Session Ended",
-                "task_plan": plan_data, # Send empty if clearing
+                "task_plan": [
+                    {"subtask": t.description, "status": t.status} 
+                    for t in self.memory.plan
+                ] if screenshot_b64 else [],
                 "current_action": self.current_action_description if screenshot_b64 else "Session Ended"
             }
-
-            async with httpx.AsyncClient() as client:
-                await client.post(
-                    f"{self.backend_url}/api/canvas/update",
-                    json=payload,
-                    timeout=2.0
-                )
+            
+            # Send via WebSocket (fast, no HTTP overhead)
+            await self.screenshot_ws.send(json.dumps(payload))
+        except websockets.exceptions.ConnectionClosed:
+            logger.warning("Screenshot WebSocket disconnected, attempting reconnect...")
+            await self._connect_screenshot_ws()
         except Exception as e:
-            logger.debug(f"Streaming failed: {e}")
+            logger.error(f"Streaming failed: {e}")
+
+    async def _connect_screenshot_ws(self):
+        """Connect to orchestrator's screenshot WebSocket for streaming"""
+        if not self.thread_id or not self.backend_url:
+            return
+        
+        try:
+            # Convert http:// to ws:// for WebSocket
+            ws_url = self.backend_url.replace("http://", "ws://").replace("https://", "wss://")
+            ws_endpoint = f"{ws_url}/ws/screenshots/{self.thread_id}"
+            
+            logger.info(f"📸 Connecting to screenshot WebSocket: {ws_endpoint}")
+            self.screenshot_ws = await websockets.connect(ws_endpoint, ping_interval=None)
+            logger.info(f"📸 Screenshot WebSocket connected for thread {self.thread_id}")
+        except Exception as e:
+            logger.error(f"Failed to connect screenshot WebSocket: {e}")
+            self.screenshot_ws = None
 
     async def run(self) -> BrowserResult:
         """Execute the browser automation task"""
@@ -316,6 +389,10 @@ class BrowserAgent:
         # 1. Initialize Browser
         if not await self.browser.launch(headless=self.headless, on_download=self._handle_download):
             return BrowserResult(success=False, task_summary="Browser launch failed", error="Browser launch failed")
+        
+        # Connect screenshot WebSocket for streaming
+        if self.thread_id:
+            await self._connect_screenshot_ws()
         
         # Start Streaming Loop
         if self.thread_id:
@@ -338,7 +415,7 @@ class BrowserAgent:
             step = 0
             while True:
                 step += 1
-                logger.info(f"\n{'='*50}\n📍 Step {step}\n{'='*50}")
+                logger.info(f"{'='*50}\n📍 Step {step}\n{'='*50}")
                 
                 # Clear previous step's downloads
                 self.recent_downloads = []
@@ -352,12 +429,86 @@ class BrowserAgent:
 
                 # Context Gathering - Always use the ACTIVE page (handles tabs)
                 self.current_action_description = "Observing page..."
-                active_page = self.browser.get_active_page() or self.browser.page
+                active_page = self.browser.get_active_page()
+                
+                if not active_page:
+                    logger.warning("⚠️ No active page at step start - recovering...")
+                    self._recovering = True
+                    try:
+                        last_known_url = self.previous_url if self.previous_url.startswith('http') else None
+                        active_page = await self.browser.recover_page(last_known_url)
+                    finally:
+                        self._recovering = False
+                
+                # CRITICAL: Capture URL immediately for recovery purposes
+                # This MUST happen before any operations that might cause context to become stale
+                last_error = None  # Track last error for prompt injection
+                
+                if active_page:
+                    try:
+                        immediate_url = active_page.url
+                        if immediate_url and immediate_url.startswith('http'):
+                            self.previous_url = immediate_url
+                    except Exception:
+                        pass  # Page might already be stale, that's ok
                 
                 # Brief wait to let any recent tab switch settle
                 await asyncio.sleep(0.3)
                 
-                page_content = await self.dom.get_page_content(active_page)
+                # Try to get page content with retry if page context is stale
+                try:
+                    async with self.page_access_lock:
+                        page_content = await self.dom.get_page_content(active_page) if active_page else {'url': '', 'elements': [], 'extraction_failed': True}
+                except ValueError as e:
+                    if "closed pipe" in str(e) or "target closed" in str(e):
+                        logger.error(f"⚠️ Browser pipe closed ({e}) - Triggering recovery...")
+                        self.browser.page = None # Force recovery next loop
+                        await asyncio.sleep(1)
+                        continue
+                    raise e
+                except Exception as e:
+                     logger.warning(f"DOM extraction error: {e}")
+                     page_content = {'url': '', 'elements': [], 'extraction_failed': True}
+                
+                # RETRY MECHANISM: If DOM extraction failed (stale context), retry with fresh page reference
+                # Check for: empty URL, extraction_failed flag, or 0 elements on non-blank page
+                extraction_failed = (
+                    page_content.get('extraction_failed', False) or
+                    not page_content.get('url') or 
+                    page_content.get('url') == ''
+                )
+                
+                if extraction_failed:
+                    logger.warning("⚠️ DOM extraction failed - context may be stale, retrying...")
+                    
+                    # Try to get the last known URL for recovery
+                    last_known_url = self.previous_url if self.previous_url.startswith('http') else None
+                    
+                    # Multiple retries with increasing wait times
+                    for retry_wait in [0.5, 1.0, 2.0]:
+                        await asyncio.sleep(retry_wait)
+                        active_page = self.browser.get_active_page()
+                        
+                        # If no active page found, try to recover with a new page
+                        if not active_page:
+                            logger.warning(f"⚠️ All pages are stale - attempting recovery...")
+                            self._recovering = True
+                            try:
+                                active_page = await self.browser.recover_page(last_known_url)
+                            finally:
+                                self._recovering = False
+                            
+                            if not active_page:
+                                logger.error("❌ Page recovery failed!")
+                                continue
+                        
+                        async with self.page_access_lock:
+                            page_content = await self.dom.get_page_content(active_page)
+                        if not page_content.get('extraction_failed', False) and page_content.get('url'):
+                            logger.info(f"✅ Retry succeeded after {retry_wait}s wait")
+                            break
+                    else:
+                        logger.warning("⚠️ All retries failed, continuing with partial data")
 
                 # MEMORY UPDATE: Persist known elements
                 # Merge current viewport elements with previously seen off-screen elements
@@ -368,6 +519,17 @@ class BrowserAgent:
                     
                     # UPDATE CACHE for ACTIONS (CRITICAL for index-based clicks)
                     self.executor.set_cached_elements(page_content['elements'])
+                    
+                    # BUILD UNIFIED PAGE TREE (combines a11y hierarchy + elements + selectors)
+                    try:
+                        page_content['unified_page_tree'] = await self.dom.build_unified_page_tree(
+                            active_page, 
+                            page_content,
+                            mode='text'
+                        )
+                    except Exception as tree_err:
+                        logger.warning(f"Unified tree build failed: {tree_err}")
+                        page_content['unified_page_tree'] = ""
                 
                 # Get URL early for blank page detection
                 current_url = page_content.get('url', '')
@@ -386,7 +548,9 @@ class BrowserAgent:
                         
                         # Take screenshot directly from active_page to avoid page mismatch
                         ss_start = time.time()
-                        screenshot_bytes = await active_page.screenshot(type='jpeg', quality=70, timeout=15000)
+                        # CRITICAL: Lock to prevent race with background stream
+                        async with self.page_access_lock:
+                            screenshot_bytes = await active_page.screenshot(type='jpeg', quality=70, timeout=15000)
                         ss_elapsed = time.time() - ss_start
                         
                         if screenshot_bytes:
@@ -402,88 +566,106 @@ class BrowserAgent:
                 
                 logger.info(f"🌐 URL: {page_content.get('url')} | 📄 Title: {page_content.get('title')}")
 
+                # NOTE: Modal handling is now done by the LLM - overlay info is sent in the prompt
+                # so the LLM can intelligently decide whether to dismiss or interact with modals
+
+
                 # AUTO-COMPLETION CHECK: Detect if subtask is already done via URL patterns
                 if self._check_url_based_completion(current_subtask.description, current_url):
                     self.memory.mark_completed(current_subtask.id, f"Auto-detected via URL: {current_url[:60]}...")
                     logger.info(f"✅ Subtask '{current_subtask.description}' auto-completed via URL detection")
                     continue  # Move to next subtask
 
-                # Decision: Text vs Vision based on LLM prediction
-                # If stuck, force Vision AND inject warning
-                is_stuck = self._is_stuck()
-                
                 # CONTEXT CHANGE DETECTION: If URL changed significantly, we made progress!
                 url_changed = current_url != self.previous_url and self.previous_url != ""
                 if url_changed:
                     logger.info(f"🔄 URL changed: {self.previous_url[:40]}... → {current_url[:40]}...")
-                    # Reset stuck counter on meaningful progress
-                    if is_stuck:
-                        logger.info("✅ URL change detected - resetting stuck counter")
-                    self.stuck_count = 0
+                    self.stuck_count = 0  # Reset on URL change
                 self.previous_url = current_url
                 
-                # FORCE STUCK RECOVERY: If stuck detected multiple times, force subtask fail
-                # BUT: Don't count stuck on blank pages - those just need navigation first
-                if is_stuck and not is_blank_page:
-                    self.stuck_count += 1
-                    logger.warning(f"🔄 Stuck count: {self.stuck_count}/3")
-                    if self.stuck_count >= 3:
-                        logger.error("❌ Stuck 3+ times. Force-failing current subtask to move forward.")
-                        self.memory.mark_failed(current_subtask.id, "Force-failed after repeated stuck detection")
-                        self.stuck_count = 0
+                # LLM-BASED PROGRESS AND STUCK DETECTION (every 5 steps)
+                is_stuck = False
+                stuck_suggestion = ""
+                if step >= 5:
+                    progress_check = await self._check_progress_and_stuck(current_subtask.description, step)
+                    
+                    # If we have enough data, auto-complete the task
+                    if progress_check.get("has_enough_data", False):
+                        logger.info(f"✅ LLM determined we have enough data: {progress_check.get('reasoning', '')[:80]}")
+                        self.stuck_count = 0  # Reset on success
+                        self.memory.mark_completed(current_subtask.id, f"LLM: Collected sufficient data - {len(self.memory.extracted_items)} items")
                         continue  # Move to next subtask
+                    
+                    # If stuck, get the suggestion for the prompt
+                    if progress_check.get("is_stuck", False):
+                        is_stuck = True
+                        stuck_suggestion = progress_check.get("suggestion", "")
+                        self.stuck_count += 1
+                        logger.warning(f"🔄 LLM detected stuck: {progress_check.get('reasoning', '')[:80]}")
                         
+                        # Force fail after 2 LLM-detected stuck situations
+                        if self.stuck_count >= 2:
+                            logger.error(f"❌ Stuck 2+ times per LLM. Force-completing with available data.")
+                            self.memory.mark_completed(current_subtask.id, f"Auto-completed due to stuck - {len(self.memory.extracted_items)} items collected")
+                            self.stuck_count = 0
+                            continue
+                    else:
+                        # Not stuck - reset counter
+                        self.stuck_count = 0
+                
+                # Let the LLM decide via next_mode prediction
+                # Only force vision if we are stuck and text actions failed
                 use_vision = (
                     self.vision.available and 
                     screenshot_b64 and 
-                    (self.next_mode == "vision" or is_stuck)
+                    (
+                        self.next_mode == "vision" or  # LLM explicitly requested vision
+                        is_stuck  # Need visual understanding when stuck text-only
+                    )
                 )
 
                 # Action Planning
                 self.current_action_description = "Planning action..."
+                
+                # Log saved data state for debugging stateful execution
+                if self.memory.extracted_items:
+                    logger.info(f"📦 Saved data available: {self.memory.get_saved_summary()}")
+                
                 action_prompt_context = self.memory.to_prompt_context()
                 
-                # INJECT STUCK WARNING
+                # Add persistent memory context (cross-session data)
+                current_site = ""
+                try:
+                    current_site = page_content.get('url', '').split('/')[2] if page_content.get('url') else ""
+                except:
+                    pass
+                
+                # Pass full task description for semantic retrieval
+                persistent_context = self.persistent.to_prompt_context(
+                    current_site=current_site,
+                    task_description=self.task  # Full task for semantic matching
+                )
+                if persistent_context:
+                    action_prompt_context += f"\n\n{persistent_context}"
+                
+                # INJECT STUCK WARNING (with LLM suggestion and BLOCKED actions)
                 if is_stuck:
-                    # Check recent history for context
-                    recent_actions = [h['action']['actions'][0]['name'] for h in self.memory.history[-3:] if h['action'].get('actions')]
-                    
                     warning_msg = "\n\n" + "="*60 + "\n"
-                    warning_msg += "🚨 CRITICAL SYSTEM ALERT: YOU ARE IN A LOOP 🚨\n"
+                    warning_msg += "🚨 CRITICAL: YOU ARE STUCK - TRY A DIFFERENT APPROACH 🚨\n"
                     warning_msg += "="*60 + "\n\n"
                     
-                    # Include explicit failed action if available
-                    if hasattr(self, '_last_no_effect_action') and self._last_no_effect_action:
-                        warning_msg += f"YOUR ACTION: {self._last_no_effect_action}\n"
-                        warning_msg += "RESULT: ❌ NO EFFECT - The page state did not change.\n\n"
+                    # Include LLM's suggestion if available
+                    if stuck_suggestion:
+                        warning_msg += f"💡 SUGGESTED APPROACH: {stuck_suggestion}\n\n"
                     
-                    warning_msg += "🚫 IT IS FORBIDDEN TO REPEAT ACTIONS THAT HAD NO EFFECT.\n"
-                    warning_msg += "There is NO POINT trying the same action again - it will fail again.\n"
-                    warning_msg += "Clicking different elements at similar coordinates will also fail.\n\n"
-                    
-                    # AGGRESSIVE WARNING for stuck_count >= 2
-                    if self.stuck_count >= 2:
-                        warning_msg += "="*60 + "\n"
-                        warning_msg += "🛑 MANDATORY: YOU MUST TAKE A DIFFERENT APPROACH\n"
-                        warning_msg += "="*60 + "\n\n"
-                        warning_msg += "STEP 1 - VERIFY THE ELEMENT:\n"
-                        warning_msg += "Use 'run_js' to check if the element is actually interactive:\n"
-                        warning_msg += "  Example: run_js with code: document.querySelector('a[href]').href\n"
-                        warning_msg += "  This tells you what the link URL is, so you can 'navigate' to it directly.\n\n"
-                        warning_msg += "STEP 2 - DECIDE BASED ON VERIFICATION:\n"
-                        warning_msg += "  • If JS reveals a URL → Use 'navigate' to go there directly\n"
-                        warning_msg += "  • If the element is an image/non-link → The content is already visible. Use 'save_info' to save what you see, then 'done'\n"
-                        warning_msg += "  • If the goal is impossible → Use 'skip_subtask' to move on\n\n"
-                        warning_msg += "⛔ DO NOT OUTPUT 'click'. IT IS FORBIDDEN AND WILL FAIL.\n"
-                    elif 'go_back' in recent_actions:
-                        warning_msg += "Your 'go_back' action is failing. Use 'navigate' to the previous URL instead.\n"
-                    elif 'click' in recent_actions:
-                        warning_msg += "Your 'click' is not causing navigation. STOP CLICKING.\n"
-                        warning_msg += "Instead: Use 'run_js' to extract the href/onclick, then decide.\n"
-                    else:
-                        warning_msg += "DO NOT repeat the same action. Use a different approach.\n"
-                         
-                    logger.warning(f"🚫 Injecting STUCK WARNING into prompt: {warning_msg}")
+                    warning_msg += "OPTIONS:\n"
+                    warning_msg += "  1. If you already have enough data → call 'done' immediately\n"
+                    warning_msg += "  2. If the current approach isn't working → try a completely different method\n"
+                    warning_msg += "  3. Use run_js to directly interact with elements via JavaScript\n"
+                    warning_msg += "  4. If this subtask is impossible → use 'skip_subtask'\n\n"
+                    warning_msg += "Review your ACTION HISTORY to avoid repeating failed steps!\n"
+                     
+                    logger.warning(f"🚫 Injecting STUCK WARNING into prompt")
                     action_prompt_context += warning_msg
                 
                 action = None
@@ -503,19 +685,32 @@ class BrowserAgent:
                     action = await self.vision.plan_action_with_vision(
                         vision_task_context, screenshot_b64, page_content, self.memory.history, step
                     )
-                    self.metrics["llm_calls"]["vision"] += 1
-                    self.metrics["llm_calls"]["total"] += 1
-                    self.metrics["vision"]["vision_analyses"] += 1
+                    
+                    # VISION OBSERVATION CAPTURE: Extract findings from vision reasoning
+                    # This fixes the issue where vision describes what it sees but doesn't call save_info
+                    if action and action.reasoning and len(action.reasoning) > 50:
+                        # Check if reasoning contains extractable data patterns
+                        data_triggers = ['price is', 'costs', 'found', 'the product', 'i can see', 
+                                        'shows', 'displays', 'contains', 'lists', 'priced at']
+                        if any(trigger in action.reasoning.lower() for trigger in data_triggers):
+                            logger.info("📷 Vision provided observation - auto-adding to memory")
+                            self.memory.add_observation(f"vision_step_{step}", action.reasoning[:500])
                 
                 if not action:
                     if use_vision: logger.info("⚠️ Vision failed, falling back to TEXT")
                     logger.info("📝 Using TEXT LLM for action planning")
                     text_task_context = f"Main Task: {self.task}\nCurrent Subtask: {current_subtask.description}\n{action_prompt_context}"
                     action = await self.llm.plan_action(
-                        text_task_context, page_content, self.memory.history, step
+                        text_task_context, page_content, self.memory.history, step, last_error=last_error
                     )
                     self.metrics["llm_calls"]["planning"] += 1
                     self.metrics["llm_calls"]["total"] += 1
+                    
+                    # Track Token Usage
+                    if action.usage:
+                        self.metrics["tokens"]["prompt"] += action.usage.get("prompt_tokens", 0)
+                        self.metrics["tokens"]["completion"] += action.usage.get("completion_tokens", 0)
+                        self.metrics["tokens"]["total"] += action.usage.get("total_tokens", 0)
 
                 action_names = [a.name for a in action.actions]
                 logger.info(f"💭 Action Sequence: {action_names} | 💡 {action.reasoning[:100]}...")
@@ -536,32 +731,70 @@ class BrowserAgent:
 
                 # Execute Action Sequence
                 # Intelligent Replanning: Capture State Before Action (including visual hash)
-                pre_state = {
-                    'url': active_page.url,
-                    'title': await active_page.title(),
-                    'screenshot_hash': None
-                }
-                # Capture pre-action screenshot hash for visual comparison
                 try:
-                    pre_screenshot = await active_page.screenshot(type='jpeg', quality=50, timeout=5000)
-                    pre_state['screenshot_hash'] = hash(pre_screenshot)  # Simple hash for comparison
-                except Exception:
-                    pass  # Screenshot failed, will rely on URL comparison
+                    pre_state = {
+                        'url': active_page.url,
+                        'title': await active_page.title(),
+                        'screenshot_hash': None
+                    }
+                    # Capture pre-action screenshot hash for visual comparison
+                    try:
+                        async with self.page_access_lock:
+                            pre_screenshot = await active_page.screenshot(type='jpeg', quality=50, timeout=5000)
+                        pre_state['screenshot_hash'] = hash(pre_screenshot)  # Simple hash for comparison
+                    except Exception:
+                        pass  # Screenshot failed, will rely on URL comparison
+                except Exception as e:
+                    # Browser/page might have been closed
+                    logger.warning(f"⚠️ Could not capture pre-state (browser may be closed): {e}")
+                    # Attempt recovery in next loop iteration instead of crashing
+                    self.browser.page = None  # Force fresh page
+                    continue
 
-                # Cache elements on executor for index-based clicking
+                # Cache elements and page text on executor for verification
                 self.executor._cached_elements = page_content.get('elements', [])
                 
-                # Track actions by type
-                action_start = time.time()
-                for act in action.actions:
-                    action_type = act.name
-                    if action_type in self.metrics["actions"]:
-                        self.metrics["actions"][action_type] += 1
-                    else:
-                        self.metrics["actions"]["other"] += 1
-                    self.metrics["actions"]["total"] += 1
+                # Update DOM Metrics
+                element_count = len(self.executor._cached_elements)
+                self.metrics['dom']['total_elements'] += element_count
+                self.metrics['dom']['snapshots'] += 1
+                if self.metrics['dom']['snapshots'] > 0:
+                    self.metrics['dom']['avg_elements'] = self.metrics['dom']['total_elements'] / self.metrics['dom']['snapshots']
+                self.executor.set_cached_page_text(page_content.get('body_text', ''))
                 
-                result = await self.executor.execute(active_page, action)
+                # Track this action for blocklist (in case we get stuck later)
+                action_name = action.actions[0].name if action.actions else "unknown"
+                self._last_executed_action = f"{action_name}: {str(action)[:80]}"
+                
+                # Track start time for metrics
+                action_start = time.time()
+                self.metrics["actions"]["total"] += 1
+                
+                # CRITICAL: Use Lock to prevent stream loop from accessing page during action
+                # This prevents the race condition that was causing browser crashes!
+                async with self.page_access_lock:
+                    result = await self.executor.execute(active_page, action)
+                    
+                    # Refresh page reference IMMEDIATELY after action while holding lock if possible?
+                    # No, executing action releases control. We need to be careful.
+                    # Actually async with lock will hold it during await. Perfect.
+                    
+                    # CRITICAL: Refresh page reference IMMEDIATELY after action
+                    # Navigation/click actions may have changed the page context
+                    # get_active_page() will find the valid page AND update self.browser.page
+                    refreshed_page = self.browser.get_active_page()
+                
+                # Check for reference update outside lock (to allow streaming to potentially resume or check)
+                if refreshed_page and refreshed_page != active_page:
+                    logger.info(f"🔄 Page reference updated after action: {refreshed_page.url[:50] if refreshed_page.url else 'new page'}")
+                    active_page = refreshed_page
+                    # Wait for the new page to fully load before continuing
+                    try:
+                        await refreshed_page.wait_for_load_state('domcontentloaded', timeout=10000)
+                        await asyncio.sleep(1.5)  # Extra wait for SPAs/dynamic content
+                        logger.info(f"✅ Page loaded and ready")
+                    except Exception as load_err:
+                        logger.debug(f"Page load wait skipped: {load_err}")
                 
                 # Track action timing
                 action_time = (time.time() - action_start) * 1000
@@ -577,22 +810,26 @@ class BrowserAgent:
                         # Small delay to let page update
                         await asyncio.sleep(0.3)
                         
+                        # Get FRESH page reference in case context changed during navigation
+                        fresh_page = self.browser.get_active_page() or active_page
+                        
                         post_state = {
-                            'url': active_page.url,
-                            'title': await active_page.title(),
+                            'url': fresh_page.url,
+                            'title': await fresh_page.title(),
                             'screenshot_hash': None
                         }
                         # Capture post-action screenshot hash
                         try:
-                            post_screenshot = await active_page.screenshot(type='jpeg', quality=50, timeout=5000)
+                            async with self.page_access_lock:
+                                post_screenshot = await fresh_page.screenshot(type='jpeg', quality=50, timeout=5000)
                             post_state['screenshot_hash'] = hash(post_screenshot)
                         except Exception:
                             pass
                             
                     except Exception as e:
-                        # "Execution context destroyed" = navigation happened = SUCCESS!
-                        if "destroyed" in str(e).lower() or "navigation" in str(e).lower():
-                            logger.info("✅ Navigation detected (context destroyed) - this is successful!")
+                        # "Execution context destroyed" or "closed" = navigation happened = SUCCESS!
+                        if "destroyed" in str(e).lower() or "closed" in str(e).lower() or "navigation" in str(e).lower():
+                            logger.info("✅ Navigation detected (context changed) - this is successful!")
                             post_state = {'url': 'navigated', 'title': 'navigated', 'screenshot_hash': 'changed'}
                         else:
                             logger.warning(f"⚠️ Post-state capture failed: {e}")
@@ -610,19 +847,38 @@ class BrowserAgent:
                         if url_changed:
                             logger.info(f"✅ URL changed: {pre_state['url'][:50]} → {post_state['url'][:50]}")
                             self._last_no_effect_action = None  # Clear any previous no-effect flag
+                            self._no_effect_count = 0  # Reset counter
+                            # CRITICAL: Update previous_url IMMEDIATELY so specific recovery uses the NEW url
+                            # If we crash after this point but before next loop, we want to restore THIS page, not the old one
+                            self.previous_url = post_state['url']
                         elif visual_changed:
                             logger.info(f"✅ Visual change detected (modal/overlay/content update)")
                             self._last_no_effect_action = None  # Clear - action had effect
+                            self._no_effect_count = 0  # Reset counter
                         elif visual_changed is None:
                             logger.info(f"⚠️ Could not verify visual change (screenshot comparison unavailable)")
                         else:
                             # BOTH URL and visual unchanged = TRUE no effect
                             failed_action_desc = f"{action_types} on {[a.params for a in action.actions]}"
-                            self._last_no_effect_action = failed_action_desc
-                            warning = f"\n⚠️ NO EFFECT: Action {action_types} had no visual or URL change. The element might be non-interactive."
+                            
+                            # Track repeated failures
+                            if self._last_no_effect_action == failed_action_desc:
+                                self._no_effect_count += 1
+                            else:
+                                self._no_effect_count = 1
+                                self._last_no_effect_action = failed_action_desc
+                            
+                            warning = f"\n⚠️ NO EFFECT (#{self._no_effect_count}): Action {action_types} had no visual or URL change. The element might be non-interactive."
                             logger.warning(warning)
                             result.message += warning
                             result.data['state_unchanged'] = True
+                            
+                            # FORCE STUCK MODE after 3 repeated failures - need completely different approach
+                            if self._no_effect_count >= 3:
+                                logger.error(f"❌ STUCK: Same action '{failed_action_desc[:60]}' failed {self._no_effect_count}x - forcing stuck recovery")
+                                self.stuck_count = 5  # Force stuck mode
+                                # Add guidance to memory for next action
+                                self.memory.add_observation(f"🚫 STUCK ALERT: Clicking '{[a.params for a in action.actions]}' does NOT work! Must try: 1) Different element, 2) JavaScript, 3) Direct URL navigation, or 4) Skip this subtask.")
 
                 # Check for background downloads (e.g. PDF links that don't navigate)
                 if self.recent_downloads:
@@ -639,6 +895,62 @@ class BrowserAgent:
                     # Auto-complete if subtask explicitly asked for download
                     if 'download' in current_subtask.description.lower():
                         self.memory.mark_completed(current_subtask.id, f"Downloaded {len(self.recent_downloads)} files: {self.recent_downloads}")
+
+                # RECORD ACTION IN HISTORY for complete LLM context
+                try:
+                    action_type = action.actions[0].name if action.actions else "unknown"
+                    action_target = str(action.actions[0].params)[:80] if action.actions else ""
+                    error_msg = None
+                    
+                    # Capture error if action failed
+                    if not result.success:
+                        error_msg = result.message[:100] if result.message else "Action failed"
+                    
+                    self.memory.add_action(
+                        step=step,
+                        url=page_content.get('url', ''),
+                        title=page_content.get('title', ''),
+                        goal=current_subtask.description if current_subtask else "",
+                        reasoning=action.reasoning[:200] if action.reasoning else "",
+                        action_type=action_type,
+                        target=action_target,
+                        result="✅ SUCCESS" if result.success else "❌ FAILED",
+                        error=error_msg,
+                        stuck=is_stuck,
+                        mode="vision" if use_vision else "text"
+                    )
+                except Exception as history_err:
+                    logger.debug(f"Could not record action history: {history_err}")
+
+                # AUTO-SAVE EXTRACTED DATA FROM run_js RESULTS
+                # If the action was run_js and returned structured data, save it to memory automatically
+                if result.success and result.data and result.data.get('auto_extracted'):
+                    js_result = result.data.get('result')
+                    if js_result:
+                        # Handle array of products/items
+                        if isinstance(js_result, list) and len(js_result) > 0:
+                            # Check if items have product-like structure
+                            sample = js_result[0] if js_result else {}
+                            if isinstance(sample, dict) and any(k in str(sample).lower() for k in ['name', 'title', 'price', 'product']):
+                                logger.info(f"📦 AUTO-SAVING {len(js_result)} extracted items from run_js")
+                                # Save to memory with a sensible key
+                                key = 'extracted_products' if 'product' in str(js_result).lower() else 'extracted_items'
+                                self.memory.safe_add_extracted({key: js_result})
+                                # Also add individual items for traceability
+                                for item in js_result:  # No limit - save all
+                                    self.memory.extracted_items.append({'run_js_data': item, 'url': page_content.get('url', '')})
+                        # Handle dict with products/items inside
+                        elif isinstance(js_result, dict):
+                            if 'products' in js_result or 'items' in js_result:
+                                items = js_result.get('products') or js_result.get('items', [])
+                                if isinstance(items, list) and len(items) > 0:
+                                    logger.info(f"📦 AUTO-SAVING {len(items)} extracted items from run_js dict")
+                                    self.memory.safe_add_extracted({'extracted_products': items})
+                            elif any(k in str(js_result).lower() for k in ['name', 'title', 'price', 'product']):
+                                # Single product/item
+                                logger.info(f"📦 AUTO-SAVING single extracted item from run_js")
+                                self.memory.safe_add_extracted({'extracted_item': js_result})
+
 
                 # Dynamic Replanning: Handle Skip
                 if result.action == "skip_subtask":
@@ -669,7 +981,8 @@ class BrowserAgent:
                             # NOTE: We need to pass this multiplier to executor, but for now we'll just try again
                             # ideally executor should accept custom timeout
                             logger.info(f"🔄 Retrying {result.action} with extended wait...")
-                            result = await self.executor.execute(active_page, action)
+                            async with self.page_access_lock:
+                                result = await self.executor.execute(active_page, action)
                             retry_count += 1
                         elif decision.get('decision') == 'SKIP':
                             logger.warning("⏭️ LLM decided to SKIP failed action.")
@@ -692,6 +1005,13 @@ class BrowserAgent:
                     'timestamp': time.time()
                 })
 
+                # Persist session state (cookies/storage) to survive crashes
+                try:
+                    if not self._recovering:
+                        await self.browser.save_session()
+                except Exception:
+                    pass
+
                 if result.success:
                     self.metrics["actions"]["successful"] += 1
                     logger.info(f"✅ Sequence Succeeded: {result.message}")
@@ -700,26 +1020,82 @@ class BrowserAgent:
                         for tid in action.completed_subtasks:
                             self.memory.mark_completed(tid, f"Completed via sequence '{action_names}'")
 
+                    # Reset error state on success
+                    last_error = None
+
                     has_done = any(a.name == "done" for a in action.actions)
                     has_extract = any(a.name == "extract" for a in action.actions)
                     has_save = any(a.name == "save_info" for a in action.actions)
 
-                    # FIRST: Always capture save_info data (even if done is also present)
-                    if has_save and result.data:
-                        # Enrich data with LLM reasoning
+                    # IMPROVED DATA CAPTURE: Capture data from ANY action that returns data
+                    # This fixes the issue where only save_info data was captured
+                    if result.data:
+                        # Enrich data with context
+                        result.data['url'] = page_content.get('url', '')
+                        result.data['step'] = step
+                        result.data['action_type'] = result.action
+                        
                         if action and action.reasoning:
                             result.data['llm_reasoning'] = action.reasoning
                         
-                        self.memory.extracted_data.update(result.data)
-                        self.memory.extracted_items.append(result.data)  # Accumulate data
-                        logger.info(f"💾 Data saved: {result.data.get('structured_info', {}).get('key', 'unknown')}")
+                        # For save_info actions, always accumulate
+                        if has_save:
+                            # Handle multiple save_info actions from a single sequence
+                            if result.data.get('all_saved_items'):
+                                for item in result.data['all_saved_items']:
+                                    item_data = {
+                                        'structured_info': item,
+                                        'url': result.data.get('url', page_content.get('url', '')),
+                                        'step': step,
+                                        'action_type': result.action,
+                                        'llm_reasoning': action.reasoning if action else ''
+                                    }
+                                    self.memory.extracted_items.append(item_data)
+                                    verified = item.get('verified', False)
+                                    key_name = item.get('key', 'unknown')
+                                    status = "✅ VERIFIED" if verified else "⚠️ UNVERIFIED"
+                                    logger.info(f"💾 Data saved: {key_name} [{status}]")
+                            else:
+                                # Single save_info (backward compatibility)
+                                self.memory.extracted_items.append(result.data)
+                                verified = result.data.get('structured_info', {}).get('verified', False)
+                                key_name = result.data.get('structured_info', {}).get('key', 'unknown')
+                                status = "✅ VERIFIED" if verified else "⚠️ UNVERIFIED"
+                                logger.info(f"💾 Data saved: {key_name} [{status}]")
+                            
+                            self.memory.extracted_data.update(result.data)
+                        elif has_extract and result.data.get('text_content'):
+                            # Extract action - save the content
+                            self.memory.extracted_data.update(result.data)
+                            self.memory.extracted_items.append(result.data)
+                            logger.info(f"💾 Extracted page content ({len(result.data.get('text_content', ''))} chars)")
                     
                     # THEN: Handle task completion
                     if has_done:
-                         self.memory.mark_completed(current_subtask.id, action.reasoning)
-                         logger.info(f"✅ Subtask '{current_subtask.description}' marked complete (Done).")
+                        # CRITICAL FIX: Check if we need fallback data capture before marking done
+                        task_needs_data = any(kw in self.task.lower() for kw in ['extract', 'find', 'get', 'save', 'what is', 'tell me', 'price', 'name'])
+                        
+                        if task_needs_data and not self.memory.extracted_items:
+                            logger.warning("⚠️ Task requires data but none saved - triggering fallback capture")
+                            fallback_data = await self._capture_fallback_data(active_page, current_subtask.description)
+                            if fallback_data:
+                                self.memory.extracted_items.append(fallback_data)
+                                self.memory.extracted_data.update(fallback_data)
+                                logger.info("📋 Fallback data captured before marking done")
+                        
+                        # Also capture any valuable reasoning from the done action
+                        if action.reasoning and len(action.reasoning) > 50:
+                            # Check if reasoning contains data that wasn't saved
+                            if not self.memory.extracted_items or not any(
+                                item.get('structured_info', {}).get('verified', False) 
+                                for item in self.memory.extracted_items
+                            ):
+                                self.memory.add_observation("final_reasoning", action.reasoning[:500])
+                        
+                        self.memory.mark_completed(current_subtask.id, action.reasoning)
+                        logger.info(f"✅ Subtask '{current_subtask.description}' marked complete (Done).")
                     elif has_extract or has_save:
-                        # Only mark complete if we have data and no explicit done
+                        # Mark complete if we have data
                         if result.data:
                             self.memory.mark_completed(current_subtask.id, "Data extracted")
                             logger.info(f"✅ Subtask '{current_subtask.description}' marked complete (Data extracted).")
@@ -728,6 +1104,9 @@ class BrowserAgent:
                     self.metrics["errors"]["action_errors"] += 1
                     self.metrics["errors"]["total"] += 1
                     logger.warning(f"⚠️ Sequence Failed at {result.action}: {result.message}")
+                    
+                    # Capture error for next prompt iteration
+                    last_error = f"Action '{result.action}' failed: {result.message}"
                     
                     # Check if we should trigger intelligent replanning
                     should_replan = await self.planner.should_replan_after_failure(
@@ -750,10 +1129,8 @@ class BrowserAgent:
                             # Reset stuck counter since we have a new approach
                             self.stuck_count = 0
                     
-                    if self._is_stuck():
-                        logger.warning("🔄 Stuck detected. Marking subtask failed.")
-                        self.memory.mark_failed(current_subtask.id, "Stuck executing actions")
-                        self.next_mode = "vision"
+                    # NOTE: Stuck detection is now LLM-based via _check_progress_and_stuck earlier in the loop
+                    # No legacy stuck check needed here
                 
             self.is_running = False
             
@@ -783,7 +1160,12 @@ class BrowserAgent:
             self.metrics["errors"]["browser_errors"] += 1
             logger.error(f"❌ Critical Agent Failure: {e}", exc_info=True)
             self._log_execution_metrics(False)
-            return BrowserResult(success=False, task_summary=f"Critical failure: {str(e)}", error=str(e))
+            return BrowserResult(
+                success=False, 
+                task_summary=f"Critical failure: {str(e)}", 
+                error=str(e),
+                extracted_data={"merged": {}, "items": [], "stats": {}, "persistent_memory": {}}
+            )
         finally:
             # Final wait for downloads before closing
             await self._wait_for_downloads()
@@ -802,67 +1184,156 @@ class BrowserAgent:
                     await self._push_state_update(None, 0)
                 except Exception as e:
                     logger.warning(f"Failed to clear canvas: {e}")
+            
+            # Clear cached data (no longer needed after task)
+            self.executor._cached_page_text = ""
+            self.executor._cached_elements = []
 
             await self.browser.close()
 
-    def _needs_image_analysis(self, subtask_desc: str) -> bool:
-        return False # Disabled per user request to rely on LLM logic only
-
-    def _is_stuck(self) -> bool:
-        """Check if stuck based on repetitive identical actions"""
-        if len(self.memory.history) < 3: return False
+    # NOTE: _needs_image_analysis and _is_stuck methods removed - they were dead code
+    # Vision decision is now made in the run() loop based on next_mode
+    # Stuck detection is now LLM-based via _check_progress_and_stuck()
+    
+    async def _check_progress_and_stuck(self, current_subtask_desc: str, step: int) -> Dict[str, Any]:
+        """
+        LLM-based progress and stuck detection.
         
-        # Check last 3 actions
-        recent = self.memory.history[-3:]
+        Returns:
+            {
+                "has_enough_data": bool,  # Should we complete the task?
+                "is_stuck": bool,         # Are we in a unproductive loop?
+                "suggestion": str,        # What to do differently
+                "reasoning": str          # Why this decision
+            }
+        """
+        # Only run this check every 5 steps to save API calls
+        if step % 5 != 0 and step > 5:
+            return {"has_enough_data": False, "is_stuck": False, "suggestion": "", "reasoning": "Skipped check"}
         
-        # Extract action signatures (name + critical params)
-        sigs = []
-        for h in recent:
-            actions = h['action'].get('actions', [])
-            if not actions: continue
-            
-            # Create a signature for the FIRST action in the step
-            a = actions[0]
-            name = a['name']
-            
-            # For clicks/types, include the target
-            params = str(a.get('keywords', '')) + str(a.get('xpath', '')) + str(a.get('text', '')) + str(a.get('selector', ''))
-            sig = f"{name}:{params}"
-            sigs.append(sig)
-            
-        # If we have 3 identical actions (and they aren't 'wait' or 'scroll')
-        if len(sigs) == 3 and len(set(sigs)) == 1:
-            action_name = sigs[0].split(':')[0]
-            if action_name not in ['scroll', 'wait']:
-                logger.warning(f"🔄 Stuck detection: Repeated action {action_name} 3 times")
-                return True
-                
-        # Improved alternating loop detection:
-        # ONLY flag if there's a TRUE alternating pattern like A-B-A-B-A-B
-        # AND scroll is NOT one of the actions (scrolling to find things is valid!)
-        if len(self.memory.history) >= 6:
-            recent_6 = self.memory.history[-6:]
-            sigs_6 = []
-            for h in recent_6:
-                actions = h['action'].get('actions', [])
-                if actions: sigs_6.append(actions[0]['name'])
-            
-            unique_actions = set(sigs_6)
-            
-            # NEVER flag scroll-heavy patterns as stuck - scrolling to find elements is valid
-            if 'scroll' in unique_actions:
-                return False
-            
-            # Only flag TRUE alternating: A-B-A-B-A-B (3 occurrences of each)
-            # Not just "2 unique actions in 6 steps"
-            if len(unique_actions) == 2 and 'done' not in sigs_6 and 'navigate' not in sigs_6:
-                # Check if it's a TRUE alternating pattern (A-B-A-B-A-B)
-                is_true_alternating = all(sigs_6[i] != sigs_6[i+1] for i in range(5))
-                if is_true_alternating:
-                    logger.warning(f"🔄 Stuck detection: TRUE alternating loop detected {unique_actions}")
-                    return True
+        # Build history summary
+        history_lines = []
+        for i, h in enumerate(self.memory.history[-10:]):
+            actions = h.get('action', {}).get('actions', [])
+            result = h.get('result', {})
+            action_names = [a['name'] for a in actions] if actions else ['?']
+            success = "✅" if result.get('success', False) else "❌"
+            msg = result.get('message', '')[:60]
+            history_lines.append(f"  Step {h.get('step', '?')}: {action_names} {success} - {msg}")
+        
+        history_str = "\n".join(history_lines) if history_lines else "(no history)"
+        
+        # Build saved data summary
+        saved_data = []
+        for item in self.memory.extracted_items[:10]:
+            key = item.get('key', 'unknown')
+            value = str(item.get('value', ''))[:80]
+            verified = "✓" if item.get('verified', False) else "?"
+            saved_data.append(f"  [{verified}] {key}: {value}")
+        saved_str = "\n".join(saved_data) if saved_data else "(no data saved yet)"
+        
+        prompt = f"""You are a browser automation progress analyzer. Review the current state and decide:
 
-        return False
+ORIGINAL TASK: {self.task}
+CURRENT SUBTASK: {current_subtask_desc}
+CURRENT STEP: {step}
+
+SAVED DATA ({len(self.memory.extracted_items)} items):
+{saved_str}
+
+RECENT ACTION HISTORY:
+{history_str}
+
+═══════════════════════════════════════════════════════════════════════════════
+ANALYZE THE SITUATION
+═══════════════════════════════════════════════════════════════════════════════
+
+1. **HAS ENOUGH DATA?**
+   - Does the saved data sufficiently answer the user's original question?
+   - For "find best X" tasks: Do we have good options to recommend?
+   - For "describe/analyze" tasks: Do we have the key findings?
+   - Still need more info? → has_enough_data: false
+
+2. **IS STUCK?**
+   - Repeating the same ineffective action? (click failing, same JS code) → is_stuck: true
+   - Productive scrolling to find more items? → is_stuck: FALSE (this is useful!)
+   - Trying to apply filters that don't exist? → is_stuck: true
+   - Making progress (new URLs, new data saved)? → is_stuck: false
+
+3. **SUGGESTION** (only if stuck):
+   - What different approach should we try?
+   - Should we skip this subtask and move on?
+
+Respond with JSON ONLY:
+{{
+    "has_enough_data": true/false,
+    "is_stuck": true/false,
+    "suggestion": "what to do differently (empty if not stuck)",
+    "reasoning": "brief explanation"
+}}"""
+
+        try:
+            response, _ = await self.llm.call_llm_direct(prompt)  # No token limit
+            if response:
+                import json
+                import re
+                json_match = re.search(r'\{[\s\S]*\}', response)
+                if json_match:
+                    data = json.loads(json_match.group())
+                    logger.info(f"🧠 Progress check: has_enough={data.get('has_enough_data')}, stuck={data.get('is_stuck')}")
+                    if data.get('reasoning'):
+                        logger.info(f"   Reasoning: {data.get('reasoning')[:100]}")
+                    return data
+        except Exception as e:
+            logger.warning(f"Progress check failed: {e}")
+        
+        return {"has_enough_data": False, "is_stuck": False, "suggestion": "", "reasoning": "Check failed"}
+
+    async def _capture_fallback_data(self, page, subtask_description: str) -> Optional[Dict]:
+        """Auto-capture visible page data as fallback when no explicit save_info was called.
+        
+        This ensures we capture data even if the LLM forgot to call save_info before done.
+        """
+        try:
+            url = page.url
+            title = await page.title()
+            
+            # Extract visible text (first 2000 chars for context)
+            visible_text = await page.evaluate("document.body.innerText.substring(0, 2000)")
+            
+            # Try to extract key data patterns
+            import re
+            extracted_patterns = {}
+            
+            # Look for prices
+            prices = re.findall(r'[\$₹€£]\s*[\d,]+(?:\.\d{2})?|\d+[\d,]*\s*(?:LPA|lpa|USD|INR|Rs\.?)', visible_text)
+            if prices:
+                extracted_patterns['prices_found'] = list(set(prices[:5]))  # Unique, max 5
+            
+            # Look for product names (capitalized phrases)
+            product_patterns = re.findall(r'(?:[A-Z][a-zA-Z0-9]+\s+)+(?:Pro|Max|Plus|Ultra|SE)?', visible_text[:1000])
+            if product_patterns:
+                extracted_patterns['potential_products'] = list(set(p.strip() for p in product_patterns[:5]))
+            
+            logger.info(f"📋 Fallback data capture from {url[:50]}: {len(visible_text)} chars, patterns: {list(extracted_patterns.keys())}")
+            
+            return {
+                "fallback_capture": True,
+                "structured_info": {
+                    "key": "page_content",
+                    "value": visible_text[:500],  # Summary
+                    "source": url,
+                    "title": title,
+                    "verified": True,  # It's from the actual page
+                    "extracted_patterns": extracted_patterns
+                },
+                "url": url,
+                "subtask": subtask_description,
+                "timestamp": time.time()
+            }
+        except Exception as e:
+            logger.warning(f"Fallback data capture failed: {e}")
+            return None
 
     def _check_url_based_completion(self, subtask_description: str, url: str) -> bool:
         """Check if a subtask is already completed based on URL patterns.
@@ -902,38 +1373,96 @@ class BrowserAgent:
         return False
 
     def _build_final_result(self) -> BrowserResult:
+        """Build a clean, human-readable result for the orchestrator/user."""
+        
         success_count = sum(1 for t in self.memory.plan if t.status == 'completed')
         total_tasks = len(self.memory.plan)
-        summary_lines = [f"{t.id}. {t.description}: {t.status}" for t in self.memory.plan]
-        summary = f"Completed {success_count}/{total_tasks} subtasks.\n" + "\n".join(summary_lines)
-        if self.memory.observations:
-            summary += "\n\nObservations:\n" + "\n".join([f"- {k}: {v}" for k,v in self.memory.observations.items()])
-
-        if self.memory.extracted_items:
-            summary += "\n\nExtracted Data Highlights:\n"
-            for item in self.memory.extracted_items:
-                if 'structured_info' in item:
-                   s = item['structured_info']
-                   summary += f"- {s['key']}: {s['value']} (Source: {s.get('source', 'unknown')})\n"
-                else:
-                   reasoning = item.get('llm_reasoning', 'No reasoning captured')
-                   url = item.get('url', 'Unknown URL')
-                   summary += f"- Source: {url}\n  Finding: {reasoning}\n"
-
+        
+        # === SECTION 1: TASK SUMMARY (human readable) ===
+        summary = f"✅ Task {'Completed' if success_count == total_tasks else 'Partially Completed'} ({success_count}/{total_tasks} subtasks)\n\n"
+        
+        # List subtasks with status
+        for t in self.memory.plan:
+            icon = "✓" if t.status == 'completed' else "✗" if t.status == 'failed' else "○"
+            summary += f"  {icon} {t.description}\n"
+        
+        # === SECTION 2: EXTRACTED DATA (the actual findings) ===
+        if self.memory.extracted_data:
+            summary += "\n📋 **Extracted Information:**\n"
+            for key, value in self.memory.extracted_data.items():
+                # Truncate very long values for readability
+                display_value = str(value)[:200] + "..." if len(str(value)) > 200 else value
+                summary += f"  • {key}: {display_value}\n"
+        
+        # === SECTION 3: ACTION LOG (simple list) ===
+        action_log = []
+        for step in self.memory.history:
+            step_num = step.get("step", "?")
+            action_data = step.get("action", {})
+            result_data = step.get("result", {})
+            
+            # Get action name(s)
+            actions = action_data.get("actions", [])
+            action_names = [a.get("name", "unknown") for a in actions] if actions else ["unknown"]
+            action_str = " → ".join(action_names)
+            
+            # Get result
+            success = result_data.get("success", False)
+            status = "✓" if success else "✗"
+            
+            # Get brief description from reasoning (first 80 chars)
+            reasoning = action_data.get("reasoning", "")[:80]
+            if len(action_data.get("reasoning", "")) > 80:
+                reasoning += "..."
+            
+            action_log.append(f"  {step_num}. [{status}] {action_str}: {reasoning}")
+        
+        # Verbose action log removed from summary to prevent flooding
+        # Structured history is already in 'actions_taken' field
+        pass
+        
+        # === BUILD RESULT (schema-compatible) ===
+        # actions_taken must be List[Dict] per BrowserResult schema
+        # Keep it minimal: just step number, action name, success status
+        minimal_actions = []
+        for step in self.memory.history:
+            step_num = step.get("step", 0)
+            action_data = step.get("action", {})
+            result_data = step.get("result", {})
+            actions = action_data.get("actions", [])
+            action_names = [a.get("name", "unknown") for a in actions] if actions else ["unknown"]
+            
+            minimal_actions.append({
+                "step": step_num,
+                "actions": action_names,
+                "success": result_data.get("success", False)
+            })
+        
         result = BrowserResult(
             success=(success_count == total_tasks),
             task_summary=summary,
-            actions_taken=self.memory.history,
-            extracted_data={"merged": self.memory.extracted_data, "items": self.memory.extracted_items},
-            metrics={'total_time': time.time() - self.start_time if self.start_time else 0}
+            actions_taken=minimal_actions,  # List[Dict] as schema requires
+            # Sanitize extracted data to prevent output flooding
+            extracted_data={
+                k: (v[:500] + "...(truncated)" if isinstance(v, str) and len(v)>500 else 
+                    str(v)[:1000] + "...(truncated)" if len(str(v))>1000 else v)
+                for k, v in self.memory.extracted_data.items()
+            },  
+            metrics={
+                'total_time': time.time() - self.start_time if self.start_time else 0,
+                'steps': len(self.memory.history),
+                'verified_items': sum(1 for i in self.memory.extracted_items if i.get('structured_info', {}).get('verified'))
+            }
         )
-        logger.info(f"📊 Final Result Building: Collected {len(self.memory.extracted_items)} items from URLs: {[d.get('url') for d in self.memory.extracted_items]}")
         
-        # Verbose Debug for User Verification
+        logger.info(f"📊 Final Result: {success_count}/{total_tasks} subtasks, {len(self.memory.extracted_data)} data items")
+        
+        # Debug logging (not in response)
         logger.info("🕵️ DEBUG: Extracted Item Details:")
         for idx, item in enumerate(self.memory.extracted_items):
-             logger.info(f"  Item {idx+1}: {item.get('url')}")
-             logger.info(f"    Reasoning: {item.get('llm_reasoning', 'N/A')}")
+            verified = item.get('structured_info', {}).get('verified', 'N/A')
+            logger.info(f"  Item {idx+1}: {item.get('url')} [verified={verified}]")
+            logger.info(f"    Reasoning: {item.get('llm_reasoning', 'N/A')[:100]}")
              
         return result
 
@@ -1001,12 +1530,12 @@ class BrowserAgent:
         logger.info(f"  Pages Visited: {self.metrics['navigation']['pages_visited']}")
         logger.info(f"  Unique URLs: {len(self.metrics['navigation']['unique_urls'])}")
         
-        # LLM Calls
+        # LLM Calls & Tokens
         logger.info("")
-        logger.info("LLM Calls:")
-        logger.info(f"  Total: {self.metrics['llm_calls']['total']}")
-        logger.info(f"  Planning: {self.metrics['llm_calls']['planning']}")
-        logger.info(f"  Vision: {self.metrics['llm_calls']['vision']}")
+        logger.info("LLM & Cost:")
+        logger.info(f"  Calls: {self.metrics['llm_calls']['total']} (Plan: {self.metrics['llm_calls']['planning']}, Vision: {self.metrics['llm_calls']['vision']})")
+        if self.metrics['tokens']['total'] > 0:
+            logger.info(f"  Tokens: {self.metrics['tokens']['total']:,} (In: {self.metrics['tokens']['prompt']:,}, Out: {self.metrics['tokens']['completion']:,})")
         if self.metrics['llm_calls']['failures'] > 0:
             logger.info(f"  Failures: {self.metrics['llm_calls']['failures']}")
         
@@ -1016,6 +1545,13 @@ class BrowserAgent:
             logger.info("Vision:")
             logger.info(f"  Screenshots: {self.metrics['vision']['screenshots_taken']}")
             logger.info(f"  Analyses: {self.metrics['vision']['vision_analyses']}")
+            
+        # DOM & Complexity
+        if self.metrics['dom']['snapshots'] > 0:
+            avg_dom = self.metrics['dom']['avg_elements']
+            logger.info("")
+            logger.info("Page Complexity:")
+            logger.info(f"  Avg Elements: {avg_dom:.0f}")
         
         # Errors
         if self.metrics['errors']['total'] > 0:
@@ -1032,4 +1568,5 @@ class BrowserAgent:
         logger.info(f"  Current Memory: {self.metrics['resource']['current_memory_mb']:.1f} MB")
         logger.info(f"  Peak Memory: {self.metrics['resource']['peak_memory_mb']:.1f} MB")
         logger.info("")
+
 

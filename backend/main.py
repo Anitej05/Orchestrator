@@ -114,9 +114,10 @@ conversation_store: Dict[str, Dict[str, Any]] = {}
 from threading import Lock
 store_lock = Lock()
 
-# Global store for live canvas updates during browser execution
-live_canvas_updates: Dict[str, Dict[str, Any]] = {}
-canvas_lock = Lock()
+# WebSocket screenshot relay: Maps thread_id -> frontend WebSocket for direct screenshot streaming
+# Browser agent sends screenshots via /ws/screenshots/{thread_id}, orchestrator relays to frontend
+frontend_websockets: Dict[str, WebSocket] = {}
+frontend_ws_lock = asyncio.Lock()  # Async lock for WebSocket registry
 
 app.add_middleware(
     CORSMiddleware,
@@ -1607,219 +1608,78 @@ async def continue_conversation(user_response: UserResponse):
         logger.error(f"An unexpected error occurred during conversation continuation for thread_id {user_response.thread_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {e}")
 
-@app.post("/api/canvas/update")
-async def update_canvas(update_data: Dict[str, Any] = Body(...)):
+# ============================================================================
+# WEBSOCKET SCREENSHOT RELAY ENDPOINT
+# ============================================================================
+# Browser agent connects here to stream screenshots directly to frontend
+# This eliminates HTTP overhead and asyncio polling issues
+# ============================================================================
+
+@app.websocket("/ws/screenshots/{thread_id}")
+async def screenshots_websocket(websocket: WebSocket, thread_id: str):
     """
-    Receive canvas updates from browser agent and store for WebSocket streaming
-    Supports both browser view (screenshots) and plan view (task plan)
+    WebSocket endpoint for browser agent to stream screenshots.
+    Screenshots are immediately relayed to the frontend WebSocket for this thread_id.
     """
+    await websocket.accept()
+    logger.info(f"📸 Browser agent connected for screenshot streaming: thread={thread_id}")
+    
     try:
-        thread_id = update_data.get("thread_id")
-        if not thread_id:
-            return {"status": "error", "message": "thread_id required"}
-        
-        logger.info(f"📥 Received canvas update for thread {thread_id} (step {update_data.get('step', 0)})")
-        
-        screenshot_data = update_data.get("screenshot_data", "")
-        url = update_data.get("url", "")
-        step = update_data.get("step", 0)
-        task = update_data.get("task", "")
-        task_plan = update_data.get("task_plan", [])  # New: task plan for plan view
-        current_action = update_data.get("current_action", "")  # New: current action
-        
-        # Create browser view HTML with embedded base64 image
-        browser_view_html = ""
-        if screenshot_data:
+        while True:
+            # Receive screenshot data from browser agent
+            data = await websocket.receive_json()
+            
+            screenshot_data = data.get("screenshot_data", "")
+            url = data.get("url", "")
+            step = data.get("step", 0)
+            task_plan = data.get("task_plan", [])
+            current_action = data.get("current_action", "")
+            
+            if not screenshot_data:
+                continue
+            
+            # Create browser view HTML
             browser_view_html = f'''
             <div style="text-align: center;">
-                <img src="data:image/png;base64,{screenshot_data}" alt="Browser live view" style="width: 100%; max-width: 1200px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);" />
+                <img src="data:image/jpeg;base64,{screenshot_data}" alt="Browser live view" style="width: 100%; max-width: 1200px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);" />
                 <div style="margin-top: 10px; color: #666; font-size: 14px;">
                     <strong>🔴 Live Browser View</strong> | Step {step} | {url[:60] if url else 'Loading...'}
                 </div>
             </div>
             '''
-        
-        # Create plan view HTML with task progress
-        # Calculate progress
-        completed_count = sum(1 for t in task_plan if t.get('status') == 'completed')
-        total_count = len(task_plan)
-        progress_percent = (completed_count / total_count * 100) if total_count > 0 else 0
-        
-        plan_view_html = '''
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <style>
-                /* Minimalistic scrollbar */
-                ::-webkit-scrollbar {
-                    width: 6px;
-                    height: 6px;
-                }
-                ::-webkit-scrollbar-track {
-                    background: transparent;
-                }
-                ::-webkit-scrollbar-thumb {
-                    background: rgba(156, 163, 175, 0.3);
-                    border-radius: 10px;
-                    transition: background 0.2s ease;
-                }
-                ::-webkit-scrollbar-thumb:hover {
-                    background: rgba(156, 163, 175, 0.5);
-                }
-                * {
-                    scrollbar-width: thin;
-                    scrollbar-color: rgba(156, 163, 175, 0.3) transparent;
-                }
-            </style>
-        </head>
-        <body style="margin: 0; padding: 0;">
-        <div style="padding: 24px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f9fafb; min-height: 100vh;">
-            <div style="max-width: 800px; margin: 0 auto;">
-                <!-- Header -->
-                <div style="background: white; border-radius: 12px; padding: 20px 24px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); border: 1px solid #e5e7eb;">
-                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
-                        <h2 style="margin: 0; color: #111827; font-size: 24px; font-weight: 600;">📋 Task Execution Plan</h2>
-                        <div style="background: #3b82f6; color: white; padding: 6px 12px; border-radius: 20px; font-size: 14px; font-weight: 600;">
-                            Step ''' + str(step) + '''
-                        </div>
-                    </div>
-                    <div style="color: #6b7280; font-size: 14px; line-height: 1.5;">''' + task[:150] + ('...' if len(task) > 150 else '') + '''</div>
-                </div>
-        '''
-        
-        if task_plan:
-            # Progress bar
-            plan_view_html += f'''
-                <div style="background: white; border-radius: 12px; padding: 20px 24px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); border: 1px solid #e5e7eb;">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                        <span style="font-size: 14px; font-weight: 600; color: #6b7280;">Progress</span>
-                        <span style="font-size: 14px; font-weight: 600; color: #3b82f6;">{completed_count}/{total_count} completed</span>
-                    </div>
-                    <div style="background: #e5e7eb; border-radius: 10px; height: 8px; overflow: hidden;">
-                        <div style="background: linear-gradient(90deg, #3b82f6 0%, #2563eb 100%); height: 100%; width: {progress_percent}%; transition: width 0.3s ease;"></div>
-                    </div>
-                </div>
-            '''
             
-            # Current action
-            if current_action:
-                plan_view_html += f'''
-                <div style="background: #3b82f6; border-radius: 12px; padding: 16px 20px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); color: white;">
-                    <div style="display: flex; align-items: center; gap: 10px;">
-                        <span style="font-size: 20px;">▶️</span>
-                        <div>
-                            <div style="font-size: 12px; opacity: 0.9; margin-bottom: 4px;">CURRENT ACTION</div>
-                            <div style="font-size: 15px; font-weight: 500;">{current_action}</div>
-                        </div>
-                    </div>
-                </div>
-                '''
-            
-            # Task list
-            plan_view_html += '<div style="display: flex; flex-direction: column; gap: 12px;">'
-            for i, subtask in enumerate(task_plan, 1):
-                status = subtask.get('status', 'pending')
-                subtask_text = subtask.get('subtask', 'Unknown')
-                
-                if status == 'completed':
-                    icon = '✅'
-                    color = '#10b981'
-                    bg_gradient = 'linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%)'
-                    border_color = '#10b981'
-                    status_text = 'COMPLETED'
-                elif status == 'failed':
-                    icon = '❌'
-                    color = '#ef4444'
-                    bg_gradient = 'linear-gradient(135deg, #fee2e2 0%, #fecaca 100%)'
-                    border_color = '#ef4444'
-                    status_text = 'FAILED'
-                else:  # pending
-                    icon = '⏳'
-                    color = '#6b7280'
-                    bg_gradient = 'linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%)'
-                    border_color = '#d1d5db'
-                    status_text = 'PENDING'
-                
-                plan_view_html += f'''
-                <div style="background: white; border-radius: 12px; padding: 16px 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); border-left: 4px solid {border_color}; transition: transform 0.2s ease, box-shadow 0.2s ease;">
-                    <div style="display: flex; align-items: start; gap: 14px;">
-                        <div style="background: {bg_gradient}; width: 40px; height: 40px; border-radius: 10px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-size: 20px;">
-                            {icon}
-                        </div>
-                        <div style="flex: 1; min-width: 0;">
-                            <div style="font-weight: 600; color: #1a202c; font-size: 15px; margin-bottom: 6px; line-height: 1.4;">{i}. {subtask_text}</div>
-                            <div style="display: inline-block; background: {bg_gradient}; color: {color}; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 600; letter-spacing: 0.5px;">
-                                {status_text}
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                '''
-            plan_view_html += '</div>'
-        else:
-            plan_view_html += '''
-            <div style="background: white; border-radius: 12px; padding: 60px 24px; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-                <div style="font-size: 48px; margin-bottom: 16px;">📋</div>
-                <div style="color: #9ca3af; font-size: 16px;">No task plan available</div>
-            </div>
-            '''
-        
-        plan_view_html += '</div></div></body></html>'
-        
-        # Store both views in global canvas updates
-        with canvas_lock:
-            live_canvas_updates[thread_id] = {
-                'has_canvas': True,
-                'canvas_type': 'html',
-                'canvas_content': browser_view_html,  # Default to browser view
-                'browser_view': browser_view_html,
-                'plan_view': plan_view_html,
-                'timestamp': time.time(),
-                'url': url,
-                'step': step,
-                'task_plan': task_plan,
-                'current_action': current_action
-            }
-        
-        return {"status": "success"}
-        
+            # Relay to frontend WebSocket if connected
+            async with frontend_ws_lock:
+                logger.info(f"🔍 Looking for frontend WS: thread={thread_id}, registered={list(frontend_websockets.keys())}")
+                frontend_ws = frontend_websockets.get(thread_id)
+                if frontend_ws:
+                    try:
+                        await frontend_ws.send_json({
+                            "node": "__live_canvas__",
+                            "thread_id": thread_id,
+                            "data": {
+                                "has_canvas": True,
+                                "canvas_type": "html",
+                                "canvas_content": browser_view_html,
+                                "browser_view": browser_view_html,
+                                "current_view": "browser",
+                                "screenshot_count": step
+                            },
+                            "timestamp": time.time()
+                        })
+                        logger.info(f"📡 Screenshot relayed to frontend: thread={thread_id}, step={step}, size={len(screenshot_data)}")
+                    except Exception as e:
+                        logger.warning(f"Failed to relay screenshot to frontend: {e}")
+                        # Remove disconnected frontend
+                        del frontend_websockets[thread_id]
+                else:
+                    logger.warning(f"⚠️ No frontend connected for thread={thread_id}, screenshot dropped")
+                    
+    except WebSocketDisconnect:
+        logger.info(f"📸 Browser agent disconnected: thread={thread_id}")
     except Exception as e:
-        logger.error(f"Error updating canvas: {e}")
-        return {"status": "error", "message": str(e)}
+        logger.error(f"Error in screenshot WebSocket: {e}")
 
-@app.post("/api/canvas/toggle-view")
-async def toggle_canvas_view(data: Dict[str, Any] = Body(...)):
-    """
-    Toggle between browser view and plan view for a thread
-    """
-    try:
-        thread_id = data.get("thread_id")
-        view_type = data.get("view_type", "browser")  # "browser" or "plan"
-        
-        if not thread_id:
-            return {"status": "error", "message": "thread_id required"}
-        
-        with canvas_lock:
-            if thread_id in live_canvas_updates:
-                canvas_data = live_canvas_updates[thread_id]
-                
-                # Switch the canvas_content based on view_type
-                if view_type == "plan" and 'plan_view' in canvas_data:
-                    canvas_data['canvas_content'] = canvas_data['plan_view']
-                    canvas_data['current_view'] = 'plan'
-                elif view_type == "browser" and 'browser_view' in canvas_data:
-                    canvas_data['canvas_content'] = canvas_data['browser_view']
-                    canvas_data['current_view'] = 'browser'
-                
-                canvas_data['timestamp'] = time.time()  # Update timestamp to trigger refresh
-                
-                return {"status": "success", "view_type": view_type}
-        
-        return {"status": "error", "message": "No canvas data found for thread"}
-        
-    except Exception as e:
-        logger.error(f"Error toggling canvas view: {e}")
-        return {"status": "error", "message": str(e)}
 
 @app.get("/api/chat/status/{thread_id}", response_model=ConversationStatus)
 async def get_conversation_status(thread_id: str):
@@ -2937,8 +2797,8 @@ async def safe_websocket_send(websocket: WebSocket, data: dict, thread_id: str =
         await websocket.send_json(data)
         return True
     except Exception as e:
-        # Connection is closed or broken - log but don't raise
-        logger.debug(f"WebSocket send failed for thread {thread_id} (connection likely closed): {e}")
+        # Connection is closed or broken - log as error to debug issues
+        logger.error(f"WebSocket send failed for thread {thread_id}: {e}")
         return False
 
 @app.websocket("/ws/chat")
@@ -3156,14 +3016,14 @@ async def websocket_chat(websocket: WebSocket):
                     # Process node data using unified helper
                     final_data = process_node_data(node_name, node_output, progress, node_count, thread_id)
 
-                    # Send enhanced node update
-                    await websocket.send_json({
+                    # Send enhanced node update using safe sender
+                    await safe_websocket_send(websocket, {
                         "node": node_name,
                         "data": final_data,
                         "thread_id": thread_id,
                         "status": "completed",
                         "timestamp": time.time()
-                    })
+                    }, thread_id)
                     logger.info(f"Streamed update from node '{node_name}' (#{node_count}) for thread_id {thread_id} - Progress: {progress:.1f}%")
                     
                     # Emit task status events for real-time UI updates
@@ -3176,36 +3036,36 @@ async def websocket_chat(websocket: WebSocket):
                                 task_name = event.get("task_name")
                                 
                                 if event_type == "task_started":
-                                    await websocket.send_json({
+                                    await safe_websocket_send(websocket, {
                                         "node": "task_started",
                                         "thread_id": thread_id,
                                         "task_name": task_name,
                                         "task_description": event.get("task_description"),
                                         "agent_name": event.get("agent_name"),
                                         "timestamp": event.get("timestamp", time.time())
-                                    })
+                                    }, thread_id)
                                     logger.debug(f"🚀 Emitted task_started for '{task_name}'")
                                     
                                 elif event_type == "task_completed":
-                                    await websocket.send_json({
+                                    await safe_websocket_send(websocket, {
                                         "node": "task_completed",
                                         "thread_id": thread_id,
                                         "task_name": task_name,
                                         "agent_name": event.get("agent_name"),
                                         "execution_time": event.get("execution_time", 0),
                                         "timestamp": event.get("timestamp", time.time())
-                                    })
+                                    }, thread_id)
                                     logger.debug(f"✅ Emitted task_completed for '{task_name}'")
                                     
                                 elif event_type == "task_failed":
-                                    await websocket.send_json({
+                                    await safe_websocket_send(websocket, {
                                         "node": "task_failed",
                                         "thread_id": thread_id,
                                         "task_name": task_name,
                                         "error": event.get("error"),
                                         "execution_time": event.get("execution_time", 0),
                                         "timestamp": event.get("timestamp", time.time())
-                                    })
+                                    }, thread_id)
                 except Exception as e:
                     logger.error(f"Error in stream_callback: {e}", exc_info=True)
             
@@ -3217,36 +3077,36 @@ async def websocket_chat(websocket: WebSocket):
                     task_name = event.get("task_name")
                     
                     if event_type == "task_started":
-                        await websocket.send_json({
+                        await safe_websocket_send(websocket, {
                             "node": "task_started",
                             "thread_id": thread_id,
                             "task_name": task_name,
                             "task_description": event.get("task_description"),
                             "agent_name": event.get("agent_name"),
                             "timestamp": event.get("timestamp", time.time())
-                        })
+                        }, thread_id)
                         logger.info(f"📡 REAL-TIME: Task started - '{task_name}'")
                         
                     elif event_type == "task_completed":
-                        await websocket.send_json({
+                        await safe_websocket_send(websocket, {
                             "node": "task_completed",
                             "thread_id": thread_id,
                             "task_name": task_name,
                             "agent_name": event.get("agent_name"),
                             "execution_time": event.get("execution_time", 0),
                             "timestamp": event.get("timestamp", time.time())
-                        })
+                        }, thread_id)
                         logger.info(f"📡 REAL-TIME: Task completed - '{task_name}' ({event.get('execution_time', 0):.2f}s)")
                         
                     elif event_type == "task_failed":
-                        await websocket.send_json({
+                        await safe_websocket_send(websocket, {
                             "node": "task_failed",
                             "thread_id": thread_id,
                             "task_name": task_name,
                             "error": event.get("error"),
                             "execution_time": event.get("execution_time", 0),
                             "timestamp": event.get("timestamp", time.time())
-                        })
+                        }, thread_id)
                         logger.warning(f"📡 REAL-TIME: Task failed - '{task_name}': {event.get('error')}")
                         
                 except Exception as e:
@@ -3278,40 +3138,11 @@ async def websocket_chat(websocket: WebSocket):
                         logger.error(f"Failed to create FileObject from file {idx} ({file_data.get('file_name', 'unknown')}): {file_err}")
                         # Continue processing other files
             
-            # Start background task to poll for live canvas updates
-            polling_active = True
-            async def poll_live_canvas():
-                last_update_time = 0
-                while polling_active:
-                    await asyncio.sleep(0.5)  # Poll every 500ms
-                    try:
-                        # Check if there's a live canvas update from browser agent
-                        with canvas_lock:
-                            if thread_id in live_canvas_updates:
-                                live_update = live_canvas_updates[thread_id]
-                                if live_update.get('timestamp', 0) > last_update_time:
-                                    # New canvas update available
-                                    await websocket.send_json({
-                                        "node": "__live_canvas__",
-                                        "thread_id": thread_id,
-                                        "data": {
-                                            "has_canvas": live_update.get('has_canvas', True),
-                                            "canvas_type": live_update.get('canvas_type', 'html'),
-                                            "canvas_content": live_update.get('canvas_content', ''),
-                                            "browser_view": live_update.get('browser_view', ''),
-                                            "plan_view": live_update.get('plan_view', ''),
-                                            "current_view": live_update.get('current_view', 'browser'),
-                                            "screenshot_count": live_update.get('step', 0)
-                                        },
-                                        "timestamp": time.time()
-                                    })
-                                    last_update_time = live_update['timestamp']
-                                    logger.info(f"📡 Sent live canvas update for thread {thread_id} (step {live_update.get('step', 0)})")
-                    except Exception as e:
-                        logger.debug(f"Error polling live canvas: {e}")
-            
-            # Start polling task
-            polling_task = asyncio.create_task(poll_live_canvas())
+            # Register frontend WebSocket for screenshot relay
+            # Browser agent connects via /ws/screenshots/{thread_id} and screenshots are relayed here
+            async with frontend_ws_lock:
+                frontend_websockets[thread_id] = websocket
+                logger.info(f"📸 Frontend WebSocket registered for screenshot relay: thread={thread_id}")
             
             try:
                 # Use unified orchestration service with streaming and enhanced error handling

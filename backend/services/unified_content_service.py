@@ -169,46 +169,6 @@ class UnifiedContentMetadata:
         )
 
 
-@dataclass
-class ContentReference:
-    id: str
-    name: str
-    content_type: ContentType
-    summary: str
-    size_bytes: int
-    
-    def to_context_string(self) -> str:
-        size_kb = self.size_bytes / 1024
-        return f"[CONTENT:{self.id}] {self.name} ({self.content_type.value}, {size_kb:.1f}KB)\n  Summary: {self.summary}"
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "id": self.id,
-            "name": self.name,
-            "content_type": self.content_type.value,
-            "summary": self.summary,
-            "size_bytes": self.size_bytes
-        }
-        data['priority'] = ContentPriority(data['priority'])
-        data['retention_policy'] = RetentionPolicy(data['retention_policy'])
-        data['agent_mappings'] = {
-            k: AgentContentMapping(**v) for k, v in data.get('agent_mappings', {}).items()
-        }
-        return cls(**data)
-    
-    def to_file_object(self) -> Dict[str, Any]:
-        """Convert to FileObject-compatible dict for orchestrator state"""
-        return {
-            "file_id": self.id,
-            "file_name": self.name,
-            "file_path": self.storage_path,
-            "file_type": self.content_type.value,
-            "mime_type": self.mime_type,
-            "size": self.size_bytes,
-            "source": self.source.value,
-            "thread_id": self.thread_id,
-        }
-    
     def to_reference(self) -> 'ContentReference':
         """Convert to lightweight reference for context inclusion"""
         return ContentReference(

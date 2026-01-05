@@ -8,8 +8,10 @@ import os
 import re
 import json
 import base64
+import asyncio
 import logging
 import io
+import httpx  # For direct Ollama API calls
 from typing import Dict, Any, Optional, List, Tuple
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
@@ -33,12 +35,9 @@ class VisionClient:
     """Vision model client with Set-of-Mark overlays for precise action planning - uses true async calls"""
     
     def __init__(self):
-        # Primary: Ollama with Qwen VL
-        self.ollama = AsyncOpenAI(
-            api_key=OLLAMA_API_KEY,
-            base_url="https://ollama.com/v1",
-            timeout=60.0  # Explicit timeout matching debug script
-        ) if OLLAMA_API_KEY else None
+        # Primary: Ollama with Qwen VL (using direct httpx for native API format)
+        self.ollama_api_key = OLLAMA_API_KEY
+        self.ollama_base_url = "https://ollama.com/v1/chat/completions"
         
         # Fallback: NVIDIA with Mistral Large (for vision)
         self.nvidia = AsyncOpenAI(
@@ -48,17 +47,22 @@ class VisionClient:
         
         self.model = "qwen3-vl:235b-cloud"
         self.model_nvidia = "mistralai/mistral-large-3-675b-instruct-2512"  # NVIDIA vision fallback
-        self.max_tokens = 1200
+        self.max_tokens = None  # No limit - let model decide
         self.valid_actions = ["click", "type", "scroll", "search", "navigate", "done", "wait", "fail", "hover", "press", "go_back", "save_info", "skip_subtask", "run_js"]
         self.mark_elements: Dict[int, Dict] = {}  # Store mark→element mapping
     
     @property
     def available(self) -> bool:
         """Check if vision is available (either Ollama or NVIDIA fallback)"""
-        return self.ollama is not None or self.nvidia is not None
+        return self.ollama_api_key is not None or self.nvidia is not None
     
     def _add_som_overlay(self, screenshot_b64: str, elements: List[Dict]) -> Tuple[str, Dict[int, Dict]]:
-        """Add Set-of-Mark numbered labels to screenshot
+        """Add Set-of-Mark overlays with element boundaries and numbered labels
+        
+        Enhanced visualization:
+        - Draws bounding boxes around elements
+        - Semi-transparent highlighting for visibility
+        - Numbered labels with element type indicators
         
         Returns:
             - Modified screenshot as base64
@@ -71,12 +75,18 @@ class VisionClient:
         try:
             # Decode image
             img_bytes = base64.b64decode(screenshot_b64)
-            img = Image.open(io.BytesIO(img_bytes))
+            img = Image.open(io.BytesIO(img_bytes)).convert('RGBA')
+            
+            # Create overlay layer for semi-transparent elements
+            overlay = Image.new('RGBA', img.size, (0, 0, 0, 0))
+            overlay_draw = ImageDraw.Draw(overlay)
+            
+            # Main draw context
             draw = ImageDraw.Draw(img)
             
             # Try to get a good font
             try:
-                font = ImageFont.truetype("arial.ttf", 14)
+                font = ImageFont.truetype("arial.ttf", 12)
                 small_font = ImageFont.truetype("arial.ttf", 10)
             except:
                 font = ImageFont.load_default()
@@ -84,62 +94,106 @@ class VisionClient:
             
             mark_mapping = {}
             
-            # Color palette for marks
-            colors = [
-                (255, 0, 0), (0, 150, 0), (0, 0, 255), (255, 165, 0),
-                (128, 0, 128), (0, 128, 128), (255, 0, 255), (128, 128, 0)
-            ]
+            # Color palette with distinct colors for different element types
+            type_colors = {
+                'button': (0, 150, 0, 180),      # Green for buttons
+                'link': (0, 100, 255, 180),      # Blue for links
+                'input': (255, 165, 0, 180),     # Orange for inputs
+                'textbox': (255, 165, 0, 180),   # Orange for textboxes
+                'checkbox': (128, 0, 128, 180),  # Purple for checkboxes
+                'default': (255, 0, 0, 180)      # Red for others
+            }
             
-            # Mark ALL viewport-visible elements (DOM already filters to viewport)
-            for idx, el in enumerate(elements):
+            # Mark ALL viewport-visible elements (increased limit for better coverage)
+            for idx, el in enumerate(elements[:300]):  # increased from 150 to 300
                 mark_num = idx + 1
                 x = el.get('x', 0)
                 y = el.get('y', 0)
-                role = el.get('role', 'element')
+                w = el.get('width', 80)  # Default width if not provided
+                h = el.get('height', 30)  # Default height if not provided
+                role = el.get('role', 'element').lower()
                 name = el.get('name', '')
                 xpath = el.get('xpath', '')
                 
-                color = colors[idx % len(colors)]
+                # Get color based on element type
+                color = type_colors.get(role, type_colors['default'])
+                border_color = (color[0], color[1], color[2], 255)  # Solid border
                 
-                # Draw label box
-                label = f"[{mark_num}]"
+                # Ensure valid coordinates
+                x1 = max(0, int(x))
+                y1 = max(0, int(y))
+                x2 = min(img.width - 1, int(x + w))
+                y2 = min(img.height - 1, int(y + h))
+                
+                # Draw semi-transparent bounding box on overlay
+                # Validate coordinates: x2 must be > x1 and y2 must be > y1
+                if w > 10 and h > 10 and x2 > x1 and y2 > y1:
+                    overlay_draw.rectangle(
+                        [x1, y1, x2, y2],
+                        fill=(color[0], color[1], color[2], 40),  # Very light fill
+                        outline=border_color,
+                        width=2
+                    )
+                
+                # Draw numbered label with type indicator
+                type_icon = '🔘' if 'button' in role else '🔗' if 'link' in role else '📝' if 'input' in role or 'text' in role else '◆'
+                label = f"{mark_num}"
                 bbox = draw.textbbox((0, 0), label, font=font)
-                label_w = bbox[2] - bbox[0] + 4
-                label_h = bbox[3] - bbox[1] + 4
+                label_w = bbox[2] - bbox[0] + 8
+                label_h = bbox[3] - bbox[1] + 6
                 
-                # Position label above element center
-                label_x = max(0, min(x - label_w // 2, img.width - label_w))
-                label_y = max(0, y - 20)
+                # Position label at top-left of element
+                label_x = max(0, min(x1, img.width - label_w))
+                label_y = max(0, y1 - label_h - 2)
+                if label_y < 5:  # If too close to top, put inside element
+                    label_y = y1 + 2
                 
-                # Draw background rectangle
+                # Draw label background (solid color for visibility)
                 draw.rectangle(
                     [label_x, label_y, label_x + label_w, label_y + label_h],
-                    fill=color,
+                    fill=(color[0], color[1], color[2]),
                     outline=(255, 255, 255)
                 )
                 
                 # Draw label text
-                draw.text((label_x + 2, label_y + 2), label, fill=(255, 255, 255), font=font)
+                draw.text((label_x + 4, label_y + 3), label, fill=(255, 255, 255), font=font)
                 
                 # Store mapping with section context
                 mark_mapping[mark_num] = {
                     'role': role,
-                    'name': name,
+                    'name': name[:100],  # Increased from 50
                     'xpath': xpath,
-                    'section': el.get('section', ''),  # Parent heading for context
-                    'x': x,
-                    'y': y
+                    'section': el.get('section', ''),
+                    'x': x, 'y': y, 'width': w, 'height': h
                 }
             
-            # Encode modified image
+            # Composite overlay onto image
+            img = Image.alpha_composite(img, overlay)
+            
+            # Convert back to RGB for encoding
+            img = img.convert('RGB')
+            
+            # COMPRESS for vision API: resize and use JPEG
+            # Max width 1024px to reduce size while keeping enough detail
+            max_width = 1024
+            if img.width > max_width:
+                ratio = max_width / img.width
+                new_size = (max_width, int(img.height * ratio))
+                img = img.resize(new_size, Image.LANCZOS)
+                logger.info(f"📐 Resized image from {img.width}x{img.height} to {new_size[0]}x{new_size[1]}")
+            
+            # Encode as JPEG for smaller size (85% quality per user request)
             output = io.BytesIO()
-            img.save(output, format='PNG')
+            img.save(output, format='JPEG', quality=85, optimize=True)
             modified_b64 = base64.b64encode(output.getvalue()).decode()
             
+            logger.info(f"🎨 SoM overlay: marked {len(mark_mapping)} elements, image size: {len(modified_b64)} chars")
             return modified_b64, mark_mapping
             
         except Exception as e:
             logger.error(f"Failed to add SoM overlay: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return screenshot_b64, {}
     
     async def plan_action_with_vision(
@@ -170,32 +224,87 @@ class VisionClient:
             # Log exact image size for debugging empty response issues
             print(f"DEBUG: marked_screenshot length: {len(marked_screenshot)}", flush=True)
             
-            # STRICT SYSTEM MESSAGE - enforces JSON output
-            system_msg = """You are a browser automation agent. You MUST respond with ONLY valid JSON.
+            # STRICT SYSTEM MESSAGE - enforces JSON output with ENHANCED VISUAL UNDERSTANDING
+            system_msg = """You are an EXPERT browser automation agent with ADVANCED VISUAL UNDERSTANDING capabilities.
 
-CRITICAL RULES:
-1. Your response MUST be a valid JSON object starting with { and ending with }
+## YOUR VISUAL ANALYSIS STRENGTHS
+You can see and understand:
+- Complex UI layouts (Apple, Samsung, premium e-commerce sites)
+- 3D animations, hero sections, and visual effects
+- Overlays, modals, sticky headers, and floating elements
+- Visual hierarchy and design patterns
+- Elements that may be hidden from text extraction
+
+## CRITICAL ANALYSIS GUIDELINES
+
+### 1. VISUAL HIERARCHY FIRST
+Before acting, analyze:
+- What is the MAIN content area vs navigation/sidebars?
+- Are there any OVERLAYS or MODALS blocking interaction?
+- What elements are VISUALLY PROMINENT (large, centered, high contrast)?
+- Is there a STICKY HEADER or FLOATING NAVIGATION?
+
+### 2. ELEMENT IDENTIFICATION
+The image has colored bounding boxes and numbered labels:
+- GREEN boxes = Buttons (click actions)
+- BLUE boxes = Links (navigation)
+- ORANGE boxes = Input fields (typing)
+- RED boxes = Other interactive elements
+Use the MARK NUMBER to reference elements: {"mark": N}
+
+### 3. COMPLEX UI PATTERNS
+Watch for:
+- MEGA MENUS: Hover-triggered dropdowns that may not be captured
+- CAROUSELS: Multiple items that need arrow clicks to see more
+- LAZY LOADING: Content that appears on scroll
+- VISUAL CTA BUTTONS: Large "Buy Now", "Shop", "Learn More" buttons
+- COOKIE BANNERS: Usually at top/bottom, click to dismiss
+
+### 4. WHEN TEXT FAILS, VISION SUCCEEDS
+Use vision when:
+- Premium sites with mostly visual content (Apple, Tesla)
+- Product images are more informative than text
+- Navigation is icon-based without text labels
+- Modal/popup elements overlay the main content
+
+### 5. USE HIERARCHY FOR CONTEXT
+You also receive a "PAGE HIERARCHY" tree. Use it to:
+- Understand grouping (what belongs to what)
+- Identify headings and sections not obvious visually
+- Confirm text that might be hard to read in the image
+
+## OUTPUT RULES
+1. Your response MUST be valid JSON starting with { and ending with }
 2. NO text before or after JSON
 3. NO markdown code blocks
-4. NO explanation outside JSON
-5. DO NOT LOOP: If the previous action was also a vision analysis of the SAME page state, you MUST take a constructive action (click, type, done, or switch to text mode). Do not just describe the page again.
-6. EFFICIENCY: Switch to "next_mode": "text" as soon as you have understood the visual layout. Text mode is faster and cheaper.
+4. Switch to "next_mode": "text" after you've understood the visual layout
 
 REQUIRED JSON FORMAT:
 {
-  "reasoning": "Brief explanation of what you see and your decision effectively.",
+  "reasoning": "Visual analysis: [what you see] → Decision: [what to do]",
   "actions": [{"name": "action_name", "params": {...}}],
   "confidence": 0.9,
   "next_mode": "text"
 }
 
-Valid action names: click, type, scroll, navigate, done, wait, hover, press, go_back, save_info, skip_subtask
-For clicks: use {"mark": N} where N is the number you see on the screenshot like [1], [2], [3]"""
+Valid actions: click, type, scroll, navigate, done, wait, hover, press, go_back, save_info, skip_subtask, run_js
+For clicks: use {"mark": N} where N is the bounding box number"""
 
             # MERGE SYSTEM PROMPT INTO USER MESSAGE for better Qwen compatibility
             full_prompt_text = system_msg + "\n\n" + prompt
 
-            messages = [
+            # Ollama Cloud uses NATIVE format: images as array of raw base64 strings
+            # NOT OpenAI format with image_url data URIs
+            ollama_messages = [
+                {
+                    "role": "user",
+                    "content": full_prompt_text,
+                    "images": [marked_screenshot]  # Raw base64, no data URI prefix!
+                }
+            ]
+            
+            # NVIDIA uses OpenAI format with image_url (kept as fallback)
+            nvidia_messages = [
                 {
                     "role": "user",
                     "content": [
@@ -206,7 +315,7 @@ For clicks: use {"mark": N} where N is the number you see on the screenshot like
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": f"data:image/png;base64,{marked_screenshot}"
+                                "url": f"data:image/jpeg;base64,{marked_screenshot}"
                             }
                         }
                     ]
@@ -263,119 +372,128 @@ For clicks: use {"mark": N} where N is the number you see on the screenshot like
             ]
 
             response = None
+            nvidia_content = None  # Store content for NVIDIA (primary)
+            ollama_content = None  # Store content for Ollama (fallback)
             
-            # Try Ollama first (primary vision model)
-            if self.ollama:
+            # NVIDIA is primary (works reliably), Ollama is fallback (often times out)
+            
+            # Try NVIDIA first (primary vision model) with 30s timeout
+            if self.nvidia:
                 try:
-                    logger.info(f"🎨 Trying Ollama vision: {self.model} (Tools Enabled)")
-                    response = await self.ollama.chat.completions.create(
-                        model=self.model,
-                        messages=messages,
-                        max_tokens=self.max_tokens,
-                        temperature=0.1,
-                        tools=tools,
-                        tool_choice="auto"
+                    logger.info(f"🎨 Trying NVIDIA vision: {self.model_nvidia} (30s timeout)")
+                    # NVIDIA with OpenAI format (with image support)
+                    response = await asyncio.wait_for(
+                        self.nvidia.chat.completions.create(
+                            model=self.model_nvidia,
+                            messages=nvidia_messages,  # OpenAI format with image_url
+                        ),
+                        timeout=90.0
                     )
-                    
-                    # LOG FULL RESPONSE FOR DEBUGGING
                     if response and response.choices:
-                        msg = response.choices[0].message
-                        content = msg.content or ""
-                        reasoning = getattr(msg, 'reasoning', None) or ""
+                        nvidia_content = response.choices[0].message.content
+                        if nvidia_content:
+                            logger.info(f"🔮 NVIDIA Vision Response: {nvidia_content[:200]}...")
+                except asyncio.TimeoutError:
+                    logger.warning(f"⏱️ NVIDIA vision timed out after 30s - trying Ollama fallback")
+                    nvidia_content = None
+                except Exception as nvidia_err:
+                    logger.warning(f"⚠️ NVIDIA vision failed: {nvidia_err}")
+                    nvidia_content = None
+            
+            # Fallback to Ollama if NVIDIA failed (30s timeout)
+            # Using direct httpx for native Ollama API format
+            if not nvidia_content and self.ollama_api_key:
+                try:
+                    logger.info(f"🎨 Falling back to Ollama vision: {self.model} (30s timeout)")
+                    
+                    # Direct httpx call with native Ollama format
+                    async with httpx.AsyncClient(timeout=90.0) as client:
+                        ollama_response = await client.post(
+                            self.ollama_base_url,
+                            headers={
+                                "Authorization": f"Bearer {self.ollama_api_key}",
+                                "Content-Type": "application/json"
+                            },
+                            json={
+                                "model": self.model,
+                                "messages": [
+                                    {
+                                        "role": "user",
+                                        "content": full_prompt_text,
+                                        "images": [marked_screenshot]  # Raw base64, native format
+                                    }
+                                ],
+                                "temperature": 0.1
+                            }
+                        )
                         
-                        if content:
-                            logger.info(f"🔮 Vision Response (content): {content[:200]}...")
-                        if reasoning:
-                            logger.info(f"🔮 Vision Response (reasoning): {reasoning[:200]}...")
-                        if not content and not reasoning:
-                            logger.warning("🔮 Vision Response: EMPTY (no content or reasoning)")
-                    else:
-                        logger.warning("🔮 Vision Response: NULL (no choices)")
+                        if ollama_response.status_code == 200:
+                            data = ollama_response.json()
+                            # Extract content from response
+                            choices = data.get("choices", [])
+                            if choices and len(choices) > 0:
+                                ollama_content = choices[0].get("message", {}).get("content", "")
+                                if ollama_content:
+                                    logger.info(f"🔮 Ollama Vision Response: {ollama_content[:200]}...")
+                                else:
+                                    logger.warning("🔮 Ollama Vision: Empty content in response")
+                            else:
+                                logger.warning("🔮 Ollama Vision: No choices in response")
+                        else:
+                            logger.warning(f"⚠️ Ollama vision failed with status {ollama_response.status_code}: {ollama_response.text[:200]}")
 
+                except httpx.TimeoutException:
+                    logger.warning(f"⏱️ Ollama vision timed out after 30s - trying NVIDIA fallback")
+                    ollama_content = None
 
                 except Exception as ollama_err:
                     print(f"\n\n❌ OLLAMA VISION ERROR: {ollama_err}\n\n", flush=True)
                     logger.warning(f"⚠️ Ollama vision failed: {ollama_err}")
-                    response = None
+                    ollama_content = None
             
-            # Fallback to NVIDIA if Ollama failed or unavailable
-            if (not response or not response.choices) and self.nvidia:
-                try:
-                    logger.info(f"🎨 Falling back to NVIDIA vision: {self.model_nvidia}")
-                    # NVIDIA with text-only prompt (no image support for this model)
-                    text_only_messages = [{"role": "user", "content": prompt}]
-                    response = await self.nvidia.chat.completions.create(
-                        model=self.model_nvidia,
-                        messages=text_only_messages,
-                        max_tokens=self.max_tokens,
-                        temperature=0.1
-                    )
-                except Exception as nvidia_err:
-                    logger.warning(f"⚠️ NVIDIA vision fallback also failed: {nvidia_err}")
-                    response = None
+            # Process response - prioritize NVIDIA content (primary), then Ollama (fallback)
+            content_to_parse = None
             
-            # Check for valid response structure
-            if not response or not response.choices:
-                logger.warning("Vision returned no choices in response")
+            if nvidia_content:
+                content_to_parse = nvidia_content
+            elif ollama_content:
+                content_to_parse = ollama_content
+            elif response and response.choices:
+                msg = response.choices[0].message
+                # Check for tool calls first
+                if msg.tool_calls:
+                    logger.info(f"🎨 Vision returned Tool Call: {msg.tool_calls[0].function.name}")
+                    try:
+                        args = json.loads(msg.tool_calls[0].function.arguments)
+                        actions_list = []
+                        if "actions" in args:
+                            for act in args["actions"]:
+                                actions_list.append(AtomicAction(
+                                    name=act.get("name"),
+                                    params=act.get("params", {})
+                                ))
+                        
+                        if actions_list:
+                            return ActionPlan(
+                                reasoning=args.get("reasoning", ""),
+                                actions=actions_list,
+                                confidence=args.get("confidence", 1.0),
+                                next_mode=args.get("next_mode", "text"),
+                                completed_subtasks=args.get("completed_subtasks", [])
+                            )
+                    except Exception as e:
+                        logger.error(f"Error processing tool call: {e}")
+                
+                # Fall back to content parsing
+                content_to_parse = msg.content or getattr(msg, 'reasoning', None)
+            
+            if not content_to_parse:
+                logger.warning("Vision returned no parseable content")
                 return None
             
-            # 1. Try to get Tool Call arguments (Preferred)
-            tool_calls = response.choices[0].message.tool_calls
-            if tool_calls:
-                logger.info(f"🎨 Vision returned Tool Call: {tool_calls[0].function.name}")
-                logger.debug(f"Tool Call Args: {tool_calls[0].function.arguments}")
-                
-                try:
-                    args = json.loads(tool_calls[0].function.arguments)
-                    
-                    # New Schema Handling: 'actions' list
-                    actions_list = []
-                    if "actions" in args:
-                        for act in args["actions"]:
-                            actions_list.append(AtomicAction(
-                                name=act.get("name"),
-                                params=act.get("params", {})
-                            ))
-                    else:
-                        # Fallback for old/malformed schema
-                        if "action_name" in args:
-                            actions_list.append(AtomicAction(
-                                name=args.get("action_name"),
-                                params=args.get("params", {})
-                            ))
-
-                    # Validate actions
-                    if not actions_list:
-                        logger.warning("Vision tool returned no valid actions")
-                        return None
-                        
-                    return ActionPlan(
-                        reasoning=args.get("reasoning", ""),
-                        actions=actions_list,
-                        confidence=args.get("confidence", 1.0),
-                        next_mode=args.get("next_mode", "text"),
-                        completed_subtasks=args.get("completed_subtasks", [])
-                    )
-
-                except json.JSONDecodeError:
-                    logger.error("Failed to decode tool arguments json")
-                except Exception as e:
-                    logger.error(f"Error processing tool call: {e}")
-
-            # 2. Fallback: Check reasoning field (legacy/Qwen-specific fallback)
-            # If tool call failed or wasn't present, but reasoning has content, maybe we can scrape it?
-            # Actually, if we use tools, the model shouldn't be outputting free text actions unless it refuses the tool.
-            
-            content = response.choices[0].message.content
-            if not content and hasattr(response.choices[0].message, 'reasoning') and response.choices[0].message.reasoning:
-                 content = response.choices[0].message.reasoning
-                 
-            if content and content.strip():
-                 logger.debug("Parsing raw vision response content (standard path for Ollama)...")
-                 return self._parse_action(content, self.mark_elements)
-            
-            logger.warning("Vision failed to return tool call or parseable content.")
-            return None
+            # Parse the content into ActionPlan
+            logger.debug(f"Parsing vision response content (len={len(content_to_parse)})...")
+            return self._parse_action(content_to_parse, self.mark_elements)
             
         except Exception as e:
             logger.error(f"Vision failed: {e}", exc_info=True)
@@ -387,11 +505,28 @@ For clicks: use {"mark": N} where N is the number you see on the screenshot like
         task: str,
         page_url: str
     ) -> Optional[str]:
-        """Analyze/describe an image on the page"""
+        """Analyze/describe an image on the page (Compressed)"""
         
         if not self.available:
             return None
-        
+            
+        # COMPRESS raw screenshot if needed
+        # analyze_image often receives raw PNGs which are huge (2-4MB)
+        try:
+            if len(screenshot_base64) > 500000: # If > ~375KB
+                img_bytes = base64.b64decode(screenshot_base64)
+                img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
+                if img.width > 1024:
+                    ratio = 1024 / img.width
+                    img = img.resize((1024, int(img.height * ratio)), Image.LANCZOS)
+                
+                output = io.BytesIO()
+                img.save(output, format='JPEG', quality=85, optimize=True)
+                screenshot_base64 = base64.b64encode(output.getvalue()).decode()
+                logger.info(f"📉 Compressed analyze_image input to {len(screenshot_base64)} chars")
+        except Exception as e:
+            logger.warning(f"Failed to compress analyze_image input: {e}")
+
         try:
             prompt = f"""Analyze this screenshot and describe what you see.
 
@@ -415,7 +550,7 @@ Provide a detailed description of what you observe."""
                                 "role": "user",
                                 "content": [
                                     {"type": "text", "text": prompt},
-                                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_base64}"}}
+                                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{screenshot_base64}"}}
                                 ]
                             }
                         ],
@@ -518,6 +653,9 @@ CURRENT STATE:
 • Title: {page_content.get('title', '')}
 • Step: {step}
 • Scroll: {page_content.get('scroll_position', 0)}px / {page_content.get('max_scroll', 0)}px ({page_content.get('scroll_percent', 100)}% down)
+
+PAGE HIERARCHY (Semantic Structure):
+{page_content.get('unified_page_tree', '(hierarchy unavailable)')}
 
 SET-OF-MARK LEGEND (elements visible in screenshot):
 {mark_legend if mark_legend else "(no marks available)"}

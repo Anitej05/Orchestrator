@@ -7,8 +7,9 @@ Simple, focused LLM client for action planning.
 import os
 import re
 import json
+import asyncio
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
@@ -24,36 +25,62 @@ CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
 
+# Cerebras key pool for rotation (5 keys, skipping 6th)
+CEREBRAS_KEYS = [
+    "csk-52m4dv4chcpf9vy9jcmjrevnp5ft22y2vctd68wyr8dewndw",
+    "csk-nnj93n833cr4c9rd2vttjeew3nwv494px62jfy45fmwjdch8",
+    "csk-c2jjpt5k9kttxd44t9jwyn55vje4m2vmrvdjjkd6h2wphv6m",
+    "csk-f428j58fvtm3n5vent8mjm3nfnwvk2rrvx6vww95e9wctv6c",
+    "csk-hhcmv35w3kcvt9nffdyhp5f6m6epre8w3mcx32hwxxmyx85y",
+]
+# Filter out None/empty keys
+CEREBRAS_KEYS = [k for k in CEREBRAS_KEYS if k]
+
 
 class LLMClient:
     """LLM client for planning browser actions - uses true async calls"""
     
     def __init__(self):
-        # Primary: Cerebras (FAST - best for browser agent)
-        self.cerebras = AsyncOpenAI(
-            api_key=CEREBRAS_API_KEY,
-            base_url="https://api.cerebras.ai/v1",
-            timeout=30.0  # 30 second timeout
-        ) if CEREBRAS_API_KEY else None
+        # Cerebras key pool for rotation
+        self._cerebras_keys = CEREBRAS_KEYS.copy()
+        self._cerebras_key_index = 0
         
-        # Fallback 1: Groq (also fast)
-        self.groq = AsyncOpenAI(
-            api_key=GROQ_API_KEY,
-            base_url="https://api.groq.com/openai/v1",
-            timeout=30.0
-        ) if GROQ_API_KEY else None
+        # Initialize Cerebras clients for each key
+        self._cerebras_clients = []
+        for key in self._cerebras_keys:
+            client = AsyncOpenAI(
+                api_key=key,
+                base_url="https://api.cerebras.ai/v1",
+                timeout=15.0  # Text model timeout
+            )
+            self._cerebras_clients.append(client)
         
-        # Fallback 2: NVIDIA (slower but larger context)
+        # Primary Cerebras client (will rotate on rate limit)
+        self.cerebras = self._cerebras_clients[0] if self._cerebras_clients else None
+        
+        # Fallback 1: NVIDIA
         self.nvidia = AsyncOpenAI(
             api_key=NVIDIA_API_KEY,
             base_url="https://integrate.api.nvidia.com/v1",
-            timeout=60.0
+            timeout=15.0  # Text model timeout
         ) if NVIDIA_API_KEY else None
         
-        # Model Configuration - use correct model names
-        self.model_cerebras = "gpt-oss-120b"  # User requested
-        self.model_groq = "openai/gpt-oss-120b"  # Groq uses this model
-        self.model_nvidia = "meta/llama-3.1-70b-instruct"  # NVIDIA's llama
+        # Fallback 2: Groq (last resort)
+        self.groq = AsyncOpenAI(
+            api_key=GROQ_API_KEY,
+            base_url="https://api.groq.com/openai/v1",
+            timeout=15.0  # Text model timeout
+        ) if GROQ_API_KEY else None
+        
+        # Model Configuration
+        self.model_cerebras = "zai-glm-4.6"  # Primary (with key rotation)
+        self.model_nvidia = "minimaxai/minimax-m2"  # Fallback 1 (interleaved thinking)
+        self.model_groq = "moonshotai/kimi-k2-instruct-0905"  # Fallback 2
+        
+        # Track temporarily disabled providers (rate limited)
+        self._disabled_providers = {}  # provider -> disabled_until_time
+        self._disabled_cerebras_keys = {}  # key_index -> disabled_until_time
+        self._cerebras_key_index = 0  # For round-robin rotation
 
     
     async def plan_action(
@@ -72,10 +99,12 @@ class LLMClient:
         for attempt in range(MAX_RETRIES):
             prompt = self._build_prompt(task, page_content, history, step, last_parse_error)
             
-            response = await self._call_llm(prompt)
+            response, usage = await self._call_llm(prompt)
             
             if response:
                 result = self._parse_action(response)
+                # Attach usage stats to the plan
+                result.usage = usage
                 if result.confidence > 0.3:  # Valid parse
                     return result
                 else:
@@ -170,36 +199,48 @@ class LLMClient:
                         f"messages: {stats['history_messages']}, "
                         f"failures: {stats['failures_count']}")
         
-        # Get the hierarchical page structure (A11y tree with grouping)
-        # This is for CONTEXT only - shows page structure
-        a11y_tree = page_content.get('a11y_tree', '')
+        # Get unified page tree (combines a11y hierarchy + elements + selectors)
+        # This is the NEW approach - one unified structure instead of separate sections
+        unified_page_tree = page_content.get('unified_page_tree', '')
         
-        # Build INTERACTIVE ELEMENTS section - this is the SOURCE OF TRUTH for clicking
-        elements = page_content.get('elements', [])
-        elements_str = ""
-        if elements:
-            elem_lines = []
-            for idx, el in enumerate(elements[:80]):  # Cap at 80 elements
-                role = el.get('role', 'element')
-                name = el.get('name', '')[:50]  # Truncate long names
-                section = el.get('section', '')
-                elem_idx = idx + 1  # 1-indexed
+        # Fallback: Build elements string if unified tree not available
+        if not unified_page_tree:
+            elements = page_content.get('elements', [])
+            if elements:
+                elem_lines = []
+                for idx, el in enumerate(elements[:200]):  # Limit to 200
+                    role = el.get('role', 'element')
+                    name = el.get('name', '')[:60]
+                    elem_idx = idx + 1
+                    xpath = el.get('xpath', '')
+                    
+                    if name:
+                        line = f"#{elem_idx} [{role}] \"{name}\""
+                        if xpath and len(xpath) < 50:
+                            line += f" → {xpath}"
+                    else:
+                        line = f"#{elem_idx} [{role}]"
+                    elem_lines.append(line)
                 
-                # Build compact element line
-                if name:
-                    line = f"#{elem_idx} [{role}] \"{name}\""
-                    if section:
-                        line += f" [under: {section[:30]}]"
-                else:
-                    line = f"#{elem_idx} [{role}] (no text)"
-                
-                elem_lines.append(line)
-            
-            elements_str = "\n".join(elem_lines)
+                unified_page_tree = "\n".join(elem_lines)
+        
+        # Build OVERLAY/MODAL section - CRITICAL for intelligent modal handling
+        overlay_info = page_content.get('overlays', page_content.get('overlay_info', {}))
+        overlay_str = ""
+        if overlay_info and overlay_info.get('hasOverlay'):
+            overlays = overlay_info.get('overlays', [])
+            close_btns = overlay_info.get('closeButtons', [])
+            overlay_lines = ["🚨 MODAL/OVERLAY DETECTED - Dismiss before continuing!"]
+            for ov in overlays[:3]:
+                title = ov.get('title', 'Unknown')
+                ov_type = ov.get('type', 'modal')
+                overlay_lines.append(f"  • Type: {ov_type}, Title: \"{title}\"")
+            if close_btns:
+                overlay_lines.append(f"  • Close: {[btn.get('text', 'X') for btn in close_btns[:3]]}")
+            overlay_lines.append("  → Use press_keys: 'Escape' OR click Close/X button")
+            overlay_str = "\n".join(overlay_lines)
         
         # Build scroll position context
-        scroll_pos = page_content.get('scroll_position', 0)
-        max_scroll = page_content.get('max_scroll', 0)
         scroll_pct = page_content.get('scroll_percent', 100)
         
         if scroll_pct == 0:
@@ -217,16 +258,14 @@ class LLMClient:
 📍 Step: {step} | URL: {page_content.get('url', 'about:blank')}
 📄 Title: {page_content.get('title', '(loading...')}
 {scroll_hint}
-
+{f'''
+{overlay_str}
+''' if overlay_str else ''}
+{self._format_selector_hints(page_content.get('selector_hints'))}
 ═══════════════════════════════════════════════════════════════════════════════
-🔘 INTERACTIVE ELEMENTS (use #N index to click)
+📄 PAGE (use #N index to click elements)
 ═══════════════════════════════════════════════════════════════════════════════
-{elements_str if elements_str else "(no elements detected)"}
-
-═══════════════════════════════════════════════════════════════════════════════
-📖 PAGE STRUCTURE (context only - shows grouping)
-═══════════════════════════════════════════════════════════════════════════════
-{a11y_tree if a11y_tree else "(Page structure not available)"}
+{unified_page_tree if unified_page_tree else "(no elements detected)"}
 
 ═══════════════════════════════════════════════════════════════════════════════
 📜 PREVIOUS ACTIONS
@@ -243,12 +282,86 @@ NOW RESPOND WITH YOUR ACTION (JSON ONLY):"""
         
         return prompt
     
-    async def call_llm_direct(self, prompt: str) -> Optional[str]:
+    def _format_selector_hints(self, hints: Optional[Dict[str, Any]]) -> str:
+        """Format discovered selectors for the prompt"""
+        if not hints:
+            return ""
+            
+        lines = []
+        # Handle the new 'patterns' style extracted by selector_discovery.py
+        # It typically returns: {'patterns': [{'selector': '.foo', 'count': 10}, ...]}
+        # Or sometimes a flat dict. Let's handle both safely.
+        
+        if isinstance(hints, dict):
+            # 1. Recommended "Semantic" patterns
+            if 'recommended' in hints:
+                lines.append("✨ RECOMMENDED SELECTORS (High Confidence):")
+                for k, v in hints.get('recommended', {}).items():
+                     lines.append(f"  • {k}: {v}")
+            
+            # 2. Semantic Content Maps (Titles, Prices, etc.) - CRITICAL for extraction
+            content_selectors = hints.get('contentSelectors', {}) or hints.get('content_selectors', {})
+            if content_selectors:
+                lines.append("\n🏷️ SEMANTIC CONTENT MAPS:")
+                for category, items in content_selectors.items():
+                    # items is a list of dicts: [{'selector': '.foo', 'count': 5, 'sample': '...'}]
+                    if items and isinstance(items, list):
+                        top_item = items[0]
+                        sel = top_item.get('selector')
+                        sample = top_item.get('sample')
+                        if sel:
+                            lines.append(f"  • {category.upper()}: {sel} (e.g., '{sample}')")
+
+            # 3. Complete Container Schema (Nested Structure)
+            # This shows: "Inside .product-card, we have .title, .price, etc."
+            selector_map = hints.get('selectorMap', {}) or hints.get('selector_map', {})
+            container = selector_map.get('container')
+            if container:
+                lines.append(f"\n📦 FOUND LIST SCHEMA (Container: '{container}'):")
+                child_selectors = selector_map.get('childSelectors', [])
+                if child_selectors:
+                    # Sort by meaningfulness (price, text)
+                    sorted_children = sorted(child_selectors, key=lambda x: (x.get('likelyPrice', False), x.get('hasContent', False)), reverse=True)[:5]
+                    for child in sorted_children:
+                        sel = child.get('selector')
+                        tag = child.get('tag', 'element')
+                        sample = (child.get('samples', []) or [''])[0]
+                        lines.append(f"  • Child: {sel} <{tag}> (e.g., '{sample}')")
+
+            # 3. Data Attributes (Robust technical hooks)
+            data_attrs = hints.get('dataAttributes', []) or hints.get('data_attributes', [])
+            if data_attrs:
+                # Top 5 most frequent data attributes
+                lines.append("\n⚓ DATA ATTRIBUTES (Robust Hooks):")
+                # Format: [{'attr': 'data-testid', 'count': 10}, ...]
+                sorted_attrs = sorted(data_attrs, key=lambda x: x.get('count', 0), reverse=True)[:5]
+                for dp in sorted_attrs:
+                    lines.append(f"  • [{dp.get('attr')}] ({dp.get('count')} elements)")
+
+            # 4. General patterns (Fallback)
+            patterns = hints.get('patterns', []) or hints.get('general', [])
+            if patterns:
+                lines.append("\n🔍 DISCOVERED PATTERNS (Repeating Structures):")
+                # Take top 5 patterns by count
+                sorted_pats = sorted(patterns, key=lambda x: x.get('count', 0), reverse=True)[:5]
+                for p in sorted_pats:
+                    sel = p.get('selector')
+                    count = p.get('count', 0)
+                    if sel:
+                        lines.append(f"  • {sel} ({count} items)")
+                        
+        if not lines:
+            return ""
+            
+        return "\n" + "\n".join(lines) + "\n"
+    
+    async def call_llm_direct(self, prompt: str) -> Tuple[Optional[str], Optional[Dict[str, int]]]:
         """Directly call LLM with prompt (for planning/analysis)"""
         return await self._call_llm(prompt)
     
-    async def _call_llm(self, prompt: str, use_system_prompt: bool = True) -> Optional[str]:
-        """Call LLM with fallback. Uses true async calls for non-blocking operation."""
+    async def _call_llm(self, prompt: str, use_system_prompt: bool = True) -> Tuple[Optional[str], Optional[Dict[str, int]]]:
+        """Call LLM with smart provider rotation. Immediately switches on rate limits."""
+        import time
         
         # Get system prompt for browser automation context
         system_prompt = get_system_prompt() if use_system_prompt else None
@@ -256,7 +369,7 @@ NOW RESPOND WITH YOUR ACTION (JSON ONLY):"""
         logger.info(f"📤 LLM Request (prompt length: {len(prompt)} chars, system: {bool(system_prompt)})")
         logger.debug(f"===== FULL PROMPT START =====\n{prompt}\n===== FULL PROMPT END =====")
         
-        # Build messages - use system + user pattern if system prompt available
+        # Build messages
         if system_prompt:
             messages = [
                 {"role": "system", "content": system_prompt},
@@ -265,15 +378,45 @@ NOW RESPOND WITH YOUR ACTION (JSON ONLY):"""
         else:
             messages = [{"role": "user", "content": prompt}]
         
-        # Try Cerebras FIRST (fastest - ~1-3 seconds)
-        if self.cerebras:
+        current_time = time.time()
+        
+        # Clean up expired disabled keys/providers
+        self._disabled_providers = {
+            k: v for k, v in self._disabled_providers.items() 
+            if v > current_time
+        }
+        self._disabled_cerebras_keys = {
+            k: v for k, v in self._disabled_cerebras_keys.items()
+            if v > current_time
+        }
+        
+        # ===== PHASE 1: Try all Cerebras keys (Primary - Round Robin) =====
+        num_keys = len(self._cerebras_clients)
+        start_index = self._cerebras_key_index
+        
+        for i in range(num_keys):
+            # Round-robin selection: start from last success + 1
+            key_idx = (start_index + i) % num_keys
+            client = self._cerebras_clients[key_idx]
+            
+            # Skip disabled keys
+            if key_idx in self._disabled_cerebras_keys:
+                remaining = int(self._disabled_cerebras_keys[key_idx] - current_time)
+                # Only log if it's the first attempt or verbose
+                logger.info(f"⏭️ Skipping Cerebras key #{key_idx+1} (rate limited for {remaining}s more)")
+                continue
+            
             try:
-                logger.info(f"🤖 Calling Cerebras ({self.model_cerebras})...")
-                response = await self.cerebras.chat.completions.create(
-                    model=self.model_cerebras,
-                    messages=messages,
-                    max_tokens=2000,
-                    temperature=0.1
+                # Log usage
+                logger.info(f"🤖 Calling Cerebras key #{key_idx+1} ({self.model_cerebras})...")
+                
+                response = await asyncio.wait_for(
+                    client.chat.completions.create(
+                        model=self.model_cerebras,
+                        messages=messages,
+                        temperature=0.1
+                    ),
+                    timeout=15.0  # Text model timeout
                 )
                 
                 content = None
@@ -281,65 +424,150 @@ NOW RESPOND WITH YOUR ACTION (JSON ONLY):"""
                     content = response.choices[0].message.content
                 
                 if content:
-                    logger.info(f"✅ Cerebras response ({len(content)} chars)")
+                    logger.info(f"✅ Cerebras key #{key_idx+1} response ({len(content)} chars)")
                     logger.debug(f"===== FULL RESPONSE START =====\n{content}\n===== FULL RESPONSE END =====")
-                    return content
-                else:
-                    logger.warning("⚠️ Cerebras returned empty content")
-            except Exception as e:
-                logger.error(f"❌ Cerebras failed: {e}")
-        
-        # Fallback 1: Groq (also fast)
-        if self.groq:
-            try:
-                logger.info(f"🤖 Calling Groq ({self.model_groq})...")
-                response = await self.groq.chat.completions.create(
-                    model=self.model_groq,
-                    messages=messages,
-                    max_tokens=2000,
-                    temperature=0.1
-                )
-                
-                content = None
-                if response.choices and response.choices[0].message:
-                    content = response.choices[0].message.content
-                
-                if content:
-                    logger.info(f"✅ Groq response ({len(content)} chars)")
-                    return content
-                else:
-                    logger.warning("⚠️ Cerebras returned empty content")
-            except Exception as e:
-                logger.error(f"❌ Cerebras failed: {e}")
-
-        
-        # Fallback to Groq
-        if self.groq:
-            try:
-                logger.info(f"🤖 Calling Groq ({self.model_groq})...")
-                response = await self.groq.chat.completions.create(
-                    model=self.model_groq,
-                    messages=messages,
-                    max_tokens=1000,
-                    temperature=0.1
-                )
-                
-                content = None
-                if response.choices and response.choices[0].message:
-                    content = response.choices[0].message.content
                     
+                    # SUCCESS: Update start index for NEXT call to be this key + 1
+                    # This ensures we distribute load across all keys over time
+                    self._cerebras_key_index = (key_idx + 1) % num_keys
+                    usage = response.usage.model_dump() if response.usage else None
+                    return content, usage
+                else:
+                    logger.warning(f"⚠️ Cerebras key #{key_idx+1} returned empty content")
+            
+            except asyncio.TimeoutError:
+                logger.warning(f"⏱️ Cerebras key #{key_idx+1} timed out after 15s - trying next key")
+                continue
+                    
+            except Exception as e:
+                error_str = str(e).lower()
+                
+                # Check for rate limit - disable this key and try next
+                if any(keyword in error_str for keyword in [
+                    '429', '413', 'rate_limit', 'too many requests', 
+                    'quota exceeded', 'tokens per', 'tpm:', 'rpm:'
+                ]):
+                    # Cerebras has 10 RPM per key, so 60s cooldown
+                    self._disabled_cerebras_keys[key_idx] = time.time() + 60  # Use fresh timestamp
+                    logger.warning(f"⚡ Cerebras key #{key_idx+1} rate limited - trying next key (disabled for 60s)")
+                    continue
+                else:
+                    logger.error(f"❌ Cerebras key #{key_idx+1} failed: {e}")
+                    continue
+        
+        # ===== PHASE 2: Fallback to NVIDIA (5s timeout) =====
+        if self.nvidia and "NVIDIA" not in self._disabled_providers:
+            try:
+                logger.info(f"🤖 Calling NVIDIA ({self.model_nvidia}) with 15s timeout...")
+                response = await asyncio.wait_for(
+                    self.nvidia.chat.completions.create(
+                        model=self.model_nvidia,
+                        messages=messages,
+                        temperature=0.1
+                    ),
+                    timeout=15.0  # Text model timeout
+                )
+                
+                content = None
+                if response.choices and response.choices[0].message:
+                    content = response.choices[0].message.content
+                
+                if content:
+                    # Strip thinking content for minimax
+                    content = self._strip_thinking_content(content)
+                    logger.info(f"✅ NVIDIA response ({len(content)} chars)")
+                    logger.debug(f"===== FULL RESPONSE START =====\n{content}\n===== FULL RESPONSE END =====")
+                    usage = response.usage.model_dump() if response.usage else None
+                    return content, usage
+                else:
+                    logger.warning("⚠️ NVIDIA returned empty content")
+            
+            except asyncio.TimeoutError:
+                logger.warning(f"⏱️ NVIDIA timed out after 15s - moving to next provider")
+                    
+            except Exception as e:
+                error_str = str(e).lower()
+                if any(keyword in error_str for keyword in ['429', '413', 'rate_limit', 'too many requests']):
+                    self._disabled_providers["NVIDIA"] = time.time() + 15  # Use fresh timestamp
+                    logger.warning(f"⚡ NVIDIA rate limited - switching (disabled for 15s)")
+                else:
+                    logger.error(f"❌ NVIDIA failed: {e}")
+        elif "NVIDIA" in self._disabled_providers:
+            remaining = int(self._disabled_providers["NVIDIA"] - current_time)
+            logger.info(f"⏭️ Skipping NVIDIA (rate limited for {remaining}s more)")
+        
+        # ===== PHASE 3: Last resort - Groq =====
+        if self.groq and "Groq" not in self._disabled_providers:
+            try:
+                logger.info(f"🤖 Calling Groq ({self.model_groq}) with 15s timeout...")
+                response = await asyncio.wait_for(
+                    self.groq.chat.completions.create(
+                        model=self.model_groq,
+                        messages=messages,
+                        temperature=0.1
+                    ),
+                    timeout=15.0  # Text model timeout
+                )
+                
+                content = None
+                if response.choices and response.choices[0].message:
+                    content = response.choices[0].message.content
+                
                 if content:
                     logger.info(f"✅ Groq response ({len(content)} chars)")
                     logger.debug(f"===== FULL RESPONSE START =====\n{content}\n===== FULL RESPONSE END =====")
-                    return content
+                    usage = response.usage.model_dump() if response.usage else None
+                    return content, usage
                 else:
                     logger.warning("⚠️ Groq returned empty content")
+            
+            except asyncio.TimeoutError:
+                logger.warning(f"⏱️ Groq timed out after 15s")
                     
             except Exception as e:
-                logger.error(f"❌ Groq failed: {e}")
+                error_str = str(e).lower()
+                if any(keyword in error_str for keyword in ['429', '413', 'rate_limit', 'too many requests']):
+                    self._disabled_providers["Groq"] = time.time() + 10  # Use fresh timestamp
+                    logger.warning(f"⚡ Groq rate limited (disabled for 10s)")
+                else:
+                    logger.error(f"❌ Groq failed: {e}")
+        elif "Groq" in self._disabled_providers:
+            remaining = int(self._disabled_providers["Groq"] - current_time)
+            logger.info(f"⏭️ Skipping Groq (rate limited for {remaining}s more)")
         
         logger.error("❌ All LLMs failed!")
-        return None
+        return None, None
+    
+    def _strip_thinking_content(self, content: str) -> str:
+        """Strip thinking tags from model output, including interleaved thinking.
+        
+        Handles:
+        - <think>...</think> and <thinking>...</thinking> (standard)
+        - 【thinking】...【/thinking】 (minimax style)
+        - Multiple interleaved thinking blocks
+        """
+        import re
+        
+        # Strip standard thinking tags
+        content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL | re.IGNORECASE)
+        content = re.sub(r'<thinking>.*?</thinking>', '', content, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Strip minimax-style interleaved thinking tags (【thinking】 format)
+        content = re.sub(r'【thinking】.*?【/thinking】', '', content, flags=re.DOTALL | re.IGNORECASE)
+        content = re.sub(r'【思考】.*?【/思考】', '', content, flags=re.DOTALL | re.IGNORECASE)  # Chinese variant
+        
+        # Strip markdown-style thinking blocks that some models use
+        content = re.sub(r'\*\*Thinking:\*\*.*?(?=\*\*(?:Response|Answer|Output):\*\*|\{)', '', content, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Handle unclosed tags at the start (model might still be thinking)
+        content = re.sub(r'^<think>.*?(?=\{)', '', content, flags=re.DOTALL | re.IGNORECASE)
+        content = re.sub(r'^<thinking>.*?(?=\{)', '', content, flags=re.DOTALL | re.IGNORECASE)
+        content = re.sub(r'^【thinking】.*?(?=\{)', '', content, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Clean up extra whitespace that might result from stripping
+        content = re.sub(r'\n\s*\n\s*\n', '\n\n', content)
+        
+        return content.strip()
     
     async def should_extend_timeout(
         self, 
@@ -384,7 +612,7 @@ Respond with ONLY valid JSON:
     "reasoning": "Brief reason why"
 }}"""
             
-            response = await self._call_llm(prompt)
+            response, _ = await self._call_llm(prompt)
             if not response:
                 return default_decision
                 
