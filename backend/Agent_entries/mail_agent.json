@@ -33,7 +33,7 @@
     {
       "endpoint": "/fetch_emails",
       "http_method": "POST",
-      "description": "List recent emails with sender, subject, labels, and snippet metadata.",
+      "description": "List emails with metadata (sender, subject, labels, snippet). USE for retrieving email list. DO NOT USE for full message content. READ-ONLY. DETERMINISTIC.",
       "parameters": [
         {
           "name": "query",
@@ -64,7 +64,7 @@
     {
       "endpoint": "/send_email",
       "http_method": "POST",
-      "description": "Send an email with optional attachments already uploaded.",
+      "description": "Send email with optional attachments. USE for sending new messages. DO NOT USE for drafts or templates. SENDS EMAIL (irreversible). DETERMINISTIC.",
       "parameters": [
         {
           "name": "to",
@@ -125,7 +125,7 @@
     {
       "endpoint": "/get_message",
       "http_method": "POST",
-      "description": "Fetch a specific email body and headers by message ID.",
+      "description": "Retrieve full email content by message ID. USE for reading complete message. DO NOT USE for listing emails. READ-ONLY. DETERMINISTIC.",
       "parameters": [
         {
           "name": "message_id",
@@ -150,7 +150,7 @@
     {
       "endpoint": "/add_label",
       "http_method": "POST",
-      "description": "Apply one or more labels to an email by message ID.",
+      "description": "Add labels to messages (IMPORTANT, STARRED, etc.). USE for organizing emails. DO NOT USE for reading content. MODIFIES METADATA. DETERMINISTIC.",
       "parameters": [
         {
           "name": "message_ids",
@@ -175,7 +175,7 @@
     {
       "endpoint": "/delete_message",
       "http_method": "POST",
-      "description": "Move an email to trash by message ID.",
+      "description": "Move messages to trash. USE for deleting emails. DO NOT USE for permanent deletion. MODIFIES DATA. DETERMINISTIC.",
       "parameters": [
         {
           "name": "message_ids",
@@ -194,7 +194,7 @@
     {
       "endpoint": "/get_attachment",
       "http_method": "POST",
-      "description": "Download a specific attachment from a message.",
+      "description": "Download email attachment by ID. USE for retrieving attached files. DO NOT USE for message body. READ-ONLY. DETERMINISTIC.",
       "parameters": [
         {
           "name": "message_id",
@@ -219,7 +219,7 @@
     {
       "endpoint": "/fetch_sent_emails",
       "http_method": "POST",
-      "description": "List recently sent emails with metadata.",
+      "description": "List sent emails with metadata. USE for retrieving sent message list. DO NOT USE for inbox emails. READ-ONLY. DETERMINISTIC.",
       "parameters": [
         {
           "name": "max_results",
@@ -244,7 +244,7 @@
     {
       "endpoint": "/get_sent_email",
       "http_method": "POST",
-      "description": "Fetch a specific sent email by ID.",
+      "description": "Retrieve full content of sent email by ID. USE for reading sent message details. DO NOT USE for inbox. READ-ONLY. DETERMINISTIC.",
       "parameters": [
         {
           "name": "message_id",
@@ -263,13 +263,13 @@
     {
       "endpoint": "/get_last_sent_email",
       "http_method": "POST",
-      "description": "Get the most recently sent email.",
+      "description": "Retrieve most recent sent email. USE for checking last sent message. DO NOT USE for specific message lookup. READ-ONLY. DETERMINISTIC.",
       "parameters": []
     },
     {
       "endpoint": "/download_attachments",
       "http_method": "POST",
-      "description": "Download all attachments for a message as files.",
+      "description": "Download all attachments from message. USE for bulk attachment retrieval. DO NOT USE for single attachment. READ-ONLY. DETERMINISTIC.",
       "parameters": [
         {
           "name": "message_id",
@@ -282,7 +282,7 @@
     {
       "endpoint": "/search_emails_with_attachments",
       "http_method": "POST",
-      "description": "Search emails that contain attachments matching a query.",
+      "description": "Find emails containing attachments. USE for locating messages with files. DO NOT USE for text search. READ-ONLY. DETERMINISTIC.",
       "parameters": [
         {
           "name": "max_results",
@@ -295,7 +295,7 @@
     {
       "endpoint": "/compose_html_email",
       "http_method": "POST",
-      "description": "Generate HTML email content from a prompt.",
+      "description": "Generate and send formatted HTML email from template. USE for styled emails. DO NOT USE for plain text. SENDS EMAIL (irreversible). LLM-DRIVEN IF USING CONTENT GENERATION.",
       "parameters": [
         {
           "name": "to",
@@ -362,7 +362,7 @@
     {
       "endpoint": "/format_email_content",
       "http_method": "POST",
-      "description": "Format and tidy email content (HTML/text) before sending.",
+      "description": "Clean and format email content before sending. USE for tidying draft content. DO NOT USE for sending. READ-ONLY. LLM-DRIVEN.",
       "parameters": [
         {
           "name": "content",
@@ -381,7 +381,7 @@
     {
       "endpoint": "/email_templates",
       "http_method": "GET",
-      "description": "Retrieve reusable email templates.",
+      "description": "List available email templates. USE for viewing template options. DO NOT USE for sending. READ-ONLY. DETERMINISTIC.",
       "parameters": []
     }
   ],

@@ -2774,65 +2774,72 @@ def plan_execution(state: State, config: RunnableConfig):
                 logger.error(f"Simplified plan creation also failed: {fallback_error}")
                 output_state = {"task_plan": []}
 
-    # === SPREADSHEET AGENT MULTI-STAGE PLANNING FIX ===
-    # Override endpoints for spreadsheet tasks to use /plan_operation for initial propose stage
+    # === DECISION CONTRACT INJECTION ===
+    # Inject Decision Contract into all task payloads
     if 'task_plan' in output_state and output_state['task_plan']:
-        logger.info("🗂️  Checking task plan for spreadsheet agent tasks to override endpoints...")
+        logger.info("🎯 Injecting Decision Contract into all tasks...")
         
-        # Get task_agent_pairs to find spreadsheet agent tasks
-        task_agent_pair_dicts = state.get('task_agent_pairs', [])
-        spreadsheet_agent_ids = set()
+        def _infer_task_type_from_endpoint(endpoint: str, description: str) -> str:
+            """Infer task type from endpoint and description"""
+            endpoint_lower = endpoint.lower()
+            desc_lower = description.lower()
+            
+            if '/compare' in endpoint_lower:
+                return 'compare'
+            elif '/merge' in endpoint_lower:
+                return 'merge'
+            elif '/get_summary' in endpoint_lower or '/display' in endpoint_lower:
+                return 'summary'
+            elif '/nl_query' in endpoint_lower:
+                return 'qa'
+            elif '/create' in endpoint_lower:
+                return 'create'
+            elif '/transform' in endpoint_lower or '/plan_operation' in endpoint_lower:
+                return 'transform'
+            else:
+                return 'transform'  # Default
         
-        # Identify spreadsheet agent IDs
-        for pair_dict in task_agent_pair_dicts:
-            try:
-                pair = TaskAgentPair.model_validate(pair_dict)
-                if 'spreadsheet' in pair.primary.id.lower():
-                    spreadsheet_agent_ids.add(pair.primary.id)
-                    logger.info(f"🗂️  Found spreadsheet agent: {pair.primary.id}")
-            except Exception as e:
-                logger.warning(f"Could not parse task_agent_pair: {e}")
-        
-        # Override endpoints for spreadsheet tasks
         for batch_idx, batch in enumerate(output_state['task_plan']):
             for task_idx, task in enumerate(batch):
-                # Check if this task is for a spreadsheet agent
-                primary_id = task.get('primary', {}).get('id') if isinstance(task.get('primary'), dict) else \
-                           (task.primary.id if hasattr(task, 'primary') and hasattr(task.primary, 'id') else None)
-                
-                if primary_id in spreadsheet_agent_ids:
-                    # This is a spreadsheet task - check if we should override endpoint to /plan_operation
-                    current_endpoint = task.get('primary', {}).get('endpoint') if isinstance(task.get('primary'), dict) else \
-                                     (task.primary.endpoint if hasattr(task, 'primary') and hasattr(task.primary, 'endpoint') else None)
+                # Ensure payload exists
+                if isinstance(task, dict):
+                    if 'primary' not in task:
+                        task['primary'] = {}
+                    if 'payload' not in task['primary']:
+                        task['primary']['payload'] = {}
                     
-                    # Only override if current endpoint is NOT already /plan_operation
-                    if current_endpoint and '/plan_operation' not in str(current_endpoint):
-                        logger.info(f"🗂️  [SPREADSHEET] Task '{task.get('task_name')}' (batch {batch_idx}, idx {task_idx}): Overriding endpoint '{current_endpoint}' → '/plan_operation'")
-                        
-                        # Update the endpoint to /plan_operation
-                        if isinstance(task, dict):
-                            if 'primary' not in task:
-                                task['primary'] = {}
-                            task['primary']['endpoint'] = '/plan_operation'
-                            task['primary']['http_method'] = 'POST'
-                            
-                            # Add stage='propose' to payload for initial plan generation
-                            if 'primary' in task and isinstance(task['primary'], dict):
-                                if 'payload' not in task['primary']:
-                                    task['primary']['payload'] = {}
-                                task['primary']['payload']['stage'] = 'propose'
-                                logger.info(f"🗂️  [SPREADSHEET] Added stage='propose' to payload for initial planning")
-                        else:
-                            # PlannedTask object
-                            task.primary.endpoint = '/plan_operation'
-                            task.primary.http_method = 'POST'
-                            if not task.primary.payload:
-                                task.primary.payload = {}
-                            task.primary.payload['stage'] = 'propose'
-                            logger.info(f"🗂️  [SPREADSHEET] Added stage='propose' to payload for initial planning")
-                    else:
-                        logger.info(f"🗂️  [SPREADSHEET] Task '{task.get('task_name')}' already using /plan_operation (no override needed)")
-    
+                    # Get endpoint and description
+                    endpoint = task.get('primary', {}).get('endpoint', '')
+                    description = task.get('task_description', '')
+                    task_name = task.get('task_name', '')
+                else:
+                    # PlannedTask object
+                    if not task.primary.payload:
+                        task.primary.payload = {}
+                    endpoint = task.primary.endpoint
+                    description = task.task_description
+                    task_name = task.task_name
+                
+                # Determine task type
+                task_type = _infer_task_type_from_endpoint(endpoint, description)
+                
+                # Build contract
+                contract = {
+                    "task_type": task_type,
+                    "allow_write": endpoint not in ['/get_summary', '/display', '/compare'],
+                    "allow_schema_change": endpoint in ['/transform', '/plan_operation', '/merge', '/create'],
+                    "confidence_required": 0.8,
+                    "source": "orchestrator"
+                }
+                
+                # Inject
+                if isinstance(task, dict):
+                    task['primary']['payload']['decision_contract'] = contract
+                else:
+                    task.primary.payload['decision_contract'] = contract
+                
+                logger.info(f"  Task '{task_name}': contract={contract}")
+
     # Save the new or modified plan to the file system immediately.
     # We create a temporary state to pass the object version of the plan for readable file output.
     temp_state_for_saving = {**state, **output_state}
@@ -3492,6 +3499,39 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
         elif not uploaded_files:
             logger.warning(f"⚠️ [FILE_ID_INJECTION] Skipped - no uploaded files available")
 
+    # AUTO-INJECT: Multiple file_ids for multi-file operations (compare, merge)
+    # Endpoints like /compare or /merge expect file_ids (array) instead of single file_id
+    if 'file_ids' in [p.name for p in selected_endpoint.parameters] and 'file_ids' not in pre_extracted_params and uploaded_files:
+        logger.info(f"🔍 [FILE_IDS_INJECTION] Checking multi-file injection for endpoint: {endpoint_path}")
+        
+        # Collect all spreadsheet files (current turn first, then older)
+        spreadsheet_files = []
+        current_turn_files = []
+        fallback_files = []
+        
+        for file_obj in uploaded_files:
+            file_dict = file_obj if isinstance(file_obj, dict) else file_obj.__dict__
+            
+            if file_dict.get('file_type') == 'spreadsheet' or file_dict.get('file_name', '').lower().endswith(('.csv', '.xlsx', '.xls')):
+                file_id = file_dict.get('file_id') or file_dict.get('content_id')
+                
+                if file_id:
+                    if file_dict.get('is_current_turn'):
+                        current_turn_files.append(file_id)
+                    else:
+                        fallback_files.append(file_id)
+        
+        # Prioritize current turn files, then add fallbacks
+        spreadsheet_files = current_turn_files + fallback_files
+        
+        if len(spreadsheet_files) >= 2:
+            pre_extracted_params['file_ids'] = spreadsheet_files
+            logger.info(f"✅ AUTO-INJECTED file_ids for multi-file operation: {spreadsheet_files}")
+        elif len(spreadsheet_files) == 1:
+            logger.warning(f"⚠️ [FILE_IDS_INJECTION] Only 1 spreadsheet file found, but endpoint expects multiple. Found: {spreadsheet_files}")
+        else:
+            logger.warning(f"⚠️ [FILE_IDS_INJECTION] No spreadsheet files found for multi-file operation")
+
     # AUTO-INJECT: Spreadsheet /plan_operation requires an instruction
     # Spreadsheet agent contract:
     # - stage=propose expects natural-language instruction
@@ -3538,30 +3578,22 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
             pre_extracted_params['question'] = planned_task.task_description
             logger.info(f"✅ AUTO-INJECTED question for /nl_query: {planned_task.task_description}")
     
-    # **EXPLICIT ROUTING FIX**: Ensure summary/analyze tasks use /nl_query for spreadsheet agent
+    # **ROUTING FIX DISABLED**: Let spreadsheet agent use /plan_operation for all tasks (agent handles thinking)
+    # Previously forced analysis tasks to /nl_query, but /plan_operation is more robust for spreadsheet agent
+    # The agent's /plan_operation endpoint will handle both transformations and analysis-only requests
     task_lower = planned_task.task_name.lower()
     task_desc_lower = planned_task.task_description.lower() if planned_task.task_description else ""
     analysis_keywords = ['summarize', 'summary', 'analyze', 'analysis', 'describe', 'explain', 'review', 'insights', 'examine']
     is_analysis_task = any(keyword in task_lower or keyword in task_desc_lower for keyword in analysis_keywords)
     
-    if is_analysis_task and 'spreadsheet' in agent_details.name.lower() and '/nl_query' not in endpoint_path:
-        logger.warning(f"⚠️ ROUTING CORRECTION: Task '{planned_task.task_name}' appears to be analysis but endpoint is '{endpoint_path}'")
-        logger.warning(f"⚠️ This should use /nl_query endpoint. Attempting to find and use it...")
-        
-        # Try to find nl_query endpoint in agent's endpoints
-        nl_query_endpoint = next((ep for ep in agent_details.endpoints if '/nl_query' in str(ep.endpoint)), None)
-        if nl_query_endpoint:
-            logger.info(f"✅ Found /nl_query endpoint, correcting routing...")
-            selected_endpoint = nl_query_endpoint
-            endpoint_path = str(nl_query_endpoint.endpoint)
-            # Ensure downstream request uses the corrected endpoint + method + URL
-            endpoint_url = f"{base_url}{endpoint_path}" if base_url else endpoint_path
-            http_method = nl_query_endpoint.http_method.upper()
-            logger.info(f"✅ ROUTE CORRECTION applied: endpoint={endpoint_path}, method={http_method}, url={endpoint_url}")
-            # Auto-inject question parameter
-            if 'question' not in pre_extracted_params:
-                pre_extracted_params['question'] = planned_task.task_description
-                logger.info(f"✅ AUTO-INJECTED question for corrected /nl_query route: {planned_task.task_description}")
+    # DISABLED: No longer switch spreadsheet tasks to /nl_query
+    # if is_analysis_task and 'spreadsheet' in agent_details.name.lower() and '/nl_query' not in endpoint_path:
+    #     logger.warning(f"⚠️ ROUTING CORRECTION: Task '{planned_task.task_name}' appears to be analysis but endpoint is '{endpoint_path}'")
+    #     ...
+    
+    # Log the routing decision for debugging
+    if 'spreadsheet' in agent_details.name.lower():
+        logger.info(f"📊 Spreadsheet task '{planned_task.task_name}' using endpoint: {endpoint_path} (analysis_task={is_analysis_task})")
 
     
     # Check if all required parameters are already extracted
@@ -4016,6 +4048,14 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                     response.raise_for_status()
                     result = response.json()
 
+                # If agent uses ApiResponse wrapper, respect its success flag.
+                # A 200 with success=false should be treated as a failed attempt.
+                if isinstance(result, dict) and result.get('success') is False:
+                    agent_error = result.get('error') or 'Agent returned success=false'
+                    logger.error(f"Agent '{agent_details.name}' returned success=false: {agent_error}")
+                    failed_attempts.append({"payload": payload, "result": str(agent_error)})
+                    continue
+
                 # **RELAY AGENT LOGS TO ORCHESTRATOR**
                 logger.info(f"")
                 logger.info(f"{'='*80}")
@@ -4070,7 +4110,10 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                 
                 if isinstance(result, dict):
                     # Check for empty canvas display (spreadsheet with no rows)
-                    canvas = result.get('canvas_display') or result.get('result', {}).get('canvas_display')
+                    nested_result = result.get('result')
+                    if not isinstance(nested_result, dict):
+                        nested_result = {}
+                    canvas = result.get('canvas_display') or nested_result.get('canvas_display')
                     if canvas and isinstance(canvas, dict):
                         rows = canvas.get('rows', [])
                         total_rows = canvas.get('total_rows', len(rows) if rows else 0)
@@ -4091,18 +4134,21 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                 # **CANVAS DISPLAY HANDLING** - Extract canvas_display from agent response
                 canvas_display = None
                 if isinstance(result, dict):
+                    nested_result = result.get('result')
+                    if not isinstance(nested_result, dict):
+                        nested_result = {}
                     # Check at top level first
                     if 'canvas_display' in result:
                         canvas_display = result.get('canvas_display')
                     # Also check inside 'result' field (some agents nest it there)
-                    elif 'result' in result and isinstance(result.get('result'), dict):
-                        canvas_display = result.get('result', {}).get('canvas_display')
+                    elif nested_result:
+                        canvas_display = nested_result.get('canvas_display')
                     
                     if canvas_display:
                         # Spreadsheet multi-stage planning: carry plan_id forward for confirmation execution
                         try:
-                            if isinstance(result.get('result'), dict) and result.get('result', {}).get('plan_id'):
-                                canvas_display['plan_id'] = result.get('result', {}).get('plan_id')
+                            if nested_result.get('plan_id'):
+                                canvas_display['plan_id'] = nested_result.get('plan_id')
                         except Exception:
                             pass
 
@@ -4114,7 +4160,10 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                     else:
                         logger.info(f"ℹ️ Agent did not return canvas_display (checked both top level and nested)")
                 
-                logger.info(f"✅ Agent call successful for task '{planned_task.task_name}'. Payload used: show_preview={payload.get('show_preview', 'not set')}")
+                show_preview_value = None
+                if isinstance(payload, dict):
+                    show_preview_value = payload.get('show_preview', 'not set')
+                logger.info(f"✅ Agent call successful for task '{planned_task.task_name}'. Payload used: show_preview={show_preview_value}")
                 return {
                     "task_name": planned_task.task_name, 
                     "result": result,

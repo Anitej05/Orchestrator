@@ -320,6 +320,41 @@ class AppendSummaryRowAction(SpreadsheetAction):
         return "\n".join(code_lines)
 
 
+class CompareFilesAction(SpreadsheetAction):
+    """Compare multiple spreadsheet files (multi-file operation)"""
+    
+    action_type: Literal["compare_files"] = "compare_files"
+    file_ids: List[str]
+    comparison_mode: Literal["schema_only", "schema_and_key", "full_diff"] = "schema_and_key"
+    key_columns: Optional[List[str]] = None
+    
+    def validate_against_df(self, df: pd.DataFrame) -> Optional[str]:
+        # This is a multi-file action; validation happens at execution with all DFs
+        return None
+    
+    def to_pandas_code(self) -> str:
+        # Multi-file actions don't use simple pandas code; handled by executor
+        return "# Multi-file compare operation (handled by executor)"
+
+
+class MergeFilesAction(SpreadsheetAction):
+    """Merge multiple spreadsheet files (multi-file operation)"""
+    
+    action_type: Literal["merge_files"] = "merge_files"
+    file_ids: List[str]
+    merge_type: Literal["join", "union", "concat"] = "join"
+    join_type: Literal["inner", "left", "right", "outer"] = "inner"
+    key_columns: Optional[List[str]] = None
+    
+    def validate_against_df(self, df: pd.DataFrame) -> Optional[str]:
+        # This is a multi-file action; validation happens at execution with all DFs
+        return None
+    
+    def to_pandas_code(self) -> str:
+        # Multi-file actions don't use simple pandas code; handled by executor
+        return "# Multi-file merge operation (handled by executor)"
+
+
 # ============================================================================
 # ACTION PARSER
 # ============================================================================
@@ -337,7 +372,9 @@ class ActionParser:
         "fill_na": FillNaAction,
         "drop_duplicates": DropDuplicatesAction,
         "add_serial": AddSerialNumberAction,
-        "append_summary_row": AppendSummaryRowAction
+        "append_summary_row": AppendSummaryRowAction,
+        "compare_files": CompareFilesAction,
+        "merge_files": MergeFilesAction
     }
     
     @classmethod

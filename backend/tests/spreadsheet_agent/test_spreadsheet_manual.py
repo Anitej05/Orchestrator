@@ -438,31 +438,31 @@ SALES_10K_QUERIES = {
 # Dataset registry
 DATASET_REGISTRY = {
     "retail": {
-        "filename": "backend/tests/test_data/retail_sales_dataset.xlsx",
+        "filename": "tests/test_data/retail_sales_dataset.xlsx",
         "queries": RETAIL_SALES_QUERIES,
         "description": "Retail Sales Dataset (varies rows)",
         "default_difficulty": "medium"
     },
     "zara": {
-        "filename": "backend/tests/test_data/zara.xlsx",
+        "filename": "tests/test_data/zara.xlsx",
         "queries": ZARA_SALES_QUERIES,
         "description": "Zara Product Catalog (254 products)",
         "default_difficulty": "medium"
     },
     "financials": {
-        "filename": "backend/tests/test_data/Financials Sample Data.xlsx",
+        "filename": "tests/test_data/Financials Sample Data.xlsx",
         "queries": FINANCIALS_QUERIES,
         "description": "Financials Dataset (353 records)",
         "default_difficulty": "medium"
     },
     "sales_10k": {
-        "filename": "backend/tests/test_data/10000 Sales Records.xlsx",
+        "filename": "tests/test_data/10000 Sales Records.xlsx",
         "queries": SALES_10K_QUERIES,
         "description": "Sales 10K Dataset (10,000 records)",
         "default_difficulty": "medium"
     },
     "salary": {
-        "filename": "backend/tests/test_data/Salary_Data.xlsx",
+        "filename": "tests/test_data/Salary_Data.xlsx",
         "queries": {
             "simple": [
                 "How many rows are in this dataset?",
@@ -576,15 +576,15 @@ class TestSummary:
     def print_summary(self):
         """Print formatted summary"""
         stats = self.get_stats()
-        print("\n" + "═"*70)
-        print("📊 TEST EXECUTION SUMMARY")
-        print("═"*70)
-        print(f"\n✅ Successful:  {self.successful_queries}/{self.total_queries} ({stats['success_rate']:.1f}%)")
-        print(f"❌ Failed:      {self.failed_queries}/{self.total_queries}")
-        print(f"⏱️  Avg Duration: {stats['avg_duration_ms']:.2f} ms")
-        print(f"📝 Total Tokens: {stats['total_tokens']:,}")
-        print(f"⏳ Elapsed Time: {stats['elapsed_time']:.2f}s")
-        print("═"*70)
+        print("\n" + "="*70)
+        print("TEST EXECUTION SUMMARY")
+        print("="*70)
+        print(f"\n[SUCCESSFUL]:  {self.successful_queries}/{self.total_queries} ({stats['success_rate']:.1f}%)")
+        print(f"[FAILED]:      {self.failed_queries}/{self.total_queries}")
+        print(f"Avg Duration: {stats['avg_duration_ms']:.2f} ms")
+        print(f"Total Tokens: {stats['total_tokens']:,}")
+        print(f"Elapsed Time: {stats['elapsed_time']:.2f}s")
+        print("="*70)
 
 
 async def run_dataset_tests(dataset_key: str, difficulty: str = None, output_format: str = "console") -> TestSummary:
@@ -605,21 +605,21 @@ async def run_dataset_tests(dataset_key: str, difficulty: str = None, output_for
 
     # Check file exists
     if not Path(test_file).exists():
-        print(f"⚠️  File not found: {test_file}")
-        print(f"📁 Expected location: {Path(test_file).absolute()}")
+        print(f"WARNING: File not found: {test_file}")
+        print(f"Expected location: {Path(test_file).absolute()}")
         return TestSummary()
 
     # Load dataframe
-    print(f"\n{'🟢'*35}")
-    print(f"📊 Testing Dataset: {dataset_key.upper()}")
+    print("\n" + "*"*35)
+    print(f"Testing Dataset: {dataset_key.upper()}")
     print(f"   Description: {dataset_info['description']}")
     print(f"   File: {test_file}")
     print(f"   Difficulty: {difficulty.upper()}")
-    print(f"{'🟢'*35}\n")
+    print("*"*35 + "\n")
 
     try:
         df = load_dataframe(test_file)
-        print(f"✅ Loaded: {len(df)} rows × {len(df.columns)} columns")
+        print(f"Loaded: {len(df)} rows x {len(df.columns)} columns")
         print(f"   Columns: {', '.join(df.columns.tolist()[:5])}{'...' if len(df.columns) > 5 else ''}")
         print(f"   Dtypes: {', '.join([f'{col}({df[col].dtype})' for col in df.columns.tolist()[:3]])}{'...' if len(df.columns) > 3 else ''}")
     except Exception as e:
@@ -635,9 +635,9 @@ async def run_dataset_tests(dataset_key: str, difficulty: str = None, output_for
 
     for idx, query in enumerate(queries, 1):
         result = TestResult(dataset_key, difficulty, idx, query)
-        print(f"\n{'─'*70}")
+        print("\n" + "-"*70)
         print(f"[{idx}/{len(queries)}] {query}")
-        print(f"{'─'*70}")
+        print("-"*70)
         
         start_time = time.time()
         try:
@@ -665,18 +665,32 @@ async def run_dataset_tests(dataset_key: str, difficulty: str = None, output_for
                 if hasattr(llm_result, 'provider_used'):
                     result.provider_used = llm_result.provider_used
 
-            # Detailed step logging
+            # Detailed step logging with code analysis
             if hasattr(llm_result, 'steps_taken') and llm_result.steps_taken:
-                print(f"\n📋 Execution Steps ({len(llm_result.steps_taken)} total):")
+                print(f"\nExecution Steps ({len(llm_result.steps_taken)} total):")
                 for step_idx, step in enumerate(llm_result.steps_taken, 1):
                     step_type = step.get('step_type', 'unknown')
                     provider = step.get('provider', 'unknown')
                     print(f"\n   Step {step_idx}: {step_type} [{provider}]")
                     
-                    # Show generated code if available
+                    # Show generated code with library analysis
                     if 'code' in step:
-                        code = step['code'][:150]
-                        print(f"      Code: {code}{'...' if len(step.get('code', '')) > 150 else ''}")
+                        code = step['code']
+                        # Detect libraries used
+                        libraries = []
+                        if 'df.' in code or 'pandas' in code:
+                            libraries.append('pandas')
+                        if 'np.' in code or 'numpy' in code:
+                            libraries.append('numpy')
+                        if 'plt.' in code or 'matplotlib' in code:
+                            libraries.append('matplotlib')
+                        if 'sql' in code.lower():
+                            libraries.append('SQL')
+                        
+                        lib_str = f" [Libraries: {', '.join(libraries)}]" if libraries else ""
+                        print(f"      Code{lib_str}:")
+                        code_display = code[:200]
+                        print(f"         {code_display}{'...' if len(code) > 200 else ''}")
                     
                     # Show result/output
                     if 'output' in step:
@@ -686,7 +700,7 @@ async def run_dataset_tests(dataset_key: str, difficulty: str = None, output_for
                     # Show errors if any
                     if 'error' in step and step['error']:
                         error = step['error'][:150]
-                        print(f"      ⚠️  Error: {error}{'...' if len(step.get('error', '')) > 150 else ''}")
+                        print(f"      ERROR: {error}{'...' if len(step.get('error', '')) > 150 else ''}")
                         if 'JSON' in step.get('error', ''):
                             result.parse_failures += 1
                     
@@ -695,7 +709,7 @@ async def run_dataset_tests(dataset_key: str, difficulty: str = None, output_for
                         print(f"      Parse attempts: {step['parse_attempts']}")
 
             if result.success:
-                print(f"\n✅ SUCCESS")
+                print(f"\n[SUCCESS]")
                 print(f"   Duration: {result.duration_ms:.0f}ms")
                 print(f"   Iterations: {result.iterations}")
                 print(f"   Provider: {result.provider_used if result.provider_used else 'default'}")
@@ -703,25 +717,15 @@ async def run_dataset_tests(dataset_key: str, difficulty: str = None, output_for
                 
                 # Show answer with better formatting
                 if result.answer:
-                    print(f"\n   📊 RESULT:")
+                    print(f"\n   RESULT:")
                     # Try to format if it looks like structured data
                     answer_lines = result.answer.split('\n')
                     for line in answer_lines[:10]:  # Show first 10 lines
                         print(f"      {line}")
                     if len(answer_lines) > 10:
                         print(f"      ... ({len(answer_lines) - 10} more lines)")
-                
-                # Show execution flow
-                if hasattr(llm_result, 'steps_taken') and llm_result.steps_taken:
-                    print(f"\n   📈 EXECUTION FLOW:")
-                    for step_idx, step in enumerate(llm_result.steps_taken, 1):
-                        status = "✅" if not step.get('error') else "⚠️"
-                        print(f"      {status} Step {step_idx}: {step.get('step_type', 'unknown')}")
-                        if 'output' in step and step['output']:
-                            output_str = str(step['output'])[:80]
-                            print(f"         → {output_str}{'...' if len(str(step['output'])) > 80 else ''}")
             else:
-                print(f"\n❌ FAILED")
+                print(f"\n[FAILED]")
                 print(f"   Duration: {result.duration_ms:.0f}ms")
                 print(f"   Iterations: {result.iterations}")
                 print(f"   Parse Failures: {result.parse_failures}")
@@ -729,24 +733,33 @@ async def run_dataset_tests(dataset_key: str, difficulty: str = None, output_for
                 # Show primary error
                 if result.error:
                     error_msg = result.error
-                    print(f"\n   🔴 PRIMARY ERROR:")
+                    print(f"\n   PRIMARY ERROR:")
                     error_lines = error_msg.split('\n')
                     for line in error_lines[:5]:
                         print(f"      {line}")
                     if len(error_lines) > 5:
                         print(f"      ... ({len(error_lines) - 5} more lines)")
                 
-                # Show failure context from steps
+                # Show failure context from steps with code analysis
                 if hasattr(llm_result, 'steps_taken') and llm_result.steps_taken:
-                    print(f"\n   📋 EXECUTION FLOW:")
+                    print(f"\n   EXECUTION STEPS:")
                     for step_idx, step in enumerate(llm_result.steps_taken, 1):
-                        status = "✅" if not step.get('error') else "❌"
+                        status = "[OK]" if not step.get('error') else "[FAIL]"
                         print(f"      {status} Step {step_idx}: {step.get('step_type', 'unknown')} [{step.get('provider', 'unknown')}]")
                         
-                        # Show what code was attempted
+                        # Show what code was attempted with library detection
                         if 'code' in step and step['code']:
-                            code = step['code'][:100]
-                            print(f"         Code: {code}{'...' if len(step.get('code', '')) > 100 else ''}")
+                            code = step['code']
+                            # Detect libraries
+                            libraries = []
+                            if 'df.' in code or 'pandas' in code:
+                                libraries.append('pandas')
+                            if 'np.' in code or 'numpy' in code:
+                                libraries.append('numpy')
+                            if 'sql' in code.lower():
+                                libraries.append('SQL')
+                            lib_str = f" [{', '.join(libraries)}]" if libraries else ""
+                            print(f"         Code{lib_str}: {code[:150]}{'...' if len(code) > 150 else ''}")
                         
                         # Show step-level errors
                         if 'error' in step and step['error']:
@@ -766,22 +779,34 @@ async def run_dataset_tests(dataset_key: str, difficulty: str = None, output_for
                             break
                     
                     if failing_step:
-                        print(f"\n   🎯 FAILURE POINT:")
+                        print(f"\n   FAILURE POINT:")
                         print(f"      Step Type: {failing_step.get('step_type', 'unknown')}")
                         print(f"      Provider: {failing_step.get('provider', 'unknown')}")
                         if 'code' in failing_step:
-                            print(f"      Attempted Code: {failing_step['code'][:150]}...")
+                            code = failing_step['code']
+                            # Detect libraries in failing code
+                            libraries = []
+                            if 'df.' in code:
+                                libraries.append('pandas')
+                            if 'np.' in code:
+                                libraries.append('numpy')
+                            lib_str = f" [{', '.join(libraries)}]" if libraries else ""
+                            print(f"      Attempted Code{lib_str}: {code[:150]}...")
                         if 'error' in failing_step:
                             print(f"      Error: {failing_step['error'][:200]}...")
                 else:
                     # No step history, show the full error
-                    print(f"\n   🎯 FAILURE DETAILS:")
-                    print(f"      {result.error}")
+                    print(f"\n   ERROR DETAILS:")
+                    error_lines = result.error.split('\n')
+                    for line in error_lines[:10]:
+                        print(f"      {line}")
+                    if len(error_lines) > 10:
+                        print(f"      ... ({len(error_lines) - 10} more lines)")
 
         except Exception as e:
             result.duration_ms = (time.time() - start_time) * 1000
             result.error = str(e)
-            print(f"\n❌ EXCEPTION")
+            print(f"\n[EXCEPTION]")
             print(f"   Duration: {result.duration_ms:.0f}ms")
             print(f"   Error Type: {type(e).__name__}")
             print(f"   Error: {str(e)[:200]}")
@@ -811,18 +836,18 @@ async def run_dataset_tests(dataset_key: str, difficulty: str = None, output_for
         }
         with open(report_file, 'w') as f:
             json.dump(results_data, f, indent=2)
-        print(f"\n💾 Results saved to: {report_file.absolute()}")
+        print(f"\nResults saved to: {report_file.absolute()}")
 
     return summary
 
 
 def print_available_datasets():
     """List all available datasets and their queries"""
-    print("\n" + "═"*70)
-    print("📚 AVAILABLE DATASETS")
-    print("═"*70)
+    print("\n" + "="*70)
+    print("AVAILABLE DATASETS")
+    print("="*70)
     for key, info in DATASET_REGISTRY.items():
-        print(f"\n🔹 {key.upper()}")
+        print(f"\n- {key.upper()}")
         print(f"   Description: {info['description']}")
         print(f"   File: {info['filename']}")
         print(f"   Difficulties: {', '.join(info['queries'].keys())}")
@@ -855,7 +880,7 @@ Examples:
         return
 
     if not args.dataset:
-        print("❌ Please specify a dataset (--dataset) or use --list to see options")
+        print("Please specify a dataset (--dataset) or use --list to see options")
         parser.print_help()
         return
 
@@ -864,9 +889,9 @@ Examples:
 
     # Display final message
     if summary.successful_queries > 0:
-        print(f"\n🎉 Completed {summary.successful_queries} successful queries!")
+        print(f"\nCompleted {summary.successful_queries} successful queries!")
     else:
-        print(f"\n⚠️  No successful queries. Check dataset file and LLM configuration.")
+        print(f"\nNo successful queries. Check dataset file and LLM configuration.")
 
 
 if __name__ == "__main__":

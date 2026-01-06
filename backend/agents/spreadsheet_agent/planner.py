@@ -209,6 +209,13 @@ class MultiStagePlanner:
         # Build prompt for LLM
         prompt = f"""You are a spreadsheet operations planner. Generate a plan using structured actions.
 
+=== CRITICAL CONSTRAINTS ===
+- ASSUME: Orchestrator already classified this as 'transform' task type
+- FOCUS: Safety validation and step decomposition ONLY
+- DO NOT: Re-interpret user intent or suggest alternate routes
+- DO NOT: Guess whether user wants analysis vs modification
+- Your ONLY job: Break instruction into safe, executable steps
+
 === DATAFRAME CONTEXT ===
 Shape: {df_context['shape']} (rows, columns)
 Columns: {', '.join(df_context['columns'])}
@@ -248,6 +255,17 @@ Sample data: {df_context['sample']}
 
 10. append_summary_row: Append a summary row with aggregations
     {{"action_type": "append_summary_row", "aggregations": {{"Age": "mean", "Total Amount": "sum"}}}}
+
+11. compare_files: Compare multiple spreadsheet files (requires 2+ files uploaded)
+    {{"action_type": "compare_files", "file_ids": ["file1_id", "file2_id"], "comparison_mode": "schema_and_key", "key_columns": ["ID"]}}
+    - comparison_mode: "schema_only", "schema_and_key", "full_diff"
+    - Use when instruction mentions: "compare files", "find differences", "what changed between files", "diff files"
+
+12. merge_files: Merge multiple spreadsheet files (requires 2+ files uploaded)
+    {{"action_type": "merge_files", "file_ids": ["file1_id", "file2_id"], "merge_type": "join", "join_type": "inner", "key_columns": ["ID"]}}
+    - merge_type: "join" (SQL-like), "union" (stack matching columns), "concat" (stack all)
+    - join_type: "inner", "outer", "left", "right" (for join merge)
+    - Use when instruction mentions: "merge files", "combine files", "join files", "union files", "concatenate files"
 
 === RESPONSE FORMAT (JSON) ===
 {{

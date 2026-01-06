@@ -35,7 +35,7 @@ class SpreadsheetOperation:
     operation_type: str  # query, transform, filter, aggregate, etc.
     instruction: str  # Natural language instruction
     pandas_code: str  # Actual pandas code executed
-    result_summary: str  # Summary of the result
+    result_summary: Any  # Summary of the result
     rows_affected: int
     columns_affected: List[str]
     dataframe_state_before: Dict[str, Any]  # Shape, columns, dtypes
@@ -117,9 +117,10 @@ class SpreadsheetSessionManager:
             if session_file.exists():
                 with open(session_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                    # Reconstruct SpreadsheetOperation objects
+                    # Reconstruct SpreadsheetOperation objects with defaults for missing fields
                     operation_history = [
-                        SpreadsheetOperation(**op) for op in data.get('operation_history', [])
+                        self._deserialize_operation(op)
+                        for op in data.get('operation_history', [])
                     ]
                     session = SpreadsheetSession(
                         file_id=data['file_id'],
@@ -146,10 +147,25 @@ class SpreadsheetSessionManager:
                 conversation_context=[],
                 current_state={},
                 metadata={'thread_id': thread_id} if thread_id else {}
-        )
-        self._active_sessions[session_id] = session
-        self._save_session(session)
-        return session
+            )
+            self._active_sessions[session_id] = session
+            self._save_session(session)
+            return session
+
+    def _deserialize_operation(self, op_data: Dict[str, Any]) -> SpreadsheetOperation:
+        """Safely deserialize an operation with sensible defaults."""
+        defaults = {
+            'timestamp': op_data.get('timestamp', datetime.now().isoformat()),
+            'operation_type': op_data.get('operation_type', op_data.get('operation', 'unknown')),
+            'instruction': op_data.get('instruction', op_data.get('description', '')),
+            'pandas_code': op_data.get('pandas_code', ''),
+            'result_summary': op_data.get('result_summary', ''),
+            'rows_affected': op_data.get('rows_affected', 0),
+            'columns_affected': op_data.get('columns_affected', []),
+            'dataframe_state_before': op_data.get('dataframe_state_before', {}),
+            'dataframe_state_after': op_data.get('dataframe_state_after', {}),
+        }
+        return SpreadsheetOperation(**defaults)
     
     def add_operation(
         self,
@@ -187,7 +203,7 @@ class SpreadsheetSessionManager:
                 operation_type=operation_type,
                 instruction=instruction,
                 pandas_code=pandas_code,
-                result_summary=result_summary,
+                result_summary=self._format_result_summary(result_summary),
                 rows_affected=rows_affected,
                 columns_affected=columns_affected,
                 dataframe_state_before=state_before,
@@ -195,10 +211,56 @@ class SpreadsheetSessionManager:
             )
             
             session.operation_history.append(operation)
+            self._trim_operation_history(session)
             session.current_state = state_after
             session.last_accessed = datetime.now().isoformat()
             
             self._save_session(session)
+
+    def track_operation(
+        self,
+        file_id: str,
+        thread_id: Optional[str] = None,
+        operation: str = "unknown",
+        description: str = "",
+        result_summary: Any = None
+    ) -> None:
+        """Track a lightweight operation (used by /nl_query and /transform)."""
+        session = self.get_or_create_session(file_id, filename="unknown", thread_id=thread_id)
+
+        with self._session_lock:
+            operation_entry = SpreadsheetOperation(
+                timestamp=datetime.now().isoformat(),
+                operation_type=operation,
+                instruction=description,
+                pandas_code="",
+                result_summary=self._format_result_summary(result_summary),
+                rows_affected=0,
+                columns_affected=[],
+                dataframe_state_before=dict(session.current_state) if session.current_state else {},
+                dataframe_state_after=dict(session.current_state) if session.current_state else {}
+            )
+
+            session.operation_history.append(operation_entry)
+            self._trim_operation_history(session)
+            session.last_accessed = datetime.now().isoformat()
+            self._save_session(session)
+
+    def get_session_history(self, file_id: str, thread_id: Optional[str] = None, limit: int = 10) -> List[Dict[str, Any]]:
+        """Return recent operations for a spreadsheet/thread combination."""
+        session = self.get_or_create_session(file_id, filename="unknown", thread_id=thread_id)
+
+        with self._session_lock:
+            history = session.operation_history[-limit:]
+            return [
+                {
+                    'timestamp': op.timestamp,
+                    'operation': op.operation_type,
+                    'description': op.instruction,
+                    'result_summary': op.result_summary
+                }
+                for op in history
+            ]
     
     def add_conversation_turn(
         self,
@@ -378,6 +440,22 @@ class SpreadsheetSessionManager:
                 context_parts.append(state_section)
         
         return "".join(context_parts)
+
+    def _trim_operation_history(self, session: SpreadsheetSession, max_entries: int = 200) -> None:
+        """Keep operation history bounded to avoid unbounded growth."""
+        if len(session.operation_history) > max_entries:
+            session.operation_history = session.operation_history[-max_entries:]
+
+    def _format_result_summary(self, summary: Any) -> str:
+        """Normalize result summaries to safe, readable strings for logging and display."""
+        if summary is None:
+            return ""
+        if isinstance(summary, str):
+            return summary
+        try:
+            return json.dumps(summary, cls=NumpyEncoder)
+        except Exception:
+            return str(summary)
     
     def get_all_files_summary(self, thread_id: str) -> str:
         """

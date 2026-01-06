@@ -77,6 +77,25 @@ class NaturalLanguageQueryRequest(BaseModel):
     max_iterations: int = Field(default=5, description="Maximum reasoning iterations")
 
 
+class CompareFilesRequest(BaseModel):
+    """Request model for comparing multiple spreadsheet files"""
+    file_ids: List[str] = Field(..., min_length=2, description="List of file IDs to compare (2 or more)")
+    comparison_mode: str = Field(default="schema_and_key", description="Comparison mode: 'schema_only', 'schema_and_key', 'full_diff'")
+    key_columns: Optional[List[str]] = Field(None, description="Columns to use as keys for row matching")
+    output_format: str = Field(default="json", description="Output format: 'json', 'csv', 'xlsx'")
+    thread_id: Optional[str] = Field(None, description="Conversation thread ID")
+
+
+class MergeFilesRequest(BaseModel):
+    """Request model for merging multiple spreadsheet files"""
+    file_ids: List[str] = Field(..., min_length=2, description="List of file IDs to merge (2 or more)")
+    merge_type: str = Field(default="join", description="Merge type: 'join', 'union', 'concat'")
+    join_type: Optional[str] = Field("inner", description="For join: 'inner', 'left', 'right', 'outer'")
+    key_columns: Optional[List[str]] = Field(None, description="Columns to join/merge on")
+    output_filename: Optional[str] = Field(None, description="Optional filename for merged output")
+    thread_id: Optional[str] = Field(None, description="Conversation thread ID")
+
+
 # ============== OPERATION TRACKING ==============
 
 class QueryPlan(BaseModel):
@@ -98,6 +117,15 @@ class ObservationData(BaseModel):
     changes_summary: str
     columns_added: List[str] = []
     columns_removed: List[str] = []
+
+
+class ComparisonResult(BaseModel):
+    """Result of comparing two or more spreadsheet files"""
+    file_ids: List[str]
+    schema_diff: Dict[str, Any]  # Column differences, dtype changes
+    row_diff: Optional[Dict[str, Any]] = None  # Added/removed/changed rows
+    summary: str
+    diff_artifact_id: Optional[str] = None  # ID of generated diff report file
     columns_renamed: Dict[str, str] = {}  # old -> new
     rows_added: int = 0
     rows_removed: int = 0

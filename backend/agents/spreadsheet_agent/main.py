@@ -10,6 +10,7 @@ import logging
 from pathlib import Path
 from typing import Dict, Any, Optional
 from asyncio import Lock as AsyncLock
+import anyio
 
 import pandas as pd
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Header
@@ -30,7 +31,18 @@ logger = logging.getLogger(__name__)
 
 # Import modular components - using absolute imports
 from agents.spreadsheet_agent.config import STORAGE_DIR, AGENT_PORT, MAX_FILE_SIZE_MB
-from agents.spreadsheet_agent.models import ApiResponse, CreateSpreadsheetRequest, NaturalLanguageQueryRequest
+from agents.spreadsheet_agent.models import (
+    ApiResponse,
+    CreateSpreadsheetRequest,
+    NaturalLanguageQueryRequest,
+    CompareFilesRequest,
+    MergeFilesRequest,
+    ComparisonResult
+)
+
+# Import contract models from backend
+from models import StandardResponse, StandardResponseMetrics, DecisionContract
+
 from agents.spreadsheet_agent.memory import spreadsheet_memory
 from agents.spreadsheet_agent import session as session_module  # Import module for _thread_local access
 from agents.spreadsheet_agent.session import (
@@ -90,6 +102,92 @@ STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 # Metrics tracking
 import time
+
+
+# ============================================================================
+# DECISION CONTRACT VALIDATION (Phase 3: Refactor)
+# ============================================================================
+
+def validate_decision_contract(
+    contract: Optional[Dict[str, Any]],
+    instruction: str,
+    endpoint: str
+) -> Optional[Dict[str, Any]]:
+    """
+    Validate Decision Contract against request.
+    Returns error dict if validation fails, None if valid.
+    
+    The orchestrator is the SOLE authority on task classification.
+    This function enforces orchestrator decisions.
+    """
+    if not contract:
+        # No contract provided - allow (backward compatibility)
+        return None
+    
+    # Check write permissions
+    if not contract.get('allow_write', False):
+        write_keywords = ['add', 'remove', 'delete', 'drop', 'modify', 'change', 'update', 'insert', 'create']
+        if any(kw in instruction.lower() for kw in write_keywords):
+            return {
+                "success": False,
+                "needs_clarification": True,
+                "message": f"Contract forbids write operations. Instruction: {instruction[:100]}"
+            }
+    
+    # Check schema change permissions
+    if not contract.get('allow_schema_change', False):
+        schema_keywords = ['rename column', 'drop column', 'add column', 'merge', 'join']
+        if any(kw in instruction.lower() for kw in schema_keywords):
+            return {
+                "success": False,
+                "needs_clarification": True,
+                "message": f"Contract forbids schema changes. Instruction: {instruction[:100]}"
+            }
+    
+    return None
+
+
+# ============================================================================
+# DECISION CONTRACT VALIDATION (Phase 3: Refactor)
+# ============================================================================
+
+def validate_decision_contract(
+    contract: Optional[Dict[str, Any]],
+    instruction: str,
+    endpoint: str
+) -> Optional[Dict[str, Any]]:
+    """
+    Validate Decision Contract against request.
+    Returns error dict if validation fails, None if valid.
+    
+    The orchestrator is the SOLE authority on task classification.
+    This function enforces orchestrator decisions.
+    """
+    if not contract:
+        # No contract provided - allow (backward compatibility)
+        return None
+    
+    # Check write permissions
+    if not contract.get('allow_write', False):
+        write_keywords = ['add', 'remove', 'delete', 'drop', 'modify', 'change', 'update', 'insert', 'create']
+        if any(kw in instruction.lower() for kw in write_keywords):
+            return {
+                "success": False,
+                "needs_clarification": True,
+                "message": f"Contract forbids write operations. Instruction: {instruction[:100]}"
+            }
+    
+    # Check schema change permissions
+    if not contract.get('allow_schema_change', False):
+        schema_keywords = ['rename column', 'drop column', 'add column', 'merge', 'join']
+        if any(kw in instruction.lower() for kw in schema_keywords):
+            return {
+                "success": False,
+                "needs_clarification": True,
+                "message": f"Contract forbids schema changes. Instruction: {instruction[:100]}"
+            }
+    
+    return None
 from collections import defaultdict
 
 call_metrics = {
@@ -192,7 +290,7 @@ async def shutdown_event():
 
 # --- API Endpoints ---
 
-@app.post("/upload", response_model=ApiResponse)
+@app.post("/upload", response_model=StandardResponse)
 async def upload_file(
     file: UploadFile = File(...),
     thread_id: Optional[str] = Form(None),
@@ -275,22 +373,40 @@ async def upload_file(
             metadata={'operation': 'upload'}
         )
 
-        return ApiResponse(success=True, result={
-            "file_id": file_id,
-            "filename": file.filename,
-            "file_path": file_location,
-            "rows": len(df),
-            "columns": len(df.columns),
-            "orchestrator_format": metadata.to_orchestrator_format(),
-            "canvas_display": canvas_display
-        })
+        return StandardResponse(
+            success=True,
+            route="/upload",
+            task_type="create",
+            data={
+                "file_id": file_id,
+                "filename": file.filename,
+                "file_path": file_location,
+                "rows": len(df),
+                "columns": len(df.columns),
+                "orchestrator_format": metadata.to_orchestrator_format()
+            },
+            preview={"canvas_display": canvas_display},
+            artifact=None,
+            metrics=StandardResponseMetrics(
+                rows_processed=len(df),
+                columns_affected=len(df.columns)
+            ),
+            confidence=1.0,
+            message=f"File '{file.filename}' uploaded successfully with {len(df)} rows and {len(df.columns)} columns"
+        )
 
     except Exception as e:
         logger.error(f"File upload failed: {e}", exc_info=True)
-        return ApiResponse(success=False, error=str(e))
+        return StandardResponse(
+            success=False,
+            route="/upload",
+            task_type="create",
+            data={},
+            message=f"Upload failed: {str(e)}"
+        )
 
 
-@app.post("/nl_query", response_model=ApiResponse)
+@app.post("/nl_query", response_model=StandardResponse)
 async def natural_language_query(
     request: NaturalLanguageQueryRequest,
     thread_id: Optional[str] = Header(None, alias="x-thread-id")
@@ -309,6 +425,29 @@ async def natural_language_query(
 
         logger.info(f"🚀 [NL_QUERY] Starting with: file_id={file_id}, question='{question[:80]}...'")
         
+        # GUARD: Block summary/preview/schema requests (these go to /get_summary or /display)
+        question_lower = question.lower()
+        redirect_keywords = [
+            'summarize', 'summary', 'preview', 'display', 'show me',
+            'schema', 'columns', 'describe file', 'what is this', 'what is in',
+            'list columns', 'file structure', 'overview'
+        ]
+        
+        if any(kw in question_lower for kw in redirect_keywords):
+            logger.warning(f"❌ [NL_QUERY GUARD] Blocked summary/preview request: {question[:100]}")
+            return StandardResponse(
+                success=False,
+                route="/nl_query",
+                task_type="qa",
+                data={},
+                needs_clarification=True,
+                message=(
+                    f"This endpoint is for analytical questions (why/how/anomaly detection) only. "
+                    f"For summaries, previews, or schema information, use /get_summary or /display. "
+                    f"Your question: {question[:100]}"
+                )
+            )
+        
         # Ensure file is loaded
         if not ensure_file_loaded(file_id, thread_id, file_manager):
             logger.error(f"❌ [NL_QUERY] File not found: {file_id}")
@@ -326,7 +465,11 @@ async def natural_language_query(
         session_context = ""
         if thread_id != "default":
             try:
-                session_history = spreadsheet_session_manager.get_session_history(thread_id, limit=5)
+                session_history = spreadsheet_session_manager.get_session_history(
+                    file_id=file_id,
+                    thread_id=thread_id,
+                    limit=5
+                )
                 if session_history:
                     session_context = "\n".join([
                         f"{i+1}. {op.get('operation', 'unknown')}: {op.get('description', '')}"
@@ -335,7 +478,7 @@ async def natural_language_query(
                     logger.info(f"📜 [NL_QUERY] Found {len(session_history)} previous operations in context")
             except Exception as e:
                 logger.warning(f"⚠️  [NL_QUERY] Could not get session history: {e}")
-        
+
         # Execute query
         async with spreadsheet_operation_lock:
             logger.info(f"🤖 [NL_QUERY] Sending to LLM for processing (max_iterations={max_iterations})...")
@@ -409,13 +552,31 @@ async def natural_language_query(
             )
         
         logger.info(f"📤 [NL_QUERY] Returning response to orchestrator")
-        return ApiResponse(success=True, result=response_data)
+        return StandardResponse(
+            success=bool(result.success),
+            route="/nl_query",
+            task_type="qa",
+            data=response_data,
+            preview={"canvas_display": canvas_display} if canvas_display else None,
+            artifact=None,
+            metrics=StandardResponseMetrics(
+                llm_calls=result.metrics.get('llm_calls', 0) if hasattr(result, 'metrics') and result.metrics else 0
+            ),
+            confidence=result.confidence if hasattr(result, 'confidence') else 0.8,
+            message=result.answer if result.success else (result.error or "Query failed")
+        )
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Natural language query failed: {e}", exc_info=True)
-        return ApiResponse(success=False, error=str(e))
+        return StandardResponse(
+            success=False,
+            route="/nl_query",
+            task_type="qa",
+            data={},
+            message=f"Query processing failed: {str(e)}"
+        )
 
 
 @app.post("/transform", response_model=ApiResponse)
@@ -497,7 +658,7 @@ async def transform_data(
         return ApiResponse(success=False, error=str(e))
 
 
-@app.post("/get_summary", response_model=ApiResponse)
+@app.post("/get_summary", response_model=StandardResponse)
 async def get_summary(file_id: str = Form(...), show_preview: bool = Form(False), thread_id: Optional[str] = Form(None)):
     """Get summary of spreadsheet with headers, dtypes, and preview"""
     try:
@@ -522,6 +683,7 @@ async def get_summary(file_id: str = Form(...), show_preview: bool = Form(False)
             "total_columns": len(df.columns)
         }
         
+        canvas_display = None
         if show_preview:
             canvas_display = dataframe_to_canvas(
                 df=df,
@@ -531,15 +693,33 @@ async def get_summary(file_id: str = Form(...), show_preview: bool = Form(False)
                 max_rows=10,
                 file_id=file_id
             )
-            summary["canvas_display"] = canvas_display
         
-        return ApiResponse(success=True, result=summary)
+        return StandardResponse(
+            success=True,
+            route="/get_summary",
+            task_type="summary",
+            data=summary,
+            preview={"canvas_display": canvas_display} if canvas_display else None,
+            artifact=None,
+            metrics=StandardResponseMetrics(
+                rows_processed=len(df),
+                columns_affected=len(df.columns)
+            ),
+            confidence=1.0,
+            message=f"Summary retrieved for {filename}: {len(df)} rows, {len(df.columns)} columns"
+        )
     
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Get summary failed: {e}", exc_info=True)
-        return ApiResponse(success=False, error=str(e))
+        return StandardResponse(
+            success=False,
+            route="/get_summary",
+            task_type="summary",
+            data={},
+            message=f"Failed to get summary: {str(e)}"
+        )
 
 
 @app.post("/get_summary_with_canvas", response_model=ApiResponse)
@@ -655,16 +835,36 @@ async def display_spreadsheet(
             file_id=file_id
         )
         
-        return ApiResponse(success=True, result={
-            "message": f"Displaying {len(display_df)} rows",
-            "canvas_display": canvas_display
-        })
+        return StandardResponse(
+            success=True,
+            route="/display",
+            task_type="preview",
+            data={
+                "file_id": file_id,
+                "filename": filename,
+                "rows_displayed": len(display_df)
+            },
+            preview={"canvas_display": canvas_display},
+            artifact=None,
+            metrics=StandardResponseMetrics(
+                rows_processed=len(display_df),
+                columns_affected=len(df.columns)
+            ),
+            confidence=1.0,
+            message=f"Displaying {len(display_df)} rows in {display_mode} mode"
+        )
     
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Display failed: {e}", exc_info=True)
-        return ApiResponse(success=False, error=str(e))
+        return StandardResponse(
+            success=False,
+            route="/display",
+            task_type="preview",
+            data={},
+            message=f"Display failed: {str(e)}"
+        )
 
 
 @app.get("/download/{file_id}")
@@ -818,7 +1018,7 @@ async def simulate_operation_endpoint(
         return ApiResponse(success=False, error=str(e))
 
 
-@app.post("/plan_operation", response_model=ApiResponse)
+@app.post("/plan_operation")
 async def plan_operation_endpoint(
     file_id: str = Form(...),
     instruction: str = Form(...),
@@ -831,6 +1031,8 @@ async def plan_operation_endpoint(
     - revise: Revise plan based on feedback
     - simulate: Test plan on copy of data
     - execute: Apply plan to actual data
+    
+    FAST PATH: For analysis-only requests (summary/describe/analyze), returns immediate response without multi-stage workflow.
     """
     try:
         thread_id = thread_id or "default"
@@ -841,6 +1043,9 @@ async def plan_operation_endpoint(
         df = get_dataframe(file_id, thread_id)
         if df is None:
             raise HTTPException(status_code=500, detail="Failed to load dataframe")
+        
+        # === MULTI-STAGE PATH: All operations require planning workflow ===
+        logger.info(f"📋 [PLAN_OPERATION] Multi-stage path: stage={stage}")
         
         # Import planner
         from agents.spreadsheet_agent.planner import planner
@@ -864,8 +1069,8 @@ async def plan_operation_endpoint(
                 "rows": [
                     [
                         str(i + 1),
-                        action.get("action_type", "unknown").replace("_", " ").title(),
-                        action.get("description", f"Execute {action.get('action_type', 'action')}")
+                        action.action_type.replace("_", " ").title(),
+                        getattr(action, 'description', f"Execute {action.action_type}")
                     ]
                     for i, action in enumerate(plan.actions)
                 ]
@@ -1006,7 +1211,7 @@ async def plan_operation_endpoint(
         return ApiResponse(success=False, error=str(e))
 
 
-@app.post("/create", response_model=ApiResponse)
+@app.post("/create", response_model=StandardResponse)
 async def create_spreadsheet(request: CreateSpreadsheetRequest):
     """Create a new spreadsheet from content or instruction"""
     try:
@@ -1029,9 +1234,13 @@ async def create_spreadsheet(request: CreateSpreadsheetRequest):
                            f"For analyzing/summarizing existing files, use /nl_query endpoint instead. "
                            f"Instruction received: {request.instruction[:100]}...")
                 logger.error(error_msg)
-                return ApiResponse(
+                return StandardResponse(
                     success=False,
-                    error="Wrong endpoint: Use /nl_query for analysis/summary tasks, not /create"
+                    route="/create",
+                    task_type="create",
+                    data={},
+                    needs_clarification=True,
+                    message="Wrong endpoint: Use /nl_query for analysis/summary tasks, not /create"
                 )
         
         # Generate CSV content if needed
@@ -1041,7 +1250,13 @@ async def create_spreadsheet(request: CreateSpreadsheetRequest):
                 request.content
             )
             if not csv_content:
-                return ApiResponse(success=False, error="Failed to generate CSV")
+                return StandardResponse(
+                    success=False,
+                    route="/create",
+                    task_type="create",
+                    data={},
+                    message="Failed to generate CSV from instruction"
+                )
         elif request.content:
             csv_content = request.content
         else:
@@ -1092,20 +1307,42 @@ async def create_spreadsheet(request: CreateSpreadsheetRequest):
             file_id=file_id
         )
         
-        return ApiResponse(success=True, result={
-            "file_id": file_id,
-            "filename": filename,
-            "file_path": str(file_path),
-            "rows": len(df),
-            "columns": len(df.columns),
-            "canvas_display": canvas_display
-        })
+        return StandardResponse(
+            success=True,
+            route="/create",
+            task_type="create",
+            data={
+                "file_id": file_id,
+                "filename": filename,
+                "file_path": str(file_path),
+                "rows": len(df),
+                "columns": len(df.columns)
+            },
+            preview={"canvas_display": canvas_display},
+            artifact={
+                "id": file_id,
+                "filename": filename,
+                "url": f"/download/{file_id}"
+            },
+            metrics=StandardResponseMetrics(
+                rows_processed=len(df),
+                columns_affected=len(df.columns)
+            ),
+            confidence=1.0,
+            message=f"Created spreadsheet '{filename}' with {len(df)} rows and {len(df.columns)} columns"
+        )
     
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Create spreadsheet failed: {e}", exc_info=True)
-        return ApiResponse(success=False, error=str(e))
+        return StandardResponse(
+            success=False,
+            route="/create",
+            task_type="create",
+            data={},
+            message=f"Create failed: {str(e)}"
+        )
 
 
 # File management endpoints
@@ -1229,6 +1466,273 @@ async def cleanup_files(max_age_hours: int = 24):
     except Exception as e:
         logger.error(f"Cleanup failed: {e}", exc_info=True)
         return ApiResponse(success=False, error=str(e))
+
+
+@app.post("/compare", response_model=StandardResponse)
+async def compare_files(request: CompareFilesRequest):
+    """
+    Compare multiple spreadsheet files.
+    
+    Supports schema comparison, key-based row diff, and full value diff.
+    Returns comparison results and optionally creates a diff report artifact.
+    
+    Uses threadpool for CPU-intensive pandas operations to avoid blocking event loop.
+    """
+    try:
+        from agents.spreadsheet_agent.models import ComparisonResult
+        from agents.spreadsheet_agent.multi_file_ops import (
+            compare_schemas,
+            compare_by_keys,
+            detect_key_columns,
+            generate_diff_report
+        )
+        
+        logger.info(f"Comparing {len(request.file_ids)} files: {request.file_ids}")
+        
+        thread_id = request.thread_id or "default"
+
+        # Load all dataframes
+        dataframes_dict = {}
+        for file_id in request.file_ids:
+            df = get_dataframe(file_id, thread_id)
+            if df is None:
+                return StandardResponse(
+                    success=False,
+                    route="/compare",
+                    task_type="compare",
+                    data={},
+                    message=f"File {file_id} not found or not loaded"
+                )
+            dataframes_dict[file_id] = df
+        
+        # THREADPOOL: Offload CPU-intensive comparison to worker thread
+        def _perform_comparison():
+            """CPU-intensive comparison work (runs in threadpool)"""
+            # Schema comparison (always performed)
+            schema_diff = compare_schemas(dataframes_dict)
+            
+            # Row comparison (if mode requires it)
+            row_diff = None
+            if request.comparison_mode in ["schema_and_key", "full_diff"]:
+                # Determine key columns
+                key_cols = request.key_columns
+                if not key_cols:
+                    # Auto-detect keys from first file
+                    first_df = list(dataframes_dict.values())[0]
+                    key_cols = detect_key_columns(first_df)
+                    logger.info(f"Auto-detected key columns: {key_cols}")
+                
+                if key_cols:
+                    try:
+                        row_diff = compare_by_keys(dataframes_dict, key_cols, request.comparison_mode)
+                    except Exception as e:
+                        logger.warning(f"Row comparison failed: {e}")
+                        row_diff = {"error": str(e), "summary": f"Could not perform row comparison: {e}"}
+                else:
+                    row_diff = {"error": "No key columns found", "summary": "Schema comparison only (no unique keys detected)"}
+            
+            return schema_diff, row_diff
+        
+        # Run in threadpool to avoid blocking event loop
+        schema_diff, row_diff = await anyio.to_thread.run_sync(_perform_comparison)
+        
+        # Generate diff report artifact only when explicitly requested via a non-JSON output.
+        # Default output_format is 'json' which should return structured JSON in the API response.
+        diff_artifact_id = None
+        if request.output_format in ["csv", "markdown"]:
+            report_content = generate_diff_report(schema_diff, row_diff, request.output_format)
+
+            ext = "csv" if request.output_format == "csv" else "md"
+            artifact_filename = f"diff_report_{int(time.time())}.{ext}"
+            report_bytes = report_content.encode("utf-8")
+
+            from agents.utils.agent_file_manager import FileType
+            artifact = await file_manager.register_file(
+                content=report_bytes,
+                filename=artifact_filename,
+                file_type=FileType.SPREADSHEET if ext == "csv" else FileType.DOCUMENT,
+                thread_id=thread_id,
+                tags=["diff", "comparison", "spreadsheet"]
+            )
+            diff_artifact_id = artifact.file_id
+            logger.info(f"Created diff report artifact: {diff_artifact_id}")
+        
+        # Build result
+        comparison_result = ComparisonResult(
+            file_ids=request.file_ids,
+            schema_diff=schema_diff,
+            row_diff=row_diff,
+            summary=f"{schema_diff.get('summary', '')}\n{row_diff.get('summary', '') if row_diff else ''}",
+            diff_artifact_id=diff_artifact_id
+        )
+        
+        # Canvas display for orchestrator integration
+        canvas_display = {
+            "canvas_type": "json",
+            "canvas_data": comparison_result.model_dump(),
+            "canvas_title": f"Comparison: {len(request.file_ids)} files",
+            "requires_confirmation": False
+        }
+        
+        # Prepare artifact info
+        artifact_info = None
+        if diff_artifact_id:
+            artifact_metadata = file_manager.get_file(diff_artifact_id)
+            if artifact_metadata:
+                artifact_info = {
+                    "id": diff_artifact_id,
+                    "filename": artifact_metadata.original_name,
+                    "url": f"/download/{diff_artifact_id}"
+                }
+        
+        return StandardResponse(
+            success=True,
+            route="/compare",
+            task_type="compare",
+            data=comparison_result.model_dump(),
+            preview={"canvas_display": canvas_display},
+            artifact=artifact_info,
+            metrics=StandardResponseMetrics(
+                rows_processed=sum(len(df) for df in dataframes_dict.values()),
+                columns_affected=0
+            ),
+            confidence=1.0,
+            message=f"Compared {len(request.file_ids)} files successfully"
+        )
+    
+    except Exception as e:
+        logger.error(f"Compare files failed: {e}", exc_info=True)
+        return StandardResponse(
+            success=False,
+            route="/compare",
+            task_type="compare",
+            data={},
+            message=f"Comparison failed: {str(e)}"
+        )
+
+
+@app.post("/merge", response_model=StandardResponse)
+async def merge_files(request: MergeFilesRequest):
+    """
+    Merge multiple spreadsheet files.
+    
+    Supports join, union, and concatenation.
+    Creates a new merged file artifact.
+    
+    Uses threadpool for CPU-intensive pandas merge operations to avoid blocking event loop.
+    """
+    try:
+        from agents.spreadsheet_agent.multi_file_ops import merge_dataframes
+        
+        logger.info(f"Merging {len(request.file_ids)} files: {request.file_ids} (mode: {request.merge_type})")
+        
+        thread_id = request.thread_id or "default"
+
+        # Load all dataframes
+        dataframes_dict = {}
+        for file_id in request.file_ids:
+            df = get_dataframe(file_id, thread_id)
+            if df is None:
+                return StandardResponse(
+                    success=False,
+                    route="/merge",
+                    task_type="merge",
+                    data={},
+                    message=f"File {file_id} not found or not loaded"
+                )
+            dataframes_dict[file_id] = df
+        
+        # THREADPOOL: Offload CPU-intensive merge to worker thread
+        def _perform_merge():
+            """CPU-intensive merge work (runs in threadpool)"""
+            return merge_dataframes(
+                dataframes_dict,
+                merge_type=request.merge_type,
+                join_type=request.join_type,
+                key_columns=request.key_columns
+            )
+        
+        # Run in threadpool to avoid blocking event loop
+        merged_df, summary = await anyio.to_thread.run_sync(_perform_merge)
+        
+        # Save merged file as new artifact
+        output_filename = request.output_filename or f"merged_{int(time.time())}.csv"
+        if not output_filename.endswith(('.csv', '.xlsx')):
+            output_filename += '.csv'
+        
+        # Build file bytes in threadpool, then register via AgentFileManager (it writes to storage).
+        def _build_output_bytes() -> bytes:
+            if output_filename.endswith('.csv'):
+                return merged_df.to_csv(index=False).encode('utf-8')
+            else:
+                from io import BytesIO
+                buffer = BytesIO()
+                merged_df.to_excel(buffer, index=False)
+                return buffer.getvalue()
+
+        output_bytes = await anyio.to_thread.run_sync(_build_output_bytes)
+
+        from agents.utils.agent_file_manager import FileType
+        artifact = await file_manager.register_file(
+            content=output_bytes,
+            filename=output_filename,
+            file_type=FileType.SPREADSHEET,
+            thread_id=thread_id,
+            tags=["merged", "spreadsheet"]
+        )
+
+        # Store in session (thread-scoped)
+        store_dataframe(artifact.file_id, merged_df, artifact.storage_path, thread_id)
+        
+        logger.info(f"Created merged artifact: {artifact.file_id} ({summary})")
+        
+        # Canvas display
+        canvas_display = {
+            "canvas_type": "spreadsheet",
+            "canvas_data": {
+                "file_id": artifact.file_id,
+                "filename": output_filename,
+                "shape": merged_df.shape,
+                "preview": merged_df.head(10).to_dict(orient="records"),
+                "summary": summary
+            },
+            "canvas_title": f"Merged: {output_filename}",
+            "requires_confirmation": False
+        }
+        
+        return StandardResponse(
+            success=True,
+            route="/merge",
+            task_type="merge",
+            data={
+                "file_id": artifact.file_id,
+                "filename": output_filename,
+                "shape": merged_df.shape,
+                "summary": summary
+            },
+            preview={"canvas_display": canvas_display},
+            artifact={
+                "id": artifact.file_id,
+                "filename": output_filename,
+                "url": f"/download/{artifact.file_id}"
+            },
+            metrics=StandardResponseMetrics(
+                rows_processed=len(merged_df),
+                columns_affected=len(merged_df.columns)
+            ),
+            confidence=1.0,
+            message=f"Merged {len(request.file_ids)} files: {summary}"
+        )
+    
+    except Exception as e:
+        logger.error(f"Merge files failed: {e}", exc_info=True)
+        return StandardResponse(
+            success=False,
+            route="/merge",
+            task_type="merge",
+            data={},
+            message=f"Merge failed: {str(e)}"
+        )
 
 
 @app.get("/health")

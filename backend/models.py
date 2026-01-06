@@ -5,6 +5,8 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import ARRAY, JSON
 from pgvector.sqlalchemy import Vector
 from database import Base
+from pydantic import BaseModel, Field, model_validator
+from typing import Dict, Any, Optional, Literal, Union
 import enum
 import uuid
 from datetime import datetime
@@ -358,3 +360,73 @@ class WorkflowExecutionAnalytics(Base):
     
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+# ============================================================================
+# ORCHESTRATOR → AGENT CONTRACTS (Phase 1: Refactor)
+# ============================================================================
+
+class DecisionContract(BaseModel):
+    """
+    Contract from orchestrator to agent defining task intent and constraints.
+    
+    The orchestrator is the SOLE authority on task classification.
+    The agent MUST validate and enforce this contract.
+    
+    Purpose: Eliminate redundant reasoning layers by making intent explicit.
+    """
+    task_type: Literal["transform", "summary", "compare", "merge", "qa", "create", "preview"]
+    allow_write: bool = False
+    allow_schema_change: bool = False
+    confidence_required: float = 0.8
+    source: Literal["orchestrator", "user"] = "orchestrator"
+    
+    class Config:
+        from_attributes = True
+
+
+class StandardResponseMetrics(BaseModel):
+    """Standardized metrics for all agent operations"""
+    rows_processed: int = 0
+    columns_affected: int = 0
+    execution_time_ms: float = 0.0
+    llm_calls: int = 0
+    
+    class Config:
+        from_attributes = True
+
+
+class StandardResponse(BaseModel):
+    """
+    Unified response schema for ALL spreadsheet agent endpoints.
+    
+    CRITICAL RULES:
+    - success=false MUST include message
+    - data MUST always exist (even if empty dict)
+    - artifact MUST be explicit (never implicit)
+    - route and task_type MUST match endpoint called
+    
+    Purpose: Eliminate 13 response schema variants, enable predictable frontend rendering.
+    """
+    success: bool
+    route: str = Field(..., description="Endpoint called (e.g., '/compare')")
+    task_type: str = Field(..., description="From Decision Contract or inferred")
+    data: Dict[str, Any] = Field(default_factory=dict, description="Always present, even if empty")
+    preview: Optional[Dict[str, Any]] = Field(None, description="Explicit preview data for UI")
+    artifact: Optional[Dict[str, str]] = Field(None, description="{id, filename, url} or None")
+    metrics: StandardResponseMetrics = Field(default_factory=StandardResponseMetrics)
+    confidence: float = Field(1.0, description="1.0 for deterministic, <1.0 for LLM-based")
+    needs_clarification: bool = False
+    message: str = Field("", description="Required when success=false or needs_clarification=true")
+    
+    @model_validator(mode='after')
+    def validate_message_required(self):
+        """Ensure message is provided when needed"""
+        if not self.success and not self.message:
+            raise ValueError("message is required when success=false")
+        if self.needs_clarification and not self.message:
+            raise ValueError("message is required when needs_clarification=true")
+        return self
+    
+    class Config:
+        from_attributes = True

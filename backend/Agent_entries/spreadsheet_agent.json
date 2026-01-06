@@ -17,7 +17,7 @@
       "endpoint": "/upload",
       "http_method": "POST",
       "request_format": "form",
-      "description": "Upload CSV/XLSX and register it for queries and edits.",
+      "description": "Register new spreadsheet file for operations. USE as first step for all CSV/Excel files. DO NOT USE for existing file_ids. CREATES FILE. DETERMINISTIC.",
       "parameters": [
         {
           "name": "file",
@@ -31,7 +31,7 @@
       "endpoint": "/display",
       "http_method": "POST",
       "request_format": "form",
-      "description": "Render a spreadsheet preview (first rows/columns) to the canvas.",
+      "description": "Show spreadsheet preview in canvas. USE for viewing data structure. DO NOT USE for analysis or questions. READ-ONLY. DETERMINISTIC.",
       "parameters": [
         {
           "name": "file_id",
@@ -57,7 +57,7 @@
       "endpoint": "/execute_pandas",
       "http_method": "POST",
       "request_format": "form",
-      "description": "Run pandas code or natural-language instructions to transform the sheet and persist the result.",
+      "description": "Execute single-step spreadsheet transformation from instruction. USE for simple edits. DO NOT USE for complex multi-step operations (use /plan_operation). MODIFIES DATA. LLM-DRIVEN.",
       "parameters": [
         {
           "name": "file_id",
@@ -83,7 +83,7 @@
       "endpoint": "/query",
       "http_method": "POST",
       "request_format": "form",
-      "description": "Answer structured queries (SQL-like) over the current sheet.",
+      "description": "Execute pandas query string for filtering or assignment. USE for SQL-like filtering. DO NOT USE for open-ended questions. READ-ONLY OR MODIFIES (depends on expression). DETERMINISTIC.",
       "parameters": [
         {
           "name": "file_id",
@@ -103,7 +103,7 @@
       "endpoint": "/simulate_operation",
       "http_method": "POST",
       "request_format": "form",
-      "description": "Preview pandas operation without modifying data. Returns simulation with warnings and change summary.",
+      "description": "Test pandas code without saving changes. USE for previewing operations. DO NOT USE for actual execution. READ-ONLY. DETERMINISTIC.",
       "parameters": [
         {
           "name": "file_id",
@@ -123,7 +123,7 @@
       "endpoint": "/plan_operation",
       "http_method": "POST",
       "request_format": "form",
-      "description": "Multi-stage spreadsheet planning with approval workflow: Propose plan -> Revise with feedback -> Simulate preview -> Execute confirmed. Returns canvas_display with requires_confirmation=true at propose stage for orchestrator approval integration. Plan state managed internally by agent via plan_id.",
+      "description": "Execute multi-step transformations with approval workflow (propose, revise, simulate, execute). USE for complex operations requiring confirmation. DO NOT USE for simple reads or single-step edits. MODIFIES DATA. CONFIRMATION REQUIRED. LLM-DRIVEN.",
       "parameters": [
         {
           "name": "file_id",
@@ -188,7 +188,7 @@
       "endpoint": "/nl_query",
       "http_method": "POST",
       "request_format": "json",
-      "description": "Answer natural language questions about the sheet with reasoning steps.",
+      "description": "Answer analytical questions with iterative reasoning. USE ONLY for open-ended analysis (why/how/anomaly detection). DO NOT USE for summaries, previews, or schema info. READ-ONLY. LLM-DRIVEN.",
       "parameters": [
         {
           "name": "file_id",
@@ -214,7 +214,7 @@
       "endpoint": "/get_summary",
       "http_method": "POST",
       "request_format": "form",
-      "description": "Provide a quick summary: rows, columns, and headline stats.",
+      "description": "Retrieve spreadsheet structure and basic statistics. PRIMARY ROUTE for overview, size, headers, dtypes. DO NOT USE for analysis or questions. READ-ONLY. DETERMINISTIC.",
       "parameters": [
         {
           "name": "file_id",
@@ -228,7 +228,7 @@
       "endpoint": "/get_column_stats",
       "http_method": "POST",
       "request_format": "form",
-      "description": "Compute per-column stats and type information.",
+      "description": "Calculate descriptive statistics for single column. USE for specific column analysis. DO NOT USE for multi-column or open-ended questions. READ-ONLY. DETERMINISTIC.",
       "parameters": [
         {
           "name": "file_id",
@@ -248,7 +248,7 @@
       "endpoint": "/transform",
       "http_method": "POST",
       "request_format": "form",
-      "description": "Apply common transformations (filter, sort, rename, add columns) via a compact request.",
+      "description": "Apply standard operations (filter, sort, group, deduplicate, fillna). USE for common transformations. DO NOT USE for complex multi-step operations. MODIFIES DATA. DETERMINISTIC.",
       "parameters": [
         {
           "name": "file_id",
@@ -269,6 +269,122 @@
           "description": "JSON string with operation parameters."
         }
       ]
+    },
+    {
+      "endpoint": "/compare",
+      "http_method": "POST",
+      "request_format": "json",
+      "description": "Compare multiple spreadsheets for schema and row differences. PRIMARY ROUTE for file comparison. USE for identifying changes between files. DO NOT USE for single-file analysis. READ-ONLY (creates artifact if non-JSON format). DETERMINISTIC.",
+      "parameters": [
+        {
+          "name": "file_ids",
+          "param_type": "array",
+          "required": true,
+          "description": "Array of file_ids (minimum 2) to compare. Auto-injected by orchestrator from uploaded_files."
+        },
+        {
+          "name": "comparison_mode",
+          "param_type": "string",
+          "required": false,
+          "description": "Comparison mode: 'schema_only' (columns/types), 'schema_and_key' (schema + row diff by key), 'full_diff' (all rows). Default: 'schema_and_key'."
+        },
+        {
+          "name": "key_columns",
+          "param_type": "array",
+          "required": false,
+          "description": "List of column names to use as keys for row comparison. Auto-detected if omitted."
+        },
+        {
+          "name": "output_format",
+          "param_type": "string",
+          "required": false,
+          "description": "Output format: 'json', 'csv', 'markdown'. Default: 'json'."
+        },
+        {
+          "name": "thread_id",
+          "param_type": "string",
+          "required": false,
+          "description": "Conversation thread ID for multi-turn sessions."
+        }
+      ],
+      "response_schema": {
+        "success": true,
+        "result": {
+          "comparison_summary": "string",
+          "diff_artifact_id": "uuid for diff report file",
+          "schema_diff": {
+            "common_columns": ["col1", "col2"],
+            "unique_columns": {"file1": ["col_a"], "file2": ["col_b"]},
+            "dtype_mismatches": {"col1": {"file1": "int64", "file2": "float64"}}
+          },
+          "row_diff": {
+            "added": {"file2": 10},
+            "removed": {"file1": 5},
+            "changed": 3
+          }
+        },
+        "canvas_display": {
+          "type": "json",
+          "content": "diff report preview"
+        }
+      }
+    },
+    {
+      "endpoint": "/merge",
+      "http_method": "POST",
+      "request_format": "json",
+      "description": "Combine multiple spreadsheets into one file via join/union/concat. PRIMARY ROUTE for merging files. USE for joining or stacking data. DO NOT USE for single-file operations. CREATES NEW FILE. DETERMINISTIC.",
+      "parameters": [
+        {
+          "name": "file_ids",
+          "param_type": "array",
+          "required": true,
+          "description": "Array of file_ids (minimum 2) to merge. Auto-injected by orchestrator from uploaded_files."
+        },
+        {
+          "name": "merge_type",
+          "param_type": "string",
+          "required": false,
+          "description": "Merge type: 'join' (SQL-like join), 'union' (stack with matching columns), 'concat' (stack all columns). Default: 'join'."
+        },
+        {
+          "name": "join_type",
+          "param_type": "string",
+          "required": false,
+          "description": "Join type for 'join' merge: 'inner', 'outer', 'left', 'right'. Default: 'inner'."
+        },
+        {
+          "name": "key_columns",
+          "param_type": "array",
+          "required": false,
+          "description": "List of column names to use as join keys. Required for 'join' merge. Auto-detected if omitted."
+        },
+        {
+          "name": "output_filename",
+          "param_type": "string",
+          "required": false,
+          "description": "Name for merged file. Default: 'merged_TIMESTAMP.xlsx'."
+        },
+        {
+          "name": "thread_id",
+          "param_type": "string",
+          "required": false,
+          "description": "Conversation thread ID for multi-turn sessions."
+        }
+      ],
+      "response_schema": {
+        "success": true,
+        "result": {
+          "merged_file_id": "uuid for new merged file",
+          "merge_summary": "string",
+          "shape": [100, 10],
+          "columns": ["col1", "col2", "..."]
+        },
+        "canvas_display": {
+          "type": "spreadsheet",
+          "content": "merged data preview"
+        }
+      }
     }
   ],
   "tool_functions": null,

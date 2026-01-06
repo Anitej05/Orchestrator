@@ -200,12 +200,23 @@ class SpreadsheetQueryAgent:
                     self.metrics["retry"]["total_retries"] += 1
                     call_metrics["retries"] = idx
                 
-                response = provider["client"].chat.completions.create(
-                    model=provider["model"],
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=provider["max_tokens"]
-                )
+                # Prefer structured JSON output where supported (OpenAI-compatible clients).
+                # Some providers reject unknown params; fall back cleanly without failing the provider.
+                create_kwargs = {
+                    "model": provider["model"],
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": provider["max_tokens"],
+                }
+
+                response = None
+                try:
+                    create_kwargs["response_format"] = {"type": "json_object"}
+                    response = provider["client"].chat.completions.create(**create_kwargs)
+                except Exception as e:
+                    # Retry once without response_format for providers that don't support it.
+                    create_kwargs.pop("response_format", None)
+                    response = provider["client"].chat.completions.create(**create_kwargs)
                 
                 # Track token usage
                 if hasattr(response, 'usage'):
@@ -299,17 +310,24 @@ You can perform ANY pandas operation including:
 - ANALYSIS: Find patterns, outliers, trends
 
 === IMPORTANT RULES ===
-1. ALWAYS respond with valid JSON in the exact format specified below
+1. ALWAYS respond with valid JSON in the exact format specified below (no markdown)
 2. Use the DataFrame variable 'df' for all operations
 3. Handle column names with spaces using backticks in query() OR bracket notation df['col name']
 4. If column names look combined (e.g., "YearsExperience,Salary"), split them into separate columns and drop empty/unnamed columns before analysis
-5. If the question is unclear, make reasonable assumptions and explain them
-6. For multi-step analysis, break it down clearly with needs_more_steps=true
-7. ALWAYS provide a helpful, human-readable final_answer
+5. Keep "thinking" brief (1-2 sentences). Do NOT include long step-by-step reasoning.
+6. "pandas_code" MUST be a single-line string. Do not include raw newlines inside JSON strings.
+7. ALWAYS provide a helpful, human-readable final_answer when is_final_answer is true
+
+=== CRITICAL CONSTRAINTS ===
+- You are ONLY for analytical questions (why/how/anomaly detection/calculations)
+- DO NOT answer summary/preview/schema requests (those go to /get_summary)
+- ASSUME: Orchestrator already classified this as 'qa' task type
+- ASSUME: User question is already validated for analytics
+- FOCUS: Execute the analysis, don't second-guess intent
 
 === RESPONSE FORMAT (JSON) ===
 {{
-    "thinking": "Your step-by-step reasoning about what the user wants",
+    "thinking": "Brief intent (1-2 sentences)",
     "needs_more_steps": true/false,
     "pandas_code": "df.query('column > value')",
     "explanation": "Clear explanation of what this code does",
@@ -356,7 +374,10 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
         pandas_methods = {'head', 'tail', 'describe', 'info', 'shape', 'columns', 'dtypes', 
                          'groupby', 'sort_values', 'query', 'drop', 'rename', 'insert',
                          'select_dtypes', 'sum', 'mean', 'count', 'max', 'min', 'fillna',
-                         'dropna', 'isnull', 'notnull', 'merge', 'join', 'to_dict', 'copy'}
+                         'dropna', 'isnull', 'notnull', 'merge', 'join', 'to_dict', 'copy',
+                         'nunique', 'unique', 'value_counts', 'apply', 'map', 'applymap',
+                         'agg', 'aggregate', 'transform', 'sample', 'duplicated', 'astype',
+                         'isna', 'notna', 'reset_index', 'set_index', 'loc', 'iloc', 'at', 'iat'}
         referenced_columns = {col for col in referenced_columns if col not in pandas_methods}
         
         # Check for non-existent columns
@@ -525,18 +546,48 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
                     
                     # HARDENED: Normalize whitespace before parsing
                     response_text = response_text.strip()
-                    response_text = "\n".join([line.strip() for line in response_text.split("\n")])
 
                     def _extract_json_object(text: str) -> str:
                         start = text.find("{")
                         end = text.rfind("}")
                         return text[start:end + 1] if start != -1 and end != -1 and end > start else text
 
-                    try:
-                        response = json.loads(response_text)
-                    except Exception:
-                        fallback = _extract_json_object(response_text)
-                        response = json.loads(fallback)
+                    def _repair_common_json_issues(text: str) -> str:
+                        # Repair common invalid JSON emitted by LLMs:
+                        # - raw newlines/tabs inside quoted strings
+                        # This does NOT attempt to fix truncation/unterminated strings.
+                        out = []
+                        in_string = False
+                        escape = False
+                        for ch in text:
+                            if escape:
+                                out.append(ch)
+                                escape = False
+                                continue
+                            if ch == "\\":
+                                out.append(ch)
+                                escape = True
+                                continue
+                            if ch == '"':
+                                out.append(ch)
+                                in_string = not in_string
+                                continue
+                            if in_string and ch == "\n":
+                                out.append("\\n")
+                                continue
+                            if in_string and ch == "\r":
+                                out.append("\\r")
+                                continue
+                            if in_string and ch == "\t":
+                                out.append("\\t")
+                                continue
+                            out.append(ch)
+                        return "".join(out)
+
+                    candidate = _extract_json_object(response_text)
+                    candidate = _repair_common_json_issues(candidate)
+
+                    response = json.loads(candidate)
 
                     # VALIDATION: Ensure required fields exist in parsed JSON
                     required_fields = ["thinking", "pandas_code", "is_final_answer"]
@@ -558,7 +609,7 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
                     conversation.append({"role": "assistant", "content": response_text[:500]})
                     conversation.append({
                         "role": "user", 
-                        "content": "Please respond with valid JSON only (no markdown), using keys thinking, pandas_code, is_final_answer, final_answer."
+                        "content": "Please respond with valid JSON only (no markdown). Keep thinking brief. Ensure pandas_code is a single line. Required keys: thinking, pandas_code, is_final_answer, final_answer."
                     })
                     if parse_failures >= 2 and provider_offset < len(self.providers) - 1:
                         failures_before_switch = parse_failures

@@ -17,7 +17,7 @@
     {
       "endpoint": "/browse",
       "http_method": "POST",
-      "description": "Drive a live browser session: navigate URLs, click/type, submit forms, extract structured data, and stream screenshots to the canvas for oversight.",
+      "description": "Execute web navigation tasks with live browser control. USE for: navigating websites, clicking elements, form submission, web scraping. DO NOT USE for local files, documents, or spreadsheets. LLM-DRIVEN. MODIFIES BROWSER STATE ONLY.",
       "parameters": [
         {
           "name": "task",

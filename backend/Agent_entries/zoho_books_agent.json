@@ -16,7 +16,7 @@
     {
       "endpoint": "/invoices",
       "http_method": "POST",
-      "description": "Create a new invoice with pharmaceutical-specific fields (batch numbers, expiry dates, drug names, regulatory info). Supports all standard invoice fields plus pharmaceutical compliance tracking.",
+      "description": "Create new invoice with line items and pharmaceutical fields. USE for generating invoices. DO NOT USE for listing or updating. CREATES DATA. DETERMINISTIC.",
       "parameters": [
         {
           "name": "customer_id",
@@ -83,7 +83,7 @@
     {
       "endpoint": "/invoices",
       "http_method": "GET",
-      "description": "List invoices with filtering options. Supports filtering by customer, item, status, date, and pharmaceutical-specific fields.",
+      "description": "List invoices with filtering (customer, status, date). USE for retrieving invoice list. DO NOT USE for single invoice details. READ-ONLY. DETERMINISTIC.",
       "parameters": [
         {
           "name": "page",
@@ -126,7 +126,7 @@
     {
       "endpoint": "/invoices/{invoice_id}",
       "http_method": "GET",
-      "description": "Get invoice details by ID including all pharmaceutical fields and line items.",
+      "description": "Retrieve single invoice by ID with all fields. USE for viewing invoice details. DO NOT USE for listing. READ-ONLY. DETERMINISTIC.",
       "parameters": [
         {
           "name": "invoice_id",
@@ -139,7 +139,7 @@
     {
       "endpoint": "/invoices/{invoice_id}",
       "http_method": "PUT",
-      "description": "Update an existing invoice. Can update any field including pharmaceutical-specific fields.",
+      "description": "Modify existing invoice fields and line items. USE for editing invoices. DO NOT USE for creating new. MODIFIES DATA. DETERMINISTIC.",
       "parameters": [
         {
           "name": "invoice_id",
@@ -182,7 +182,7 @@
     {
       "endpoint": "/invoices/{invoice_id}",
       "http_method": "DELETE",
-      "description": "Delete an invoice.",
+      "description": "Remove invoice from Zoho Books. USE for deleting invoices. DO NOT USE for voiding. DELETES DATA. DETERMINISTIC.",
       "parameters": [
         {
           "name": "invoice_id",
@@ -195,7 +195,7 @@
     {
       "endpoint": "/invoices/{invoice_id}/send",
       "http_method": "POST",
-      "description": "Send invoice via email to customer. Supports custom email addresses, CC, subject, and body.",
+      "description": "Email invoice to customer with optional customization. USE for sending invoices. DO NOT USE for marking status only. SENDS EMAIL (irreversible). DETERMINISTIC.",
       "parameters": [
         {
           "name": "invoice_id",
@@ -238,7 +238,7 @@
     {
       "endpoint": "/invoices/{invoice_id}/mark-as-sent",
       "http_method": "POST",
-      "description": "Mark invoice as sent without actually sending email.",
+      "description": "Update invoice status to sent without emailing. USE for manual status update. DO NOT USE for actual sending. MODIFIES STATUS. DETERMINISTIC.",
       "parameters": [
         {
           "name": "invoice_id",
@@ -251,7 +251,7 @@
     {
       "endpoint": "/invoices/{invoice_id}/mark-as-paid",
       "http_method": "POST",
-      "description": "Mark invoice as paid (full or partial payment).",
+      "description": "Update invoice payment status. USE for recording payments. DO NOT USE for actual payment processing. MODIFIES STATUS. DETERMINISTIC.",
       "parameters": [
         {
           "name": "invoice_id",
@@ -270,7 +270,7 @@
     {
       "endpoint": "/customers",
       "http_method": "POST",
-      "description": "Create a new customer with pharmaceutical-specific fields (license number, regulatory authority, tax ID).",
+      "description": "Add new customer with contact and pharmaceutical fields. USE for creating customers. DO NOT USE for listing or updating. CREATES DATA. DETERMINISTIC.",
       "parameters": [
         {
           "name": "customer_name",
@@ -325,7 +325,7 @@
     {
       "endpoint": "/customers",
       "http_method": "GET",
-      "description": "List customers with search and filtering options.",
+      "description": "List customers with pagination and search. USE for retrieving customer list. DO NOT USE for single customer details. READ-ONLY. DETERMINISTIC.",
       "parameters": [
         {
           "name": "page",
@@ -350,7 +350,7 @@
     {
       "endpoint": "/customers/{customer_id}",
       "http_method": "GET",
-      "description": "Get customer details by ID including pharmaceutical fields.",
+      "description": "Retrieve single customer by ID with all fields. USE for viewing customer details. DO NOT USE for listing. READ-ONLY. DETERMINISTIC.",
       "parameters": [
         {
           "name": "customer_id",
@@ -363,7 +363,7 @@
     {
       "endpoint": "/customers/{customer_id}",
       "http_method": "PUT",
-      "description": "Update an existing customer including pharmaceutical fields.",
+      "description": "Modify existing customer information. USE for editing customers. DO NOT USE for creating new. MODIFIES DATA. DETERMINISTIC.",
       "parameters": [
         {
           "name": "customer_id",
@@ -394,7 +394,7 @@
     {
       "endpoint": "/items",
       "http_method": "POST",
-      "description": "Create a new item with pharmaceutical-specific fields (batch number, expiry date, drug name, manufacturer, regulatory license, storage conditions, hazard class, controlled substance flag, prescription required flag).",
+      "description": "Add new inventory item with pharmaceutical tracking fields. USE for creating items. DO NOT USE for listing or updating. CREATES DATA. DETERMINISTIC.",
       "parameters": [
         {
           "name": "name",
@@ -491,7 +491,7 @@
     {
       "endpoint": "/items",
       "http_method": "GET",
-      "description": "List items with filtering options.",
+      "description": "List inventory items with pagination. USE for retrieving item list. DO NOT USE for single item details. READ-ONLY. DETERMINISTIC.",
       "parameters": [
         {
           "name": "page",
@@ -522,7 +522,7 @@
     {
       "endpoint": "/items/{item_id}",
       "http_method": "GET",
-      "description": "Get item details by ID including all pharmaceutical fields.",
+      "description": "Retrieve single item by ID with all pharmaceutical fields. USE for viewing item details. DO NOT USE for listing. READ-ONLY. DETERMINISTIC.",
       "parameters": [
         {
           "name": "item_id",
@@ -535,7 +535,7 @@
     {
       "endpoint": "/items/{item_id}",
       "http_method": "PUT",
-      "description": "Update an existing item including pharmaceutical fields.",
+      "description": "Modify existing item information and pharmaceutical fields. USE for editing items. DO NOT USE for creating new. MODIFIES DATA. DETERMINISTIC.",
       "parameters": [
         {
           "name": "item_id",
@@ -572,7 +572,7 @@
     {
       "endpoint": "/payments",
       "http_method": "POST",
-      "description": "Record a payment against an invoice or customer.",
+      "description": "Record payment transaction for invoice or customer. USE for logging payments. DO NOT USE for payment status updates only. CREATES DATA. DETERMINISTIC.",
       "parameters": [
         {
           "name": "customer_id",
@@ -621,7 +621,7 @@
     {
       "endpoint": "/payments",
       "http_method": "GET",
-      "description": "List payments with filtering options.",
+      "description": "List payment transactions with filtering. USE for retrieving payment history. DO NOT USE for single payment details. READ-ONLY. DETERMINISTIC.",
       "parameters": [
         {
           "name": "page",
@@ -658,7 +658,7 @@
     {
       "endpoint": "/payments/{payment_id}",
       "http_method": "GET",
-      "description": "Get payment details by ID.",
+      "description": "Retrieve single payment transaction by ID. USE for viewing payment details. DO NOT USE for listing. READ-ONLY. DETERMINISTIC.",
       "parameters": [
         {
           "name": "payment_id",
@@ -671,7 +671,7 @@
     {
       "endpoint": "/estimates",
       "http_method": "POST",
-      "description": "Create an estimate (quote) with pharmaceutical fields. Can later be converted to invoice.",
+      "description": "Create new estimate (quote) with line items. USE for generating quotes. DO NOT USE for invoices. CREATES DATA. DETERMINISTIC.",
       "parameters": [
         {
           "name": "customer_id",
@@ -702,7 +702,7 @@
     {
       "endpoint": "/estimates",
       "http_method": "GET",
-      "description": "List estimates with filtering options.",
+      "description": "List estimates with filtering (customer, status, date). USE for retrieving estimate list. DO NOT USE for single estimate details. READ-ONLY. DETERMINISTIC.",
       "parameters": [
         {
           "name": "page",
@@ -727,7 +727,7 @@
     {
       "endpoint": "/estimates/{estimate_id}/convert-to-invoice",
       "http_method": "POST",
-      "description": "Convert an estimate to an invoice.",
+      "description": "Transform approved estimate into invoice. USE for estimate conversion. DO NOT USE for creating new invoices from scratch. CREATES INVOICE. DETERMINISTIC.",
       "parameters": [
         {
           "name": "estimate_id",
@@ -740,7 +740,7 @@
     {
       "endpoint": "/health",
       "http_method": "GET",
-      "description": "Health check endpoint. Returns connection status, API domain, organization ID, and rate limit usage.",
+      "description": "Check Zoho Books connection and rate limits. USE for diagnostics. DO NOT USE for data operations. READ-ONLY. DETERMINISTIC.",
       "parameters": []
     }
   ],
