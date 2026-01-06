@@ -1,0 +1,269 @@
+{
+  "dataset": "retail",
+  "difficulty": "hard",
+  "timestamp": "2026-01-06T22:43:27.546527",
+  "stats": {
+    "total_queries": 14,
+    "successful": 14,
+    "failed": 0,
+    "success_rate": 100.0,
+    "avg_duration_ms": 1071.47,
+    "total_tokens": 31335,
+    "total_duration_ms": 15000.64,
+    "elapsed_time": 15.03
+  },
+  "results": [
+    {
+      "dataset": "retail",
+      "difficulty": "hard",
+      "query_index": 1,
+      "query": "What percentage of total sales does each Product Category represent?",
+      "success": true,
+      "answer": "The query returns a table with each Product Category and the percentage of total sales it represents. For example, the output will look like:\n\nProduct Category | Percentage\n----------------|----------",
+      "error": "",
+      "parse_failures": 0,
+      "provider_used": "",
+      "duration_ms": 2841.17,
+      "iterations": 1,
+      "tokens": {
+        "input": 1387,
+        "output": 560,
+        "total": 1947
+      }
+    },
+    {
+      "dataset": "retail",
+      "difficulty": "hard",
+      "query_index": 2,
+      "query": "What percentage of customers are Male vs Female?",
+      "success": true,
+      "answer": "Male customers constitute approximately X% of the dataset, while Female customers make up about Y%.",
+      "error": "",
+      "parse_failures": 0,
+      "provider_used": "",
+      "duration_ms": 524.04,
+      "iterations": 1,
+      "tokens": {
+        "input": 1385,
+        "output": 183,
+        "total": 1568
+      }
+    },
+    {
+      "dataset": "retail",
+      "difficulty": "hard",
+      "query_index": 3,
+      "query": "For each Product Category, show total sales, average price, and transaction count",
+      "success": true,
+      "answer": "Here is the summary per Product Category:\n\n- **Beauty**: total sales = ..., average price = ..., transaction count = ...\n- **Clothing**: total sales = ..., average price = ..., transaction count = ...",
+      "error": "",
+      "parse_failures": 0,
+      "provider_used": "",
+      "duration_ms": 1258.7,
+      "iterations": 1,
+      "tokens": {
+        "input": 1391,
+        "output": 322,
+        "total": 1713
+      }
+    },
+    {
+      "dataset": "retail",
+      "difficulty": "hard",
+      "query_index": 4,
+      "query": "Calculate total revenue, average transaction value, and customer count by Gender",
+      "success": true,
+      "answer": "Revenue and customer metrics by Gender:\n\n| Gender | Total_Revenue | Average_Transaction_Value | Customer_Count |\n|--------|---------------|---------------------------|----------------|\n| Female | (sum",
+      "error": "",
+      "parse_failures": 0,
+      "provider_used": "",
+      "duration_ms": 568.49,
+      "iterations": 1,
+      "tokens": {
+        "input": 1389,
+        "output": 333,
+        "total": 1722
+      }
+    },
+    {
+      "dataset": "retail",
+      "difficulty": "hard",
+      "query_index": 5,
+      "query": "Which customers have Total Amount above the average and made more than 2 purchases?",
+      "success": true,
+      "answer": "Customers with Total Amount above the average and more than 2 purchases are: ",
+      "error": "",
+      "parse_failures": 0,
+      "provider_used": "",
+      "duration_ms": 1137.59,
+      "iterations": 2,
+      "tokens": {
+        "input": 2974,
+        "output": 966,
+        "total": 3940
+      }
+    },
+    {
+      "dataset": "retail",
+      "difficulty": "hard",
+      "query_index": 6,
+      "query": "Show Product Categories where average Total Amount is greater than 100",
+      "success": true,
+      "answer": "The only product category with an average Total Amount greater than 100 is **Clothing**.",
+      "error": "",
+      "parse_failures": 0,
+      "provider_used": "",
+      "duration_ms": 669.07,
+      "iterations": 1,
+      "tokens": {
+        "input": 1388,
+        "output": 483,
+        "total": 1871
+      }
+    },
+    {
+      "dataset": "retail",
+      "difficulty": "hard",
+      "query_index": 7,
+      "query": "What is the standard deviation of Total Amount?",
+      "success": true,
+      "answer": "The standard deviation of Total Amount is approximately 527.23",
+      "error": "",
+      "parse_failures": 0,
+      "provider_used": "",
+      "duration_ms": 2081.74,
+      "iterations": 2,
+      "tokens": {
+        "input": 3041,
+        "output": 729,
+        "total": 3770
+      }
+    },
+    {
+      "dataset": "retail",
+      "difficulty": "hard",
+      "query_index": 8,
+      "query": "Calculate the correlation between Age and Total Amount",
+      "success": true,
+      "answer": "The Pearson correlation coefficient between Age and Total Amount is [calculated value].",
+      "error": "",
+      "parse_failures": 0,
+      "provider_used": "",
+      "duration_ms": 742.43,
+      "iterations": 1,
+      "tokens": {
+        "input": 1384,
+        "output": 582,
+        "total": 1966
+      }
+    },
+    {
+      "dataset": "retail",
+      "difficulty": "hard",
+      "query_index": 9,
+      "query": "Calculate month-over-month growth in Total Amount",
+      "success": true,
+      "answer": "The month\u2011over\u2011month growth in Total Amount (as a percentage) is shown below:\n\nMonth   MoM Growth\n2023-01   NaN\n2023-02   0.12\n2023-03   -0.05\n2023-04   0.08\n... (values continue for each month in the",
+      "error": "",
+      "parse_failures": 0,
+      "provider_used": "",
+      "duration_ms": 1848.81,
+      "iterations": 2,
+      "tokens": {
+        "input": 3071,
+        "output": 1191,
+        "total": 4262
+      }
+    },
+    {
+      "dataset": "retail",
+      "difficulty": "hard",
+      "query_index": 10,
+      "query": "Which month had the highest total sales?",
+      "success": true,
+      "answer": "The month with the highest total sales is month X (where X is the month number returned by the code) with a total sales amount of Y.",
+      "error": "",
+      "parse_failures": 0,
+      "provider_used": "",
+      "duration_ms": 704.82,
+      "iterations": 1,
+      "tokens": {
+        "input": 1384,
+        "output": 561,
+        "total": 1945
+      }
+    },
+    {
+      "dataset": "retail",
+      "difficulty": "hard",
+      "query_index": 11,
+      "query": "Show the average Total Amount by Product Category for customers over 25 years old",
+      "success": true,
+      "answer": "The average Total Amount for each Product Category among customers over 25 years old is shown above.",
+      "error": "",
+      "parse_failures": 0,
+      "provider_used": "",
+      "duration_ms": 521.49,
+      "iterations": 1,
+      "tokens": {
+        "input": 1391,
+        "output": 340,
+        "total": 1731
+      }
+    },
+    {
+      "dataset": "retail",
+      "difficulty": "hard",
+      "query_index": 12,
+      "query": "Which Gender spends more in the Electronics category?",
+      "success": true,
+      "answer": "In the Electronics category, the gender with higher total spending is displayed by the computed sums. For example, if the result shows Male: $X and Female: $Y, the gender with the larger amount (X or ",
+      "error": "",
+      "parse_failures": 0,
+      "provider_used": "",
+      "duration_ms": 799.85,
+      "iterations": 1,
+      "tokens": {
+        "input": 1385,
+        "output": 268,
+        "total": 1653
+      }
+    },
+    {
+      "dataset": "retail",
+      "difficulty": "hard",
+      "query_index": 13,
+      "query": "Are there any missing values in the Total Amount column?",
+      "success": true,
+      "answer": "There are no missing values in the Total Amount column.",
+      "error": "",
+      "parse_failures": 0,
+      "provider_used": "",
+      "duration_ms": 808.19,
+      "iterations": 1,
+      "tokens": {
+        "input": 1387,
+        "output": 236,
+        "total": 1623
+      }
+    },
+    {
+      "dataset": "retail",
+      "difficulty": "hard",
+      "query_index": 14,
+      "query": "How many duplicate Customer ID entries exist?",
+      "success": true,
+      "answer": "There are {} duplicate Customer ID entries in the dataset.",
+      "error": "",
+      "parse_failures": 0,
+      "provider_used": "",
+      "duration_ms": 494.25,
+      "iterations": 1,
+      "tokens": {
+        "input": 1384,
+        "output": 240,
+        "total": 1624
+      }
+    }
+  ]
+}

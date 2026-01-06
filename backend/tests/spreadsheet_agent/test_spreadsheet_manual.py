@@ -35,6 +35,57 @@ from agents.spreadsheet_agent.session import store_dataframe, get_dataframe
 # Create global query agent instance
 query_agent_instance = SpreadsheetQueryAgent()
 
+# ----------------------------------------------------------------------------
+# Test data path resolution helpers
+# ----------------------------------------------------------------------------
+def resolve_test_file_path(rel_path: str) -> Path:
+    """
+    Resolve a dataset path to the actual backend/tests/test_data location.
+
+    Handles inputs like 'tests/test_data/retail_sales_dataset.xlsx' regardless
+    of current working directory, and normalizes Windows paths.
+    """
+    original = Path(rel_path)
+
+    # Base dir: backend/tests/test_data relative to this file
+    base_dir = Path(__file__).parent.parent / "test_data"
+
+    # If the provided path already exists as-is, return it
+    if original.exists():
+        return original
+
+    # If the path includes tests/test_data, map to our base_dir with filename
+    try:
+        name = original.name
+    except Exception:
+        name = str(original).split("/")[-1]
+
+    candidate1 = base_dir / name
+    if candidate1.exists():
+        return candidate1
+
+    # Fallback: explicit backend/tests/test_data under repo root
+    repo_root = Path(__file__).parent.parent.parent.parent  # go up to workspace root
+    candidate2 = repo_root / "backend" / "tests" / "test_data" / name
+    if candidate2.exists():
+        return candidate2
+
+    # If a bare filename was given, try in base_dir
+    if not original.parent or str(original.parent) == ".":
+        candidate3 = base_dir / str(original)
+        if candidate3.exists():
+            return candidate3
+
+    # Last resort: return candidate1 (preferred location) even if it doesn't exist
+    return candidate1
+
+def list_available_test_files() -> List[str]:
+    """Return a list of files present in backend/tests/test_data for diagnostics."""
+    base_dir = Path(__file__).parent.parent / "test_data"
+    if not base_dir.exists():
+        return []
+    return [str(p.name) for p in base_dir.iterdir() if p.is_file()]
+
 # ============================================================================
 # QUERY DATASETS
 # ============================================================================
@@ -596,6 +647,7 @@ async def run_dataset_tests(dataset_key: str, difficulty: str = None, output_for
 
     dataset_info = DATASET_REGISTRY[dataset_key]
     test_file = dataset_info["filename"]
+    resolved_path = resolve_test_file_path(test_file)
     difficulty = difficulty or dataset_info["default_difficulty"]
 
     if difficulty not in dataset_info["queries"]:
@@ -603,22 +655,31 @@ async def run_dataset_tests(dataset_key: str, difficulty: str = None, output_for
         print(f"   Available: {', '.join(dataset_info['queries'].keys())}")
         return TestSummary()
 
-    # Check file exists
-    if not Path(test_file).exists():
+    # Check file exists (using resolved path)
+    if not Path(resolved_path).exists():
         print(f"WARNING: File not found: {test_file}")
-        print(f"Expected location: {Path(test_file).absolute()}")
+        print(f"Resolved location tried: {resolved_path}")
+        # Show additional attempted canonical path
+        alt_backend_path = Path(__file__).parent.parent / "test_data" / Path(test_file).name
+        print(f"Alternate backend path: {alt_backend_path}")
+        # List available files to aid selection
+        available = list_available_test_files()
+        if available:
+            print(f"Available files in backend/tests/test_data: {', '.join(available)}")
+        else:
+            print("No files found in backend/tests/test_data")
         return TestSummary()
 
     # Load dataframe
     print("\n" + "*"*35)
     print(f"Testing Dataset: {dataset_key.upper()}")
     print(f"   Description: {dataset_info['description']}")
-    print(f"   File: {test_file}")
+    print(f"   File: {resolved_path}")
     print(f"   Difficulty: {difficulty.upper()}")
     print("*"*35 + "\n")
 
     try:
-        df = load_dataframe(test_file)
+        df = load_dataframe(str(resolved_path))
         print(f"Loaded: {len(df)} rows x {len(df.columns)} columns")
         print(f"   Columns: {', '.join(df.columns.tolist()[:5])}{'...' if len(df.columns) > 5 else ''}")
         print(f"   Dtypes: {', '.join([f'{col}({df[col].dtype})' for col in df.columns.tolist()[:3]])}{'...' if len(df.columns) > 3 else ''}")
