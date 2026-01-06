@@ -200,7 +200,7 @@ async def prepare_content_for_agent(
     agent_details: Any,
     endpoint_path: str,
     orchestrator_config: Dict[str, Any]
-) -> Tuple[Dict[str, str], str]:
+) -> Tuple[Dict[str, str], str, List[Dict[str, Any]]]:
     """
     Prepare content for a task by uploading to the agent if needed.
     
@@ -211,10 +211,10 @@ async def prepare_content_for_agent(
         orchestrator_config: Orchestrator config with user_id etc.
     
     Returns:
-        Tuple of (content_id_mapping, enhanced_context)
+        Tuple of (content_id_mapping, enhanced_context, updated_uploaded_files)
     """
     if not config.enabled:
-        return {}, ""
+        return {}, "", state.get("uploaded_files", [])
     
     content_service = get_content_service()
     content_id_mapping = {}
@@ -227,7 +227,7 @@ async def prepare_content_for_agent(
     logger.info(f"[CONTENT_PREP] Found {len(uploaded_files)} uploaded files")
     
     if not uploaded_files:
-        return content_id_mapping, enhanced_context
+        return content_id_mapping, enhanced_context, uploaded_files
     
     # Check if agent requires file upload
     requires_upload = agent_requires_file_upload(agent_details, endpoint_path)
@@ -241,7 +241,7 @@ The user has uploaded files. Use the file information below:
 {json.dumps(uploaded_files, indent=2)}
 ```
 '''
-        return content_id_mapping, enhanced_context
+        return content_id_mapping, enhanced_context, uploaded_files
     
     # Agent requires file upload - upload files first
     logger.info(f"[CONTENT_PREP] Agent {agent_details.id} requires file upload")
@@ -252,14 +252,19 @@ The user has uploaded files. Use the file information below:
     
     if not base_url:
         logger.warning(f"[CONTENT_PREP] No base_url for agent {agent_details.id}")
-        return content_id_mapping, enhanced_context
+        return content_id_mapping, enhanced_context, uploaded_files
     
-    # Upload each file
+    # Upload each file and track updates
     file_info = []
+    updated_uploaded_files = []
+    
     for file_obj in uploaded_files:
         file_name = file_obj.get('file_name') or file_obj.get('original_name', 'unknown')
         file_path = file_obj.get('file_path') or file_obj.get('stored_path')
         content_id = file_obj.get('file_id') or file_obj.get('content_id')
+        
+        # Create a copy to update
+        updated_file_obj = file_obj.copy()
         
         logger.info(f"[CONTENT_PREP] Processing file: name={file_name}, path={file_path}, content_id={content_id}")
         
@@ -276,6 +281,9 @@ The user has uploaded files. Use the file information below:
                     "file_id": content_id,
                     "file_type": file_obj.get('file_type', 'document')
                 })
+                # Ensure file_id is set in updated object
+                updated_file_obj['file_id'] = content_id
+                updated_uploaded_files.append(updated_file_obj)
                 continue
         
         # If we have a content_id, use it; otherwise register the file
@@ -316,10 +324,15 @@ The user has uploaded files. Use the file information below:
                             "file_id": agent_content_id,
                             "file_type": file_obj.get('file_type', 'document')
                         })
+                        # Update file_id in state
+                        updated_file_obj['file_id'] = agent_content_id
+                        updated_uploaded_files.append(updated_file_obj)
                         logger.info(f"[CONTENT_PREP] Direct upload succeeded: {file_name} -> {agent_content_id}")
                         continue
                 except Exception as e:
                     logger.error(f"[CONTENT_PREP] Direct upload failed for {file_name}: {e}")
+            # File not uploaded, add original object
+            updated_uploaded_files.append(updated_file_obj)
             continue
         
         # Upload to agent via content service
@@ -343,9 +356,14 @@ The user has uploaded files. Use the file information below:
                 "file_type": file_obj.get('file_type', 'document')
             })
             
+            # Update file_id in state
+            updated_file_obj['file_id'] = agent_content_id
+            updated_uploaded_files.append(updated_file_obj)
             logger.info(f"[CONTENT_PREP] Mapped {file_name} -> {agent_content_id}")
         else:
             logger.error(f"[CONTENT_PREP] Failed to upload {file_name} to agent {agent_details.id}")
+            # Still add to list but without file_id update
+            updated_uploaded_files.append(updated_file_obj)
     
     if file_info:
         enhanced_context = f'''
@@ -369,7 +387,8 @@ Files could not be uploaded to the agent. The following files are available:
 '''
     
     logger.info(f"[CONTENT_PREP] Final mapping: {content_id_mapping}")
-    return content_id_mapping, enhanced_context
+    logger.info(f"[CONTENT_PREP] Updated {len(updated_uploaded_files)} file entries with agent file_ids")
+    return content_id_mapping, enhanced_context, updated_uploaded_files
 
 
 def inject_content_id_into_payload(

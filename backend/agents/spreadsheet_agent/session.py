@@ -48,25 +48,40 @@ def _normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         return cleaned
 
     # Detect "CSV-in-a-cell" style: first column header has commas and others were empty/unnamed
+    # BUT: only apply this if we truly have a single-column file with comma-separated values
     first_col = cleaned.columns[0]
     other_cols_empty = len(cleaned.columns) == 1
     if not other_cols_empty:
         other_cols_empty = all(_is_empty_series(cleaned[c]) for c in cleaned.columns[1:])
 
-    if "," in str(first_col) and other_cols_empty:
+    # Check if first row values also contain commas (indicates CSV-in-cell pattern)
+    first_row_has_commas = False
+    if len(cleaned) > 0:
+        first_val = str(cleaned[first_col].iloc[0])
+        first_row_has_commas = "," in first_val and len(first_val.split(",")) >= 2
+
+    # Only split if: header has commas, other columns empty, AND first row also has commas
+    if "," in str(first_col) and other_cols_empty and first_row_has_commas:
         target_cols = [part.strip() for part in str(first_col).split(",") if part.strip()]
         if len(target_cols) >= 2:
             try:
                 # Split the combined column into separate columns
                 split_df = cleaned[first_col].astype(str).str.split(",", expand=True)
                 split_df.columns = target_cols[: split_df.shape[1]]
-                # Coerce numerics where possible
+                # Coerce numerics where possible (use convert_dtypes instead of deprecated errors='ignore')
                 for col in split_df.columns:
-                    split_df[col] = pd.to_numeric(split_df[col].str.strip(), errors="ignore")
+                    try:
+                        split_df[col] = pd.to_numeric(split_df[col].str.strip())
+                    except (ValueError, TypeError):
+                        pass  # Keep as string if not numeric
 
                 cleaned = split_df
+                logger.info(f"[NORMALIZE] Split CSV-in-cell format into {len(target_cols)} columns")
             except Exception as e:
                 logger.warning(f"[NORMALIZE] Failed to split combined column '{first_col}': {e}")
+    elif len(cleaned.columns) > 1:
+        # Multi-column file detected - this is normal, don't attempt splitting
+        logger.info(f"[NORMALIZE] Multi-column file detected ({len(cleaned.columns)} columns): {list(cleaned.columns)[:5]}")
 
     return cleaned
 

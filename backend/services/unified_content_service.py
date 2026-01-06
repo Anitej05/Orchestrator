@@ -809,14 +809,35 @@ class UnifiedContentService:
         """Extract content ID from agent response"""
         # Try common patterns
         if isinstance(response, dict):
+            # StandardResponse format: {"success": true, "data": {"file_id": "..."}}
+            if 'data' in response and isinstance(response['data'], dict):
+                file_id = response['data'].get('file_id')
+                if file_id:
+                    logger.info(f"[EXTRACT_CONTENT_ID] Found file_id in data: {file_id}")
+                    return file_id
+            # Legacy ApiResponse format: {"result": {"file_id": "..."}}
             if 'result' in response and isinstance(response['result'], dict):
-                return response['result'].get('file_id')
+                file_id = response['result'].get('file_id')
+                if file_id:
+                    logger.info(f"[EXTRACT_CONTENT_ID] Found file_id in result: {file_id}")
+                    return file_id
+            # Direct file_id
             if 'file_id' in response:
-                return response['file_id']
+                file_id = response['file_id']
+                logger.info(f"[EXTRACT_CONTENT_ID] Found direct file_id: {file_id}")
+                return file_id
+            # Generic id
             if 'id' in response:
-                return response['id']
+                content_id = response['id']
+                logger.info(f"[EXTRACT_CONTENT_ID] Found generic id: {content_id}")
+                return content_id
+            # Content ID
             if 'content_id' in response:
-                return response['content_id']
+                content_id = response['content_id']
+                logger.info(f"[EXTRACT_CONTENT_ID] Found content_id: {content_id}")
+                return content_id
+        
+        logger.warning(f"[EXTRACT_CONTENT_ID] Could not extract content ID from response: {response}")
         return None
     
     async def _verify_agent_content(self, agent_base_url: str, agent_content_id: str) -> bool:

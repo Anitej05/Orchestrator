@@ -3278,12 +3278,18 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
     if uploaded_files and FILE_INTEGRATION_ENABLED:
         try:
             # Prepare files for this specific agent (uploads if needed)
-            file_id_mapping, file_context = await prepare_files_for_task(
+            file_id_mapping, file_context, updated_uploaded_files = await prepare_files_for_task(
                 state=state,
                 agent_details=agent_details,
                 endpoint_path=endpoint_path,
                 orchestrator_config=config  # Fixed: use orchestrator_config parameter name
             )
+            # CRITICAL: Update state with agent-returned file_ids
+            if updated_uploaded_files:
+                state["uploaded_files"] = updated_uploaded_files
+                uploaded_files = updated_uploaded_files  # Update local reference
+                logger.info(f"✅ Updated state with {len(updated_uploaded_files)} file entries containing agent file_ids")
+            
             logger.info(f"File integration: prepared {len(file_id_mapping)} file mappings for agent {agent_details.id}")
             logger.info(f"[FILE_ID_DEBUG] file_id_mapping contents: {file_id_mapping}")
         except Exception as e:

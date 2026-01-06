@@ -71,8 +71,22 @@ def _is_spreadsheet_creation(task_name: str, task_desc: str, combined: str) -> b
                         'review', 'insights', 'examine', 'interpret', 'report about', 'report on']
     is_analysis = any(keyword in combined for keyword in analysis_keywords)
     
+    # Check for modification keywords - these are NOT creation tasks when operating on uploaded files
+    modification_keywords = ['add', 'append', 'insert', 'modify', 'update', 'change', 'edit', 'calculate',
+                             'compute', 'average', 'sum', 'total', 'transform', 'apply', 'filter']
+    is_modification = any(keyword in combined for keyword in modification_keywords)
+    
+    # If operating on existing/uploaded file, NOT creation
+    has_existing_file = any(phrase in combined for phrase in ['uploaded', 'existing', 'current', 'this file', 
+                                                                'the file', 'the sheet', 'the spreadsheet'])
+    
     # If it's asking to analyze/summarize an existing file, NOT creation
     if is_analysis and any(phrase in combined for phrase in ['of the', 'about the', 'from the', 'existing', 'uploaded']):
+        return False
+    
+    # If it's asking to modify an existing file, NOT creation
+    if is_modification and has_existing_file:
+        logger.info(f"[CREATION_HANDLER] Detected modification task (not creation): modification={is_modification}, has_existing={has_existing_file}")
         return False
     
     # Keywords must be present + file type or spreadsheet reference
