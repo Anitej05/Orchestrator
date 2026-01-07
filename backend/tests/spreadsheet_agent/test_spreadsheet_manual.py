@@ -565,18 +565,27 @@ class TestResult:
         self.iterations = 0
         self.tokens_input = 0
         self.tokens_output = 0
-        self.steps = []
+        self.steps: List[Dict[str, Any]] = []
+        self.final_data: Any = None
+        self.pandas_code: List[str] = []
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization"""
+        # Sanitize final_data for JSON (convert non-serializable types to strings)
+        safe_final_data = None
+        if self.final_data is not None:
+            try:
+                safe_final_data = json.loads(json.dumps(self.final_data, default=str))
+            except Exception:
+                safe_final_data = str(self.final_data)
         return {
             "dataset": self.dataset,
             "difficulty": self.difficulty,
             "query_index": self.query_index,
             "query": self.query,
             "success": self.success,
-            "answer": self.answer[:200] if self.answer else "",
-            "error": self.error[:200] if self.error else "",
+            "answer": self.answer or "",
+            "error": self.error or "",
             "parse_failures": self.parse_failures,
             "provider_used": self.provider_used,
             "duration_ms": round(self.duration_ms, 2),
@@ -585,7 +594,26 @@ class TestResult:
                 "input": self.tokens_input,
                 "output": self.tokens_output,
                 "total": self.tokens_input + self.tokens_output
-            }
+            },
+            # Include the computed data (limited by agent to reasonable size)
+            "final_data": safe_final_data,
+            # Include a condensed view of execution steps with pandas code and previews
+            "steps": [
+                {
+                    "iteration": s.get("iteration"),
+                    "provider": s.get("provider"),
+                    "thinking": s.get("thinking"),
+                    "pandas_code": s.get("code"),
+                    "explanation": s.get("explanation"),
+                    "error": s.get("error"),
+                    "success": s.get("success"),
+                    "result_preview": s.get("result_preview"),
+                    "result_shape": s.get("result_shape"),
+                }
+                for s in (self.steps or [])
+            ],
+            # Also surface the list of pandas snippets used in this query
+            "pandas_code": self.pandas_code,
         }
 
 
@@ -694,6 +722,47 @@ async def run_dataset_tests(dataset_key: str, difficulty: str = None, output_for
     summary = TestSummary()
     thread_id = f"test-{dataset_key}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
+    # --------------------------------------------------------------------
+    # Helper: Render data preview safely for various data types
+    # --------------------------------------------------------------------
+    def _render_data_preview(data: Any, max_items: int = 5, max_chars: int = 800) -> str:
+        try:
+            # Pandas DataFrame
+            if isinstance(data, pd.DataFrame):
+                preview_df = data.head(max_items)
+                try:
+                    return json.dumps(preview_df.to_dict(orient='records'), default=str, indent=2)[:max_chars]
+                except Exception:
+                    return str(preview_df)[:max_chars]
+
+            # Pandas Series
+            if isinstance(data, pd.Series):
+                preview_series = data.head(max_items)
+                try:
+                    return json.dumps(preview_series.to_dict(), default=str, indent=2)[:max_chars]
+                except Exception:
+                    return str(preview_series)[:max_chars]
+
+            # List/Tuple
+            if isinstance(data, (list, tuple)):
+                preview_list = list(data)[:max_items]
+                try:
+                    return json.dumps(preview_list, default=str, indent=2)[:max_chars]
+                except Exception:
+                    return str(preview_list)[:max_chars]
+
+            # Dict
+            if isinstance(data, dict):
+                try:
+                    return json.dumps(data, default=str, indent=2)[:max_chars]
+                except Exception:
+                    return str(data)[:max_chars]
+
+            # Fallback: string representation
+            return str(data)[:max_chars]
+        except Exception:
+            return "<unable to render preview>"
+
     for idx, query in enumerate(queries, 1):
         result = TestResult(dataset_key, difficulty, idx, query)
         print("\n" + "-"*70)
@@ -717,6 +786,16 @@ async def run_dataset_tests(dataset_key: str, difficulty: str = None, output_for
             result.answer = llm_result.answer or ""
             result.error = llm_result.error or ""
             result.iterations = len(llm_result.steps_taken) if hasattr(llm_result, 'steps_taken') else 0
+            # Capture final data (preview computed by agent)
+            if hasattr(llm_result, 'final_data'):
+                result.final_data = llm_result.final_data
+            # Capture steps and pandas code snippets used
+            if hasattr(llm_result, 'steps_taken') and llm_result.steps_taken:
+                result.steps = llm_result.steps_taken
+                # Collect all pandas code lines used across steps
+                result.pandas_code = [
+                    s.get('code') for s in llm_result.steps_taken if s.get('code')
+                ]
 
             # Extract metrics if available
             if hasattr(llm_result, 'execution_metrics') and llm_result.execution_metrics:
@@ -750,8 +829,8 @@ async def run_dataset_tests(dataset_key: str, difficulty: str = None, output_for
                         
                         lib_str = f" [Libraries: {', '.join(libraries)}]" if libraries else ""
                         print(f"      Code{lib_str}:")
-                        code_display = code[:200]
-                        print(f"         {code_display}{'...' if len(code) > 200 else ''}")
+                        # Show full code for clarity in console (not truncated)
+                        print(f"         {code}")
                     
                     # Show result/output
                     if 'output' in step:
@@ -785,6 +864,11 @@ async def run_dataset_tests(dataset_key: str, difficulty: str = None, output_for
                         print(f"      {line}")
                     if len(answer_lines) > 10:
                         print(f"      ... ({len(answer_lines) - 10} more lines)")
+                # If final_data exists, print a compact preview
+                if result.final_data:
+                    print(f"\n   DATA PREVIEW:")
+                    preview_text = _render_data_preview(result.final_data)
+                    print(f"      {preview_text}")
             else:
                 print(f"\n[FAILED]")
                 print(f"   Duration: {result.duration_ms:.0f}ms")
