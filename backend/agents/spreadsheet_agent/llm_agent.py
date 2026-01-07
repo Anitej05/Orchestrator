@@ -287,6 +287,110 @@ Column Statistics:
         
         return context
     
+    def _enhance_answer_with_data(self, template_answer: str, current_result: Any) -> str:
+        """
+        Enhance a templated answer (e.g. "X%", "Y%", "[calculated value]") with actual computed values.
+        Extracts real values from result and inserts them into various placeholder formats.
+        """
+        if not current_result or not template_answer:
+            return template_answer
+        
+        try:
+            # Parse result into key-value pairs and values
+            kv_pairs = {}  # For dict-like results: {"key": value}
+            values_list = []  # For ordered values
+            
+            if isinstance(current_result, dict):
+                # Dict or Series as dict
+                for key, val in list(current_result.items())[:20]:
+                    # Format the value
+                    if isinstance(val, float) and val == int(val):
+                        formatted_val = str(int(val))
+                    elif isinstance(val, float):
+                        formatted_val = f"{val:.2f}"
+                    else:
+                        formatted_val = str(val)
+                    
+                    kv_pairs[str(key)] = formatted_val
+                    values_list.append(formatted_val)
+                    
+            elif isinstance(current_result, list):
+                # List of dicts or values
+                if current_result and isinstance(current_result[0], dict):
+                    # List of dicts - extract values from first item or all
+                    for item in current_result[:10]:
+                        for key, val in item.items():
+                            if isinstance(val, (int, float)):
+                                if isinstance(val, float) and val == int(val):
+                                    formatted_val = str(int(val))
+                                elif isinstance(val, float):
+                                    formatted_val = f"{val:.2f}"
+                                else:
+                                    formatted_val = str(val)
+                                values_list.append(formatted_val)
+                                if str(key) not in kv_pairs:
+                                    kv_pairs[str(key)] = formatted_val
+                else:
+                    # List of scalars
+                    for item in current_result[:20]:
+                        if isinstance(item, (int, float)):
+                            if isinstance(item, float) and item == int(item):
+                                formatted_val = str(int(item))
+                            elif isinstance(item, float):
+                                formatted_val = f"{item:.2f}"
+                            else:
+                                formatted_val = str(item)
+                            values_list.append(formatted_val)
+                        else:
+                            values_list.append(str(item))
+            else:
+                # Scalar value
+                val = current_result
+                if isinstance(val, float) and val == int(val):
+                    values_list.append(str(int(val)))
+                elif isinstance(val, float):
+                    values_list.append(f"{val:.2f}")
+                else:
+                    values_list.append(str(val))
+            
+            # Replace multiple types of placeholders in answer
+            enhanced = template_answer
+            
+            # 1. Replace X, Y, Z placeholders ONLY (safer than A, B, C which appear in words)
+            placeholders = ["X", "Y", "Z"]
+            for idx, placeholder in enumerate(placeholders):
+                if placeholder in enhanced and idx < len(values_list):
+                    # Use word boundary to avoid replacing letters inside words
+                    import re
+                    # Replace X, Y, Z only when they're standalone (not part of a word)
+                    pattern = r'\b' + placeholder + r'\b'
+                    enhanced = re.sub(pattern, values_list[idx], enhanced, count=1)
+            
+            # 2. Replace [calculated value] style placeholders
+            import re
+            calculated_pattern = r'\[calculated value\]|\[value\]|\[result\]'
+            matches = re.findall(calculated_pattern, enhanced, re.IGNORECASE)
+            for idx, match in enumerate(matches):
+                if idx < len(values_list):
+                    enhanced = enhanced.replace(match, values_list[idx], 1)
+            
+            # 3. Replace [Month], [Category] style placeholders with actual key names
+            bracket_pattern = r'\[(\w+)\]'
+            bracket_matches = re.findall(bracket_pattern, enhanced)
+            for key_name in bracket_matches:
+                if key_name in kv_pairs:
+                    enhanced = enhanced.replace(f"[{key_name}]", kv_pairs[key_name], 1)
+            
+            # 4. Replace {} style placeholders
+            if "{}" in enhanced and values_list:
+                for val in values_list[:5]:
+                    enhanced = enhanced.replace("{}", val, 1)
+            
+            return enhanced
+        except Exception as e:
+            logger.debug(f"Could not enhance answer with data: {e}")
+            return template_answer
+    
     def _build_system_prompt(self, df_context: str, session_context: str = "", all_files_context: str = "") -> str:
         """Build the system prompt for the query agent
         
@@ -335,16 +439,28 @@ You can perform ANY pandas operation including:
     "final_answer": "Human-readable answer (REQUIRED if is_final_answer is true)"
 }}
 
+=== ANSWER GENERATION GUIDELINES ===
+When you set is_final_answer to true, the final_answer MUST:
+1. Be a clear, human-readable statement answering the user's question
+2. Use PLACEHOLDERS for values that will be computed: Use X, Y, Z, A, B, C for numeric/categorical values
+3. Example Template Answers:
+   - For grouped results: "Category X has Y transactions with Z average price"
+   - For percentages: "Beauty: X%, Clothing: Y%, Electronics: Z%"
+   - For single value: "The total is X"
+   - For multiple stats: "Sales: X, Average: Y, Count: Z"
+4. If the result is a dict/Series with key-value pairs, show all keys with X, Y, Z placeholders
+5. Do NOT include actual values in your answer - the system will fill in placeholders with real computed values
+
 === EXAMPLES ===
 
 User: "Show me all people older than 30"
-Response: {{"thinking": "User wants to filter rows where age > 30", "needs_more_steps": false, "pandas_code": "df.query('age > 30')", "explanation": "Filtering to show only rows where age column exceeds 30", "is_final_answer": true, "final_answer": "Here are all people older than 30"}}
+Response: {{"thinking": "User wants to filter rows where age > 30", "needs_more_steps": false, "pandas_code": "df.query('age > 30')", "explanation": "Filtering to show only rows where age column exceeds 30", "is_final_answer": true, "final_answer": "Here are the X people older than 30 (results shown above)"}}
 
 User: "What's the average salary by department?"
-Response: {{"thinking": "User wants a grouped aggregation - group by department and calculate mean salary", "needs_more_steps": false, "pandas_code": "df.groupby('department')['salary'].mean()", "explanation": "Grouping by department and calculating the average salary for each", "is_final_answer": true, "final_answer": "Here is the average salary broken down by department"}}
+Response: {{"thinking": "User wants grouped aggregation by department", "needs_more_steps": false, "pandas_code": "df.groupby('department')['salary'].mean()", "explanation": "Grouping by department and calculating mean salary", "is_final_answer": true, "final_answer": "Average salary by department: Engineering: X, Sales: Y, HR: Z"}}
 
-User: "Who earns the most in the sales department?"
-Response: {{"thinking": "Need to filter to Sales department first, then find the row with maximum salary", "needs_more_steps": false, "pandas_code": "df[df['department'] == 'Sales'].nlargest(1, 'salary')", "explanation": "Filter to Sales department only, then get the row with the highest salary", "is_final_answer": true, "final_answer": "The highest earner in the Sales department is shown above"}}
+User: "What percentage of total sales does each Product Category represent?"
+Response: {{"thinking": "Calculate total sales per category and their percentage of grand total", "needs_more_steps": false, "pandas_code": "df.groupby('Product Category')['Total Amount'].sum() / df['Total Amount'].sum() * 100", "explanation": "Group by Product Category, sum Total Amount per category, divide by total sales, multiply by 100 for percentage", "is_final_answer": true, "final_answer": "Percentage breakdown by Product Category: Beauty: X%, Clothing: Y%, Electronics: Z%"}}
 
 User: "How many rows have Feature1 greater than 50?"
 Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": false, "pandas_code": "len(df[df['Feature1'] > 50])", "explanation": "Counting rows where Feature1 exceeds 50", "is_final_answer": true, "final_answer": "There are X rows where Feature1 is greater than 50"}}
@@ -722,10 +838,17 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
                     else:
                         final_data = None
                     
+                    # Log raw answer before enhancement
+                    logger.info(f"🔍 Raw answer: {final_answer[:150]}")
+                    
+                    # Enhance answer with actual computed values
+                    enhanced_answer = self._enhance_answer_with_data(final_answer, current_result)
+                    logger.info(f"🔍 Enhanced answer: {enhanced_answer[:150]}")
+                    
                     # Create query result first
                     query_result = QueryResult(
                         question=question,
-                        answer=final_answer,
+                        answer=enhanced_answer,
                         steps_taken=steps_taken,
                         final_data=final_data,
                         success=True,
