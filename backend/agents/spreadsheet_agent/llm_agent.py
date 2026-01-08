@@ -245,17 +245,17 @@ class SpreadsheetQueryAgent:
         
         raise RuntimeError(f"All LLM providers failed. Last error: {last_error}")
     
-    def _get_dataframe_context(self, df: pd.DataFrame, file_id: str = None) -> str:
+    def _get_dataframe_context(self, df: pd.DataFrame, file_id: str = None, thread_id: str = "default") -> str:
         """Generate context about the dataframe for the LLM (with caching)
         
         Note: The LLM should be reminded that pandas (as pd) is already imported
         in the execution environment and no import statements should be generated.
         """
-        # Try to get from cache if file_id provided
+        # Try to get from context cache if file_id provided
         if file_id:
-            cached_context = spreadsheet_memory.get_df_metadata(file_id)
-            if cached_context and 'context_string' in cached_context:
-                return cached_context['context_string']
+            cached_context = spreadsheet_memory.get_context(thread_id, file_id)
+            if cached_context:
+                return cached_context
         
         context = f"""DataFrame Information:
 - Shape: {df.shape[0]} rows × {df.shape[1]} columns
@@ -279,8 +279,8 @@ Column Statistics:
         
         # Cache the context if file_id provided
         if file_id:
+            spreadsheet_memory.store_context(thread_id, file_id, context)
             spreadsheet_memory.cache_df_metadata(file_id, {
-                'context_string': context,
                 'shape': df.shape,
                 'columns': list(df.columns)
             })
@@ -390,6 +390,35 @@ Column Statistics:
         except Exception as e:
             logger.debug(f"Could not enhance answer with data: {e}")
             return template_answer
+
+    def _check_percentage_invariants(self, answer: str, current_result: Any) -> Optional[str]:
+        """Lightweight sanity check: if answer expresses percentages, verify they sum ~100."""
+        if not answer or "%" not in answer:
+            return None
+
+        # Extract numeric values from result
+        numbers = []
+        try:
+            if isinstance(current_result, dict):
+                numbers = [float(v) for v in current_result.values() if isinstance(v, (int, float))]
+            elif isinstance(current_result, list):
+                if current_result and isinstance(current_result[0], dict):
+                    for item in current_result:
+                        for v in item.values():
+                            if isinstance(v, (int, float)):
+                                numbers.append(float(v))
+                else:
+                    numbers = [float(v) for v in current_result if isinstance(v, (int, float))]
+        except Exception:
+            numbers = []
+
+        if not numbers:
+            return None
+
+        total = sum(numbers)
+        if total < 90 or total > 110:
+            return f"Sanity check: percentage totals look off (sum={total:.1f}). Review calculation."
+        return None
     
     def _build_system_prompt(self, df_context: str, session_context: str = "", all_files_context: str = "") -> str:
         """Build the system prompt for the query agent
@@ -529,20 +558,28 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
         try:
             # Create a safe execution environment
             local_vars = {"df": df, "pd": pd}
-            
-            # Execute the code
+
+            # First try evaluating as an expression to capture the returned value (e.g., Series/array)
+            try:
+                result_value = eval(code, {"__builtins__": {}}, local_vars)
+                updated_df = local_vars.get("df", df)
+                return result_value, updated_df, None
+            except SyntaxError:
+                # Not an expression (likely assignment/mutation); fall back to exec
+                pass
+
+            # Execute statements (mutations/assignments)
             exec(code, {"__builtins__": {}}, local_vars)
-            
-            # Retrieve the (possibly modified) dataframe
+
             updated_df = local_vars.get("df", df)
-            
+
             # If the specific variable 'result' exists, return it
             if "result" in local_vars:
                 return local_vars["result"], updated_df, None
-                
+
             # Otherwise, return the df itself as the result (e.g. after filtering)
             return updated_df, updated_df, None
-            
+
         except KeyError as e:
             # Enhanced KeyError handling with column suggestions
             column_name = str(e).strip("'\"")
@@ -625,7 +662,7 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
         # Working copy of dataframe for this session
         current_df = df.copy()
         
-        df_context = self._get_dataframe_context(current_df, file_id)
+        df_context = self._get_dataframe_context(current_df, file_id, thread_id)
         system_prompt = self._build_system_prompt(df_context, session_context, all_files_context)
         
         steps_taken = []
@@ -843,6 +880,12 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
                     
                     # Enhance answer with actual computed values
                     enhanced_answer = self._enhance_answer_with_data(final_answer, current_result)
+
+                    # Percentage sanity guard
+                    sanity_warning = self._check_percentage_invariants(enhanced_answer, current_result)
+                    if sanity_warning:
+                        enhanced_answer = f"{enhanced_answer} ({sanity_warning})"
+
                     logger.info(f"🔍 Enhanced answer: {enhanced_answer[:150]}")
                     
                     # Create query result first
@@ -896,8 +939,8 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
                     # Log metrics
                     self._log_execution_metrics(query_metrics, True)
                     
-                    # Cache the result
-                    spreadsheet_memory.cache_query_result(question, query_result, file_id, thread_id)
+                    # Cache the result (keyed by file and question)
+                    spreadsheet_memory.cache_query_result(file_id, question, query_result, thread_id)
                     
                     return query_result
                 

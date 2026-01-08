@@ -5,9 +5,10 @@ Provides thread-scoped dataframe storage and session tracking.
 """
 
 import logging
-from typing import Dict, Any, Optional
-from threading import local
+from typing import Dict, Any, Optional, Tuple
 from pathlib import Path
+from collections import defaultdict
+from threading import Lock
 
 import pandas as pd
 
@@ -86,26 +87,54 @@ def _normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return cleaned
 
 
-# Thread-local storage for dataframes (prevents cross-conversation contamination)
-_thread_local = local()
+# Thread-scoped storage backed by process-level dicts to avoid cross-thread reuse.
+_store_lock = Lock()
+_dataframes_by_thread: Dict[str, Dict[str, pd.DataFrame]] = defaultdict(dict)
+_file_paths_by_thread: Dict[str, Dict[str, str]] = defaultdict(dict)
+_versions_by_thread: Dict[str, Dict[str, int]] = defaultdict(dict)
+
+# Compatibility: keep an object with the same attributes some callers inspect directly.
+class _ThreadView:
+    pass
+
+
+_thread_local = _ThreadView()
+_thread_local.dataframes_by_thread = _dataframes_by_thread
+_thread_local.file_paths_by_thread = _file_paths_by_thread
 
 
 def get_conversation_dataframes(thread_id: str) -> Dict[str, pd.DataFrame]:
     """Get thread-scoped dataframe storage, keyed by thread_id for isolation."""
-    if not hasattr(_thread_local, 'dataframes_by_thread'):
-        _thread_local.dataframes_by_thread = {}
-    if thread_id not in _thread_local.dataframes_by_thread:
-        _thread_local.dataframes_by_thread[thread_id] = {}
-    return _thread_local.dataframes_by_thread[thread_id]
+    with _store_lock:
+        return _dataframes_by_thread[thread_id]
 
 
 def get_conversation_file_paths(thread_id: str) -> Dict[str, str]:
     """Get thread-scoped file paths, keyed by thread_id for isolation."""
-    if not hasattr(_thread_local, 'file_paths_by_thread'):
-        _thread_local.file_paths_by_thread = {}
-    if thread_id not in _thread_local.file_paths_by_thread:
-        _thread_local.file_paths_by_thread[thread_id] = {}
-    return _thread_local.file_paths_by_thread[thread_id]
+    with _store_lock:
+        return _file_paths_by_thread[thread_id]
+
+
+def _get_conversation_versions(thread_id: str) -> Dict[str, int]:
+    """Track monotonically increasing versions per dataframe for cache safety."""
+    with _store_lock:
+        return _versions_by_thread[thread_id]
+
+
+def _log_dtype_drift(file_id: str, previous: Optional[Dict[str, Any]], current_dtypes: Dict[str, str]):
+    """Warn when dtypes drift between versions to surface silent coercions."""
+    if not previous or not previous.get('dtypes'):
+        return
+
+    old_dtypes = previous.get('dtypes', {})
+    changed = {
+        col: (old_dtypes.get(col), current_dtypes.get(col))
+        for col in set(old_dtypes) | set(current_dtypes)
+        if old_dtypes.get(col) != current_dtypes.get(col)
+    }
+
+    if changed:
+        logger.warning(f"[DTYPE-DRIFT] file_id={file_id}: {changed}")
 
 
 def ensure_file_loaded(file_id: str, thread_id: str = "default", file_manager=None) -> bool:
@@ -131,6 +160,7 @@ def ensure_file_loaded(file_id: str, thread_id: str = "default", file_manager=No
     # Get thread-scoped storage
     dfs = get_conversation_dataframes(thread_id)
     file_mapping = get_conversation_file_paths(thread_id)
+    versions = _get_conversation_versions(thread_id)
     
     logger.info(f"[ENSURE_LOADED] Current dataframes keys in thread: {list(dfs.keys())}")
     logger.info(f"[ENSURE_LOADED] Current file_paths keys in thread: {list(file_mapping.keys())}")
@@ -158,6 +188,7 @@ def ensure_file_loaded(file_id: str, thread_id: str = "default", file_manager=No
             df = _normalize_dataframe(df)
             dfs[file_id] = df
             file_mapping[file_id] = file_path
+            versions[file_id] = cached_metadata.get('version', versions.get(file_id, 0))
             logger.info(f"[ENSURE_LOADED] ✅ Reloaded from cache. Shape: {df.shape}")
             return True
         except Exception as e:
@@ -175,6 +206,7 @@ def ensure_file_loaded(file_id: str, thread_id: str = "default", file_manager=No
                 df = pd.read_excel(file_path)
             df = _normalize_dataframe(df)
             dfs[file_id] = df
+            versions[file_id] = versions.get(file_id, 0)
             logger.info(f"[ENSURE_LOADED] ✅ Reloaded from file_paths. Shape: {df.shape}")
             return True
         except Exception as e:
@@ -194,12 +226,15 @@ def ensure_file_loaded(file_id: str, thread_id: str = "default", file_manager=No
                 df = _normalize_dataframe(df)
                 dfs[file_id] = df
                 file_mapping[file_id] = metadata.storage_path
+                versions[file_id] = versions.get(file_id, 0) + 1
                 
                 # Cache for future use
                 spreadsheet_memory.cache_df_metadata(file_id, {
                     'file_path': metadata.storage_path,
                     'shape': df.shape,
-                    'columns': df.columns.tolist()
+                    'columns': df.columns.tolist(),
+                    'dtypes': {k: str(v) for k, v in df.dtypes.to_dict().items()},
+                    'version': versions[file_id]
                 })
                 
                 logger.info(f"[ENSURE_LOADED] ✅ Reloaded from file_manager. Shape: {df.shape}")
@@ -228,20 +263,29 @@ def store_dataframe(file_id: str, df: pd.DataFrame, file_path: str, thread_id: s
     """Store dataframe in thread-scoped storage and cache."""
     dfs = get_conversation_dataframes(thread_id)
     paths = get_conversation_file_paths(thread_id)
+    versions = _get_conversation_versions(thread_id)
+
+    prev_meta = spreadsheet_memory.get_df_metadata(file_id)
 
     normalized = _normalize_dataframe(df)
+    current_dtypes = {k: str(v) for k, v in normalized.dtypes.to_dict().items()}
 
     dfs[file_id] = normalized
     paths[file_id] = file_path
-    
-    # Cache metadata
+    versions[file_id] = versions.get(file_id, 0) + 1
+
+    _log_dtype_drift(file_id, prev_meta, current_dtypes)
+
+    # Cache metadata with version and dtypes for downstream validation
     spreadsheet_memory.cache_df_metadata(file_id, {
         'file_path': file_path,
         'shape': normalized.shape,
-        'columns': normalized.columns.tolist()
+        'columns': normalized.columns.tolist(),
+        'dtypes': current_dtypes,
+        'version': versions[file_id]
     })
-    
-    logger.info(f"Stored dataframe {file_id} in thread {thread_id}")
+
+    logger.info(f"Stored dataframe {file_id} in thread {thread_id} (v{versions[file_id]})")
 
 
 def get_dataframe(file_id: str, thread_id: str = "default") -> Optional[pd.DataFrame]:
@@ -252,8 +296,7 @@ def get_dataframe(file_id: str, thread_id: str = "default") -> Optional[pd.DataF
 
 def clear_thread_data(thread_id: str):
     """Clear all data for a specific thread."""
-    if hasattr(_thread_local, 'dataframes_by_thread'):
-        _thread_local.dataframes_by_thread.pop(thread_id, None)
-    if hasattr(_thread_local, 'file_paths_by_thread'):
-        _thread_local.file_paths_by_thread.pop(thread_id, None)
+    _dataframes_by_thread.pop(thread_id, None)
+    _file_paths_by_thread.pop(thread_id, None)
+    _versions_by_thread.pop(thread_id, None)
     logger.info(f"Cleared thread data for {thread_id}")

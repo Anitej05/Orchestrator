@@ -8,7 +8,7 @@ import argparse
 import json
 import time
 from datetime import datetime
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any, Tuple, Optional
 from collections import defaultdict
 
 # Fix Windows console encoding for emojis
@@ -666,7 +666,7 @@ class TestSummary:
         print("="*70)
 
 
-async def run_dataset_tests(dataset_key: str, difficulty: str = None, output_format: str = "console") -> TestSummary:
+async def run_dataset_tests(dataset_key: str, difficulty: str = None, query_index: Optional[int] = None, output_format: str = "console") -> TestSummary:
     """Run tests on a specific dataset"""
     if dataset_key not in DATASET_REGISTRY:
         print(f"❌ Unknown dataset: {dataset_key}")
@@ -719,6 +719,13 @@ async def run_dataset_tests(dataset_key: str, difficulty: str = None, output_for
 
     # Run queries
     queries = dataset_info["queries"][difficulty]
+    if query_index is not None:
+        if 1 <= query_index <= len(queries):
+            queries = [queries[query_index - 1]]
+            print(f"Running single query at index {query_index}.")
+        else:
+            print(f"❌ Query index {query_index} is out of bounds for {len(queries)} queries.")
+            return TestSummary()
     summary = TestSummary()
     thread_id = f"test-{dataset_key}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
@@ -1010,12 +1017,14 @@ Examples:
   python test_spreadsheet_manual.py --dataset zara --difficulty medium
   python test_spreadsheet_manual.py --dataset salary --difficulty simple --output json
   python test_spreadsheet_manual.py --dataset retail --difficulty hard --output json
+  python test_spreadsheet_manual.py --dataset zara --difficulty hard --query-index 1
         """
     )
     
     parser.add_argument("--list", action="store_true", help="List all available datasets")
     parser.add_argument("--dataset", type=str, help="Dataset to test (zara, retail, financials, sales_10k, salary)")
     parser.add_argument("--difficulty", type=str, choices=["simple", "medium", "hard"], help="Query difficulty level")
+    parser.add_argument("--query-index", type=int, help="Specific query index to run within the selected difficulty (1-based)")
     parser.add_argument("--output", type=str, choices=["console", "json"], default="console", help="Output format")
     
     args = parser.parse_args()
@@ -1030,7 +1039,7 @@ Examples:
         return
 
     # Run tests
-    summary = await run_dataset_tests(args.dataset, args.difficulty, args.output)
+    summary = await run_dataset_tests(args.dataset, args.difficulty, args.query_index, args.output)
 
     # Display final message
     if summary.successful_queries > 0:

@@ -145,49 +145,6 @@ def validate_decision_contract(
             }
     
     return None
-
-
-# ============================================================================
-# DECISION CONTRACT VALIDATION (Phase 3: Refactor)
-# ============================================================================
-
-def validate_decision_contract(
-    contract: Optional[Dict[str, Any]],
-    instruction: str,
-    endpoint: str
-) -> Optional[Dict[str, Any]]:
-    """
-    Validate Decision Contract against request.
-    Returns error dict if validation fails, None if valid.
-    
-    The orchestrator is the SOLE authority on task classification.
-    This function enforces orchestrator decisions.
-    """
-    if not contract:
-        # No contract provided - allow (backward compatibility)
-        return None
-    
-    # Check write permissions
-    if not contract.get('allow_write', False):
-        write_keywords = ['add', 'remove', 'delete', 'drop', 'modify', 'change', 'update', 'insert', 'create']
-        if any(kw in instruction.lower() for kw in write_keywords):
-            return {
-                "success": False,
-                "needs_clarification": True,
-                "message": f"Contract forbids write operations. Instruction: {instruction[:100]}"
-            }
-    
-    # Check schema change permissions
-    if not contract.get('allow_schema_change', False):
-        schema_keywords = ['rename column', 'drop column', 'add column', 'merge', 'join']
-        if any(kw in instruction.lower() for kw in schema_keywords):
-            return {
-                "success": False,
-                "needs_clarification": True,
-                "message": f"Contract forbids schema changes. Instruction: {instruction[:100]}"
-            }
-    
-    return None
 from collections import defaultdict
 
 call_metrics = {
@@ -497,9 +454,7 @@ async def natural_language_query(
             else:
                 logger.error(f"❌ [NL_QUERY] LLM processing failed: {result.error}")
         
-        # Update dataframe if modified
-        if result.final_dataframe is not None:
-            store_dataframe(file_id, result.final_dataframe, file_paths.get(file_id, ""), thread_id)
+        # Read-only: do NOT persist dataframe mutations from /nl_query
         
         # Track operation
         if thread_id != "default":
@@ -614,7 +569,8 @@ async def transform_data(
                 return ApiResponse(success=False, error=error_msg)
         
         # Update dataframe
-        store_dataframe(file_id, modified_df, file_paths.get(file_id, ""), thread_id)
+        thread_paths = get_conversation_file_paths(thread_id)
+        store_dataframe(file_id, modified_df, thread_paths.get(file_id, file_paths.get(file_id, "")), thread_id)
         
         # Track operation
         if thread_id != "default":
@@ -960,7 +916,8 @@ async def execute_pandas(
                 return ApiResponse(success=False, error=error_msg)
         
         # Update dataframe
-        store_dataframe(file_id, modified_df, file_paths.get(file_id, ""), thread_id)
+        thread_paths = get_conversation_file_paths(thread_id)
+        store_dataframe(file_id, modified_df, thread_paths.get(file_id, file_paths.get(file_id, "")), thread_id)
         
         return ApiResponse(success=True, result={
             "message": "Code executed successfully",
@@ -1180,7 +1137,8 @@ async def plan_operation_endpoint(
             
             if exec_result["success"]:
                 # Update dataframe in session
-                store_dataframe(file_id, modified_df, file_paths.get(file_id, ""), thread_id)
+                thread_paths = get_conversation_file_paths(thread_id)
+                store_dataframe(file_id, modified_df, thread_paths.get(file_id, file_paths.get(file_id, "")), thread_id)
                 
                 return ApiResponse(
                     success=True,
