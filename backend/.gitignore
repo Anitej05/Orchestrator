@@ -41,5 +41,7 @@ test_detailed_continuity.py
 
 /zoho-books
 /agents/zoho_books/temp.json
+/tests/spreadsheet_agent/edge_case_datasets
+
 
 

@@ -609,6 +609,7 @@ class TestResult:
                     "success": s.get("success"),
                     "result_preview": s.get("result_preview"),
                     "result_shape": s.get("result_shape"),
+                    "raw_response_text": s.get("raw_response_text") or s.get("raw_response"),
                 }
                 for s in (self.steps or [])
             ],
@@ -838,6 +839,13 @@ async def run_dataset_tests(dataset_key: str, difficulty: str = None, query_inde
                         print(f"      Code{lib_str}:")
                         # Show full code for clarity in console (not truncated)
                         print(f"         {code}")
+
+                    # Show raw LLM response (truncated for console)
+                    raw_response_text = step.get('raw_response_text')
+                    if raw_response_text:
+                        preview = raw_response_text[:320]
+                        suffix = '...' if len(raw_response_text) > 320 else ''
+                        print(f"      Raw LLM: {preview}{suffix}")
                     
                     # Show result/output
                     if 'output' in step:
@@ -912,6 +920,13 @@ async def run_dataset_tests(dataset_key: str, difficulty: str = None, query_inde
                                 libraries.append('SQL')
                             lib_str = f" [{', '.join(libraries)}]" if libraries else ""
                             print(f"         Code{lib_str}: {code[:150]}{'...' if len(code) > 150 else ''}")
+
+                        # Show raw LLM response (truncated for console)
+                        raw_response_text = step.get('raw_response_text')
+                        if raw_response_text:
+                            preview = raw_response_text[:320]
+                            suffix = '...' if len(raw_response_text) > 320 else ''
+                            print(f"         Raw LLM: {preview}{suffix}")
                         
                         # Show step-level errors
                         if 'error' in step and step['error']:

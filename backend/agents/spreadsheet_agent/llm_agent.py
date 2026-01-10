@@ -683,6 +683,7 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
             try:
                 # Get LLM response with metrics
                 response_text, call_metrics = self._get_completion(conversation, provider_offset=provider_offset)
+                raw_response_text = response_text
                 query_metrics["llm_calls"] += 1
                 query_metrics["tokens_input"] += call_metrics["tokens_input"]
                 query_metrics["tokens_output"] += call_metrics["tokens_output"]
@@ -756,7 +757,8 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
                     steps_taken.append({
                         "iteration": iteration,
                         "error": f"JSON parse error: {e}",
-                        "raw_response": response_text[:500]
+                        "raw_response": response_text[:500],
+                        "raw_response_text": raw_response_text
                     })
                     # Ask LLM to fix the response with stricter instruction
                     conversation.append({"role": "assistant", "content": response_text[:500]})
@@ -782,7 +784,8 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
                     "iteration": iteration,
                     "thinking": thinking,
                     "code": pandas_code,
-                    "explanation": explanation
+                    "explanation": explanation,
+                    "raw_response_text": raw_response_text
                 }
                 
                 # Execute pandas code if provided
@@ -848,12 +851,23 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
                         step_info["result_shape"] = result.shape
                         current_result = result.to_dict(orient="records")
                     elif isinstance(result, pd.Series):
-                        # Convert to dict and ensure native types
-                        series_dict = result.head(10).to_dict()
-                        # Sanitize dict
-                        safe_dict = json.loads(json.dumps(series_dict, default=str))
-                        step_info["result_preview"] = safe_dict
-                        current_result = result.to_dict()
+                        # Handle Series with MultiIndex (from groupby with multiple columns)
+                        # These produce tuple keys that JSON can't serialize
+                        if isinstance(result.index, pd.MultiIndex):
+                            # Convert MultiIndex Series to DataFrame then to records
+                            result_df = result.reset_index()
+                            records = result_df.head(10).to_dict(orient="records")
+                            safe_records = json.loads(json.dumps(records, default=str))
+                            step_info["result_preview"] = safe_records
+                            step_info["result_shape"] = result_df.shape
+                            current_result = result_df.to_dict(orient="records")
+                        else:
+                            # Regular Series with simple index
+                            series_dict = result.head(10).to_dict()
+                            # Sanitize dict
+                            safe_dict = json.loads(json.dumps(series_dict, default=str))
+                            step_info["result_preview"] = safe_dict
+                            current_result = result.to_dict()
                     else:
                         step_info["result_preview"] = str(result)
                         current_result = result
