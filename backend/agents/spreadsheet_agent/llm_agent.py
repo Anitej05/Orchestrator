@@ -10,6 +10,7 @@ import json
 import time
 import psutil
 import os
+import numpy as np
 from typing import Dict, List, Any, Optional, Tuple
 
 import pandas as pd
@@ -36,7 +37,7 @@ from .config import (
     LLM_TEMPERATURE,
     LLM_MAX_TOKENS_QUERY
 )
-from .models import QueryResult
+from .models import QueryResult, UserChoice, AnomalyDetails
 from .memory import spreadsheet_memory
 
 logger = logging.getLogger(__name__)
@@ -547,6 +548,122 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
         
         return None
     
+    def _is_mostly_numeric(self, series: pd.Series) -> bool:
+        """Check if a series has mostly numeric values (>= 60%)"""
+        if len(series) == 0:
+            return False
+        
+        numeric_count = 0
+        total_count = 0
+        
+        for val in series.dropna():
+            total_count += 1
+            try:
+                float(val)
+                numeric_count += 1
+            except (ValueError, TypeError):
+                pass
+        
+        if total_count == 0:
+            return False
+        
+        return (numeric_count / total_count) >= 0.6
+    
+    def _detect_dtype_drift(self, original_df: pd.DataFrame, current_df: pd.DataFrame) -> Optional[Tuple[AnomalyDetails, List[UserChoice]]]:
+        """Detect dtype drift between original and current DataFrames.
+        Also detects pre-existing object columns that should be numeric.
+        
+        Returns:
+            Tuple of (AnomalyDetails, List[UserChoice]) if drift detected, None otherwise
+        """
+        # Compare dtypes
+        original_dtypes = original_df.dtypes.to_dict()
+        current_dtypes = current_df.dtypes.to_dict()
+        
+        # Find columns with dtype changes OR pre-existing object columns with mostly numeric values
+        drifted_columns = []
+        for col in original_dtypes:
+            if col in current_dtypes:
+                orig_dtype = str(original_dtypes[col])
+                curr_dtype = str(current_dtypes[col])
+                try:
+                    logger.debug(f"[DriftCheck] Column='{col}' orig_dtype='{orig_dtype}' curr_dtype='{curr_dtype}'")
+                except Exception:
+                    pass
+                
+                # Case 1: Detect numeric -> object drift (dtype changed during execution)
+                if orig_dtype in ['int64', 'float64'] and curr_dtype == 'object':
+                    drifted_columns.append(col)
+                
+                # Case 2: Detect pre-existing object columns that should be numeric
+                # (column was object from the start but has mostly numeric values)
+                elif orig_dtype == 'object' and curr_dtype == 'object':
+                    # Check if column has mostly numeric-like values
+                    is_numeric_like = self._is_mostly_numeric(current_df[col])
+                    try:
+                        logger.debug(f"[DriftCheck] Column='{col}' numeric_like={is_numeric_like}")
+                    except Exception:
+                        pass
+                    if is_numeric_like:
+                        drifted_columns.append(col)
+        
+        if not drifted_columns:
+            return None
+        
+        # Build anomaly details
+        sample_values = {}
+        for col in drifted_columns:
+            # Get non-numeric values in supposedly numeric column
+            non_numeric = []
+            for val in current_df[col].dropna().unique()[:5]:
+                try:
+                    float(val)
+                except (ValueError, TypeError):
+                    non_numeric.append(val)
+            sample_values[col] = non_numeric
+        
+        affected_cols_str = ', '.join([f"'{col}'" for col in drifted_columns])
+        
+        anomaly = AnomalyDetails(
+            anomaly_type="dtype_drift",
+            affected_columns=drifted_columns,
+            message=f"I detected that column(s) {affected_cols_str} contain mostly numbers, but some values are strings (dtype drift). This can affect calculations.",
+            current_dtypes={col: str(current_dtypes[col]) for col in drifted_columns},
+            expected_dtypes={col: str(original_dtypes[col]) for col in drifted_columns},
+            sample_values=sample_values,
+            severity="warning"
+        )
+        
+        # Build user choices
+        choices = [
+            UserChoice(
+                id="convert_numeric",
+                label="Convert to numeric (invalid → NaN)",
+                description=f"Convert {affected_cols_str} to numeric, replacing invalid values with NaN. This allows calculations to proceed.",
+                is_safe=True
+            ),
+            UserChoice(
+                id="ignore_rows",
+                label="Ignore invalid rows",
+                description=f"Filter out rows where {affected_cols_str} have non-numeric values before calculating.",
+                is_safe=True
+            ),
+            UserChoice(
+                id="treat_as_text",
+                label="Treat as text and continue",
+                description=f"Keep {affected_cols_str} as text. Numeric operations may fail.",
+                is_safe=True
+            ),
+            UserChoice(
+                id="cancel",
+                label="Cancel the analysis",
+                description="Stop the current operation without making changes.",
+                is_safe=True
+            )
+        ]
+        
+        return anomaly, choices
+    
     def _safe_execute_pandas(self, df: pd.DataFrame, code: str) -> Tuple[Any, pd.DataFrame, Optional[str]]:
         """Safely execute pandas code and return result or error"""
         # Pre-execution validation
@@ -555,13 +672,27 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
             logger.warning(f"⚠️ Code validation failed: {validation_error}")
             return None, df, validation_error
         
-        try:
-            # Create a safe execution environment
-            local_vars = {"df": df, "pd": pd}
+        # Minimal safe globals injected for LLM-generated code
+        safe_globals = {
+            "__builtins__": {},  # block dangerous builtins
+            "pd": pd,
+            "np": np,
+            "float": float,
+            "int": int,
+            "str": str,
+            "len": len,
+            "sum": sum,
+            "min": min,
+            "max": max,
+            "abs": abs,
+            "round": round,
+        }
+        local_vars = {"df": df}
 
+        try:
             # First try evaluating as an expression to capture the returned value (e.g., Series/array)
             try:
-                result_value = eval(code, {"__builtins__": {}}, local_vars)
+                result_value = eval(code, safe_globals, local_vars)
                 updated_df = local_vars.get("df", df)
                 return result_value, updated_df, None
             except SyntaxError:
@@ -569,7 +700,7 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
                 pass
 
             # Execute statements (mutations/assignments)
-            exec(code, {"__builtins__": {}}, local_vars)
+            exec(code, safe_globals, local_vars)
 
             updated_df = local_vars.get("df", df)
 
@@ -901,6 +1032,36 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
                         enhanced_answer = f"{enhanced_answer} ({sanity_warning})"
 
                     logger.info(f"🔍 Enhanced answer: {enhanced_answer[:150]}")
+                    
+                    # DTYPE DRIFT DETECTION: Check for dtype changes before finalizing
+                    drift_check = self._detect_dtype_drift(df, current_df)
+                    if drift_check is not None:
+                        anomaly, user_choices = drift_check
+                        logger.warning(f"⚠️ Dtype drift detected: {anomaly.affected_columns}")
+                        
+                        # Return anomaly result instead of final answer
+                        query_result = QueryResult(
+                            question=question,
+                            answer=anomaly.message,
+                            steps_taken=steps_taken,
+                            final_data=None,
+                            success=False,
+                            status="anomaly_detected",
+                            needs_user_input=True,
+                            anomaly=anomaly,
+                            user_choices=user_choices,
+                            pending_action="dtype_conversion",
+                            final_dataframe=current_df
+                        )
+                        
+                        # Add metrics
+                        query_metrics["latency_ms"] = (time.time() - query_start) * 1000
+                        end_memory = process.memory_info().rss / 1024 / 1024
+                        query_metrics["memory_used_mb"] = end_memory - start_memory
+                        query_result.execution_metrics = query_metrics
+                        
+                        self._log_execution_metrics(query_metrics, False)
+                        return query_result
                     
                     # Create query result first
                     query_result = QueryResult(

@@ -269,10 +269,10 @@ class PlanValidationResult(BaseModel):
 
 class AgentResponseEvaluationEnhanced(BaseModel):
     """Enhanced schema for evaluating agent responses with reactive routing support."""
-    status: Literal["complete", "partial_success", "failed", "user_input_required"] = Field(..., description="The status of the agent response evaluation.")
+    status: Literal["complete", "partial_success", "failed", "user_input_required", "anomaly_detected"] = Field(..., description="The status of the agent response evaluation.")
     reasoning: str = Field(..., description="Explanation of the evaluation decision.")
     feedback_for_replanning: Optional[str] = Field(None, description="Specific feedback for the planner if status is 'failed'.")
-    question: Optional[str] = Field(None, description="Question to ask the user if status is 'user_input_required'.")
+    question: Optional[str] = Field(None, description="Question to ask the user if status is 'user_input_required' or 'anomaly_detected'.")
 
 class FinalResponse(BaseModel):
     """Schema for unified final response generation (text + canvas)."""
