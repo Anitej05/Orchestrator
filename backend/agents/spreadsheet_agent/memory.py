@@ -118,7 +118,9 @@ class SpreadsheetMemory:
             metadata: Metadata dict (shape, columns, dtypes, etc.)
         """
         key = f"df_meta:{file_id}"
-        self.metadata_cache.put(key, metadata)
+        existing = self.metadata_cache.get(key) or {}
+        merged = {**existing, **metadata}
+        self.metadata_cache.put(key, merged)
         logger.debug(f"Cached metadata for {file_id}")
     
     def get_df_metadata(self, file_id: str) -> Optional[Dict[str, Any]]:

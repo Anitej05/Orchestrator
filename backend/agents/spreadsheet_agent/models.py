@@ -132,6 +132,25 @@ class ComparisonResult(BaseModel):
     data_modified: bool = False
 
 
+class UserChoice(BaseModel):
+    """Single user choice option for anomaly resolution"""
+    id: str  # e.g., "convert_numeric", "ignore_rows", "treat_as_text", "cancel"
+    label: str  # Human-readable label
+    description: str  # What this action does
+    is_safe: bool = True  # Whether this action is non-destructive
+
+
+class AnomalyDetails(BaseModel):
+    """Detailed information about detected anomaly"""
+    anomaly_type: str  # e.g., "dtype_drift", "missing_values", "outliers"
+    affected_columns: List[str]
+    message: str  # Human-readable explanation
+    current_dtypes: Dict[str, str]  # Column -> current dtype
+    expected_dtypes: Optional[Dict[str, str]] = None  # Column -> expected dtype
+    sample_values: Optional[Dict[str, List[Any]]] = None  # Column -> problematic values
+    severity: str = "warning"  # "info", "warning", "error"
+
+
 class QueryResult(BaseModel):
     """Result of a natural language query"""
     question: str
@@ -143,6 +162,13 @@ class QueryResult(BaseModel):
     execution_metrics: Optional[Dict[str, Any]] = None  # Add metrics field
     final_dataframe: Optional[Any] = None  # Store the modified DataFrame
     observation: Optional[ObservationData] = None  # Track changes made
+    
+    # Anomaly detection and user input handling
+    status: str = "completed"  # "completed", "anomaly_detected", "failed"
+    needs_user_input: bool = False
+    anomaly: Optional[AnomalyDetails] = None
+    user_choices: Optional[List[UserChoice]] = None
+    pending_action: Optional[str] = None  # Action waiting for user decision
     
     class Config:
         arbitrary_types_allowed = True

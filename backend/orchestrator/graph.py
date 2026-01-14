@@ -5066,7 +5066,26 @@ def evaluate_agent_response(state: State):
     '''
     try:
         from schemas import AgentResponseEvaluationEnhanced
-        evaluation = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, AgentResponseEvaluationEnhanced)
+        
+        # PRE-CHECK: If task result explicitly requests user input, skip LLM evaluation
+        task_result = task_to_evaluate.get('result', {})
+        if isinstance(task_result, dict):
+            # Check for anomaly detection from spreadsheet agent
+            if task_result.get('needs_user_input') or task_result.get('status') == 'anomaly_detected':
+                print(f"!!! EVALUATE: Task result needs user input - bypassing LLM evaluation !!!")
+                logger.warning(f"Task result explicitly needs user input: {task_result.get('status')}")
+                
+                # Create evaluation with anomaly_detected status
+                evaluation = AgentResponseEvaluationEnhanced(
+                    status="anomaly_detected",
+                    reasoning=task_result.get('answer', 'Agent detected anomaly requiring user decision'),
+                    question=task_result.get('answer', 'How would you like to proceed?')
+                )
+            else:
+                evaluation = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, AgentResponseEvaluationEnhanced)
+        else:
+            evaluation = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, AgentResponseEvaluationEnhanced)
+        
         print(f"!!! EVALUATE: LLM evaluation status={evaluation.status} !!!")
         logger.info(f"Evaluation result: status={evaluation.status}, reasoning={evaluation.reasoning}")
         
@@ -5117,6 +5136,37 @@ def evaluate_agent_response(state: State):
                 result['canvas_type'] = state.get('canvas_type')
                 result['canvas_content'] = state.get('canvas_content')
                 logger.info("Preserving canvas from previous successful task")
+            
+            return result
+        
+        elif evaluation.status == "anomaly_detected":
+            print(f"!!! EVALUATE: Anomaly detected - pausing for user decision !!!")
+            logger.warning(f"Task '{task_to_evaluate['task_name']}' detected anomaly: {evaluation.reasoning}")
+            
+            # Extract anomaly details from task result if available
+            task_result = task_to_evaluate.get('result', {})
+            anomaly_details = None
+            user_choices = None
+            
+            if isinstance(task_result, dict):
+                anomaly_details = task_result.get('anomaly')
+                user_choices = task_result.get('user_choices')
+            
+            result = {
+                "pending_user_input": True,
+                "question_for_user": evaluation.question or "How would you like to proceed?",
+                "eval_status": "user_input_required",  # Map to existing pause mechanism
+                "anomaly_type": anomaly_details.get('anomaly_type') if anomaly_details else None,
+                "anomaly_details": anomaly_details,
+                "user_choices": user_choices,
+                "replan_count": 0
+            }
+            
+            # Preserve canvas
+            if state.get('has_canvas'):
+                result['has_canvas'] = state['has_canvas']
+                result['canvas_type'] = state.get('canvas_type')
+                result['canvas_content'] = state.get('canvas_content')
             
             return result
         

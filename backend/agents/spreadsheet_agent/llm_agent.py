@@ -10,6 +10,7 @@ import json
 import time
 import psutil
 import os
+import numpy as np
 from typing import Dict, List, Any, Optional, Tuple
 
 import pandas as pd
@@ -36,7 +37,7 @@ from .config import (
     LLM_TEMPERATURE,
     LLM_MAX_TOKENS_QUERY
 )
-from .models import QueryResult
+from .models import QueryResult, UserChoice, AnomalyDetails
 from .memory import spreadsheet_memory
 
 logger = logging.getLogger(__name__)
@@ -245,17 +246,17 @@ class SpreadsheetQueryAgent:
         
         raise RuntimeError(f"All LLM providers failed. Last error: {last_error}")
     
-    def _get_dataframe_context(self, df: pd.DataFrame, file_id: str = None) -> str:
+    def _get_dataframe_context(self, df: pd.DataFrame, file_id: str = None, thread_id: str = "default") -> str:
         """Generate context about the dataframe for the LLM (with caching)
         
         Note: The LLM should be reminded that pandas (as pd) is already imported
         in the execution environment and no import statements should be generated.
         """
-        # Try to get from cache if file_id provided
+        # Try to get from context cache if file_id provided
         if file_id:
-            cached_context = spreadsheet_memory.get_df_metadata(file_id)
-            if cached_context and 'context_string' in cached_context:
-                return cached_context['context_string']
+            cached_context = spreadsheet_memory.get_context(thread_id, file_id)
+            if cached_context:
+                return cached_context
         
         context = f"""DataFrame Information:
 - Shape: {df.shape[0]} rows × {df.shape[1]} columns
@@ -279,8 +280,8 @@ Column Statistics:
         
         # Cache the context if file_id provided
         if file_id:
+            spreadsheet_memory.store_context(thread_id, file_id, context)
             spreadsheet_memory.cache_df_metadata(file_id, {
-                'context_string': context,
                 'shape': df.shape,
                 'columns': list(df.columns)
             })
@@ -390,6 +391,35 @@ Column Statistics:
         except Exception as e:
             logger.debug(f"Could not enhance answer with data: {e}")
             return template_answer
+
+    def _check_percentage_invariants(self, answer: str, current_result: Any) -> Optional[str]:
+        """Lightweight sanity check: if answer expresses percentages, verify they sum ~100."""
+        if not answer or "%" not in answer:
+            return None
+
+        # Extract numeric values from result
+        numbers = []
+        try:
+            if isinstance(current_result, dict):
+                numbers = [float(v) for v in current_result.values() if isinstance(v, (int, float))]
+            elif isinstance(current_result, list):
+                if current_result and isinstance(current_result[0], dict):
+                    for item in current_result:
+                        for v in item.values():
+                            if isinstance(v, (int, float)):
+                                numbers.append(float(v))
+                else:
+                    numbers = [float(v) for v in current_result if isinstance(v, (int, float))]
+        except Exception:
+            numbers = []
+
+        if not numbers:
+            return None
+
+        total = sum(numbers)
+        if total < 90 or total > 110:
+            return f"Sanity check: percentage totals look off (sum={total:.1f}). Review calculation."
+        return None
     
     def _build_system_prompt(self, df_context: str, session_context: str = "", all_files_context: str = "") -> str:
         """Build the system prompt for the query agent
@@ -518,6 +548,122 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
         
         return None
     
+    def _is_mostly_numeric(self, series: pd.Series) -> bool:
+        """Check if a series has mostly numeric values (>= 60%)"""
+        if len(series) == 0:
+            return False
+        
+        numeric_count = 0
+        total_count = 0
+        
+        for val in series.dropna():
+            total_count += 1
+            try:
+                float(val)
+                numeric_count += 1
+            except (ValueError, TypeError):
+                pass
+        
+        if total_count == 0:
+            return False
+        
+        return (numeric_count / total_count) >= 0.6
+    
+    def _detect_dtype_drift(self, original_df: pd.DataFrame, current_df: pd.DataFrame) -> Optional[Tuple[AnomalyDetails, List[UserChoice]]]:
+        """Detect dtype drift between original and current DataFrames.
+        Also detects pre-existing object columns that should be numeric.
+        
+        Returns:
+            Tuple of (AnomalyDetails, List[UserChoice]) if drift detected, None otherwise
+        """
+        # Compare dtypes
+        original_dtypes = original_df.dtypes.to_dict()
+        current_dtypes = current_df.dtypes.to_dict()
+        
+        # Find columns with dtype changes OR pre-existing object columns with mostly numeric values
+        drifted_columns = []
+        for col in original_dtypes:
+            if col in current_dtypes:
+                orig_dtype = str(original_dtypes[col])
+                curr_dtype = str(current_dtypes[col])
+                try:
+                    logger.debug(f"[DriftCheck] Column='{col}' orig_dtype='{orig_dtype}' curr_dtype='{curr_dtype}'")
+                except Exception:
+                    pass
+                
+                # Case 1: Detect numeric -> object drift (dtype changed during execution)
+                if orig_dtype in ['int64', 'float64'] and curr_dtype == 'object':
+                    drifted_columns.append(col)
+                
+                # Case 2: Detect pre-existing object columns that should be numeric
+                # (column was object from the start but has mostly numeric values)
+                elif orig_dtype == 'object' and curr_dtype == 'object':
+                    # Check if column has mostly numeric-like values
+                    is_numeric_like = self._is_mostly_numeric(current_df[col])
+                    try:
+                        logger.debug(f"[DriftCheck] Column='{col}' numeric_like={is_numeric_like}")
+                    except Exception:
+                        pass
+                    if is_numeric_like:
+                        drifted_columns.append(col)
+        
+        if not drifted_columns:
+            return None
+        
+        # Build anomaly details
+        sample_values = {}
+        for col in drifted_columns:
+            # Get non-numeric values in supposedly numeric column
+            non_numeric = []
+            for val in current_df[col].dropna().unique()[:5]:
+                try:
+                    float(val)
+                except (ValueError, TypeError):
+                    non_numeric.append(val)
+            sample_values[col] = non_numeric
+        
+        affected_cols_str = ', '.join([f"'{col}'" for col in drifted_columns])
+        
+        anomaly = AnomalyDetails(
+            anomaly_type="dtype_drift",
+            affected_columns=drifted_columns,
+            message=f"I detected that column(s) {affected_cols_str} contain mostly numbers, but some values are strings (dtype drift). This can affect calculations.",
+            current_dtypes={col: str(current_dtypes[col]) for col in drifted_columns},
+            expected_dtypes={col: str(original_dtypes[col]) for col in drifted_columns},
+            sample_values=sample_values,
+            severity="warning"
+        )
+        
+        # Build user choices
+        choices = [
+            UserChoice(
+                id="convert_numeric",
+                label="Convert to numeric (invalid → NaN)",
+                description=f"Convert {affected_cols_str} to numeric, replacing invalid values with NaN. This allows calculations to proceed.",
+                is_safe=True
+            ),
+            UserChoice(
+                id="ignore_rows",
+                label="Ignore invalid rows",
+                description=f"Filter out rows where {affected_cols_str} have non-numeric values before calculating.",
+                is_safe=True
+            ),
+            UserChoice(
+                id="treat_as_text",
+                label="Treat as text and continue",
+                description=f"Keep {affected_cols_str} as text. Numeric operations may fail.",
+                is_safe=True
+            ),
+            UserChoice(
+                id="cancel",
+                label="Cancel the analysis",
+                description="Stop the current operation without making changes.",
+                is_safe=True
+            )
+        ]
+        
+        return anomaly, choices
+    
     def _safe_execute_pandas(self, df: pd.DataFrame, code: str) -> Tuple[Any, pd.DataFrame, Optional[str]]:
         """Safely execute pandas code and return result or error"""
         # Pre-execution validation
@@ -526,23 +672,45 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
             logger.warning(f"⚠️ Code validation failed: {validation_error}")
             return None, df, validation_error
         
+        # Minimal safe globals injected for LLM-generated code
+        safe_globals = {
+            "__builtins__": {},  # block dangerous builtins
+            "pd": pd,
+            "np": np,
+            "float": float,
+            "int": int,
+            "str": str,
+            "len": len,
+            "sum": sum,
+            "min": min,
+            "max": max,
+            "abs": abs,
+            "round": round,
+        }
+        local_vars = {"df": df}
+
         try:
-            # Create a safe execution environment
-            local_vars = {"df": df, "pd": pd}
-            
-            # Execute the code
-            exec(code, {"__builtins__": {}}, local_vars)
-            
-            # Retrieve the (possibly modified) dataframe
+            # First try evaluating as an expression to capture the returned value (e.g., Series/array)
+            try:
+                result_value = eval(code, safe_globals, local_vars)
+                updated_df = local_vars.get("df", df)
+                return result_value, updated_df, None
+            except SyntaxError:
+                # Not an expression (likely assignment/mutation); fall back to exec
+                pass
+
+            # Execute statements (mutations/assignments)
+            exec(code, safe_globals, local_vars)
+
             updated_df = local_vars.get("df", df)
-            
+
             # If the specific variable 'result' exists, return it
             if "result" in local_vars:
                 return local_vars["result"], updated_df, None
-                
+
             # Otherwise, return the df itself as the result (e.g. after filtering)
             return updated_df, updated_df, None
-            
+
         except KeyError as e:
             # Enhanced KeyError handling with column suggestions
             column_name = str(e).strip("'\"")
@@ -625,7 +793,7 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
         # Working copy of dataframe for this session
         current_df = df.copy()
         
-        df_context = self._get_dataframe_context(current_df, file_id)
+        df_context = self._get_dataframe_context(current_df, file_id, thread_id)
         system_prompt = self._build_system_prompt(df_context, session_context, all_files_context)
         
         steps_taken = []
@@ -646,6 +814,7 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
             try:
                 # Get LLM response with metrics
                 response_text, call_metrics = self._get_completion(conversation, provider_offset=provider_offset)
+                raw_response_text = response_text
                 query_metrics["llm_calls"] += 1
                 query_metrics["tokens_input"] += call_metrics["tokens_input"]
                 query_metrics["tokens_output"] += call_metrics["tokens_output"]
@@ -719,7 +888,8 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
                     steps_taken.append({
                         "iteration": iteration,
                         "error": f"JSON parse error: {e}",
-                        "raw_response": response_text[:500]
+                        "raw_response": response_text[:500],
+                        "raw_response_text": raw_response_text
                     })
                     # Ask LLM to fix the response with stricter instruction
                     conversation.append({"role": "assistant", "content": response_text[:500]})
@@ -745,7 +915,8 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
                     "iteration": iteration,
                     "thinking": thinking,
                     "code": pandas_code,
-                    "explanation": explanation
+                    "explanation": explanation,
+                    "raw_response_text": raw_response_text
                 }
                 
                 # Execute pandas code if provided
@@ -811,12 +982,23 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
                         step_info["result_shape"] = result.shape
                         current_result = result.to_dict(orient="records")
                     elif isinstance(result, pd.Series):
-                        # Convert to dict and ensure native types
-                        series_dict = result.head(10).to_dict()
-                        # Sanitize dict
-                        safe_dict = json.loads(json.dumps(series_dict, default=str))
-                        step_info["result_preview"] = safe_dict
-                        current_result = result.to_dict()
+                        # Handle Series with MultiIndex (from groupby with multiple columns)
+                        # These produce tuple keys that JSON can't serialize
+                        if isinstance(result.index, pd.MultiIndex):
+                            # Convert MultiIndex Series to DataFrame then to records
+                            result_df = result.reset_index()
+                            records = result_df.head(10).to_dict(orient="records")
+                            safe_records = json.loads(json.dumps(records, default=str))
+                            step_info["result_preview"] = safe_records
+                            step_info["result_shape"] = result_df.shape
+                            current_result = result_df.to_dict(orient="records")
+                        else:
+                            # Regular Series with simple index
+                            series_dict = result.head(10).to_dict()
+                            # Sanitize dict
+                            safe_dict = json.loads(json.dumps(series_dict, default=str))
+                            step_info["result_preview"] = safe_dict
+                            current_result = result.to_dict()
                     else:
                         step_info["result_preview"] = str(result)
                         current_result = result
@@ -843,7 +1025,43 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
                     
                     # Enhance answer with actual computed values
                     enhanced_answer = self._enhance_answer_with_data(final_answer, current_result)
+
+                    # Percentage sanity guard
+                    sanity_warning = self._check_percentage_invariants(enhanced_answer, current_result)
+                    if sanity_warning:
+                        enhanced_answer = f"{enhanced_answer} ({sanity_warning})"
+
                     logger.info(f"🔍 Enhanced answer: {enhanced_answer[:150]}")
+                    
+                    # DTYPE DRIFT DETECTION: Check for dtype changes before finalizing
+                    drift_check = self._detect_dtype_drift(df, current_df)
+                    if drift_check is not None:
+                        anomaly, user_choices = drift_check
+                        logger.warning(f"⚠️ Dtype drift detected: {anomaly.affected_columns}")
+                        
+                        # Return anomaly result instead of final answer
+                        query_result = QueryResult(
+                            question=question,
+                            answer=anomaly.message,
+                            steps_taken=steps_taken,
+                            final_data=None,
+                            success=False,
+                            status="anomaly_detected",
+                            needs_user_input=True,
+                            anomaly=anomaly,
+                            user_choices=user_choices,
+                            pending_action="dtype_conversion",
+                            final_dataframe=current_df
+                        )
+                        
+                        # Add metrics
+                        query_metrics["latency_ms"] = (time.time() - query_start) * 1000
+                        end_memory = process.memory_info().rss / 1024 / 1024
+                        query_metrics["memory_used_mb"] = end_memory - start_memory
+                        query_result.execution_metrics = query_metrics
+                        
+                        self._log_execution_metrics(query_metrics, False)
+                        return query_result
                     
                     # Create query result first
                     query_result = QueryResult(
@@ -896,8 +1114,8 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
                     # Log metrics
                     self._log_execution_metrics(query_metrics, True)
                     
-                    # Cache the result
-                    spreadsheet_memory.cache_query_result(question, query_result, file_id, thread_id)
+                    # Cache the result (keyed by file and question)
+                    spreadsheet_memory.cache_query_result(file_id, question, query_result, thread_id)
                     
                     return query_result
                 
