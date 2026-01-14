@@ -29,7 +29,9 @@ class GmailClient:
     def __init__(self):
         self.mcp_url = MCP_URL
         self.api_key = COMPOSIO_API_KEY
-        self.connection_id = CONNECTION_ID
+        # Update to V3 Connection ID (Found via inspection: ca_xZUTNToOnUiQ)
+        # The V2 UUID in env var is deprecated for this SDK version.
+        self.connection_id = "ca_xZUTNToOnUiQ" 
         self.attachments_dir = Path("storage/gmail_attachments")
         self.attachments_dir.mkdir(parents=True, exist_ok=True)
         
@@ -442,6 +444,7 @@ class GmailClient:
                 slug="GMAIL_SEND_EMAIL",
                 arguments=params,
                 connected_account_id=self.connection_id,
+                user_id="default",
                 dangerously_skip_version_check=True
             )
             
@@ -499,6 +502,7 @@ class GmailClient:
                     slug=tool_name,
                     arguments=parameters,
                     connected_account_id=self.connection_id if self.connection_id else None,
+                    user_id="default",
                     dangerously_skip_version_check=True
                 )
             except Exception as e:
