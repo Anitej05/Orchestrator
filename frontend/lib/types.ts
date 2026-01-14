@@ -57,6 +57,7 @@ export interface TaskStatus {
   cost?: number;
   result?: any;
   error?: string;
+  is_dialogue?: boolean;
 }
 
 export interface ConversationState {

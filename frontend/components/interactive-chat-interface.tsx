@@ -5,11 +5,14 @@ import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
-import { MessageCircle, Clock, CheckCircle, Paperclip, X, File as FileIcon, AlertCircle, Loader2, Brain, Search, Users, FileText, Play, BarChart3, ChevronDown, ChevronUp, Globe } from 'lucide-react';
+import { MessageCircle, Clock, CheckCircle, Paperclip, X, File as FileIcon, AlertCircle, Loader2, Brain, Search, Users, FileText, Play, BarChart3, ChevronDown, ChevronUp, Globe, Copy, Check, Volume2, VolumeX, Mic, MicOff, Square } from 'lucide-react';
 import Markdown from '@/components/ui/markdown';
 import { type ProcessResponse, type ConversationState, type Message, type Attachment } from '@/lib/types';
 import { PlanApprovalModal } from '@/components/plan-approval-modal';
 import { useConversationStore } from '@/lib/conversation-store';
+import { useTTS } from '@/hooks/useTTS';
+import { useSpeechToText } from '@/hooks/useSpeechToText';
+import { AudioWaveSVG } from '@/components/ui/audio-wave-animation';
 
 interface InteractiveChatInterfaceProps {
   onWorkflowComplete?: (result: ProcessResponse) => void;
@@ -62,8 +65,74 @@ export function InteractiveChatInterface({
   const [previewUrls, setPreviewUrls] = useState<string[]>([]);
   const [planningMode, setPlanningMode] = useState(false);
   const [expandedTraces, setExpandedTraces] = useState<Set<string>>(new Set());
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  
+  const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
+
+  // TTS Hook for Read Aloud functionality
+  const { speak, stop: stopSpeaking, isSpeaking, isGenerating: isTTSGenerating, isLoading: isTTSLoading } = useTTS();
+
+  // STT Hook for Voice Input functionality
+  const {
+    startListening,
+    stopListening,
+    isListening,
+    transcript,
+    interimTranscript,
+    audioLevel,
+    isSupported: isSTTSupported,
+    resetTranscript,
+  } = useSpeechToText({
+    continuous: false,
+    onResult: (text) => {
+      // Append recognized text to input
+      setInputValue(prev => prev + (prev ? ' ' : '') + text);
+    },
+  });
+
+  // Handle read aloud for a message
+  const handleReadAloud = async (messageId: string, content: string) => {
+    if (speakingMessageId === messageId && (isSpeaking || isTTSGenerating)) {
+      // Stop if already speaking or generating this message
+      stopSpeaking();
+      setSpeakingMessageId(null);
+    } else {
+      // Stop any current speech and start new
+      stopSpeaking();
+      setSpeakingMessageId(messageId);
+      await speak(content);
+    }
+  };
+
+  // Sync speaking state with UI
+  useEffect(() => {
+    if (!isSpeaking && !isTTSGenerating && speakingMessageId) {
+      setSpeakingMessageId(null);
+    }
+  }, [isSpeaking, isTTSGenerating, speakingMessageId]);
+
+  // Handle microphone toggle
+  const handleMicrophoneToggle = () => {
+    if (isListening) {
+      stopListening();
+    } else {
+      resetTranscript();
+      startListening();
+    }
+  };
+
+  // Copy message content to clipboard with animation feedback
+  const copyToClipboard = async (messageId: string, content: string) => {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopiedMessageId(messageId);
+      // Reset after 2 seconds
+      setTimeout(() => setCopiedMessageId(null), 2000);
+    } catch (err) {
+      console.error('Failed to copy:', err);
+    }
+  };
+
   const toggleTrace = (messageId: string) => {
     setExpandedTraces(prev => {
       const next = new Set(prev);
@@ -81,7 +150,7 @@ export function InteractiveChatInterface({
     console.log('Plan approved by user');
     // DON'T clear isWaitingForUser yet - continueConversation needs to see it's true
     // Only clear approval_required to close the modal
-    useConversationStore.setState({ 
+    useConversationStore.setState({
       approval_required: false
     });
     // continueConversation will capture isWaitingForUser=true and send user_response
@@ -92,7 +161,7 @@ export function InteractiveChatInterface({
     console.log('Plan cancelled by user');
     // DON'T clear isWaitingForUser yet - continueConversation needs to see it's true
     // Only clear approval_required to close the modal
-    useConversationStore.setState({ 
+    useConversationStore.setState({
       approval_required: false
     });
     // continueConversation will capture isWaitingForUser=true and send user_response
@@ -103,7 +172,7 @@ export function InteractiveChatInterface({
     console.log('User wants to modify plan');
     // Just close the approval modal and let user type modifications
     // The modify logic will be handled in handleSubmit when they click "Modify" button
-    useConversationStore.setState({ 
+    useConversationStore.setState({
       approval_required: false
     });
   };
@@ -111,17 +180,17 @@ export function InteractiveChatInterface({
   // Handler for Accept & Execute button (uses parent's logic)
   const handleAcceptAndExecute = async () => {
     console.log('User accepts and executes plan');
-    
+
     // Check if this is from planning mode (approval_required) or saved workflow
     if (state.approval_required) {
       // Planning mode - send 'approve' to backend to continue execution
-      useConversationStore.setState({ 
+      useConversationStore.setState({
         approval_required: false
       });
       await continueConversation('approve', [], false, owner);
     } else if (onAcceptPlan) {
       // Saved workflow - use parent's logic
-      useConversationStore.setState({ 
+      useConversationStore.setState({
         approval_required: false
       });
       await onAcceptPlan();
@@ -154,7 +223,7 @@ export function InteractiveChatInterface({
     };
 
     window.addEventListener('autoExecuteWorkflow' as any, handleAutoExecute as any);
-    
+
     return () => {
       window.removeEventListener('autoExecuteWorkflow' as any, handleAutoExecute as any);
     };
@@ -180,7 +249,7 @@ export function InteractiveChatInterface({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
+
     if (state.isWaitingForUser) {
       // User is responding to a question from the system
       if (userResponse.trim()) {
@@ -201,7 +270,7 @@ export function InteractiveChatInterface({
     } else {
       // Check if this is a continuation of an existing conversation or a new one
       const hasExistingConversation = state.thread_id && state.messages.length > 0;
-      
+
       if (inputValue.trim() || attachedFiles.length > 0) {
         if (hasExistingConversation) {
           // Continue existing conversation with planning mode
@@ -242,7 +311,7 @@ export function InteractiveChatInterface({
             <p className="text-lg font-medium">Start a conversation to orchestrate your workflow</p>
           </div>
         )}
-        
+
         {state.messages
           .filter((message: Message) => {
             // Filter out empty assistant messages to prevent empty bubbles
@@ -254,19 +323,18 @@ export function InteractiveChatInterface({
           .map((message: Message, index: number) => {
             // Ensure message.id is a valid string
             const messageId = message.id || `message-${index}-${Date.now()}`;
-            
+
             return (
               <div key={messageId} className={`message message-${message.type} w-full flex ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div className={`p-4 rounded-2xl shadow-lg ${
-                  message.type === 'user' 
-                    ? 'bg-gradient-to-br from-blue-600 to-blue-700 dark:from-blue-600 dark:to-blue-800 text-white max-w-[85%] shadow-lg shadow-blue-500/30'
-                    : message.type === 'system'
+                <div className={`p-4 rounded-2xl shadow-lg ${message.type === 'user'
+                  ? 'bg-gradient-to-br from-blue-600 to-blue-700 dark:from-blue-600 dark:to-blue-800 text-white max-w-[85%] shadow-lg shadow-blue-500/30'
+                  : message.type === 'system'
                     ? 'bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700/40 text-amber-900 dark:text-amber-200 max-w-[90%] shadow-md'
                     : 'bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700/40 text-gray-900 dark:text-gray-100 max-w-[95%] shadow-md'
-                }`}>
+                  }`}>
                   <div className="message-content space-y-2">
                     {message.content && (message.type === 'assistant' ? <Markdown content={message.content} /> : <p>{message.content}</p>)}
-                    
+
                     {/* Collapsible browsing trace */}
                     {message.browsing_trace && message.browsing_trace.length > 0 && (
                       <div className="browsing-trace mt-3">
@@ -280,11 +348,11 @@ export function InteractiveChatInterface({
                             <ChevronDown className="w-4 h-4" />
                           )}
                           <span>
-                            {expandedTraces.has(messageId) ? 'Hide' : 'View'} browsing trace 
+                            {expandedTraces.has(messageId) ? 'Hide' : 'View'} browsing trace
                             ({message.browsing_trace.length} {message.browsing_trace.length === 1 ? 'action' : 'actions'})
                           </span>
                         </button>
-                        
+
                         {expandedTraces.has(messageId) && (
                           <div className="mt-2 space-y-2 p-3 bg-gray-50 dark:bg-gray-800/30 rounded-lg border border-gray-200 dark:border-gray-800/30">
                             <h4 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Browsing Trace:</h4>
@@ -316,7 +384,7 @@ export function InteractiveChatInterface({
                         )}
                       </div>
                     )}
-                    
+
                     {message.attachments && message.attachments.length > 0 && (
                       <div className="flex flex-wrap gap-2 mt-2">
                         {message.attachments.map((att: Attachment, attIndex: number) => (
@@ -346,14 +414,67 @@ export function InteractiveChatInterface({
                       </Button>
                     )}
                   </div>
-                  <div className={`text-xs opacity-60 mt-1.5 font-medium ${message.type === 'user' ? 'text-blue-100 dark:text-blue-200' : 'text-gray-500 dark:text-gray-400'}`}>
-                    {message.timestamp.toLocaleTimeString()}
+                  {/* Footer with timestamp and copy button */}
+                  <div className={`flex items-center justify-between mt-1.5 ${message.type === 'user' ? 'text-blue-100 dark:text-blue-200' : 'text-gray-500 dark:text-gray-400'}`}>
+                    <div className="text-xs opacity-60 font-medium">
+                      {message.timestamp.toLocaleTimeString()}
+                    </div>
+                    {/* Action buttons for assistant messages */}
+                    {message.type === 'assistant' && message.content && (
+                      <div className="flex items-center gap-1">
+                        {/* Read Aloud button */}
+                        <button
+                          onClick={() => handleReadAloud(messageId, message.content!)}
+                          className={`p-1.5 rounded-lg transition-all duration-300 ease-out hover:bg-gray-100 dark:hover:bg-gray-700/50 ${speakingMessageId === messageId && isSpeaking
+                            ? 'text-blue-500 scale-110'
+                            : (speakingMessageId === messageId && isTTSGenerating) || (isTTSLoading && speakingMessageId === messageId)
+                              ? 'text-gray-500 hover:text-gray-600 dark:text-gray-400 dark:hover:text-gray-300'
+                              : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300'
+                            }`}
+                          title={
+                            speakingMessageId === messageId && isSpeaking
+                              ? 'Stop reading'
+                              : speakingMessageId === messageId && isTTSGenerating
+                                ? 'Generating audio... (click to cancel)'
+                                : isTTSLoading && speakingMessageId === messageId
+                                  ? 'Loading TTS model...'
+                                  : 'Read aloud'
+                          }
+                          disabled={isTTSLoading && speakingMessageId !== messageId}
+                        >
+                          {speakingMessageId === messageId && isSpeaking ? (
+                            <Square className="w-4 h-4" />
+                          ) : speakingMessageId === messageId && isTTSGenerating ? (
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                          ) : isTTSLoading && speakingMessageId === messageId ? (
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                          ) : (
+                            <Volume2 className="w-4 h-4" />
+                          )}
+                        </button>
+                        {/* Copy button */}
+                        <button
+                          onClick={() => copyToClipboard(messageId, message.content!)}
+                          className={`p-1.5 rounded-lg transition-all duration-300 ease-out hover:bg-gray-100 dark:hover:bg-gray-700/50 ${copiedMessageId === messageId
+                            ? 'text-green-500 scale-110'
+                            : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300'
+                            }`}
+                          title={copiedMessageId === messageId ? 'Copied!' : 'Copy message'}
+                        >
+                          {copiedMessageId === messageId ? (
+                            <Check className="w-4 h-4 animate-bounce" />
+                          ) : (
+                            <Copy className="w-4 h-4" />
+                          )}
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
             );
           })}
-        
+
         {/* Live Browser Stream - shown AFTER messages while browser is running */}
         {isBrowserRunning && (
           <div className="browser-live-stream w-full flex justify-start">
@@ -393,29 +514,28 @@ export function InteractiveChatInterface({
       <div className="p-4 border-t border-gray-200 dark:border-gray-800/30 bg-gray-50/80 dark:bg-gray-800/70 backdrop-blur-lg rounded-b-lg">
         {/* Consolidated Status Indicator - Shows orchestration progress above input */}
         {(isLoading || state.status === 'processing') && !state.isWaitingForUser && (
-          <div className={`status-indicator p-3 rounded-lg mb-4 ${
-            state.isWaitingForUser
-              ? 'bg-yellow-50 border border-yellow-200' 
-              : state.metadata?.currentStage === 'completed'
+          <div className={`status-indicator p-3 rounded-lg mb-4 ${state.isWaitingForUser
+            ? 'bg-yellow-50 border border-yellow-200'
+            : state.metadata?.currentStage === 'completed'
               ? 'bg-green-50 border border-green-200'
               : state.metadata?.currentStage === 'error'
-              ? 'bg-red-50 border border-red-200'
-              : state.metadata?.currentStage === 'parsing'
-              ? 'bg-purple-50 border border-purple-200'
-              : state.metadata?.currentStage === 'searching'
-              ? 'bg-green-50 border border-green-200'
-              : state.metadata?.currentStage === 'ranking'
-              ? 'bg-orange-50 border border-orange-200'
-              : state.metadata?.currentStage === 'planning'
-              ? 'bg-indigo-50 border border-indigo-200'
-              : state.metadata?.currentStage === 'validating'
-              ? 'bg-teal-50 border border-teal-200'
-              : state.metadata?.currentStage === 'executing'
-              ? 'bg-red-50 border border-red-200'
-              : state.metadata?.currentStage === 'aggregating'
-              ? 'bg-cyan-50 border border-cyan-200'
-              : 'bg-blue-50 border border-blue-200'  // default initializing state
-          }`}>
+                ? 'bg-red-50 border border-red-200'
+                : state.metadata?.currentStage === 'parsing'
+                  ? 'bg-purple-50 border border-purple-200'
+                  : state.metadata?.currentStage === 'searching'
+                    ? 'bg-green-50 border border-green-200'
+                    : state.metadata?.currentStage === 'ranking'
+                      ? 'bg-orange-50 border border-orange-200'
+                      : state.metadata?.currentStage === 'planning'
+                        ? 'bg-indigo-50 border border-indigo-200'
+                        : state.metadata?.currentStage === 'validating'
+                          ? 'bg-teal-50 border border-teal-200'
+                          : state.metadata?.currentStage === 'executing'
+                            ? 'bg-red-50 border border-red-200'
+                            : state.metadata?.currentStage === 'aggregating'
+                              ? 'bg-cyan-50 border border-cyan-200'
+                              : 'bg-blue-50 border border-blue-200'  // default initializing state
+            }`}>
             <div className="flex items-center space-x-2">
               {state.isWaitingForUser ? (
                 <AlertCircle className="w-4 h-4 text-yellow-600" />
@@ -440,45 +560,43 @@ export function InteractiveChatInterface({
               ) : (
                 <Loader2 className={`w-4 h-4 animate-spin text-blue-600`} />
               )}
-              <span className={`font-medium text-sm ${
-                state.isWaitingForUser
-                  ? 'text-yellow-800' 
-                  : state.metadata?.currentStage === 'completed'
+              <span className={`font-medium text-sm ${state.isWaitingForUser
+                ? 'text-yellow-800'
+                : state.metadata?.currentStage === 'completed'
                   ? 'text-green-800'
                   : state.metadata?.currentStage === 'error'
-                  ? 'text-red-800'
-                  : state.metadata?.currentStage === 'parsing'
-                  ? 'text-purple-800'
-                  : state.metadata?.currentStage === 'searching'
-                  ? 'text-green-800'
-                  : state.metadata?.currentStage === 'ranking'
-                  ? 'text-orange-800'
-                  : state.metadata?.currentStage === 'planning'
-                  ? 'text-indigo-800'
-                  : state.metadata?.currentStage === 'validating'
-                  ? 'text-teal-800'
-                  : state.metadata?.currentStage === 'executing'
-                  ? 'text-red-800'
-                  : state.metadata?.currentStage === 'aggregating'
-                  ? 'text-cyan-800'
-                  : 'text-blue-800'  // default initializing state
-              }`}>
-                 {state.metadata?.stageMessage || (state.isWaitingForUser ? 'Waiting for your response...' : 'Processing your request...')}
+                    ? 'text-red-800'
+                    : state.metadata?.currentStage === 'parsing'
+                      ? 'text-purple-800'
+                      : state.metadata?.currentStage === 'searching'
+                        ? 'text-green-800'
+                        : state.metadata?.currentStage === 'ranking'
+                          ? 'text-orange-800'
+                          : state.metadata?.currentStage === 'planning'
+                            ? 'text-indigo-800'
+                            : state.metadata?.currentStage === 'validating'
+                              ? 'text-teal-800'
+                              : state.metadata?.currentStage === 'executing'
+                                ? 'text-red-800'
+                                : state.metadata?.currentStage === 'aggregating'
+                                  ? 'text-cyan-800'
+                                  : 'text-blue-800'  // default initializing state
+                }`}>
+                {state.metadata?.stageMessage || (state.isWaitingForUser ? 'Waiting for your response...' : 'Processing your request...')}
               </span>
               {state.metadata?.progress && !state.isWaitingForUser && state.metadata?.currentStage !== 'completed' && state.metadata?.currentStage !== 'error' && (
                 <div className="flex-1 bg-gray-200 dark:bg-gray-700/50 rounded-full h-2 ml-4 overflow-hidden">
-                  <div 
-                    className={`h-2 rounded-full transition-all duration-300 ${
-                      state.metadata?.currentStage === 'initializing' ? 'bg-blue-500' :
+                  <div
+                    className={`h-2 rounded-full transition-all duration-300 ${state.metadata?.currentStage === 'initializing' ? 'bg-blue-500' :
                       state.metadata?.currentStage === 'parsing' ? 'bg-purple-500' :
-                      state.metadata?.currentStage === 'searching' ? 'bg-green-500' :
-                      state.metadata?.currentStage === 'ranking' ? 'bg-orange-500' :
-                      state.metadata?.currentStage === 'planning' ? 'bg-indigo-500' :
-                      state.metadata?.currentStage === 'validating' ? 'bg-teal-500' :
-                      state.metadata?.currentStage === 'executing' ? 'bg-red-500' :
-                      state.metadata?.currentStage === 'aggregating' ? 'bg-cyan-500' :
-                      'bg-blue-500'
-                    }`} 
+                        state.metadata?.currentStage === 'searching' ? 'bg-green-500' :
+                          state.metadata?.currentStage === 'ranking' ? 'bg-orange-500' :
+                            state.metadata?.currentStage === 'planning' ? 'bg-indigo-500' :
+                              state.metadata?.currentStage === 'validating' ? 'bg-teal-500' :
+                                state.metadata?.currentStage === 'executing' ? 'bg-red-500' :
+                                  state.metadata?.currentStage === 'aggregating' ? 'bg-cyan-500' :
+                                    'bg-blue-500'
+                      }`}
                     style={{ width: `${state.metadata.progress}%` }}
                   />
                 </div>
@@ -489,163 +607,209 @@ export function InteractiveChatInterface({
 
         {/* Hide input form when browser is running - only show progress bar */}
         {!isBrowserRunning && (
-        <form onSubmit={handleSubmit} className="space-y-4">
-          {state.isWaitingForUser ? (
-            <div className="space-y-3">
-              <Textarea
-                value={userResponse}
-                onChange={(e) => setUserResponse(e.target.value)}
-                placeholder="Type your response here..."
-                disabled={isLoading}
-                className="min-h-[120px] text-base"
-                onKeyDown={handleKeyDown}
-                autoFocus
-              />
-            </div>
-          ) : (
-            <>
-              {/* Attached Files Preview */}
-              <div className="flex flex-wrap gap-2">
-                {attachedFiles.filter(f => f.type.startsWith('image/')).map((file, index) => (
-                  <div key={file.name} className="relative">
-                    <img src={previewUrls[index]} alt={file.name} className="h-20 w-20 object-cover rounded-md" />
-                    <button 
-                      type="button"
-                      onClick={() => removeFile(file.name)} 
-                      className="absolute top-0 right-0 bg-red-500 text-white rounded-full p-1 text-xs"
-                    >
-                      <X className="w-3 h-3" />
-                    </button>
-                  </div>
-                ))}
-                {attachedFiles.filter(f => !f.type.startsWith('image/')).map(file => (
-                  <Badge key={file.name} variant="secondary" className="flex items-center gap-1">
-                    <FileIcon className="w-4 h-4" />
-                    {file.name}
-                    <X className="w-3 h-3 cursor-pointer" onClick={() => removeFile(file.name)} />
-                  </Badge>
-                ))}
-              </div>
-
-              {/* Planning Mode Toggle */}
-              <div className="flex items-center justify-between px-1 py-2">
-                <div className="flex items-center gap-2">
-                  <Switch
-                    id="planning-mode"
-                    checked={planningMode}
-                    onCheckedChange={setPlanningMode}
-                  />
-                  <label 
-                    htmlFor="planning-mode" 
-                    className="text-sm font-medium cursor-pointer select-none"
-                  >
-                    Planning Mode
-                  </label>
-                </div>
-                {planningMode && (
-                  <Badge variant="secondary" className="text-xs">
-                    Will pause for approval
-                  </Badge>
-                )}
-              </div>
-
-              <div className="space-y-2">
+          <form onSubmit={handleSubmit} className="space-y-4">
+            {state.isWaitingForUser ? (
+              <div className="space-y-3">
                 <Textarea
-                  value={inputValue}
-                  onChange={(e) => setInputValue(e.target.value)}
-                  placeholder="Describe what you want to accomplish..."
+                  value={userResponse}
+                  onChange={(e) => setUserResponse(e.target.value)}
+                  placeholder="Type your response here..."
                   disabled={isLoading}
-                  className="min-h-[60px] text-base"
+                  className="min-h-[120px] text-base"
                   onKeyDown={handleKeyDown}
+                  autoFocus
                 />
               </div>
-            </>
-          )}
-          
-          <div className="flex justify-between items-center">
-            <div className="flex items-center gap-2">
-              <Button 
-                type="button" 
-                variant="outline" 
-                size="sm" 
-                onClick={() => fileInputRef.current?.click()}
-                disabled={isLoading}
-              >
-                <Paperclip className="w-4 h-4" />
-              </Button>
-              <input 
-                type="file" 
-                ref={fileInputRef} 
-                className="hidden" 
-                onChange={handleFileChange} 
-                multiple 
-              />
-            </div>
-            <div className="flex space-x-2">
-              {/* Plan Approval Buttons - Only show when in planning mode with approval required, or executing saved workflows */}
-              {((planningMode && state.approval_required) || ((state.metadata?.currentStage === 'validating' || state.status === 'planning_complete') && onAcceptPlan && state.metadata?.from_workflow)) ? (
-                <>
-                  {/* Only show Modify button for non-saved workflows when in planning mode */}
-                  {planningMode && !state.metadata?.from_workflow && (
-                    <Button 
-                      type="button"
-                      variant="outline" 
-                      size="sm" 
-                      onClick={handleModifyPlan}
-                      className="border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-800"
+            ) : (
+              <>
+                {/* Attached Files Preview */}
+                <div className="flex flex-wrap gap-2">
+                  {attachedFiles.filter(f => f.type.startsWith('image/')).map((file, index) => (
+                    <div key={file.name} className="relative">
+                      <img src={previewUrls[index]} alt={file.name} className="h-20 w-20 object-cover rounded-md" />
+                      <button
+                        type="button"
+                        onClick={() => removeFile(file.name)}
+                        className="absolute top-0 right-0 bg-red-500 text-white rounded-full p-1 text-xs"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+                  {attachedFiles.filter(f => !f.type.startsWith('image/')).map(file => (
+                    <Badge key={file.name} variant="secondary" className="flex items-center gap-1">
+                      <FileIcon className="w-4 h-4" />
+                      {file.name}
+                      <X className="w-3 h-3 cursor-pointer" onClick={() => removeFile(file.name)} />
+                    </Badge>
+                  ))}
+                </div>
+
+                {/* Planning Mode Toggle */}
+                <div className="flex items-center justify-between px-1 py-2">
+                  <div className="flex items-center gap-2">
+                    <Switch
+                      id="planning-mode"
+                      checked={planningMode}
+                      onCheckedChange={setPlanningMode}
+                    />
+                    <label
+                      htmlFor="planning-mode"
+                      className="text-sm font-medium cursor-pointer select-none"
                     >
-                      Modify Plan
-                    </Button>
+                      Planning Mode
+                    </label>
+                  </div>
+                  {planningMode && (
+                    <Badge variant="secondary" className="text-xs">
+                      Will pause for approval
+                    </Badge>
                   )}
-                  
-                  {/* Show Accept button when approval is needed in planning mode or for saved workflows */}
-                  <Button 
-                    type="button"
-                    size="sm" 
-                    onClick={handleAcceptAndExecute}
-                    className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white shadow-md"
-                  >
-                    Accept & Execute
-                  </Button>
-                </>
-              ) : null}
-              
-              <Button 
-                type="submit" 
-                disabled={
-                  isLoading || 
-                  (state.isWaitingForUser ? !userResponse.trim() : (!inputValue.trim() && attachedFiles.length === 0))
-                }
-              >
-                {isLoading 
-                  ? 'Processing...' 
-                  : (state.metadata?.currentStage === 'validating' || state.status === 'planning_complete')
-                  ? 'Modify'
-                  : state.isWaitingForUser 
-                  ? 'Send Response' 
-                  : 'Start Workflow'}
-              </Button>
-              
-              {state.messages.length > 0 && (
-                <Button 
-                  type="button" 
+                </div>
+
+                <div className="space-y-2">
+                  <div className="relative">
+                    {/* Audio Recording Overlay */}
+                    {isListening && (
+                      <div className="absolute inset-0 bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-blue-900/30 dark:to-indigo-900/30 rounded-lg border-2 border-blue-400 dark:border-blue-500 flex flex-col items-center justify-center z-10">
+                        <AudioWaveSVG
+                          isActive={isListening}
+                          audioLevel={audioLevel}
+                          color="#3b82f6"
+                          width={160}
+                          height={50}
+                        />
+                        <div className="flex items-center gap-2 mt-3">
+                          <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
+                          <span className="text-sm font-medium text-blue-700 dark:text-blue-300">
+                            Listening...
+                          </span>
+                        </div>
+                        {(transcript || interimTranscript) && (
+                          <p className="text-xs text-gray-600 dark:text-gray-400 mt-2 px-4 text-center max-w-full truncate">
+                            {transcript}{interimTranscript && <span className="opacity-60">{interimTranscript}</span>}
+                          </p>
+                        )}
+                      </div>
+                    )}
+                    <Textarea
+                      value={inputValue}
+                      onChange={(e) => setInputValue(e.target.value)}
+                      placeholder="Describe what you want to accomplish..."
+                      disabled={isLoading || isListening}
+                      className={`min-h-[60px] text-base ${isListening ? 'opacity-0' : ''}`}
+                      onKeyDown={handleKeyDown}
+                    />
+                  </div>
+                </div>
+              </>
+            )}
+
+            <div className="flex justify-between items-center">
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
                   variant="outline"
-                  onClick={resetConversation}
+                  size="sm"
+                  onClick={() => fileInputRef.current?.click()}
                   disabled={isLoading}
                 >
-                  Reset
+                  <Paperclip className="w-4 h-4" />
                 </Button>
-              )}
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  className="hidden"
+                  onChange={handleFileChange}
+                  multiple
+                />
+                {/* Microphone button for voice input */}
+                {isSTTSupported && (
+                  <Button
+                    type="button"
+                    variant={isListening ? "default" : "outline"}
+                    size="sm"
+                    onClick={handleMicrophoneToggle}
+                    disabled={isLoading}
+                    className={isListening
+                      ? "bg-red-500 hover:bg-red-600 text-white border-red-500"
+                      : ""
+                    }
+                    title={isListening ? "Stop recording" : "Start voice input"}
+                  >
+                    {isListening ? (
+                      <MicOff className="w-4 h-4" />
+                    ) : (
+                      <Mic className="w-4 h-4" />
+                    )}
+                  </Button>
+                )}
+              </div>
+              <div className="flex space-x-2">
+                {/* Plan Approval Buttons - Only show when in planning mode with approval required, or executing saved workflows */}
+                {((planningMode && state.approval_required) || ((state.metadata?.currentStage === 'validating' || state.status === 'planning_complete') && onAcceptPlan && state.metadata?.from_workflow)) ? (
+                  <>
+                    {/* Only show Modify button for non-saved workflows when in planning mode */}
+                    {planningMode && !state.metadata?.from_workflow && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={handleModifyPlan}
+                        className="border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-800"
+                      >
+                        Modify Plan
+                      </Button>
+                    )}
+
+                    {/* Show Accept button when approval is needed in planning mode or for saved workflows */}
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={handleAcceptAndExecute}
+                      className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white shadow-md"
+                    >
+                      Accept & Execute
+                    </Button>
+                  </>
+                ) : null}
+
+                <Button
+                  type="submit"
+                  disabled={
+                    isLoading ||
+                    (state.isWaitingForUser ? !userResponse.trim() : (!inputValue.trim() && attachedFiles.length === 0))
+                  }
+                >
+                  {isLoading
+                    ? 'Processing...'
+                    : (state.metadata?.currentStage === 'validating' || state.status === 'planning_complete')
+                      ? 'Modify'
+                      : state.isWaitingForUser
+                        ? 'Send Response'
+                        : 'Start Workflow'}
+                </Button>
+
+                {state.messages.length > 0 && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={resetConversation}
+                    disabled={isLoading}
+                  >
+                    Reset
+                  </Button>
+                )}
+              </div>
             </div>
-          </div>
-        </form>
+          </form>
         )}
       </div>
 
       {/* Plan Approval Modal - Disabled, now using chat interface buttons */}
       <PlanApprovalModal
         isOpen={false}
-        onClose={() => {}}
+        onClose={() => { }}
         onApprove={handleApprovePlan}
         onModify={handleModifyPlan}
         onCancel={handleCancelPlan}

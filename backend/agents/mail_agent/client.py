@@ -443,7 +443,7 @@ class GmailClient:
             except:
                 pass
                 
-            logger.info(f"Sending email (attachment count: {len(attachment_file_ids)}) params keys: {list(params.keys())}")
+            logger.info(f"Sending email (attachment count: {len(attachment_file_ids or [])}) params keys: {list(params.keys())}")
             
             # Use client.tools.execute for native file handling + version skip
             result = client.tools.execute(
