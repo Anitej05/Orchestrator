@@ -10,7 +10,12 @@ from schemas import (
     FileObject,
     AnalysisResult,
     EndpointDetail,
-    EndpointParameterDetail
+    EndpointDetail,
+    EndpointParameterDetail,
+    AgentResponse,
+    AgentResponseStatus,
+    OrchestratorMessage,
+    DialogueContext
 )
 # Lazy import to avoid jaxlib issues
 # from sentence_transformers import SentenceTransformer
@@ -1571,6 +1576,11 @@ def parse_prompt(state: State):
         6.  **Strict Schema:** Always output tasks in the required schema.
         7.  **Decompose Analytical Requests:** If the user's request requires multiple distinct capabilities or asks for analysis (e.g., 'find X and then analyze its effect on Y', 'compare X and Y'), you **MUST** break it down into a sequence of discrete tasks. For example, a request to 'see which news affected stocks' should be decomposed into two separate tasks: one for `get company stock history` and another for `get company news headlines`. The final analysis will be handled by a later step.
         8.  **Prioritize Specificity:** When creating a `task_description`, be as specific and detailed as possible. The description should be a clear, self-contained instruction for another agent. For example, instead of "find company news," write "Find the three most recent news articles about the company 'TechCorp' and extract their headlines, publication dates, and a brief summary of each." This level of detail is crucial for the next agent to perform its job accurately.
+        9.  **COMPLEX EMAIL WORKFLOWS - DELEGATE TO MAIL AGENT:** For multi-step email requests (e.g., "find emails from X, summarize them, and mark important ones"), create a SINGLE task delegated to the Mail Agent with the FULL user prompt in parameters. The Mail Agent can decompose complex requests internally and handle multi-step execution with dialogue. Use these parameters:
+            - `task_name`: "complex_email_workflow"
+            - `task_description`: The full user request
+            - `parameters`: {{"prompt": "FULL USER REQUEST HERE", "endpoint": "/execute"}}
+            This allows the agent to handle Search → Summarize → Label workflows autonomously.
 
         For each task you identify, provide:
         1. `task_name`: A short, descriptive name (e.g., "get_company_news", "summarize_document").
@@ -1617,6 +1627,25 @@ def parse_prompt(state: State):
             "user_expectations": {{}},
             "direct_response": null,
             "suggested_title": "AAPL News Headlines"
+        }}
+        ```
+        
+        Example 3 (Complex Email Workflow - DELEGATE TO MAIL AGENT): If the user prompt is "Find emails from John Smith, summarize them, and mark the important ones", your output should be:
+        ```json
+        {{
+            "tasks": [
+                {{
+                    "task_name": "complex_email_workflow",
+                    "task_description": "Find emails from John Smith, summarize them, and mark the important ones",
+                    "parameters": {{
+                        "prompt": "Find emails from John Smith, summarize them, and mark the important ones",
+                        "endpoint": "/execute"
+                    }}
+                }}
+            ],
+            "user_expectations": {{}},
+            "direct_response": null,
+            "suggested_title": "John Smith Email Summary"
         }}
         ```
 
@@ -1887,7 +1916,7 @@ async def agent_directory_search(state: State):
             return {"candidate_agents": {}, "parsing_error_feedback": "No active agents available in the system."}
         
         # Use LLM to select agents for each task
-        primary_llm = ChatGroq(model="llama-3.3-70b-versatile") if os.getenv("GROQ_API_KEY") else ChatCerebras(model="llama-3.3-70b")
+        primary_llm = ChatGroq(model="llama-3.3-70b-versatile") if os.getenv("GROQ_API_KEY") else ChatCerebras(model="gpt-oss-120b")
         fallback_llm = ChatNVIDIA(model="meta/llama-3.3-70b-instruct") if os.getenv("NVIDIA_API_KEY") else None
         
         # Build task list for the prompt
@@ -2316,6 +2345,53 @@ def validate_agent_endpoints(state: State):
     logger.info("Endpoint validation complete.")
     return {"task_agent_pairs": validated_pairs}
 
+
+def should_use_dialogue_mode(task_description: str, task_name: str = "") -> bool:
+    """
+    Detect if a task requires multi-turn dialogue mode.
+    
+    Triggers for dialogue mode:
+    - Task involves "search then act" pattern
+    - Task uses conditional language
+    - Task involves filtering/categorizing results
+    
+    Returns:
+        True if dialogue mode should be used
+    """
+    text = (task_description + " " + task_name).lower()
+    
+    # Conditional action patterns (search then selective action)
+    conditional_triggers = [
+        "and then delete", "and then archive", "and remove",
+        "delete only", "archive only", "star only",
+        "only the", "except the", "but not",
+        "if they", "when they", "which are",
+        "filter", "categorize", "sort by",
+        "promotional", "newsletters", "spam",
+        "find and delete", "search and archive",
+        "the ones that", "those that are"
+    ]
+    
+    # Check for multi-step email management patterns
+    email_action_words = ["delete", "archive", "star", "label", "mark"]
+    search_words = ["find", "search", "look for", "get"]
+    
+    has_search = any(word in text for word in search_words)
+    has_action = any(word in text for word in email_action_words)
+    has_conditional = any(trigger in text for trigger in conditional_triggers)
+    
+    # Trigger dialogue if: (search + action) or explicit conditional
+    if has_conditional:
+        logger.info(f"🔄 DIALOGUE MODE TRIGGERED: Conditional pattern detected in '{task_description[:50]}...'")
+        return True
+    
+    if has_search and has_action:
+        logger.info(f"🔄 DIALOGUE MODE TRIGGERED: Search+Action pattern detected in '{task_description[:50]}...'")
+        return True
+    
+    return False
+
+
 def plan_execution(state: State, config: RunnableConfig):
     '''
     Creates an initial execution plan or modifies an existing one if a replan is needed,
@@ -2644,13 +2720,13 @@ def plan_execution(state: State, config: RunnableConfig):
                                         logger.warning(f"🔧 CORRECTING HTTP METHOD: LLM suggested {task.primary.http_method} for {endpoint_path}, but agent config requires {correct_http_method}")
                                         task.primary.http_method = correct_http_method
                 
-                # AUTO-INJECT PARAMETERS: Fill in parameters from uploaded files BEFORE serialization
+                # AUTO-INJECT PARAMETERS: Fill in parameters from parsed tasks and uploaded files BEFORE serialization
                 uploaded_files = state.get("uploaded_files", [])
                 original_prompt = state.get('original_prompt', '')
                 logger.info(f"🔍 DEBUG: uploaded_files count={len(uploaded_files)}, response.plan exists={response.plan is not None}, plan length={len(response.plan) if response.plan else 0}")
                 
-                if uploaded_files and response.plan:
-                    logger.info(f"AUTO-INJECT: Processing {len(uploaded_files)} uploaded files for parameter injection")
+                if response.plan:
+                    # 1. Merge pre-extracted parameters from parsed_tasks (ALWAYS RUN)
                     for batch in response.plan:
                         for task in batch:
                             # Get the parsed task to access pre-extracted parameters
@@ -2661,9 +2737,14 @@ def plan_execution(state: State, config: RunnableConfig):
                                     task.primary.payload = {}
                                 task.primary.payload.update(parsed_task.parameters)
                                 logger.info(f"Using pre-extracted parameters for '{task.task_name}': {task.primary.payload}")
-                            
-                            # Use helper function to inject file parameters (consolidates duplicate logic)
-                            inject_file_parameters(task, uploaded_files, original_prompt, logger)
+
+                    # 2. Inject file parameters if files exist
+                    if uploaded_files:
+                        logger.info(f"AUTO-INJECT: Processing {len(uploaded_files)} uploaded files for parameter injection")
+                        for batch in response.plan:
+                            for task in batch:
+                                # Use helper function to inject file parameters (consolidates duplicate logic)
+                                inject_file_parameters(task, uploaded_files, original_prompt, logger)
                 
                 serializable_plan = [[task.model_dump(mode='json') for task in batch] for batch in (response.plan or [])]
                 output_state = {
@@ -2936,6 +3017,170 @@ def validate_plan_for_execution(state: State):
     print(f"!!! VALIDATION ENTRY !!!")
     logger.info("Performing dynamic validation of the execution plan...")
     
+    # --- RESUME LOGIC: Reactivate paused task if plan is empty ---
+    task_plan_dicts = state.get("task_plan", [])
+    pending_input = state.get("pending_user_input", False)
+    completed_tasks = state.get("completed_tasks", [])
+    
+    # If we are resuming (pending_input=True) but the plan is empty, 
+    # it means the paused task was marked as 'completed' in the previous turn.
+    # We must find it and put it back into the plan to re-execute it.
+    if (not task_plan_dicts or not task_plan_dicts[0]) and pending_input:
+        logger.info("RESUME: Found pending user input with empty plan - attempting to resume paused task.")
+        
+        # Find the task that requested input (search from newest to oldest)
+        paused_task_data = None
+        for task in reversed(completed_tasks):
+            # Safe access for both Pydantic models and dicts
+            if isinstance(task, dict):
+                res = task.get("result", {})
+                t_name = task.get("task_name")
+            else:
+                # Assume Pydantic model
+                res = getattr(task, "result", {})
+                t_name = getattr(task, "task_name", None)
+            
+            # Check for result dict vs object
+            if not isinstance(res, dict):
+                # If result is an object (e.g. Node Output), try to convert or access
+                if hasattr(res, "dict"):
+                    res = res.dict()
+                elif hasattr(res, "__dict__"):
+                    res = res.__dict__
+                else:
+                    res = {}
+            
+            if res.get("pending_user_input"):
+                # Normalize to dict for downstream use
+                paused_task_data = {"task_name": t_name, "result": res}
+                break
+        
+        if paused_task_data:
+            task_name = paused_task_data.get("task_name")
+            logger.info(f"RESUME: Re-activating paused task '{task_name}'")
+            
+            # We need to reconstruct a PlannedTask.
+            # We can use the 'task_agent_pairs' to find the original agent assignment.
+            task_agent_pairs = state.get("task_agent_pairs", [])
+            # task_agent_pairs might be objects too
+            matched_pair = None
+            for p in task_agent_pairs:
+                p_name = p.get("task_name") if isinstance(p, dict) else getattr(p, "task_name", None)
+                if p_name == task_name:
+                    matched_pair = p
+                    break
+            
+            if matched_pair:
+                # Reconstruct the PlannedTask from the Pair info
+                if isinstance(matched_pair, dict):
+                    primary_agent = matched_pair.get("primary", {})
+                else:
+                    primary_agent = getattr(matched_pair, "primary", {})
+                    if hasattr(primary_agent, "dict"):
+                        primary_agent = primary_agent.dict()
+                
+                # We need the task description. We can try to find it in parsed_tasks
+                parsed_tasks = state.get("parsed_tasks", [])
+                task_desc = "Resumed Task"
+                for pt in parsed_tasks:
+                    pt_name = pt.get("task_name") if isinstance(pt, dict) else getattr(pt, "task_name", None)
+                    if pt_name == task_name:
+                        task_desc = pt.get("task_description") if isinstance(pt, dict) else getattr(pt, "task_description", "")
+                        break
+                
+                # Create the task object
+                reactivated_task = {
+                    "task_name": task_name,
+                    "task_description": task_desc,
+                    "parameters": None, # Will be re-generated or used from existing
+                    "primary": {
+                        "id": primary_agent.get("id"),
+                        "http_method": "POST", # Default assumption, or get from endpoint
+                        "endpoint": "/execute", # Default, ideally should match original
+                        "payload": {} 
+                    },
+                    "fallbacks": [],
+                    "route_type": "agent"
+                }
+                
+                # Correct the endpoint/method if possible from the pair
+                # The pair object is complex, but let's trust the defaults or try to get specific if needed.
+                # Actually, 'Plan' contains the full info.
+                # But since the plan is empty, we must rely on 'task_agent_pairs'.
+                
+                logger.info(f"RESUME: Reactivated task plan: {reactivated_task}")
+                
+                # Return state update: Set the task plan to contain this single batch
+                return {
+                    "task_plan": [[reactivated_task]],
+                    "replan_reason": None,
+                    "pending_user_input": True # Keep it True so run_agent picks it up
+                }
+            else:
+                 logger.warning(f"RESUME: Could not find agent pair for paused task '{task_name}'. Cannot resume.")
+        else:
+             logger.warning("RESUME: Could not find a task that requested input in completed_tasks.")
+
+    # --- DIALOGUE MODE DETECTION ---
+    # Check if the original prompt requires multi-turn dialogue with an agent
+    original_prompt = state.get('original_prompt', '')
+    task_plan_dicts = state.get("task_plan", [])
+    
+    if task_plan_dicts and task_plan_dicts[0]:
+        first_task = task_plan_dicts[0][0]
+        task_description = first_task.get('task_description', '') if isinstance(first_task, dict) else ''
+        task_name = first_task.get('task_name', '') if isinstance(first_task, dict) else ''
+        
+        # Check if this task needs dialogue mode
+        if should_use_dialogue_mode(original_prompt) or should_use_dialogue_mode(task_description, task_name):
+            logger.info("🔄 DIALOGUE MODE: Task requires multi-turn agent conversation")
+            
+            # Get the agent info for this task
+            task_agent_pairs = state.get('task_agent_pairs', [])
+            if task_agent_pairs:
+                pair = task_agent_pairs[0]
+                agent = pair.get('primary', {}) if isinstance(pair, dict) else {}
+                agent_id = agent.get('id', 'mail_agent')
+                
+                # Determine agent base URL from connection_config or default
+                connection_config = agent.get('connection_config', {})
+                agent_base_url = connection_config.get('base_url', 'http://localhost:8002')
+                
+                # Get available endpoints for the LLM to use
+                available_endpoints = [
+                    {"endpoint": ep.get('endpoint'), "http_method": ep.get('http_method'), "description": ep.get('description')}
+                    for ep in agent.get('endpoints', [])
+                ]
+                
+                # Create initial action from the first planned task
+                primary = first_task.get('primary', {})
+                initial_action = {
+                    "endpoint": primary.get('endpoint', '/search'),
+                    "http_method": primary.get('http_method', 'POST'),
+                    "payload": primary.get('payload', {}),
+                    "action_description": f"Execute: {task_name}"
+                }
+                
+                # Build the dialogue task
+                dialogue_task = {
+                    "goal": original_prompt,
+                    "agent_id": agent_id,
+                    "agent_base_url": agent_base_url,
+                    "available_endpoints": available_endpoints,
+                    "initial_action": initial_action,
+                    "max_turns": 5,
+                    "context": {"task_description": task_description}
+                }
+                
+                logger.info(f"🔄 DialogueTask created for agent '{agent_id}' with goal: {original_prompt[:100]}...")
+                
+                return {
+                    "needs_dialogue_mode": True,
+                    "dialogue_task": dialogue_task,
+                    "replan_reason": None,
+                    "pending_user_input": False
+                }
+    
     # --- ARTIFACT INTEGRATION: Summarize completed tasks to reduce context size ---
     completed_tasks_for_context = state.get('completed_tasks', [])
     if ARTIFACT_INTEGRATION_ENABLED and completed_tasks_for_context:
@@ -3091,6 +3336,43 @@ def validate_plan_for_execution(state: State):
         logger.error(f"Plan validation LLM call failed: {e}. Assuming plan is ready to avoid stalling.")
         return {"replan_reason": None, "pending_user_input": False, "question_for_user": None}
 
+
+def route_after_validation(state: State):
+    """
+    Route after validate_plan_for_execution based on validation results.
+    
+    Routes to:
+    - agent_dialogue_loop: If needs_dialogue_mode is True (multi-turn conversation required)
+    - execute_batch: If validation passed (normal execution)
+    - plan_execution: If replan is needed
+    - ask_user: If user input is required
+    """
+    needs_dialogue = state.get("needs_dialogue_mode", False)
+    replan_reason = state.get("replan_reason")
+    pending_user = state.get("pending_user_input", False)
+    
+    logger.info(f"=== ROUTE_AFTER_VALIDATION: needs_dialogue={needs_dialogue}, replan={bool(replan_reason)}, pending_user={pending_user} ===")
+    print(f"!!! ROUTE_AFTER_VALIDATION: needs_dialogue={needs_dialogue}, replan={bool(replan_reason)}, pending_user={pending_user} !!!")
+    
+    # Priority 1: Dialogue mode takes precedence (new multi-turn system)
+    if needs_dialogue:
+        logger.info("🔄 Routing to agent_dialogue_loop for multi-turn conversation")
+        return "agent_dialogue_loop"
+    
+    # Priority 2: Replan needed
+    if replan_reason:
+        logger.info(f"Routing to plan_execution for replan: {replan_reason}")
+        return "plan_execution"
+    
+    # Priority 3: User input required
+    if pending_user:
+        logger.info("Routing to ask_user for required input")
+        return "ask_user"
+    
+    # Default: Execute the batch
+    logger.info("Validation passed. Routing to execute_batch")
+    return "execute_batch"
+
 async def execute_mcp_agent(planned_task: PlannedTask, agent_details: AgentCard, state: State, config: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     Execute an MCP agent by calling its tools via the MCP protocol.
@@ -3205,7 +3487,70 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
     '''
     logger.info(f"Running agent '{agent_details.name}' for task: '{planned_task.task_name}' (force_execute={force_execute})")
     
-    # Construct full URL from base_url + endpoint
+    # --- RESUMPTION CHECK ---
+    # Check if we are resuming a paused dialogue with this agent
+    dialogue_contexts = state.get('dialogue_contexts', {})
+    user_response = state.get('user_response')
+    agent_id = agent_details.id
+    
+    # Check if we have a context for this agent AND a user response (meaning we just resumed)
+    # The key in dialogue_contexts is usually the task_id or agent_id
+    resuming_context = dialogue_contexts.get(agent_id) or dialogue_contexts.get(f"task-{planned_task.task_name}")
+    
+    logger.info(f"🔍 [RESUME_DEBUG] agent_id={agent_id}, user_response={user_response is not None}, has_context={resuming_context is not None}")
+    logger.info(f"🔍 [RESUME_DEBUG] dialogue_contexts keys={list(dialogue_contexts.keys())}")
+    if resuming_context:
+        logger.info(f"🔍 [RESUME_DEBUG] Found context for task: {resuming_context.get('task_id')}")
+    else:
+        logger.info(f"🔍 [RESUME_DEBUG] Context NOT found for agent_id='{agent_id}' or task='task-{planned_task.task_name}'")
+    
+    if user_response and resuming_context:
+        logger.info(f"⚡ RESUMING DIALOGUE for task '{planned_task.task_name}' with user input")
+        
+        # Switch to /continue endpoint
+        # Assume base_url is properly set in agent_details
+        connection_config = agent_details.connection_config
+        base_url = connection_config.get('base_url', '') if connection_config else ''
+        continue_url = f"{base_url.rstrip('/')}/continue"
+        
+        # Override execution to use /continue
+        headers = connection_config.get('headers', {}) if connection_config else {}
+        if os.getenv("OPENAI_API_KEY"):
+             headers["Authorization"] = f"Bearer {os.getenv('OPENAI_API_KEY')}"
+        
+        # Construct OrchestratorMessage for continue
+        # Note: We construct the raw payload expected by the continue endpoint
+        continue_payload = {
+            "type": "continue",
+            "answer": user_response,
+            "payload": {"task_id": resuming_context.get("task_id")}
+        }
+        
+        logger.info(f"📤 Sending /continue to {continue_url}")
+        
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(continue_url, json=continue_payload, headers=headers)
+                response.raise_for_status()
+                result = response.json()
+                
+                logger.info(f"✅ /continue successful")
+                
+                # Clear the used response to prevent re-use
+                # This needs to be handled by the caller or we return a flag
+                
+                # Same result processing as normal execution
+                return {
+                    "task_name": planned_task.task_name,
+                    "result": result,
+                    "status_code": response.status_code,
+                    "resumed": True # Flag to indicate resumption
+                }
+        except Exception as e:
+            logger.error(f"Failed to resume task: {e}")
+            return {"task_name": planned_task.task_name, "result": f"Error resuming: {str(e)}", "status_code": 500}
+    
+    # --- NORMAL EXECUTION ---
     endpoint_path = str(planned_task.primary.endpoint)
     # CRITICAL FIX: Safely access connection_config which may be None or not a dict
     connection_config = agent_details.connection_config
@@ -3700,6 +4045,10 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
             3. If param_type is "integer", the value MUST be a JSON number
             4. If param_type is "boolean", the value MUST be true or false (no quotes)
             
+            **NATURAL LANGUAGE PARAMETERS:**
+            - If endpoint is /search or description mentions "natural language", pass the user's query as-is (don't convert to technical syntax)
+            - The agent internally handles conversion to the correct format (e.g., Mail Agent converts natural language to Gmail search syntax)
+            
             High-Level Task: "{planned_task.task_description}"
             Conversation History:
             {history}
@@ -4061,6 +4410,39 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                     logger.error(f"Agent '{agent_details.name}' returned success=false: {agent_error}")
                     failed_attempts.append({"payload": payload, "result": str(agent_error)})
                     continue
+
+                # **BIDIRECTIONAL DIALOGUE: Detect NEEDS_INPUT status from AgentResponse**
+                # If agent returns status='NEEDS_INPUT', pause workflow and relay question to user
+                # NOTE: Check both uppercase (Enum name) and lowercase (Enum value) to be safe
+                agent_status = result.get('status')
+                if isinstance(result, dict) and agent_status in ['NEEDS_INPUT', 'needs_input']:
+                    agent_question = result.get('question', 'The agent needs more information.')
+                    question_type = result.get('question_type', 'text')
+                    options = result.get('options', [])
+                    dialogue_context = result.get('context', {})
+                    
+                    logger.info(f"⏸️ [AGENT PAUSE] Agent '{agent_details.name}' needs user input: {agent_question}")
+                    logger.info(f"   Question type: {question_type}, Options: {options}")
+                    
+                    # Return result with pending_user_input flag for execute_batch to detect
+                    return {
+                        "task_name": planned_task.task_name,
+                        "result": {
+                            "pending_user_input": True,
+                            "question_for_user": agent_question,
+                            "question_type": question_type,
+                            "options": options,
+                            "dialogue_contexts": {
+                                agent_details.id: {
+                                    "task_id": dialogue_context.get("task_id") or f"task-{planned_task.task_name}",
+                                    "original_context": dialogue_context
+                                }
+                            },
+                            "needs_dialogue_mode": True
+                        },
+                        "raw_response": result,
+                        "status": "NEEDS_INPUT"
+                    }
 
                 # **RELAY AGENT LOGS TO ORCHESTRATOR**
                 logger.info(f"")
@@ -4770,6 +5152,16 @@ async def execute_batch(state: State, config: RunnableConfig):
                 # This will be handled by the orchestrator's confirmation flow
         else:
             logger.info(f"ℹ️ No canvas display from task '{task_name}'")
+
+        # --- BIDIRECTIONAL DIALOGUE HANDLING ---
+        # Check if the agent requested user input (e.g. clarification question)
+        task_result = res.get('result', {})
+        if isinstance(task_result, dict) and task_result.get('pending_user_input'):
+            logger.info(f"⏸️  Task '{task_name}' requested user input: {task_result.get('question_for_user')}")
+            pending_agent_input_found = True
+            pending_agent_question = task_result.get('question_for_user')
+            pending_dialogue_contexts = task_result.get('dialogue_contexts')
+            pending_needs_dialogue = task_result.get('needs_dialogue_mode')
         
         # --- ARTIFACT INTEGRATION: Compress large task results ---
         task_result = res.get('result', {})
@@ -4892,8 +5284,29 @@ async def execute_batch(state: State, config: RunnableConfig):
         "canvas_displays": canvas_displays,  # Include canvas displays from agents
         "pending_confirmation": requires_confirmation,
         "pending_confirmation_task": pending_confirmation_task,
-        "eval_status": confirmation_eval_status if requires_confirmation else None  # Set awaiting_confirmation or clear
+        "eval_status": confirmation_eval_status if requires_confirmation else None,  # Set awaiting_confirmation or clear
+        "user_response": None,  # Clear user response as it should have been consumed by this batch
+        # CRITICAL: Clear pending_user_input when batch completes normally (will be set True later if NEEDS_INPUT)
+        "pending_user_input": False,
+        "question_for_user": None,
+        "dialogue_contexts": {},
+        "needs_dialogue_mode": False
     }
+    
+    # --- BIDIRECTIONAL DIALOGUE STATE MERGE ---
+    if 'pending_agent_input_found' in locals() and pending_agent_input_found:
+        logger.info(f"⏸️  Halting batch execution for agent question: {pending_agent_question}")
+        output_state["pending_user_input"] = True
+        output_state["question_for_user"] = pending_agent_question
+        if pending_dialogue_contexts:
+            # Merge with existing contexts if any
+            existing_contexts = state.get('dialogue_contexts', {})
+            output_state["dialogue_contexts"] = {**existing_contexts, **pending_dialogue_contexts}
+        if pending_needs_dialogue:
+            output_state["needs_dialogue_mode"] = True
+        
+        # Set eval_status to avoid evaluation node interference
+        output_state["eval_status"] = "awaiting_user_input"
 
     # Add new uploaded files if any were registered
     if 'new_uploaded_files' in locals() and new_uploaded_files:
@@ -4944,6 +5357,15 @@ def evaluate_agent_response(state: State):
     print(f"!!! EVALUATE: latest_completed_tasks in state: {'latest_completed_tasks' in state} !!!")
     print(f"!!! EVALUATE: pending_confirmation={state.get('pending_confirmation')}, canvas_displays={len(state.get('canvas_displays', []))} !!!")
     
+    # BIDIRECTIONAL DIALOGUE FIX: Skip evaluation if we are already waiting for user input
+    # (e.g. from execute_batch handling a needs_input signal)
+    if state.get('pending_user_input'):
+        print(f"!!! EVALUATE: Skipping evaluation - pending_user_input is True !!!")
+        logger.info("Skipping evaluation because pending_user_input is already set")
+        return {
+            "eval_status": "awaiting_user_input"
+        }
+
     # CANVAS CONFIRMATION FIX: Skip evaluation if confirmation is pending
     if state.get('pending_confirmation'):
         print(f"!!! EVALUATE: Skipping evaluation - confirmation pending !!!")
@@ -5951,6 +6373,370 @@ async def collect_agent_metrics(completed_tasks: List[Dict[str, Any]]) -> Dict[s
     return result
 
 
+
+async def _answer_agent_question(llm, question: str, options: List[str] | None, goal: str, history: List[Dict]) -> Dict[str, Any]:
+    """
+    Asks the LLM to answer a clarifying question from an agent based on context.
+    """
+    from schemas import AgentResponse
+    
+    history_text = "\n".join([f"Turn {t.get('turn')}: {t.get('action')} -> Result: {str(t.get('result_preview', ''))[:200]}" for t in history])
+    
+    prompt = f"""
+    The agent has paused execution to ask a clarifying question.
+    
+    GOAL: {goal}
+    
+    PAST INTERACTION HISTORY:
+    {history_text}
+    
+    AGENT QUESTION: {question}
+    OPTIONS: {options}
+    
+    Can you answer this question based on the GOAL and HISTORY?
+    If yes, provide the answer.
+    If no (or if you need user input), say "CANNOT_ANSWER".
+    
+    Return JSON:
+    {{
+        "can_answer": true/false,
+        "answer": "your answer here or reason why not"
+    }}
+    """
+    
+    messages = [
+        SystemMessage(content="You are an intelligent orchestrator helping an agent complete a task."),
+        HumanMessage(content=prompt)
+    ]
+    
+    try:
+        response = await llm.ainvoke(messages)
+        content = str(response.content).strip()
+        # Remove potential markdown code blocks
+        if "```" in content:
+            content = content.split("```json")[-1].split("```")[0].strip()
+        if content.startswith("```"):
+             content = content.strip("`")
+             
+        data = json.loads(content)
+        return data
+    except Exception as e:
+        logger.error(f"Error answering agent question: {e}")
+        return {"can_answer": False, "answer": f"Error: {str(e)}"}
+
+# ==================== MULTI-TURN AGENT DIALOGUE ====================
+
+async def agent_dialogue_loop(state: State, config: RunnableConfig):
+    """
+    Multi-turn dialogue with a single agent to complete complex tasks.
+    Supports user interruption and resumption.
+    """
+    from schemas import DialogueTask, DialogueAction, DialogueNextStep, OrchestratorMessage
+    
+    logger.info("=== AGENT_DIALOGUE_LOOP: Starting multi-turn conversation ===")
+    
+    dialogue_task_dict = state.get('dialogue_task')
+    if not dialogue_task_dict:
+        logger.error("No dialogue_task in state")
+        return {"dialogue_result": {"error": "No dialogue task specified"}}
+    
+    dialogue_task = DialogueTask.model_validate(dialogue_task_dict)
+    task_id = f"dial-{state.get('thread_id', 'unknown')}-{dialogue_task.agent_id}"
+    
+    logger.info(f"Goal: {dialogue_task.goal}")
+    
+    # LLM for analysis
+    primary_llm = ChatCerebras(model="gpt-oss-120b")
+    fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
+    
+    # --- RESUMPTION LOGIC ---
+    # Check if we are resuming from a user pause
+    saved_state = state.get("dialogue_contexts", {}).get(task_id, {})
+    user_response = state.get("user_response")
+    
+    if saved_state and user_response and saved_state.get("status") == "paused_for_user":
+        logger.info(f"▶️ Resuming dialogue with User Input: {user_response}")
+        dialogue_history = saved_state.get("history", [])
+        start_turn = saved_state.get("turn", 0)
+        current_result = None # specific result not needed for resume, we jump to continue
+        is_resuming = True
+        
+        # Consumed the user response
+        # Note: We don't clear it here, the graph transition usually handles that or we overwrite results
+    else:
+        logger.info("🆕 Starting new dialogue session")
+        dialogue_history = []
+        start_turn = 0
+        current_result = None
+        is_resuming = False
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        
+        # If resuming, we need to execute the CONTINUE action immediately before entering the loop
+        if is_resuming:
+             logger.info("⚡ Executing User-Driven /continue")
+             continue_msg = OrchestratorMessage(
+                type="continue",
+                answer=user_response,
+                payload={"task_id": saved_state.get("agent_task_id")}
+             )
+             try:
+                 continue_url = f"{dialogue_task.agent_base_url.rstrip('/')}/continue"
+                 response = await client.post(continue_url, json=continue_msg.model_dump())
+                 response.raise_for_status()
+                 current_result = response.json()
+                 
+                 dialogue_history.append({
+                    "turn": start_turn,
+                    "action": "User Provided Input",
+                    "result": f"User answered: {user_response}",
+                    "follow_up": "Resumed execution"
+                 })
+             except Exception as e:
+                 logger.error(f"Failed to resume task: {e}")
+                 return {"dialogue_result": {"error": f"Failed to resume: {str(e)}"}}
+
+        
+        # MAIN LOOP
+        for turn in range(start_turn, dialogue_task.max_turns):
+            logger.info(f"--- Dialogue Turn {turn + 1}/{dialogue_task.max_turns} ---")
+            
+            # Determine which action to execute
+            if turn == 0 and not is_resuming:
+                action = dialogue_task.initial_action
+            elif is_resuming and turn == start_turn:
+                # If we just resumed, we typically want to Analyze the result of the resumption
+                # So we skip direct action selection and go to Analysis in next iteration?
+                # Actually, we need to analyze 'current_result' (which is the output of /continue)
+                
+                # We can treat the output of /continue as the input for the next decision
+                # So we fall through to the LLM decision block below
+                pass 
+            
+            # Decision Block (Run for all turns except truly initial one)
+            if turn > 0 or (is_resuming and turn == start_turn):
+                # Use LLM to decide next action based on current results
+                next_step = await _analyze_and_decide_next_step(
+                    primary_llm, fallback_llm,
+                    dialogue_task.goal,
+                    dialogue_history,
+                    current_result,
+                    dialogue_task.available_endpoints
+                )
+                
+                if next_step.is_complete:
+                    logger.info(f"✅ Dialogue complete: {next_step.reasoning}")
+                    return {
+                        "dialogue_result": {
+                            "success": True,
+                            "summary": next_step.final_summary or next_step.reasoning,
+                            "turns": turn + 1,
+                            "history": dialogue_history
+                        },
+                        "needs_dialogue_mode": False
+                    }
+                
+                if not next_step.next_action:
+                    logger.error("LLM returned incomplete but no next action")
+                    break
+                    
+                action = next_step.next_action
+            
+            # Reset resuming flag after first iteration
+            is_resuming = False
+
+            # Execute the action
+            logger.info(f"Executing: {action.http_method} {action.endpoint}")
+            payload_log = json.dumps(action.payload, default=str)
+            logger.info(f"Payload: {payload_log[:500]}")
+            
+            try:
+                url = f"{dialogue_task.agent_base_url.rstrip('/')}{action.endpoint}"
+                
+                # Inject task_id
+                agent_task_id = f"{task_id}-{turn}" 
+                if "task_id" not in action.payload:
+                    action.payload["task_id"] = agent_task_id
+                else:
+                    agent_task_id = action.payload["task_id"]
+
+                if action.http_method.upper() == "GET":
+                    response = await client.get(url, params=action.payload)
+                else:
+                    response = await client.post(url, json=action.payload)
+                
+                response.raise_for_status()
+                current_result = response.json()
+                
+                # --- BIDIRECTIONAL PROTOCOL HANDLING ---
+                if isinstance(current_result, dict) and current_result.get("status") == "needs_input":
+                    question = current_result.get("question")
+                    logger.info(f"🤔 Agent paused & asked: {question}")
+                    
+                    # 1. Try LLM Auto-Answer
+                    answer_analysis = await _answer_agent_question(
+                        primary_llm, 
+                        question, 
+                        current_result.get("options"), 
+                        dialogue_task.goal, 
+                        dialogue_history
+                    )
+                    
+                    if answer_analysis.get("can_answer"):
+                        # ... (Existing Auto-Answer Logic) ...
+                        answer = answer_analysis["answer"]
+                        logger.info(f"💡 Orchestrator answering: {answer}")
+                        dialogue_history.append({
+                            "turn": turn + 1,
+                            "action": action.action_description,
+                            "result": f"Agent asked: {question}",
+                            "follow_up": f"Orchestrator answered: {answer}"
+                        })
+                        
+                        continue_msg = OrchestratorMessage(type="continue", answer=answer, payload={"task_id": agent_task_id})
+                        response = await client.post(f"{dialogue_task.agent_base_url.rstrip('/')}/continue", json=continue_msg.model_dump())
+                        response.raise_for_status()
+                        current_result = response.json()
+                        logger.info("✅ Resumed successfully via LLM")
+                        
+                    else:
+                        # 2. ESCALATE TO USER
+                        logger.info(f"🤷‍♂️ Orchestrator cannot answer. Escalating to user: {question}")
+                        
+                        # Save State to allow resumption
+                        dialogue_context = {
+                            "task_id": task_id,
+                            "history": dialogue_history + [{
+                                "turn": turn + 1, 
+                                "action": action.action_description, 
+                                "result": f"Agent asked: {question} (Waiting for User)"
+                            }],
+                            "turn": turn + 1, # Resume at next turn
+                            "agent_task_id": agent_task_id,
+                            "status": "paused_for_user"
+                        }
+                        
+                        # Return to Graph with User Request
+                        return {
+                            "pending_user_input": True,
+                            "question_for_user": f"The Agent needs help: {question}\nOptions: {current_result.get('options') or 'N/A'}",
+                            "dialogue_contexts": {task_id: dialogue_context},
+                            # Keep needs_dialogue_mode active so we route back here on resume?
+                            # IMPORTANT: The graph routing needs to know to come back to agent_dialogue_loop
+                            "needs_dialogue_mode": True 
+                        }
+
+                # ---------------------------------------
+                
+                # Record in history (Final result of the turn)
+                dialogue_history.append({
+                    "turn": turn + 1,
+                    "action": action.action_description,
+                    "endpoint": action.endpoint,
+                    "payload": action.payload,
+                    "result_preview": str(current_result)[:1000]
+                })
+
+            except Exception as e:
+                logger.error(f"Action failed: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                return {"dialogue_result": {"error": f"Step failed: {str(e)}"}}
+
+        
+        # Max turns reached
+        logger.warning(f"Max dialogue turns ({dialogue_task.max_turns}) reached")
+        return {
+            "dialogue_result": {
+                "success": False,
+                "error": "Max dialogue turns reached without completing goal",
+                "history": dialogue_history
+            },
+            "needs_dialogue_mode": False
+        }
+
+
+async def _analyze_and_decide_next_step(
+    primary_llm, fallback_llm,
+    goal: str,
+    history: List[Dict],
+    current_result: Any,
+    available_endpoints: List[Dict]
+) -> 'DialogueNextStep':
+    """
+    LLM-powered decision making for the dialogue loop.
+    Analyzes current results and decides what to do next.
+    """
+    from schemas import DialogueNextStep, DialogueAction
+    
+    # Format endpoints for prompt
+    endpoints_str = json.dumps(available_endpoints, indent=2)
+    
+    # Format history for prompt
+    history_str = ""
+    for h in history:
+        history_str += f"\n  Turn {h.get('turn')}: {h.get('action')}"
+        if h.get('error'):
+            history_str += f" → ERROR: {h.get('error')}"
+        else:
+            history_str += f" → Success"
+    
+    # Current result (truncated for safety)
+    result_str = json.dumps(current_result, default=str)
+    if len(result_str) > 5000:
+        result_str = result_str[:5000] + "... [truncated]"
+    
+    prompt = f'''
+    You are an intelligent agent orchestrator analyzing the results of a multi-step task.
+    
+    **USER'S GOAL:** "{goal}"
+    
+    **DIALOGUE HISTORY:** {history_str if history_str else "No previous actions"}
+    
+    **CURRENT RESULT:**
+    {result_str}
+    
+    **AVAILABLE ENDPOINTS:**
+    {endpoints_str}
+    
+    **YOUR TASK:**
+    Analyze the current result and decide:
+    1. Is the user's goal achieved? If yes, set is_complete=true and provide a final_summary.
+    2. If not complete, what is the next action to take?
+    
+    **IMPORTANT RULES:**
+    - For searches: Look at the results to identify which items match the user's criteria
+    - For management actions: Use specific IDs from search results, NOT general categories
+    - Be precise: If user wants to "delete promotional emails", first identify WHICH emails are promotional from the search results, then delete those specific IDs
+    - Only use endpoints from the available list
+    
+    Respond with a JSON object matching this schema:
+    {{
+        "is_complete": boolean,
+        "reasoning": "Why you made this decision",
+        "next_action": {{  // Only if is_complete is false
+            "endpoint": "/endpoint_path",
+            "http_method": "POST",
+            "payload": {{}},
+            "action_description": "Human-readable description"
+        }},
+        "final_summary": "Summary for user (only if is_complete is true)"
+    }}
+    '''
+    
+    try:
+        response = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, DialogueNextStep)
+        return response
+    except Exception as e:
+        logger.error(f"LLM analysis failed: {e}")
+        # Return a "complete" response to avoid infinite loop
+        return DialogueNextStep(
+            is_complete=True,
+            reasoning=f"Analysis failed: {str(e)}",
+            final_summary="The operation could not be completed due to an analysis error."
+        )
+
+
 def generate_final_response(state: State):
     """
     UNIFIED FINAL RESPONSE: Generates both text and canvas in a single optimized call.
@@ -6563,7 +7349,7 @@ def generate_conversation_title(prompt: str, messages: List = None) -> str:
     """
     try:
         # Use Cerebras for fast title generation
-        llm = ChatCerebras(model="llama3.1-8b", temperature=0.3)
+        llm = ChatCerebras(model="gpt-oss-120b", temperature=0.3)
         
         # Get first user message if prompt is empty
         if not prompt and messages:
@@ -6765,6 +7551,12 @@ def route_after_validation(state: State):
         logger.info("Replan needed. Routing back to plan_execution.")
         return "plan_execution"
     if pending_user_input:
+        # RESUME LOGIC: If we have a pending input flag BUT the user has provided a response,
+        # we should proceed to execution (resume), not ask again.
+        if state.get("user_response"):
+            logger.info("Pending input flag is set, but user_response is present. Resuming execution flow.")
+            return "execute_batch"
+            
         logger.info("Pending user input. Routing to ask_user.")
         return "ask_user"
     else:
@@ -6924,6 +7716,12 @@ def route_after_load_history(state: State):
         logger.info("Pre-approved workflow detected. Skipping orchestration and jumping to validation.")
         return "validate_plan_for_execution"
     
+    # Resume flow: If we are waiting for user input, resume execution
+    if state.get("pending_user_input"):
+        print("!!! PENDING USER INPUT DETECTED = RESUME EXECUTION !!!")
+        logger.info("Pending user input detected in history. Resuming execution flow.")
+        return "validate_plan_for_execution"
+    
     # Otherwise, proceed with normal orchestration flow
     print("!!! NO PRE-APPROVED PLAN = PROCEED TO ANALYSIS !!!")
     logger.info("No pre-approved plan. Proceeding to analyze_request.")
@@ -7043,6 +7841,7 @@ builder.add_node("evaluate_agent_response", evaluate_agent_response)  # OPTIMIZE
 builder.add_node("ask_user", ask_user)
 builder.add_node("generate_final_response", generate_final_response)  # OPTIMIZED: Unified text + canvas
 builder.add_node("execute_confirmed_task", execute_confirmed_task)  # Canvas confirmation flow
+builder.add_node("agent_dialogue_loop", agent_dialogue_loop)  # NEW: Multi-turn agent conversations
 # Note: render_canvas_output node removed - now integrated into generate_final_response
 
 builder.add_edge(START, "load_history")
@@ -7194,7 +7993,8 @@ builder.add_conditional_edges("agent_directory_search", route_after_search, {
 builder.add_conditional_edges("validate_plan_for_execution", route_after_validation, {
     "execute_batch": "execute_batch",
     "plan_execution": "plan_execution",
-    "ask_user": "ask_user"
+    "ask_user": "ask_user",
+    "agent_dialogue_loop": "agent_dialogue_loop"  # NEW: Multi-turn dialogue routing
 })
 
 builder.add_conditional_edges("evaluate_agent_response", should_continue_or_finish, {
@@ -7206,6 +8006,9 @@ builder.add_conditional_edges("evaluate_agent_response", should_continue_or_fini
 
 # After confirmed task execution, go to evaluation
 builder.add_edge("execute_confirmed_task", "evaluate_agent_response")
+
+# After dialogue loop completes, generate final response
+builder.add_edge("agent_dialogue_loop", "generate_final_response")
 
 # Compile the graph
 graph = builder.compile()

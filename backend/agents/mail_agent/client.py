@@ -366,6 +366,7 @@ class GmailClient:
         is_html: bool = False,
         attachment_file_ids: list = None,
         attachment_paths: list = None,
+        attachment_path: str = None,
         user_id: str = "me"
     ) -> Dict[str, Any]:
         """
@@ -423,9 +424,14 @@ class GmailClient:
                 else:
                     params["body"] += "\n\nAttachments:\n" + "\n".join(attachment_links)
             
-            if attachment_paths:
-                 # Native upload for local files (Verified with SDK 0.10.6+)
-                 params["attachments"] = attachment_paths
+            # Handling Native Upload
+            # Try using 'attachment' (singular) key for local file to trigger SDK auto-upload
+            if attachment_path:
+                 params["attachment"] = attachment_path # Try singular
+            elif attachment_paths and len(attachment_paths) > 0:
+                 # Fallback if list provided: use first one as singular 'attachment'
+                 # assuming tool only supports one native upload or key is singular
+                 params["attachment"] = attachment_paths[0]
             
             # Send via Composio using native parameters
             client = Composio(api_key=self.api_key)

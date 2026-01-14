@@ -103,6 +103,18 @@ def _is_spreadsheet_creation(task_name: str, task_desc: str, combined: str) -> b
 
 def _is_document_creation(task_name: str, task_desc: str, combined: str) -> bool:
     """Check if task is document creation."""
+    # EXCLUSION: Email/Mail Agent tasks should NEVER be creation tasks
+    email_keywords = ['email', 'mail', 'mailbox', 'inbox', 'gmail', 'search_emails', 
+                      'summarize_emails', 'send_email', 'draft_reply', 'fetch_emails']
+    if any(keyword in combined for keyword in email_keywords):
+        return False
+    
+    # EXCLUSION: Search/analysis tasks should NOT be creation tasks
+    analysis_keywords = ['search', 'find', 'summarize', 'summary', 'analyze', 'analysis',
+                         'list', 'describe', 'explain', 'review', 'idiom', 'extract']
+    if any(keyword in combined for keyword in analysis_keywords):
+        return False
+    
     # Keywords must be present + file type or document reference
     has_create_keyword = any(keyword in combined for keyword in DOCUMENT_CREATE_KEYWORDS)
     has_file_type = any(ftype in combined for ftype in DOCUMENT_FILE_TYPES)

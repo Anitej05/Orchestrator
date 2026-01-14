@@ -1,0 +1,8 @@
+{
+  "recipient_email": "anitej473@gmail.com",
+  "subject": "E2E Native Upload Test (Corrected)",
+  "body": "This email should contain a native file attachment (test_upload_native.txt).",
+  "is_html": false,
+  "user_id": "me",
+  "attachment": "D:\\Internship\\Orbimesh\\backend\\test_upload_native.txt"
+}

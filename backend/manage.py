@@ -146,16 +146,17 @@ def sync_agent_to_db(db: Session, agent_data: dict, is_new: bool = False):
     db.flush()
     
     # Delete old capabilities, endpoints, and parameters
-    # Must delete parameters first due to foreign key constraints
-    db.query(AgentCapability).filter_by(agent_id=agent_id).delete()
-    
-    # Delete parameters for all endpoints of this agent
-    endpoints = db.query(AgentEndpoint).filter_by(agent_id=agent_id).all()
-    for endpoint in endpoints:
-        db.query(EndpointParameter).filter_by(endpoint_id=endpoint.id).delete()
-    
+    # Must delete parameters first due to foreign key constraints - using subquery for robustness
+    db.query(EndpointParameter).filter(
+        EndpointParameter.endpoint_id.in_(
+            db.query(AgentEndpoint.id).filter(AgentEndpoint.agent_id == agent_id)
+        )
+    ).delete(synchronize_session=False)
+
     # Now delete endpoints
-    db.query(AgentEndpoint).filter_by(agent_id=agent_id).delete()
+    db.query(AgentEndpoint).filter_by(agent_id=agent_id).delete(synchronize_session=False)
+
+    db.query(AgentCapability).filter_by(agent_id=agent_id).delete(synchronize_session=False)
     
     # SKIP: Capabilities system temporarily disabled
     # The capabilities field exists in JSON as empty dict for future use
@@ -226,23 +227,24 @@ def sync_agent_entries(verbose: bool = True):
     unchanged_count = 0
     errors = []
     
-    with SessionLocal() as db:
-        for json_file in agent_files:
-            try:
-                # Validate agent schema first
-                if SCHEMA_VALIDATION_AVAILABLE and verbose:
-                    is_valid, error_msg, validated_schema = validate_agent_file(str(json_file))
-                    if not is_valid:
-                        logger.warning(f"⚠️  Schema validation warning for {json_file.name}: {error_msg}")
-                        logger.warning("    Proceeding with sync anyway (backward compatibility)")
-                
-                # Load agent data
-                with open(json_file, 'r', encoding='utf-8') as f:
-                    agent_data = json.load(f)
-                
-                agent_id = agent_data.get('id')
-                agent_name = agent_data.get('name', agent_id)
-                
+    for json_file in agent_files:
+        try:
+            # Validate agent schema first
+            if SCHEMA_VALIDATION_AVAILABLE and verbose:
+                is_valid, error_msg, validated_schema = validate_agent_file(str(json_file))
+                if not is_valid:
+                    logger.warning(f"⚠️  Schema validation warning for {json_file.name}: {error_msg}")
+                    logger.warning("    Proceeding with sync anyway (backward compatibility)")
+            
+            # Load agent data
+            with open(json_file, 'r', encoding='utf-8') as f:
+                agent_data = json.load(f)
+            
+            agent_id = agent_data.get('id')
+            agent_name = agent_data.get('name', agent_id)
+            
+            # Create session for this agent
+            with SessionLocal() as db:
                 # Check if agent exists
                 db_agent = db.query(Agent).options(
                     joinedload(Agent.capability_vectors),
@@ -268,10 +270,10 @@ def sync_agent_entries(verbose: bool = True):
                     sync_agent_to_db(db, agent_data, is_new=True)
                     added_count += 1
                     
-            except Exception as e:
-                error_msg = f"Failed to sync {json_file.name}: {str(e)}"
-                logger.error(f"❌ {error_msg}")
-                errors.append(error_msg)
+        except Exception as e:
+            error_msg = f"Failed to sync {json_file.name}: {str(e)}"
+            logger.error(f"❌ {error_msg}")
+            errors.append(error_msg)
     
     # Summary
     if verbose:

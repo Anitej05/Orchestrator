@@ -2,11 +2,12 @@
   "id": "mail_agent",
   "owner_id": "orbimesh-vendor",
   "name": "Mail Agent",
-  "description": "Gmail integration via Composio. Read, send, search, and manage emails with full Gmail API capabilities.",
+  "description": "Smart, stateful Gmail assistant. Understands context, drafts replies, summarizes batches, and extracts tasks from your inbox.",
   "agent_type": "http_rest",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "status": "active",
   "price_per_call_usd": 0.005,
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAv...\n-----END PUBLIC KEY-----",
   "requires_credentials": true,
   "credential_fields": [
     {
@@ -14,16 +15,8 @@
       "label": "Composio API Key",
       "type": "password",
       "required": true,
-      "description": "Your Composio API key from https://app.composio.dev/settings/api-keys",
+      "description": "Your Composio API key",
       "placeholder": "ak_..."
-    },
-    {
-      "name": "gmail_connection_id",
-      "label": "Gmail Connection ID",
-      "type": "text",
-      "required": true,
-      "description": "Your Gmail connection ID from Composio dashboard",
-      "placeholder": "Gmail-xxxxx"
     }
   ],
   "connection_config": {
@@ -31,46 +24,141 @@
   },
   "endpoints": [
     {
-      "endpoint": "/fetch_emails",
+      "endpoint": "/execute",
       "http_method": "POST",
-      "description": "List emails with metadata (sender, subject, labels, snippet). USE for retrieving email list. DO NOT USE for full message content. READ-ONLY. DETERMINISTIC.",
+      "description": "PREFERRED ENDPOINT FOR COMPLEX MULTI-STEP TASKS. This endpoint can handle complex natural language prompts that require multiple internal steps (e.g., 'find emails from John, summarize them, and mark important ones'). The agent will decompose the request, execute steps sequentially, and use BIDIRECTIONAL DIALOGUE to ask clarifying questions when needed. For simple single-action requests, use the specific endpoints below instead.",
+      "parameters": [
+        {
+          "name": "action",
+          "param_type": "string",
+          "required": false,
+          "description": "OPTIONAL: Specific action to execute (e.g., 'search', 'summarize', 'mark'). If omitted, provide 'prompt' instead for complex multi-step requests."
+        },
+        {
+          "name": "prompt",
+          "param_type": "string",
+          "required": false,
+          "description": "RECOMMENDED FOR COMPLEX TASKS: Natural language prompt describing the full request (e.g., 'Find all emails from John Smith, summarize them, and mark any containing deadlines as important'). The agent will decompose this internally and handle multi-step execution with dialogue if clarification is needed."
+        },
+        {
+          "name": "payload",
+          "param_type": "object",
+          "required": false,
+          "description": "Arguments for the action (only needed if using 'action' parameter)"
+        },
+        {
+          "name": "task_id",
+          "param_type": "string",
+          "required": false,
+          "description": "Task ID for tracking conversation state across dialogue turns"
+        }
+      ]
+    },
+    {
+      "endpoint": "/continue",
+      "http_method": "POST",
+      "description": "Resume a paused task with an answer to the agent's question.",
+      "parameters": [
+        {
+          "name": "task_id",
+          "param_type": "string",
+          "required": true,
+          "description": "Task ID to resume"
+        },
+        {
+          "name": "answer",
+          "param_type": "string",
+          "required": true,
+          "description": "Answer to the agent's question"
+        }
+      ]
+    },
+    {
+      "endpoint": "/search",
+      "http_method": "POST",
+      "description": "Smart semantic search with NATURAL LANGUAGE support. Accepts plain English queries like 'find emails about project deadlines' or 'recent messages from my boss'. The agent internally converts natural language to Gmail search syntax using LLM. Stores results for follow-up actions like summarization or action extraction.",
       "parameters": [
         {
           "name": "query",
           "param_type": "string",
-          "required": false,
-          "description": "Gmail search query (e.g., 'is:unread', 'from:example@gmail.com')"
+          "required": true,
+          "description": "Natural language query (e.g., 'emails about idioms', 'invoices from Amazon last month', 'unread messages from Google'). The agent converts this to Gmail search syntax automatically."
         },
         {
           "name": "max_results",
           "param_type": "integer",
           "required": false,
-          "description": "Max emails to fetch (default: 10)"
-        },
+          "description": "Max results (default: 10)"
+        }
+      ]
+    },
+    {
+      "endpoint": "/summarize_emails",
+      "http_method": "POST",
+      "description": "Summarize multiple emails. If no IDs are provided, it summarizes the results of the last search.",
+      "parameters": [
         {
-          "name": "user_id",
-          "param_type": "string",
-          "required": false,
-          "description": "Gmail user ID (default: 'me')"
-        },
-        {
-          "name": "label_ids",
+          "name": "message_ids",
           "param_type": "array",
           "required": false,
-          "description": "Label IDs to filter by (default: ['INBOX'])"
+          "description": "List of message IDs to summarize"
+        },
+        {
+          "name": "use_history",
+          "param_type": "boolean",
+          "required": false,
+          "description": "Use last search results if IDs empty (default: True)"
+        }
+      ]
+    },
+    {
+      "endpoint": "/draft_reply",
+      "http_method": "POST",
+      "description": "Generate a context-aware reply draft based on thread history and user intent.",
+      "parameters": [
+        {
+          "name": "message_id",
+          "param_type": "string",
+          "required": true,
+          "description": "ID of the email to reply to"
+        },
+        {
+          "name": "intent",
+          "param_type": "string",
+          "required": true,
+          "description": "Your intent (e.g., 'thank them and confirm', 'ask to reschedule')"
+        }
+      ]
+    },
+    {
+      "endpoint": "/extract_action_items",
+      "http_method": "POST",
+      "description": "Extract tasks, deadlines, and meetings from specific emails or last search results.",
+      "parameters": [
+        {
+          "name": "message_ids",
+          "param_type": "array",
+          "required": false,
+          "description": "Email IDs to scan"
+        },
+        {
+          "name": "use_history",
+          "param_type": "boolean",
+          "required": false,
+          "description": "Scan last search results if IDs empty"
         }
       ]
     },
     {
       "endpoint": "/send_email",
       "http_method": "POST",
-      "description": "Send email with optional attachments. USE for sending new messages. DO NOT USE for drafts or templates. SENDS EMAIL (irreversible). DETERMINISTIC.",
+      "description": "Send a new email. Supports HTML, attachments, and PREVIEW. To pause and review draft, set show_preview=true first.",
       "parameters": [
         {
           "name": "to",
           "param_type": "array",
           "required": true,
-          "description": "Recipient email addresses"
+          "description": "Recipient address(es)"
         },
         {
           "name": "subject",
@@ -82,268 +170,13 @@
           "name": "body",
           "param_type": "string",
           "required": true,
-          "description": "Email body (text or HTML)"
-        },
-        {
-          "name": "cc",
-          "param_type": "array",
-          "required": false,
-          "description": "CC addresses"
-        },
-        {
-          "name": "bcc",
-          "param_type": "array",
-          "required": false,
-          "description": "BCC addresses"
+          "description": "Email body (Markdown/HTML/Text)"
         },
         {
           "name": "is_html",
           "param_type": "boolean",
           "required": false,
-          "description": "Is body HTML? (default: false)"
-        },
-        {
-          "name": "attachment_file_ids",
-          "param_type": "array",
-          "required": false,
-          "description": "File IDs from file manager to attach"
-        },
-        {
-          "name": "attachment_paths",
-          "param_type": "array",
-          "required": false,
-          "description": "Local file paths to attach"
-        },
-        {
-          "name": "user_id",
-          "param_type": "string",
-          "required": false,
-          "description": "Gmail user ID (default: 'me')"
-        }
-      ]
-    },
-    {
-      "endpoint": "/get_message",
-      "http_method": "POST",
-      "description": "Retrieve full email content by message ID. USE for reading complete message. DO NOT USE for listing emails. READ-ONLY. DETERMINISTIC.",
-      "parameters": [
-        {
-          "name": "message_id",
-          "param_type": "string",
-          "required": true,
-          "description": "Gmail message ID"
-        },
-        {
-          "name": "format",
-          "param_type": "string",
-          "required": false,
-          "description": "Message format: 'full' or 'minimal' (default: 'full')"
-        },
-        {
-          "name": "user_id",
-          "param_type": "string",
-          "required": false,
-          "description": "Gmail user ID (default: 'me')"
-        }
-      ]
-    },
-    {
-      "endpoint": "/add_label",
-      "http_method": "POST",
-      "description": "Add labels to messages (IMPORTANT, STARRED, etc.). USE for organizing emails. DO NOT USE for reading content. MODIFIES METADATA. DETERMINISTIC.",
-      "parameters": [
-        {
-          "name": "message_ids",
-          "param_type": "array",
-          "required": true,
-          "description": "Message IDs to label"
-        },
-        {
-          "name": "label_ids",
-          "param_type": "array",
-          "required": true,
-          "description": "Label IDs to add (e.g., ['IMPORTANT', 'STARRED'])"
-        },
-        {
-          "name": "user_id",
-          "param_type": "string",
-          "required": false,
-          "description": "Gmail user ID (default: 'me')"
-        }
-      ]
-    },
-    {
-      "endpoint": "/delete_message",
-      "http_method": "POST",
-      "description": "Move messages to trash. USE for deleting emails. DO NOT USE for permanent deletion. MODIFIES DATA. DETERMINISTIC.",
-      "parameters": [
-        {
-          "name": "message_ids",
-          "param_type": "array",
-          "required": true,
-          "description": "Message IDs to delete"
-        },
-        {
-          "name": "user_id",
-          "param_type": "string",
-          "required": false,
-          "description": "Gmail user ID (default: 'me')"
-        }
-      ]
-    },
-    {
-      "endpoint": "/get_attachment",
-      "http_method": "POST",
-      "description": "Download email attachment by ID. USE for retrieving attached files. DO NOT USE for message body. READ-ONLY. DETERMINISTIC.",
-      "parameters": [
-        {
-          "name": "message_id",
-          "param_type": "string",
-          "required": true,
-          "description": "Gmail message ID"
-        },
-        {
-          "name": "attachment_id",
-          "param_type": "string",
-          "required": true,
-          "description": "Attachment ID from the message"
-        },
-        {
-          "name": "user_id",
-          "param_type": "string",
-          "required": false,
-          "description": "Gmail user ID (default: 'me')"
-        }
-      ]
-    },
-    {
-      "endpoint": "/fetch_sent_emails",
-      "http_method": "POST",
-      "description": "List sent emails with metadata. USE for retrieving sent message list. DO NOT USE for inbox emails. READ-ONLY. DETERMINISTIC.",
-      "parameters": [
-        {
-          "name": "max_results",
-          "param_type": "integer",
-          "required": false,
-          "description": "Max emails to fetch (default: 10)"
-        },
-        {
-          "name": "include_body",
-          "param_type": "boolean",
-          "required": false,
-          "description": "Include full email body (default: true)"
-        },
-        {
-          "name": "user_id",
-          "param_type": "string",
-          "required": false,
-          "description": "Gmail user ID (default: 'me')"
-        }
-      ]
-    },
-    {
-      "endpoint": "/get_sent_email",
-      "http_method": "POST",
-      "description": "Retrieve full content of sent email by ID. USE for reading sent message details. DO NOT USE for inbox. READ-ONLY. DETERMINISTIC.",
-      "parameters": [
-        {
-          "name": "message_id",
-          "param_type": "string",
-          "required": true,
-          "description": "Gmail message ID of the sent email"
-        },
-        {
-          "name": "user_id",
-          "param_type": "string",
-          "required": false,
-          "description": "Gmail user ID (default: 'me')"
-        }
-      ]
-    },
-    {
-      "endpoint": "/get_last_sent_email",
-      "http_method": "POST",
-      "description": "Retrieve most recent sent email. USE for checking last sent message. DO NOT USE for specific message lookup. READ-ONLY. DETERMINISTIC.",
-      "parameters": []
-    },
-    {
-      "endpoint": "/download_attachments",
-      "http_method": "POST",
-      "description": "Download all attachments from message. USE for bulk attachment retrieval. DO NOT USE for single attachment. READ-ONLY. DETERMINISTIC.",
-      "parameters": [
-        {
-          "name": "message_id",
-          "param_type": "string",
-          "required": true,
-          "description": "Gmail message ID"
-        }
-      ]
-    },
-    {
-      "endpoint": "/search_emails_with_attachments",
-      "http_method": "POST",
-      "description": "Find emails containing attachments. USE for locating messages with files. DO NOT USE for text search. READ-ONLY. DETERMINISTIC.",
-      "parameters": [
-        {
-          "name": "max_results",
-          "param_type": "integer",
-          "required": false,
-          "description": "Max emails to return (default: 10)"
-        }
-      ]
-    },
-    {
-      "endpoint": "/compose_html_email",
-      "http_method": "POST",
-      "description": "Generate and send formatted HTML email from template. USE for styled emails. DO NOT USE for plain text. SENDS EMAIL (irreversible). LLM-DRIVEN IF USING CONTENT GENERATION.",
-      "parameters": [
-        {
-          "name": "to",
-          "param_type": "array",
-          "required": true,
-          "description": "Recipient addresses"
-        },
-        {
-          "name": "subject",
-          "param_type": "string",
-          "required": true,
-          "description": "Subject"
-        },
-        {
-          "name": "content",
-          "param_type": "string",
-          "required": true,
-          "description": "Email content"
-        },
-        {
-          "name": "template",
-          "param_type": "string",
-          "required": false,
-          "description": "Template: basic, professional, newsletter (default: basic)"
-        },
-        {
-          "name": "header_text",
-          "param_type": "string",
-          "required": false,
-          "description": "Optional header text"
-        },
-        {
-          "name": "footer_text",
-          "param_type": "string",
-          "required": false,
-          "description": "Optional footer text"
-        },
-        {
-          "name": "cc",
-          "param_type": "array",
-          "required": false,
-          "description": "CC addresses"
-        },
-        {
-          "name": "bcc",
-          "param_type": "array",
-          "required": false,
-          "description": "BCC addresses"
+          "description": "Format as HTML? (default: false)"
         },
         {
           "name": "attachment_file_ids",
@@ -352,48 +185,69 @@
           "description": "File IDs to attach"
         },
         {
-          "name": "attachment_paths",
-          "param_type": "array",
+          "name": "show_preview",
+          "param_type": "boolean",
           "required": false,
-          "description": "File paths to attach"
+          "description": "SET TO TRUE to pause and show draft in canvas before sending. Default: False (sends immediately)"
         }
       ]
     },
     {
-      "endpoint": "/format_email_content",
+      "endpoint": "/manage_emails",
       "http_method": "POST",
-      "description": "Clean and format email content before sending. USE for tidying draft content. DO NOT USE for sending. READ-ONLY. LLM-DRIVEN.",
+      "description": "Unified endpoint to Archive, Delete, Star, Label, or Mark Read/Unread.",
       "parameters": [
         {
-          "name": "content",
-          "param_type": "string",
-          "required": true,
-          "description": "Raw email content to format"
+          "name": "message_ids",
+          "param_type": "array",
+          "required": false,
+          "description": "List of message IDs. If empty, uses last search results."
         },
         {
-          "name": "format_type",
+          "name": "action",
           "param_type": "string",
+          "required": true,
+          "description": "Action: mark_read, mark_unread, archive, delete, star, unstar, add_labels, remove_labels"
+        },
+        {
+          "name": "labels",
+          "param_type": "array",
           "required": false,
-          "description": "Format type: markdown, bullet_points, numbered_list (default: markdown)"
+          "description": "Required for add/remove_labels"
+        },
+        {
+          "name": "use_history",
+          "param_type": "boolean",
+          "required": false,
+          "description": "Apply to last search results if IDs empty (default: True)"
         }
       ]
     },
     {
-      "endpoint": "/email_templates",
-      "http_method": "GET",
-      "description": "List available email templates. USE for viewing template options. DO NOT USE for sending. READ-ONLY. DETERMINISTIC.",
-      "parameters": []
+      "endpoint": "/download_attachments",
+      "http_method": "POST",
+      "description": "Download all attachments from an email and save them to the agent's file system for analysis.",
+      "parameters": [
+        {
+          "name": "message_id",
+          "param_type": "string",
+          "required": true,
+          "description": "Gmail message ID"
+        }
+      ]
+    },
+    {
+      "endpoint": "/get_message",
+      "http_method": "POST",
+      "description": "Fetch the full details of a single message. Includes AI ANALYSIS of attachments (will advise if you need to download).",
+      "parameters": [
+        {
+          "name": "message_id",
+          "param_type": "string",
+          "required": true,
+          "description": "Gmail message ID"
+        }
+      ]
     }
-  ],
-  "tool_functions": null,
-  "tool_registry": null,
-  "tags": [],
-  "category": null,
-  "icon": null,
-  "documentation_url": null,
-  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nYOUR_PUBLIC_KEY_HERE\n-----END PUBLIC KEY-----",
-  "capabilities": {
-    "categories": [],
-    "all_keywords": []
-  }
+  ]
 }

@@ -114,6 +114,10 @@ conversation_store: Dict[str, Dict[str, Any]] = {}
 from threading import Lock
 store_lock = Lock()
 
+# Canvas live updates: Maps thread_id -> canvas data for browser agent visualization
+live_canvas_updates: Dict[str, Dict[str, Any]] = {}
+canvas_lock = Lock()
+
 # WebSocket screenshot relay: Maps thread_id -> frontend WebSocket for direct screenshot streaming
 # Browser agent sends screenshots via /ws/screenshots/{thread_id}, orchestrator relays to frontend
 frontend_websockets: Dict[str, WebSocket] = {}
@@ -1048,7 +1052,7 @@ async def execute_orchestration(
         logger.info(f"USER RESPONSE BRANCH: user_response='{user_response}', planning_mode={planning_mode}")
         initial_state = dict(current_conversation)  # Convert to dict if it's a State object
         initial_state["user_response"] = user_response
-        initial_state["pending_user_input"] = False
+        # initial_state["pending_user_input"] = False # REMOVED: Must preserve this flag from history for resume logic to work
         initial_state["question_for_user"] = None
         initial_state["parse_retry_count"] = 0
         

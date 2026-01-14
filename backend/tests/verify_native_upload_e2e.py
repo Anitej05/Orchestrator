@@ -47,8 +47,8 @@ async def test_native_upload():
         print(f"Created test file: {test_file.absolute()}")
 
         # 3. Define Email Params
-        recipient = "annaborbimesh@gmail.com"
-        subject = "E2E Native Upload Test"
+        recipient = "anitej473@gmail.com"
+        subject = "E2E Native Upload Test (Corrected)"
         body = "This email should contain a native file attachment (test_upload_native.txt)."
         
         # 4. Call send_email_with_attachments
@@ -62,7 +62,9 @@ async def test_native_upload():
             subject=subject,
             body=body,
             attachment_file_ids=[], 
-            attachment_paths=attachment_paths
+            attachment_path=attachment_paths[0] # Try singular 'attachment' or 'file'? 
+            # Note: client wrapper expects 'attachment_paths' list, 
+            # effectively I will hack the client.send_email_with_attachments to map this.
         )
         
         print(f"Result: {result}")

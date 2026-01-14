@@ -13,7 +13,8 @@ from schemas import (
     AgentCard, # This is a Pydantic model
     TaskAgentPair, # This is a Pydantic model
     PlannedTask, # This is a Pydantic model
-    FileObject
+    FileObject,
+    DialogueTask # For multi-turn agent conversations
 )
 
 def or_overwrite(a: bool | None, b: bool | None) -> bool:
@@ -101,5 +102,14 @@ class State(TypedDict):
     replan_count: Annotated[int, overwrite_reducer]
     
     # Tool routing fields (Phase 1 implementation)
-    tool_routed_count: Annotated[int, overwrite_reducer]  # Number of tasks handled by direct tools  # Track number of replans to prevent infinite loops
+    tool_routed_count: Annotated[int, overwrite_reducer]  # Number of tasks handled by direct tools
     task_events: Annotated[List[Dict], overwrite_reducer]
+    
+    # Multi-Turn Agent Dialogue fields
+    dialogue_task: Annotated[Optional[Dict], overwrite_reducer]  # Current DialogueTask (serialized)
+    dialogue_result: Annotated[Optional[Dict], overwrite_reducer]  # Result from dialogue loop
+    needs_dialogue_mode: Annotated[bool, overwrite_reducer]  # Flag to trigger dialogue loop
+    
+    # Bidirectional Dialogue State
+    dialogue_contexts: Annotated[Dict[str, Dict], overwrite_reducer]
+    pending_agent_questions: Annotated[List[Dict], overwrite_reducer]

@@ -27,19 +27,19 @@ from .utils import (
     CustomJSONEncoder,
 )
 
-# Routing functions (fully implemented here)
-from .routing import (
-    route_after_search,
-    route_after_approval,
-    route_after_validation,
-    route_after_load_history,
-    route_after_analysis,
-    route_after_parse,
-    should_continue_or_finish,
-    route_after_plan_creation,
-    route_after_execute_batch,
-    route_after_ask_user,
-)
+# Routing functions (removed - module does not exist)
+# from .routing import (
+#     route_after_search,
+#     route_after_approval,
+#     route_after_validation,
+#     route_after_load_history,
+#     route_after_analysis,
+#     route_after_parse,
+#     should_continue_or_finish,
+#     route_after_plan_creation,
+#     route_after_execute_batch,
+#     route_after_ask_user,
+# )
 
 # Pydantic schemas from modules
 from .planning import PlanValidation, PlanValidationResult
@@ -64,17 +64,17 @@ __all__ = [
     'invoke_llm_with_fallback',
     'CustomJSONEncoder',
     
-    # Routing
-    'route_after_search',
-    'route_after_approval',
-    'route_after_validation',
-    'route_after_load_history',
-    'route_after_analysis',
-    'route_after_parse',
-    'should_continue_or_finish',
-    'route_after_plan_creation',
-    'route_after_execute_batch',
-    'route_after_ask_user',
+    # Routing (removed)
+    # 'route_after_search',
+    # 'route_after_approval',
+    # 'route_after_validation',
+    # 'route_after_load_history',
+    # 'route_after_analysis',
+    # 'route_after_parse',
+    # 'should_continue_or_finish',
+    # 'route_after_plan_creation',
+    # 'route_after_execute_batch',
+    # 'route_after_ask_user',
     
     # Schemas
     'PlanValidation',

@@ -2,6 +2,7 @@
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 from typing import List, Literal, Optional, Dict, Any
+from enum import Enum
 from cryptography.hazmat.primitives import serialization
 
 # --- Core Data Structures ---
@@ -137,6 +138,90 @@ class PlannedTask(BaseModel):
 class ExecutionPlan(BaseModel):
     """The final, structured execution plan with parallel batches."""
     plan: List[List[PlannedTask]]
+
+
+# --- Multi-Turn Agent Dialogue Models ---
+
+class DialogueAction(BaseModel):
+    """A single action in the dialogue loop."""
+    endpoint: str = Field(..., description="Endpoint to call (e.g., /search, /manage_emails)")
+    http_method: str = Field(default="POST", description="HTTP method")
+    payload: Dict[str, Any] = Field(default_factory=dict, description="Parameters for the call")
+    action_description: str = Field(..., description="Human-readable description of what this action does")
+
+
+class DialogueNextStep(BaseModel):
+    """LLM's decision for the next step in dialogue."""
+    is_complete: bool = Field(..., description="True if the goal has been achieved")
+    reasoning: str = Field(..., description="Why this decision was made")
+    next_action: Optional[DialogueAction] = Field(None, description="The next action to take (if not complete)")
+    final_summary: Optional[str] = Field(None, description="Summary for user (if complete)")
+
+
+class DialogueTask(BaseModel):
+    """
+    A task that requires multi-turn conversation with an agent.
+    Used when the Orchestrator needs to see intermediate results before deciding next steps.
+    """
+    goal: str = Field(..., description="The user's ultimate goal")
+    agent_id: str = Field(..., description="Which agent to converse with")
+    agent_base_url: str = Field(..., description="Base URL of the agent")
+    available_endpoints: List[Dict[str, Any]] = Field(default_factory=list, description="Endpoints available on this agent")
+    initial_action: DialogueAction = Field(..., description="First action to take")
+    max_turns: int = Field(default=5, description="Maximum dialogue turns")
+    context: Dict[str, Any] = Field(default_factory=dict, description="Additional context for LLM analysis")
+
+
+
+# --- Bidirectional Dialogue Models ---
+
+class AgentResponseStatus(str, Enum):
+    """Status of an agent's execution response."""
+    COMPLETE = "complete"
+    ERROR = "error"
+    NEEDS_INPUT = "needs_input"
+    PARTIAL = "partial"
+
+class AgentResponse(BaseModel):
+    """
+    Standardized response from an agent to the orchestrator.
+    Supports pausing for input, streaming partial results, and final completion.
+    """
+    status: AgentResponseStatus = Field(..., description="Execution status")
+    result: Optional[Any] = Field(None, description="Final result (if complete)")
+    error: Optional[str] = Field(None, description="Error message (if error)")
+    
+    # For needs_input status
+    question: Optional[str] = Field(None, description="Clarifying question for the orchestrator/user")
+    question_type: Optional[Literal["choice", "text", "confirmation"]] = Field(None, description="Type of input needed")
+    options: Optional[List[str]] = Field(None, description="Valid options for choice questions")
+    context: Optional[Dict[str, Any]] = Field(None, description="Context to help answer the question")
+    
+    # For partial status
+    partial_result: Optional[Any] = Field(None, description="Intermediate result")
+    progress: Optional[float] = Field(None, ge=0.0, le=1.0, description="Progress indicator (0.0-1.0)")
+
+class OrchestratorMessage(BaseModel):
+    """Message from Orchestrator to Agent during a dialogue."""
+    type: Literal["execute", "continue", "cancel", "context_update"] = Field("execute", description="Message type")
+    
+    # For execute
+    action: Optional[str] = Field(None, description="Action/Endpoint to execute (optional if prompt is provided)")
+    prompt: Optional[str] = Field(None, description="Natural language prompt for complex multi-step tasks (agent handles decomposition)")
+    payload: Optional[Dict[str, Any]] = Field(None, description="Arguments for the action")
+    
+    # For continue
+    answer: Optional[str] = Field(None, description="Answer to agent's question")
+    additional_context: Optional[Dict[str, Any]] = Field(None, description="Updated context")
+
+class DialogueContext(BaseModel):
+    """Tracks the state of a specific agent conversation."""
+    task_id: str
+    agent_id: str
+    status: Literal["active", "paused", "completed"]
+    history: List[Dict[str, Any]] = Field(default_factory=list, description="Message history")
+    current_question: Optional[AgentResponse] = Field(None, description="Pending question if paused")
+
 
 # --- API Request/Response Models ---
 

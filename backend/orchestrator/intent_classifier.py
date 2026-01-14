@@ -14,6 +14,11 @@ import logging
 from typing import Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field
 from pathlib import Path
+import os
+from langchain_cerebras import ChatCerebras
+from langchain_groq import ChatGroq
+from langchain_nvidia_ai_endpoints import ChatNVIDIA
+from orchestrator.nodes.utils import invoke_llm_with_fallback
 
 logger = logging.getLogger("AgentOrchestrator")
 
@@ -104,16 +109,8 @@ class IntentClassifier:
                     reasoning="Pattern matched: top headlines query"
                 )
             ),
-            # WEB SEARCH PATTERNS (only for simple search queries without navigation or news)
-            (
-                re.compile(r"(search|find|lookup)(?!.*\\b(news|headlines|articles)\\b)", re.IGNORECASE),
-                Intent(
-                    category="data_query",
-                    tool_hint="web_search_and_summarize",
-                    confidence=0.75,
-                    reasoning="Pattern matched: web search query"
-                )
-            ),
+            # WEB SEARCH PATTERN REMOVED - DELEGATED TO LLM FOR BETTER CONTEXT AWARENESS
+            # (Old regex was too aggressive and captured agent "search" tasks)
             # FINANCE PATTERNS - Order matters! More specific patterns first
             # Stock price with company name (most flexible - catches "Tesla stock", "stock of Apple", etc.)
             (
@@ -200,9 +197,9 @@ class IntentClassifier:
                 logger.info(f"✅ File-based intent: {intent.category} (confidence={intent.confidence:.2f})")
                 return intent
         
-        # TIER 3: Fallback to generic categorization
-        logger.info("⚠️ No pattern match - using generic classification")
-        return self._generic_classification(prompt)
+        # TIER 3: LLM Classification (Smart Routing)
+        logger.info("⚠️ No pattern match - delegating to LLM classifier")
+        return self._classify_with_llm(prompt)
     
     def _pattern_match(self, prompt: str) -> Optional[Intent]:
         """Try to match prompt against known patterns"""
@@ -341,8 +338,61 @@ class IntentClassifier:
         
         return None
     
-    def _generic_classification(self, prompt: str) -> Intent:
-        """Fallback generic classification"""
+    def _classify_with_llm(self, prompt: str) -> Intent:
+        """
+        Use LLM to classify intent when patterns fail.
+        Distinguishes between Generic Web Search, Specific Agent Tasks, and Complex Workflows.
+        """
+        try:
+            # Initialize LLMs
+            primary_llm = ChatCerebras(model="gpt-oss-120b") if os.getenv("CEREBRAS_API_KEY") else None
+            fallback_llm = ChatNVIDIA(model="meta/llama-3.1-70b-instruct") if os.getenv("NVIDIA_API_KEY") else None
+            
+            if not primary_llm and not fallback_llm:
+                logger.warning("No LLM keys available for intent classification - falling back to generic")
+                return self._complex_workflow_fallback(prompt)
+                
+            system_prompt = """You are the Intent Classifier for an AI Orchestrator.
+            Your job is to route user queries to the best category.
+            
+            Categories:
+            1. "agent_task": User wants a specialized agent (Mail/Calendar/Browser Agent) OR tasks involving emails, files, calendar, web automation. Agents accept NATURAL LANGUAGE - you don't need to convert queries.
+            2. "data_query": Simple public information queries (weather, stock prices, news) - handled by direct tools.
+            3. "web_navigation": Requests to browse/open a specific URL or website.
+            4. "complex_workflow": Ambiguous or multi-step requests needing planning.
+            
+            RULES:
+            - If user mentions "agent" OR the task is about emails/files/calendar/browsing: output "agent_task"
+            - Agents like Mail Agent accept natural language (e.g., "find emails about idioms") - pass the query as-is
+            - Public facts/entities (e.g., "weather in NY"): output "data_query"
+            
+            Output JSON only matching the schema."""
+            
+            classification = invoke_llm_with_fallback(
+                primary_llm=primary_llm,
+                fallback_llm=fallback_llm,
+                prompt=f"{system_prompt}\n\nUser Query: {prompt}",
+                pydantic_schema=Intent,
+            )
+            
+            if classification:
+                # Post-process: specific override for agent tasks
+                if classification.category == "agent_task":
+                    classification.tool_hint = None # Ensure it goes to Agent selection, not specific tool
+                    classification.requires_context = True
+                elif classification.category == "data_query" and not classification.tool_hint:
+                    classification.tool_hint = "web_search_and_summarize" # Default for data query
+                    
+                logger.info(f"🧠 LLM Classified Intent: {classification.category} (Hint: {classification.tool_hint})")
+                return classification
+                
+        except Exception as e:
+            logger.error(f"LLM Classification failed: {e}")
+            
+        return self._complex_workflow_fallback(prompt)
+
+    def _complex_workflow_fallback(self, prompt: str) -> Intent:
+        """Determine fallback mechanism"""
         prompt_lower = prompt.lower()
         
         # Check for web navigation keywords
