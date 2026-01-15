@@ -1,4 +1,4 @@
-# In Project_Agent_Directory/orchestrator/graph.py
+# In Orbimesh Backend/orchestrator/graph.py
 
 from orchestrator.state import State, CompletedTask
 from schemas import (
@@ -77,14 +77,14 @@ ORCHESTRATOR_METRICS = {
 
 @lru_cache(maxsize=256)
 def _get_registry_request_format(agent_id: str, endpoint_path: str) -> str | None:
-    """Fallback to Agent_entries metadata when DB endpoint records are missing request_format."""
+    """Fallback to agent_entries metadata when DB endpoint records are missing request_format."""
     try:
         normalized_endpoint_path = (endpoint_path or "").strip()
         if normalized_endpoint_path and not normalized_endpoint_path.startswith('/'):
             normalized_endpoint_path = '/' + normalized_endpoint_path
 
         backend_dir = Path(__file__).resolve().parents[1]
-        entry_path = backend_dir / 'Agent_entries' / f'{agent_id}.json'
+        entry_path = backend_dir / 'agent_entries' / f'{agent_id}.json'
         if not entry_path.exists():
             return None
 
@@ -1763,141 +1763,201 @@ def parse_prompt(state: State):
 
 async def classify_and_route_to_tools(state: State):
     """
-    TIER 1: INTENT CLASSIFICATION AND TOOL-FIRST ROUTING
+    LLM-BASED TOOL SELECTION (Primary) - Similar to agent_directory_search for agents.
     
-    This node runs BEFORE agent selection to check if simple tasks can be handled by direct tools.
+    This node runs BEFORE agent selection to check if tasks can be handled by direct tools.
+    Uses LLM to semantically match tools to tasks based on rich metadata (use_when, not_for).
     
-    Industry standard approach:
-    1. Pattern-match common queries (stock prices, news, wiki) -> instant tool selection
-    2. File-based routing (documents, spreadsheets) -> skip tool routing  
-    3. Tool validation (check required params available) -> route to tool or continue to agents
-    
-    Benefits:
-    - 70%+ of queries handled by fast deterministic tools (no LLM agent selection needed)
-    - 5-10x faster response times for common queries
-    - 50%+ cost reduction (fewer LLM calls)
+    Flow:
+    1. Get all available tools with their descriptions and use_when hints
+    2. Ask LLM to select the best tool for each task (or "AGENT" if none suitable)
+    3. Validate parameters and execute selected tools
+    4. Pass remaining tasks to agent_directory_search
     """
-    from orchestrator.intent_classifier import classify_intent
-    from orchestrator.tool_router import route_to_tool
-    from orchestrator.tool_registry import execute_tool, get_tool_registry
+    from orchestrator.tool_registry import execute_tool, list_tool_cards, get_tool_registry
     from orchestrator.parameter_validator import ParameterValidator
+    from orchestrator.nodes.utils import invoke_llm_with_fallback
     
     original_prompt = state.get('original_prompt', '')
     parsed_tasks = state.get('parsed_tasks', [])
     uploaded_files = state.get('uploaded_files', [])
     
-    logger.info(f"🎯 CLASSIFY_AND_ROUTE: Starting intent classification for prompt: {original_prompt[:100]}...")
-    print(f"🎯 CLASSIFY_AND_ROUTE: Analyzing {len(parsed_tasks)} tasks")
+    logger.info(f"🎯 TOOL_SELECTION: LLM-based tool selection for {len(parsed_tasks)} tasks")
+    print(f"🎯 TOOL_SELECTION: Analyzing {len(parsed_tasks)} tasks with LLM")
     
-    # Initialize parameter validator
+    if not parsed_tasks:
+        return {"completed_tasks": state.get('completed_tasks', []), "parsed_tasks": [], "tool_routed_count": 0}
+    
+    # Get tool catalog for LLM
+    tool_cards = list_tool_cards()
+    logger.info(f"📦 Available tools: {len(tool_cards)}")
+    
+    if not tool_cards:
+        logger.warning("No tools available - routing all tasks to agents")
+        return {"completed_tasks": state.get('completed_tasks', []), "parsed_tasks": parsed_tasks, "tool_routed_count": 0}
+    
+    # Initialize LLM and parameter validator
+    primary_llm = ChatGroq(model="llama-3.3-70b-versatile") if os.getenv("GROQ_API_KEY") else ChatCerebras(model="gpt-oss-120b")
+    fallback_llm = ChatNVIDIA(model="meta/llama-3.3-70b-instruct") if os.getenv("NVIDIA_API_KEY") else None
+    
     tool_registry = get_tool_registry()
     param_validator = ParameterValidator(tool_registry)
     
-    # Track which tasks can be handled by tools
+    # Build tool catalog for LLM prompt
+    tool_catalog = []
+    for tc in tool_cards:
+        tool_catalog.append({
+            "tool_name": tc["tool_name"],
+            "description": tc["description"],
+            "use_when": tc.get("use_when", ""),
+            "not_for": tc.get("not_for", ""),
+            "required_params": tc.get("required_params", []),
+            "example_queries": tc.get("example_queries", [])[:3]  # Limit examples for prompt size
+        })
+    
+    # Build task list for LLM
+    tasks_info = []
+    for task in parsed_tasks:
+        tasks_info.append({
+            "task_name": task.task_name,
+            "task_description": task.task_description,
+            "parameters": dict(task.parameters) if task.parameters else {}
+        })
+    
+    # Check if any files are uploaded (file tasks typically need agents)
+    has_files = bool(uploaded_files)
+    file_hint = ""
+    if has_files:
+        file_types = [f.get("file_type", "unknown") for f in uploaded_files]
+        file_hint = f"\n\n**NOTE:** User has uploaded files: {file_types}. File-related tasks (document analysis, spreadsheet operations) should go to AGENT."
+    
+    # LLM prompt for semantic tool selection
+    prompt = f'''
+You are an expert at deciding whether a task can be handled by a direct tool or needs a specialized agent.
+
+**ORIGINAL USER REQUEST:**
+"{original_prompt}"
+
+**TASKS TO ROUTE:**
+{json.dumps(tasks_info, indent=2)}
+
+**AVAILABLE TOOLS:**
+{json.dumps(tool_catalog, indent=2)}
+{file_hint}
+
+**INSTRUCTIONS:**
+For each task, decide if a TOOL can handle it or if it needs an AGENT.
+
+**DECISION RULES:**
+1. **USE TOOL when:**
+   - The task matches a tool's "use_when" description
+   - The task is a simple data lookup (stock price, news, Wikipedia, web search)
+   - The required parameters are available or can be extracted from the task
+
+2. **USE AGENT when:**
+   - The task involves file operations (documents, spreadsheets, images)
+   - The task requires web browsing/navigation (clicking, form filling)
+   - The task is complex, multi-step, or stateful
+   - The task matches a tool's "not_for" description
+   - No suitable tool exists
+
+**OUTPUT FORMAT:**
+Return a JSON object where keys are task names and values are the selected tool_name or "AGENT":
+{{
+    "task_name_1": "get_stock_quote",
+    "task_name_2": "AGENT",
+    "task_name_3": "search_news"
+}}
+
+Be decisive. If unsure, prefer AGENT (safer fallback).
+'''
+    
+    # Schema for LLM response
+    class ToolSelectionResult(BaseModel):
+        selections: Dict[str, str] = Field(
+            description="Map of task names to tool_name or 'AGENT'"
+        )
+    
     tool_routed_tasks = []
     agent_required_tasks = []
     
-    for task in parsed_tasks:
-        # CRITICAL FIX: Use Task.parameters directly (pre-extracted by LLM)
-        # Only use task_prompt for intent classification, not parameter extraction
-        task_prompt = f"{task.task_name}: {task.task_description}"
-        task_params = dict(task.parameters) if task.parameters else {}  # Pre-extracted by LLM
+    try:
+        logger.info("🤖 Asking LLM to select tools for tasks...")
+        response = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, ToolSelectionResult)
         
-        logger.info(f"🔍 [ROUTE] Task: {task.task_name} | Pre-extracted params: {task_params}")
-        
-        # STEP 1: Classify intent (for tool selection, not parameter extraction)
-        intent = classify_intent(task_prompt, uploaded_files)
-        logger.info(f"📊 Intent for '{task.task_name}': {intent.category} (confidence={intent.confidence:.2f}, tool_hint={intent.tool_hint})")
-        print(f"📊 Intent: {intent.category} | Tool: {intent.tool_hint} | Confidence: {intent.confidence:.2f}")
-        
-        # CRITICAL: Merge pre-extracted parameters with intent entities
-        # Pre-extracted params take priority (they're from LLM parse, not re-extracted)
-        merged_entities = {**intent.entities, **task_params}
-        intent.entities = merged_entities
-        logger.info(f"🔀 [MERGE] Intent entities merged: {merged_entities}")
-        
-        # STEP 2: Try to route to tool
-        routing_decision = route_to_tool(intent, context={"state": state, "task_params": task_params})
-        
-        if routing_decision.use_tool:
-            logger.info(f"✅ TOOL ROUTING: '{task.task_name}' -> Tool '{routing_decision.tool_name}' ({routing_decision.reasoning})")
-            print(f"✅ TOOL SELECTED: {routing_decision.tool_name}")
+        for task in parsed_tasks:
+            task_name = task.task_name
+            selected = response.selections.get(task_name, "AGENT")
+            task_params = dict(task.parameters) if task.parameters else {}
             
-            # STEP 2.5: Validate parameters using ParameterValidator
-            tool_name = routing_decision.tool_name
+            if selected == "AGENT" or selected.upper() == "AGENT":
+                logger.info(f"➡️ LLM routed '{task_name}' to AGENT")
+                print(f"➡️ AGENT: {task_name}")
+                agent_required_tasks.append(task)
+                continue
+            
+            # LLM selected a tool
+            tool_name = selected
+            logger.info(f"🔧 LLM selected tool '{tool_name}' for task '{task_name}'")
+            print(f"🔧 TOOL: {tool_name} for '{task_name}'")
+            
+            # Validate parameters
             param_context = param_validator.validate_and_merge(
                 task=task,
                 tool_name=tool_name,
-                intent_params=merged_entities
+                intent_params=task_params
             )
             
             if not param_context.is_valid:
                 logger.warning(f"⚠️ Tool '{tool_name}' parameter validation failed: {param_context.validation_errors}")
-                print(f"⚠️ PARAM VALIDATION FAILED: {tool_name} - {param_context.validation_errors}")
+                print(f"⚠️ PARAM FAILED: {tool_name} - falling back to agent")
                 agent_required_tasks.append(task)
                 continue
             
-            # Validate parameters before execution
-            if routing_decision.missing_params:
-                logger.warning(f"⚠️ Tool '{tool_name}' has missing params: {routing_decision.missing_params}")
-                print(f"⚠️ MISSING PARAMS: {tool_name} - {routing_decision.missing_params}")
-                agent_required_tasks.append(task)
-                continue
-            
-            # Execute tool immediately with validated parameters
+            # Execute tool
             try:
-                logger.info(f"🔧 Executing tool '{tool_name}' with validated params: {param_context.merged_params}")
+                logger.info(f"🔧 Executing tool '{tool_name}' with params: {param_context.merged_params}")
                 result = await execute_tool(tool_name, param_context.merged_params)
                 
-                # Check if tool execution succeeded
                 if not result.get("success"):
                     error_msg = result.get("error", "Tool execution failed")
-                    logger.error(f"❌ Tool '{tool_name}' execution failed: {error_msg}")
-                    print(f"❌ TOOL ERROR: {tool_name} - {error_msg}")
+                    logger.error(f"❌ Tool '{tool_name}' failed: {error_msg}")
+                    print(f"❌ TOOL FAILED: {tool_name}")
                     agent_required_tasks.append(task)
                     continue
                 
-                # Check if the tool result contains errors
                 tool_result = result.get("result")
+                
+                # Check for error in result
                 if isinstance(tool_result, dict) and tool_result.get("status") == "error":
-                    error_msg = tool_result.get("error", "Unknown error in tool result")
+                    error_msg = tool_result.get("error", "Unknown error")
                     logger.error(f"❌ Tool '{tool_name}' returned error: {error_msg}")
-                    print(f"❌ TOOL ERROR: {tool_name} - {error_msg}")
                     agent_required_tasks.append(task)
                     continue
                 
-                if isinstance(tool_result, dict) and "error" in tool_result and not tool_result.get("totalResults"):
-                    # Tool returned error but not marked as status error
-                    error_msg = tool_result.get("error", "Unknown error in tool result")
-                    logger.error(f"❌ Tool '{tool_name}' returned error: {error_msg}")
-                    print(f"❌ TOOL ERROR: {tool_name} - {error_msg}")
-                    agent_required_tasks.append(task)
-                    continue
-                
-                logger.info(f"✅ Tool execution SUCCESS for '{tool_name}'")
+                logger.info(f"✅ Tool '{tool_name}' executed successfully")
                 print(f"✅ TOOL SUCCESS: {tool_name}")
                 
-                # Add to completed tasks
                 completed_task = CompletedTask(
                     task_name=task.task_name,
                     task_description=task.task_description,
                     agent_name=f"Tool: {tool_name}",
                     result=tool_result,
                     success=True,
-                    execution_time=0.5,  # Fast tool execution
+                    execution_time=0.5,
                     error=None
                 )
                 tool_routed_tasks.append(completed_task)
-                    
+                
             except Exception as e:
-                logger.error(f"❌ Tool execution ERROR for '{tool_name}': {e}", exc_info=True)
-                print(f"❌ TOOL ERROR: {tool_name} - falling back to agent")
+                logger.error(f"❌ Tool execution error for '{tool_name}': {e}")
+                print(f"❌ TOOL ERROR: {tool_name}")
                 agent_required_tasks.append(task)
-        else:
-            # Tool routing declined - continue to agent selection
-            logger.info(f"➡️ AGENT ROUTING: '{task.task_name}' -> {routing_decision.reasoning}")
-            print(f"➡️ AGENT REQUIRED: {routing_decision.reasoning}")
-            agent_required_tasks.append(task)
+                
+    except Exception as e:
+        logger.error(f"LLM tool selection failed: {e}. Routing all tasks to agents.")
+        print(f"⚠️ LLM FAILED - routing to agents")
+        agent_required_tasks = parsed_tasks
     
     # Update state
     completed_tasks = state.get('completed_tasks', [])
@@ -1908,7 +1968,7 @@ async def classify_and_route_to_tools(state: State):
     
     return {
         "completed_tasks": completed_tasks,
-        "parsed_tasks": agent_required_tasks,  # Only tasks that need agents
+        "parsed_tasks": agent_required_tasks,
         "tool_routed_count": len(tool_routed_tasks)
     }
 
@@ -2025,6 +2085,7 @@ Only include agents that have the required endpoint AND are genuinely capable of
             selections: Dict[str, List[str]] = Field(
                 description="Map of task names to ordered list of agent IDs"
             )
+
         
         try:
             logger.info("Using LLM for semantic agent selection...")
@@ -4436,7 +4497,7 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                             logger.info(f"✅ Using endpoint-specific request_format: {endpoint_format}")
                             return endpoint_format
 
-                        # Fall back to registry file (Agent_entries) if DB endpoint metadata is missing
+                        # Fall back to registry file (agent_entries) if DB endpoint metadata is missing
                         registry_format = _get_registry_request_format(agent_id, ep_path)
                         if registry_format:
                             logger.info(f"✅ Using registry request_format for {agent_id}{ep_path}: {registry_format}")
