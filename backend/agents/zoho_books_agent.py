@@ -10,7 +10,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("zoho_books_agent")
 load_dotenv()
 
 # ==================== ROBUST PATH HANDLING ====================

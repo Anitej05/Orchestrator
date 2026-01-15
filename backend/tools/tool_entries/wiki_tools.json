@@ -1,0 +1,129 @@
+{
+    "id": "wiki_tools",
+    "name": "Wikipedia Tools",
+    "description": "Wikipedia lookups including search, page summaries, specific sections, and images. Great for factual information and definitions.",
+    "version": "1.0.0",
+    "category": "wiki",
+    "requires_env": [],
+    "tools": [
+        {
+            "function_name": "search_wikipedia",
+            "display_name": "Search Wikipedia",
+            "description": "Search Wikipedia for pages matching a query",
+            "use_when": "User wants to find Wikipedia pages about a topic but doesn't know the exact title",
+            "not_for": "Getting actual content (use get_wikipedia_summary after finding the title)",
+            "parameters": [
+                {
+                    "name": "query",
+                    "type": "string",
+                    "required": true,
+                    "description": "The search term to look for (e.g., 'Artificial Intelligence')"
+                }
+            ],
+            "returns": "Dictionary with list of matching page titles",
+            "example_queries": [
+                "Search Wikipedia for quantum computing",
+                "Find wiki pages about machine learning",
+                "Look up Einstein on Wikipedia"
+            ],
+            "keywords": [
+                "search",
+                "find",
+                "wikipedia",
+                "wiki",
+                "lookup"
+            ]
+        },
+        {
+            "function_name": "get_wikipedia_summary",
+            "display_name": "Get Wikipedia Summary",
+            "description": "Get the full summary of a Wikipedia page",
+            "use_when": "User wants to learn about a topic, get a definition, or understand what something is",
+            "not_for": "Specific sections (use get_wikipedia_section), finding page titles (use search_wikipedia first)",
+            "parameters": [
+                {
+                    "name": "title",
+                    "type": "string",
+                    "required": true,
+                    "description": "The exact title of the Wikipedia page"
+                }
+            ],
+            "returns": "Dictionary with title, summary text, and URL",
+            "example_queries": [
+                "What is machine learning?",
+                "Tell me about Albert Einstein",
+                "Explain quantum computing",
+                "What is photosynthesis?"
+            ],
+            "keywords": [
+                "what is",
+                "explain",
+                "tell me about",
+                "define",
+                "summary",
+                "overview"
+            ]
+        },
+        {
+            "function_name": "get_wikipedia_section",
+            "display_name": "Get Wikipedia Section",
+            "description": "Get content of a specific section from a Wikipedia page",
+            "use_when": "User wants a specific section like 'History', 'Applications', or 'Controversy' from a Wikipedia page",
+            "not_for": "Full page summary (use get_wikipedia_summary), finding pages (use search_wikipedia)",
+            "parameters": [
+                {
+                    "name": "title",
+                    "type": "string",
+                    "required": true,
+                    "description": "The exact title of the Wikipedia page"
+                },
+                {
+                    "name": "section",
+                    "type": "string",
+                    "required": true,
+                    "description": "The section title to retrieve (e.g., 'History', 'Applications')"
+                }
+            ],
+            "returns": "Dictionary with title, section name, and section content",
+            "example_queries": [
+                "Get the history section of the AI Wikipedia page",
+                "What are the applications of machine learning?",
+                "Show me the controversy section for Bitcoin"
+            ],
+            "keywords": [
+                "section",
+                "history",
+                "applications",
+                "part",
+                "specific"
+            ]
+        },
+        {
+            "function_name": "get_wikipedia_images",
+            "display_name": "Get Wikipedia Images",
+            "description": "Get all image URLs from a Wikipedia page",
+            "use_when": "User wants images or pictures from a Wikipedia page",
+            "not_for": "Text content (use get_wikipedia_summary or get_wikipedia_section)",
+            "parameters": [
+                {
+                    "name": "title",
+                    "type": "string",
+                    "required": true,
+                    "description": "The exact title of the Wikipedia page"
+                }
+            ],
+            "returns": "Dictionary with title and list of image URLs",
+            "example_queries": [
+                "Get images from the Mars Wikipedia page",
+                "Show me pictures of the Eiffel Tower from Wikipedia",
+                "Wikipedia images for Albert Einstein"
+            ],
+            "keywords": [
+                "images",
+                "pictures",
+                "photos",
+                "visual"
+            ]
+        }
+    ]
+}

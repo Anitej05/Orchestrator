@@ -78,7 +78,7 @@ curl -X POST http://localhost:8081/create \
     "content": "Introduction\nThis is a document.\n\nConclusion\nThank you.",
     "file_name": "my_document.docx",
     "file_type": "docx",
-    "output_dir": "backend/storage/documents"
+    "output_dir": "storage/document_agent"
   }'
 ```
 
@@ -87,7 +87,7 @@ curl -X POST http://localhost:8081/create \
 {
   "success": true,
   "message": "Created my_document.docx",
-  "file_path": "backend/storage/documents/my_document.docx"
+  "file_path": "storage/document_agent/my_document.docx"
 }
 ```
 
@@ -245,7 +245,7 @@ NVIDIA_API_KEY=nvidia_xxxxxxxxxxxx          # Fallback LLM
 GROQ_API_KEY=gsk_xxxxxxxxxxxx              # Last resort LLM
 
 # Storage Paths (optional, auto-created)
-DOCUMENTS_DIR=backend/storage/documents
+DOCUMENTS_DIR=storage/document_agent
 SESSIONS_DIR=backend/storage/document_sessions
 VERSIONS_DIR=backend/storage/document_versions
 
@@ -296,7 +296,7 @@ Create a new document.
   "content": "Your document content here",
   "file_name": "report.docx",
   "file_type": "docx",
-  "output_dir": "backend/storage/documents",
+  "output_dir": "storage/document_agent",
   "thread_id": "optional-thread-id"
 }
 ```
@@ -306,7 +306,7 @@ Create a new document.
 {
   "success": true,
   "message": "Created report.docx",
-  "file_path": "backend/storage/documents/report.docx"
+  "file_path": "storage/document_agent/report.docx"
 }
 ```
 
@@ -316,7 +316,7 @@ Edit document with natural language instruction.
 **Request:**
 ```json
 {
-  "file_path": "backend/storage/documents/report.docx",
+  "file_path": "storage/document_agent/report.docx",
   "instruction": "Make all headings bold and blue, add a table of contents",
   "thread_id": "optional-thread-id",
   "use_vision": false
@@ -328,7 +328,7 @@ Edit document with natural language instruction.
 {
   "success": true,
   "message": "Applied 3 edits",
-  "file_path": "backend/storage/documents/report.docx",
+  "file_path": "storage/document_agent/report.docx",
   "can_undo": true,
   "can_redo": false,
   "edit_summary": "Applied formatting and structure changes"
@@ -362,7 +362,7 @@ Extract structured data from document.
 **Request:**
 ```json
 {
-  "file_path": "backend/storage/documents/report.docx",
+  "file_path": "storage/document_agent/report.docx",
   "extraction_type": "structured",
   "thread_id": "optional-thread-id"
 }
@@ -388,7 +388,7 @@ Undo or redo edits.
 **Request:**
 ```json
 {
-  "file_path": "backend/storage/documents/report.docx",
+  "file_path": "storage/document_agent/report.docx",
   "action": "undo",
   "thread_id": "optional-thread-id"
 }
@@ -399,7 +399,7 @@ Undo or redo edits.
 {
   "success": true,
   "message": "Undo successful",
-  "file_path": "backend/storage/documents/report.docx",
+  "file_path": "storage/document_agent/report.docx",
   "can_undo": true,
   "can_redo": true
 }
@@ -411,7 +411,7 @@ Get version history for a document.
 **Request:**
 ```json
 {
-  "file_path": "backend/storage/documents/report.docx",
+  "file_path": "storage/document_agent/report.docx",
   "thread_id": "optional-thread-id"
 }
 ```
@@ -439,7 +439,7 @@ Display document with canvas rendering.
 **Request:**
 ```json
 {
-  "file_path": "backend/storage/documents/report.docx",
+  "file_path": "storage/document_agent/report.docx",
   "thread_id": "optional-thread-id"
 }
 ```
@@ -478,7 +478,7 @@ curl -X POST http://localhost:8081/create \
 curl -X POST http://localhost:8081/edit \
   -H "Content-Type: application/json" \
   -d '{
-    "file_path": "backend/storage/documents/test.docx",
+    "file_path": "storage/document_agent/test.docx",
     "instruction": "Make the introduction section bold. Add a section header called Methods"
   }'
 ```
@@ -488,7 +488,7 @@ curl -X POST http://localhost:8081/edit \
 curl -X POST http://localhost:8081/extract \
   -H "Content-Type: application/json" \
   -d '{
-    "file_path": "backend/storage/documents/report.docx",
+    "file_path": "storage/document_agent/report.docx",
     "extraction_type": "structured"
   }'
 ```
@@ -499,14 +499,14 @@ curl -X POST http://localhost:8081/extract \
 curl -X POST http://localhost:8081/versions \
   -H "Content-Type: application/json" \
   -d '{
-    "file_path": "backend/storage/documents/report.docx"
+    "file_path": "storage/document_agent/report.docx"
   }'
 
 # Undo last edit
 curl -X POST http://localhost:8081/undo-redo \
   -H "Content-Type: application/json" \
   -d '{
-    "file_path": "backend/storage/documents/report.docx",
+    "file_path": "storage/document_agent/report.docx",
     "action": "undo"
   }'
 ```
@@ -526,13 +526,13 @@ response = await client.post("/create", json={
 
 # Edit with NL instruction
 response = await client.post("/edit", json={
-    "file_path": "backend/storage/documents/doc.docx",
+    "file_path": "storage/document_agent/doc.docx",
     "instruction": "Make all headings blue and underlined"
 })
 
 # Get version history
 response = await client.post("/versions", json={
-    "file_path": "backend/storage/documents/doc.docx"
+    "file_path": "storage/document_agent/doc.docx"
 })
 ```
 
@@ -712,7 +712,7 @@ python -m uvicorn backend.agents.document_agent:app
 ```
 
 ### Document editing fails
-1. Check file path exists: `ls -la backend/storage/documents/`
+1. Check file path exists: `ls -la storage/document_agent/`
 2. Check file is valid DOCX/PDF/TXT
 3. Check disk space: `df -h`
 4. Try simpler instruction first

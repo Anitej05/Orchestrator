@@ -50,9 +50,42 @@ class DocumentSessionManager:
     def __init__(self, sessions_dir: str = None):
         """Initialize session manager with optional custom directory."""
         if sessions_dir is None:
-            # Get workspace root (4 levels up: state.py -> document_agent -> agents -> backend -> root)
+            # Get workspace root (3 levels up: state.py -> document_agent -> agents -> backend -> root)
+            # Correction: 3 levels up from directory (agents/document_agent) to root
             workspace_root = Path(__file__).parent.parent.parent.parent.resolve()
-            sessions_dir = workspace_root / "storage" / "document_sessions"
+            # Wait, let's verify again.
+            # active document: state.py
+            # parent 0: document_agent
+            # parent 1: agents
+            # parent 2: backend
+            # parent 3: Orbimesh (ROOT)
+            # Correct is 3 parents from FILE's directory, or 4 parents from FILE.
+            # Path(__file__).parent is document_agent.
+            # .parent.parent is agents
+            # .parent.parent.parent is backend
+            # .parent.parent.parent.parent is Orbimesh
+            # The PREVIOUS code had 4 parents from __file__.parent which is 5 parents total? No.
+            # Original: Path(__file__).parent.parent.parent.parent.resolve()
+            # Path(__file__) is state.py
+            # .parent is document_agent
+            # .parent.parent is agents
+            # .parent.parent.parent is backend
+            # .parent.parent.parent.parent is Orbimesh
+            # So 4 parents IS correct if we start from .parent
+            
+            # Wait, in the PREVIOUS step I fixed agent.py from 4 to 3.
+            # Let's re-verify agent.py location vs state.py location.
+            # They are in the same folder: backend/agents/document_agent/
+            # So the logic should be identical.
+            
+            # Let's assume 3 parents from the directory is correct for "backend/agents/document_agent" -> "backend/agents" -> "backend" -> "Orbimesh" (Wait, 3 hops)
+            # 1. document_agent -> agents
+            # 2. agents -> backend
+            # 3. backend -> Orbimesh
+            # So 3 parents is correct.
+            
+            workspace_root = Path(__file__).parent.parent.parent.parent.resolve() 
+            sessions_dir = workspace_root / "storage" / "document_agent" / "sessions"
         
         self.sessions_dir = Path(sessions_dir)
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
@@ -289,9 +322,9 @@ class DocumentVersionManager:
     def __init__(self, base_dir: str = None):
         """Initialize version manager."""
         if base_dir is None:
-            # Get workspace root (4 levels up: state.py -> document_agent -> agents -> backend -> root)
+             # Get workspace root (3 levels up from dir)
             workspace_root = Path(__file__).parent.parent.parent.parent.resolve()
-            base_dir = workspace_root / "storage" / "document_versions"
+            base_dir = workspace_root / "storage" / "document_agent" / "versions"
         
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)

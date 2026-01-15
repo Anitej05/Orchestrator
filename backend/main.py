@@ -1,4 +1,4 @@
-# Project_Agent_Directory/main.py
+# Orbimesh Backend/main.py
 import uuid
 import logging
 import json
@@ -161,9 +161,11 @@ from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
 # Create storage directory if it doesn't exist
-storage_path = Path("storage").absolute()
+# Create storage directory if it doesn't exist
+# Fix: Use absolute path to project root (Orbimesh/storage) instead of relative (Orbimesh/backend/storage)
+storage_path = (Path(__file__).parent.parent / "storage").resolve()
 storage_path.mkdir(exist_ok=True)
-(storage_path / "images").mkdir(exist_ok=True)
+# Images moved to strict hierarchy (storage/system/images or browser_agent/screenshots)
 
 # Mount storage directory for serving screenshots
 app.mount("/storage", StaticFiles(directory=str(storage_path)), name="storage")
@@ -407,7 +409,7 @@ async def create_document_unified(request: CreateDocumentRequest, req: Request):
                 "content": request.content,
                 "file_name": request.file_name,
                 "file_type": request.file_type,
-                "output_dir": "backend/storage/documents",
+                "output_dir": "storage/document_agent",
                 "thread_id": request.thread_id
             }
             
@@ -445,7 +447,7 @@ async def create_document_unified(request: CreateDocumentRequest, req: Request):
             # Get relative path for /files endpoint
             try:
                 abs_path = PathlibPath(file_path).resolve()
-                storage_base = PathlibPath("storage").resolve()
+                storage_base = (PathlibPath(__file__).parent.parent / "storage").resolve()
                 relative_path = str(abs_path.relative_to(storage_base))
                 preview_url = f"/files/{relative_path}"
                 
@@ -588,7 +590,7 @@ async def create_spreadsheet_unified(request: CreateSpreadsheetRequest, req: Req
             raise HTTPException(status_code=400, detail=f"Invalid data format: {str(e)}")
         
         # Create storage directory
-        storage_dir = PathlibPath("storage/spreadsheets")
+        storage_dir = PathlibPath(__file__).parent.parent / "storage" / "spreadsheet_agent"
         storage_dir.mkdir(parents=True, exist_ok=True)
         file_path = storage_dir / request.filename
         
@@ -4001,7 +4003,7 @@ async def startup_event():
     except Exception as e:
         logger.error(f"❌ Failed to create tables: {str(e)}", exc_info=True)
     
-    # Sync agent definitions from Agent_entries/*.json to database
+    # Sync agent definitions from agent_entries/*.json to database
     try:
         from manage import sync_agent_entries
         logger.info("Syncing agent definitions to database...")

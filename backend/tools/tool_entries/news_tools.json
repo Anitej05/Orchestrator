@@ -1,0 +1,94 @@
+{
+    "id": "news_tools",
+    "name": "News Tools",
+    "description": "News article search and top headlines using NewsAPI. Get breaking news and search for articles on any topic.",
+    "version": "1.0.0",
+    "category": "news",
+    "requires_env": [
+        "NEWS_API_KEY"
+    ],
+    "tools": [
+        {
+            "function_name": "search_news",
+            "display_name": "Search News",
+            "description": "Search for news articles matching a keyword or query",
+            "use_when": "User wants to find news articles about a specific topic, company, event, or keyword",
+            "not_for": "Top/trending headlines without specific query (use get_top_headlines)",
+            "parameters": [
+                {
+                    "name": "query",
+                    "type": "string",
+                    "required": true,
+                    "description": "The search keyword or phrase (e.g., 'Tesla', 'stock market trends')"
+                },
+                {
+                    "name": "language",
+                    "type": "string",
+                    "required": false,
+                    "default": "en",
+                    "description": "The 2-letter ISO-639-1 code of the language"
+                },
+                {
+                    "name": "page_size",
+                    "type": "integer",
+                    "required": false,
+                    "default": 10,
+                    "description": "Number of results to return (1-100)"
+                }
+            ],
+            "returns": "Dictionary with status, totalResults, and articles list (title, description, url, publishedAt, source)",
+            "example_queries": [
+                "Find news about Tesla",
+                "Search for AI news",
+                "What's happening with Apple?",
+                "Get articles about climate change"
+            ],
+            "keywords": [
+                "news",
+                "articles",
+                "search",
+                "find",
+                "happening",
+                "coverage"
+            ]
+        },
+        {
+            "function_name": "get_top_headlines",
+            "display_name": "Get Top Headlines",
+            "description": "Get top business headlines for a specific country",
+            "use_when": "User wants trending news, top headlines, breaking news, or current events without a specific topic",
+            "not_for": "Topic-specific article search (use search_news)",
+            "parameters": [
+                {
+                    "name": "country",
+                    "type": "string",
+                    "required": false,
+                    "default": "us",
+                    "description": "The 2-letter ISO 3166-1 country code (e.g., 'us', 'gb', 'in')"
+                },
+                {
+                    "name": "page_size",
+                    "type": "integer",
+                    "required": false,
+                    "default": 10,
+                    "description": "Number of results to return (1-100)"
+                }
+            ],
+            "returns": "Dictionary with status, totalResults, and articles list (title, description, url, publishedAt, source)",
+            "example_queries": [
+                "What's the top news today?",
+                "Show me trending headlines",
+                "Breaking news in the US",
+                "Top business news in India"
+            ],
+            "keywords": [
+                "top",
+                "headlines",
+                "trending",
+                "breaking",
+                "latest",
+                "today"
+            ]
+        }
+    ]
+}

@@ -1,5 +1,5 @@
 {
-  "id": "custom_browser_agent",
+  "id": "browser_automation_agent",
   "owner_id": "orbimesh-vendor",
   "name": "Custom Browser Automation Agent",
   "description": "Browser automation agent for WEB NAVIGATION ONLY. Cannot process local files, documents, or spreadsheets. Use ONLY for: navigating websites, clicking web elements, submitting forms, extracting data from web pages, and streaming live browser screenshots. Multi-provider LLM fallback (Cerebras → Groq → NVIDIA) and vision capabilities (Ollama → NVIDIA). NOT for document editing, spreadsheet manipulation, or local file processing.",

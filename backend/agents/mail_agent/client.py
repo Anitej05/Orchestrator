@@ -32,7 +32,10 @@ class GmailClient:
         # Update to V3 Connection ID (Found via inspection: ca_xZUTNToOnUiQ)
         # The V2 UUID in env var is deprecated for this SDK version.
         self.connection_id = "ca_xZUTNToOnUiQ" 
-        self.attachments_dir = Path("storage/mail_agent/gmail_attachments")
+        # Calculate project root from this file: client.py -> mail_agent -> agents -> backend -> Orbimesh
+        # 4 levels up from file
+        project_root = Path(__file__).parent.parent.parent.parent.resolve()
+        self.attachments_dir = project_root / "storage" / "mail_agent" / "attachments"
         self.attachments_dir.mkdir(parents=True, exist_ok=True)
         
         # Initialize standardized file manager for attachments

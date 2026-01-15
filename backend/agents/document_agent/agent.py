@@ -46,9 +46,16 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# Get workspace root (3 levels up from this file: agent.py -> document_agent -> agents -> backend -> root)
-WORKSPACE_ROOT = Path(__file__).parent.parent.parent.parent.resolve()
-DEFAULT_STORAGE_DIR = WORKSPACE_ROOT / "storage" / "documents"
+# Get workspace root (3 levels up from this file: agent.py → document_agent → agents → backend → root)
+# file: .../backend/agents/document_agent/agent.py
+# parent 0: .../backend/agents/document_agent
+# parent 1: .../backend/agents
+# parent 2: .../backend
+# parent 3: .../Orbimesh (ROOT)
+# Using Path(__file__).parent goes to the directory, then .parent.parent.parent reaches root
+WORKSPACE_ROOT = Path(__file__).parent.parent.parent.parent.resolve()  # Correct: 3 dir levels from file
+DEFAULT_STORAGE_DIR = WORKSPACE_ROOT / "storage" / "document_agent"
+
 
 class DocumentAgent:
     """
@@ -214,7 +221,7 @@ class DocumentAgent:
                     logger.info(f"redirecting path {p} -> backend/{p}")
                 else:
                     # Recursive fallback: search in storage root
-                    storage_root = WORKSPACE_ROOT / "backend" / "storage"
+                    storage_root = WORKSPACE_ROOT / "storage"
                     if storage_root.exists():
                         closest_match = None
                         try:

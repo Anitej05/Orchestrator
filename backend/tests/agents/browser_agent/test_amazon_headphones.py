@@ -8,10 +8,10 @@ import logging
 import sys
 import os
 
-# Add parent directory to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Add backend directory to path (4 levels up)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 
-from browser_agent.agent import BrowserAgent
+from agents.browser_agent.agent import BrowserAgent
 
 # Configure logging
 log_file = "browser_headphones_test.log"

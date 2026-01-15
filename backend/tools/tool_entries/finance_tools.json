@@ -1,0 +1,141 @@
+{
+    "id": "finance_tools",
+    "name": "Finance Tools",
+    "description": "Stock market data including real-time quotes, historical prices, company information, and key financial statistics using Yahoo Finance.",
+    "version": "1.0.0",
+    "category": "finance",
+    "requires_env": [],
+    "tools": [
+        {
+            "function_name": "get_stock_quote",
+            "display_name": "Get Stock Quote",
+            "description": "Get current stock price and basic quote data",
+            "use_when": "User asks for current/real-time stock price, quote, or today's price of a ticker",
+            "not_for": "Historical data (use get_stock_history), company details (use get_company_info), financial metrics (use get_key_statistics)",
+            "parameters": [
+                {
+                    "name": "ticker",
+                    "type": "string",
+                    "required": true,
+                    "description": "Stock ticker symbol (e.g., 'AAPL', 'TSLA', 'MSFT')"
+                }
+            ],
+            "returns": "Dictionary with current price, day high/low, volume, market cap",
+            "example_queries": [
+                "What's Tesla's stock price?",
+                "Get AAPL quote",
+                "Current price of Microsoft",
+                "How much is NVDA trading at?"
+            ],
+            "keywords": [
+                "stock",
+                "price",
+                "quote",
+                "ticker",
+                "current",
+                "trading"
+            ]
+        },
+        {
+            "function_name": "get_stock_history",
+            "display_name": "Get Stock History",
+            "description": "Get historical stock price data (OHLCV)",
+            "use_when": "User asks for historical prices, past performance, price chart data, or OHLCV data",
+            "not_for": "Current/real-time price (use get_stock_quote), company info (use get_company_info)",
+            "parameters": [
+                {
+                    "name": "ticker",
+                    "type": "string",
+                    "required": true,
+                    "description": "Stock ticker symbol"
+                },
+                {
+                    "name": "period",
+                    "type": "string",
+                    "required": false,
+                    "default": "1mo",
+                    "description": "Time period - '1d', '5d', '1mo', '3mo', '6mo', '1y', '5y', 'max'"
+                }
+            ],
+            "returns": "Dictionary with ticker, period, and list of historical data points (date, open, high, low, close, volume)",
+            "example_queries": [
+                "Show me Apple's stock history for the past month",
+                "TSLA price over the last year",
+                "Historical prices of Amazon",
+                "Get 6-month OHLC data for GOOGL"
+            ],
+            "keywords": [
+                "history",
+                "historical",
+                "past",
+                "chart",
+                "ohlc",
+                "performance",
+                "trend"
+            ]
+        },
+        {
+            "function_name": "get_company_info",
+            "display_name": "Get Company Info",
+            "description": "Get company information and business summary",
+            "use_when": "User asks about what a company does, its industry, sector, or business description",
+            "not_for": "Stock prices (use get_stock_quote), financial metrics (use get_key_statistics)",
+            "parameters": [
+                {
+                    "name": "ticker",
+                    "type": "string",
+                    "required": true,
+                    "description": "Stock ticker symbol"
+                }
+            ],
+            "returns": "Dictionary with company name, sector, industry, website, employees, and business summary",
+            "example_queries": [
+                "What does Tesla do?",
+                "Tell me about Apple as a company",
+                "What industry is NVIDIA in?",
+                "Company overview for Microsoft"
+            ],
+            "keywords": [
+                "company",
+                "about",
+                "overview",
+                "business",
+                "sector",
+                "industry",
+                "what does"
+            ]
+        },
+        {
+            "function_name": "get_key_statistics",
+            "display_name": "Get Key Statistics",
+            "description": "Get key financial statistics and metrics",
+            "use_when": "User asks for PE ratio, EPS, market cap, beta, dividend yield, 52-week high/low, or other financial metrics",
+            "not_for": "Current price (use get_stock_quote), company description (use get_company_info)",
+            "parameters": [
+                {
+                    "name": "ticker",
+                    "type": "string",
+                    "required": true,
+                    "description": "Stock ticker symbol"
+                }
+            ],
+            "returns": "Dictionary with market cap, PE ratio, EPS, beta, dividend yield, 52-week high/low, price-to-book",
+            "example_queries": [
+                "What's Apple's PE ratio?",
+                "Show me TSLA financial metrics",
+                "What's the market cap of Amazon?",
+                "NVDA 52-week high and low"
+            ],
+            "keywords": [
+                "pe ratio",
+                "eps",
+                "market cap",
+                "metrics",
+                "statistics",
+                "dividend",
+                "beta",
+                "52-week"
+            ]
+        }
+    ]
+}

@@ -207,7 +207,7 @@ The agent implements fail-safe error handling:
 ## Integration with Orchestrator
 
 The agent is automatically discovered by the orchestrator when:
-1. Agent JSON file is in `Agent_entries/`
+1. Agent JSON file is in `agent_entries/`
 2. Agent is synced to database using `python manage.py sync_agents`
 3. Agent service is running on configured port (8050)
 

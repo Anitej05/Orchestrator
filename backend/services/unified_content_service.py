@@ -23,13 +23,20 @@ from enum import Enum
 logger = logging.getLogger("UnifiedContentService")
 
 # Storage directories
-STORAGE_BASE = Path("storage")
-CONTENT_DIR = STORAGE_BASE / "content"
+# Determine project root: services -> backend -> root (2 levels up)
+# Determine project root: services -> backend -> root (2 levels up)
+PROJECT_ROOT = Path(__file__).parent.parent.parent.resolve()
+STORAGE_BASE = PROJECT_ROOT / "storage"
+SYSTEM_DIR = STORAGE_BASE / "system"
+CONTENT_DIR = SYSTEM_DIR / "content"
+
 USER_UPLOADS_DIR = CONTENT_DIR / "uploads"
 AGENT_FILES_DIR = CONTENT_DIR / "agent_files"
 ARTIFACTS_DIR = CONTENT_DIR / "artifacts"
 TEMP_DIR = CONTENT_DIR / "temp"
 
+# Also ensure system dir exists
+SYSTEM_DIR.mkdir(parents=True, exist_ok=True)
 for dir_path in [USER_UPLOADS_DIR, AGENT_FILES_DIR, ARTIFACTS_DIR, TEMP_DIR]:
     dir_path.mkdir(parents=True, exist_ok=True)
 

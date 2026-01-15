@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Agent Management Script
-Automatically syncs agent definitions from Agent_entries/*.json to the database.
+Automatically syncs agent definitions from agent_entries/*.json to the database.
 """
 
 import sys
@@ -27,7 +27,7 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
 # Configuration
-AGENT_ENTRIES_DIR = Path(__file__).parent / "Agent_entries"
+AGENT_ENTRIES_DIR = Path(__file__).parent / "agent_entries"
 
 # Lazy load embedding model
 _embedding_model = None
@@ -192,7 +192,7 @@ def sync_agent_to_db(db: Session, agent_data: dict, is_new: bool = False):
 
 def sync_agent_entries(verbose: bool = True):
     """
-    Sync all agent entries from Agent_entries/*.json to the database.
+    Sync all agent entries from agent_entries/*.json to the database.
     Non-destructive: only adds new agents or updates changed ones.
     
     Returns:
@@ -206,10 +206,10 @@ def sync_agent_entries(verbose: bool = True):
     # Ensure tables exist
     create_tables()
     
-    # Check if Agent_entries directory exists
+    # Check if agent_entries directory exists
     if not AGENT_ENTRIES_DIR.is_dir():
         logger.error(f"❌ Directory not found: {AGENT_ENTRIES_DIR}")
-        return {"error": "Agent_entries directory not found"}
+        return {"error": "agent_entries directory not found"}
     
     # Find all JSON files
     agent_files = list(AGENT_ENTRIES_DIR.glob("*.json"))

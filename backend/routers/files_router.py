@@ -17,9 +17,13 @@ from schemas import FileObject
 router = APIRouter(prefix="/api", tags=["Files"])
 
 # Ensure storage directories exist
-os.makedirs("storage/images", exist_ok=True)
-os.makedirs("storage/documents", exist_ok=True)
-os.makedirs("storage/spreadsheets", exist_ok=True)
+# Ensure storage directories exist
+from pathlib import Path
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+STORAGE_ROOT = PROJECT_ROOT / "storage"
+(STORAGE_ROOT / "images").mkdir(parents=True, exist_ok=True)
+(STORAGE_ROOT / "documents").mkdir(parents=True, exist_ok=True)
+(STORAGE_ROOT / "spreadsheets").mkdir(parents=True, exist_ok=True)
 
 
 @router.post("/upload", response_model=List[FileObject])
@@ -45,8 +49,8 @@ async def upload_files(files: List[UploadFile] = File(...)):
         else:
             file_type = 'document'
         
-        save_dir = f"storage/{file_type}s"  # Path relative to project root
-        file_path = os.path.join(save_dir, file.filename)
+        save_dir = STORAGE_ROOT / f"{file_type}s"
+        file_path = save_dir / file.filename
 
         # Save the file asynchronously
         try:
@@ -77,12 +81,15 @@ async def serve_file(file_path: str):
     if ".." in file_path or file_path.startswith("/"):
         raise HTTPException(status_code=400, detail="Invalid file path")
     
-    # Check if file exists
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File not found")
+    # Resolve path relative to PROJECT_ROOT (so 'storage/...' work)
+    full_path = PROJECT_ROOT / file_path
     
+    # Check if file exists
+    if not full_path.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+        
     # Determine media type based on file extension
-    media_type, _ = guess_type(file_path)
+    media_type, _ = guess_type(str(full_path))
     
     # Return the file
-    return FileResponse(file_path, media_type=media_type)
+    return FileResponse(str(full_path), media_type=media_type)

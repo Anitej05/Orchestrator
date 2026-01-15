@@ -73,11 +73,13 @@ AGENT_DEFINITION = {
 app = FastAPI(title="Custom Browser Automation Agent")
 
 # Storage Setup (kept for compatibility)
-STORAGE_DIR = Path("storage/browser_agent/screenshots")
+# Storage Setup (kept for compatibility)
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+STORAGE_DIR = PROJECT_ROOT / "storage" / "browser_agent" / "screenshots"
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-DOWNLOADS_DIR = Path("storage/browser_agent/downloads")
+DOWNLOADS_DIR = PROJECT_ROOT / "storage" / "browser_agent" / "downloads"
 DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
-UPLOADS_DIR = Path("storage/browser_agent/uploads")
+UPLOADS_DIR = PROJECT_ROOT / "storage" / "browser_agent" / "uploads"
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
 screenshot_file_manager = AgentFileManager(

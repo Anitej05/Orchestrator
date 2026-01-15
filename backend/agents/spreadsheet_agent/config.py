@@ -10,9 +10,9 @@ load_dotenv()
 # ============== PATHS ==============
 # Use root storage directory as specified
 ROOT_DIR = Path(__file__).parent.parent.parent.parent  # Get to repo root
-STORAGE_DIR = ROOT_DIR / "storage" / "spreadsheets"
-SESSIONS_DIR = ROOT_DIR / "storage" / "spreadsheet_sessions"
-MEMORY_CACHE_DIR = ROOT_DIR / "storage" / "spreadsheet_memory"
+STORAGE_DIR = ROOT_DIR / "storage" / "spreadsheet_agent"
+SESSIONS_DIR = STORAGE_DIR / "sessions"
+MEMORY_CACHE_DIR = STORAGE_DIR / "memory"
 
 # Create directories
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)

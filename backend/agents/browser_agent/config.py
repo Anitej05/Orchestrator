@@ -13,7 +13,7 @@ _CURRENT_FILE = Path(__file__).resolve()
 _BROWSER_AGENT_DIR = _CURRENT_FILE.parent
 _AGENTS_DIR = _BROWSER_AGENT_DIR.parent
 _BACKEND_DIR = _AGENTS_DIR.parent
-_PROJECT_ROOT = _BACKEND_DIR
+_PROJECT_ROOT = _BACKEND_DIR.parent
 
 # Storage configuration - Use project root storage folder
 STORAGE_ROOT = _PROJECT_ROOT / "storage" / "browser_agent"

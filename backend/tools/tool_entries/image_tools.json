@@ -1,0 +1,50 @@
+{
+    "id": "image_tools",
+    "name": "Image Analysis Tools",
+    "description": "Image analysis and understanding using Groq's vision model. Analyze images and answer questions about them.",
+    "version": "1.0.0",
+    "category": "image",
+    "requires_env": [
+        "GROQ_API_KEY"
+    ],
+    "tools": [
+        {
+            "function_name": "analyze_image",
+            "display_name": "Analyze Image",
+            "description": "Analyze an image using Groq's vision model and answer a question about it",
+            "use_when": "User has an image file and wants to understand its contents, describe it, or ask questions about it",
+            "not_for": "Web image search (use search_tools), Wikipedia images (use wiki_tools)",
+            "parameters": [
+                {
+                    "name": "image_path",
+                    "type": "string",
+                    "required": true,
+                    "description": "Local file path to the image"
+                },
+                {
+                    "name": "query",
+                    "type": "string",
+                    "required": true,
+                    "description": "Question to ask about the image"
+                }
+            ],
+            "returns": "Dictionary with answer to the query, original query, and image path",
+            "example_queries": [
+                "What's in this image?",
+                "Describe the screenshot I uploaded",
+                "Can you read the text in this picture?",
+                "Analyze this chart and explain it"
+            ],
+            "keywords": [
+                "image",
+                "picture",
+                "photo",
+                "analyze",
+                "describe",
+                "vision",
+                "see",
+                "screenshot"
+            ]
+        }
+    ]
+}

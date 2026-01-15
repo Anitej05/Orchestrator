@@ -138,6 +138,9 @@ _rate_limit = {
 # AGENT DEFINITION
 # ============================================================================
 
+# Agent Logs: `storage/zoho_books_agent/agent.log`
+# Request Logs: `storage/zoho_books_agent/requests.log`
+# Error Logs: `storage/zoho_books_agent/errors.log`
 AGENT_DEFINITION = {
     "id": "zoho_books_agent",
     "owner_id": "orbimesh-vendor",
@@ -192,8 +195,13 @@ AGENT_DEFINITION = {
 app = FastAPI(title="Zoho Books Agent - Pharmaceutical")
 
 # Initialize file manager
-STORAGE_DIR = Path("storage/zoho_books")
+# Initialize file manager
+PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
+STORAGE_DIR = PROJECT_ROOT / "storage" / "zoho_books_agent"
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+
+# Add file handler to the root logger
+logging.getLogger().addHandler(logging.FileHandler(STORAGE_DIR / "debug.log"))
 
 file_manager = AgentFileManager(
     agent_id="zoho_books_agent",

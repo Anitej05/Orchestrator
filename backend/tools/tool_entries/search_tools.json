@@ -1,0 +1,57 @@
+{
+    "id": "search_tools",
+    "name": "Web Search Tools",
+    "description": "Real-time web search using Groq's compound model. Search the internet and get summarized answers with citations.",
+    "version": "1.0.0",
+    "category": "search",
+    "requires_env": [
+        "GROQ_API_KEY"
+    ],
+    "tools": [
+        {
+            "function_name": "web_search_and_summarize",
+            "display_name": "Web Search and Summarize",
+            "description": "Perform real-time web search and return summarized answer with citations",
+            "use_when": "User needs current/real-time information from the web, recent events, or answers that require internet search",
+            "not_for": "Wikipedia facts (use wiki_tools), stock prices (use finance_tools), news articles (use news_tools)",
+            "parameters": [
+                {
+                    "name": "query",
+                    "type": "string",
+                    "required": true,
+                    "description": "The question or topic to search for"
+                },
+                {
+                    "name": "include_domains",
+                    "type": "array",
+                    "required": false,
+                    "description": "Optional list of domains to restrict search to"
+                },
+                {
+                    "name": "exclude_domains",
+                    "type": "array",
+                    "required": false,
+                    "description": "Optional list of domains to exclude from search"
+                }
+            ],
+            "returns": "Dictionary with answer, sources, and original query",
+            "example_queries": [
+                "Search the web for latest iPhone reviews",
+                "Find information about upcoming SpaceX launches",
+                "What are the best restaurants in NYC?",
+                "Research the current state of renewable energy"
+            ],
+            "keywords": [
+                "search",
+                "web",
+                "internet",
+                "google",
+                "find",
+                "research",
+                "current",
+                "latest",
+                "recent"
+            ]
+        }
+    ]
+}

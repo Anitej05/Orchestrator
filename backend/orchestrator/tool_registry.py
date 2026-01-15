@@ -77,8 +77,20 @@ def list_tool_cards() -> List[Dict[str, Any]]:
     - description
     - capabilities
     - required_params (best-effort from args_schema)
+    - use_when (from JSON definitions)
+    - not_for (from JSON definitions)
+    - example_queries (from JSON definitions)
     """
     _ensure_tools_initialized()
+
+    # Try to get enriched data from discovery engine
+    try:
+        from orchestrator.tool_discovery import get_tool_discovery
+        discovery = get_tool_discovery()
+        discovery_cards = {card["tool_name"]: card for card in discovery.list_tool_cards()}
+    except Exception as e:
+        logger.warning(f"Could not load discovery engine: {e}")
+        discovery_cards = {}
 
     cards: List[Dict[str, Any]] = []
     for tool_name, meta in _tool_meta_by_name.items():
@@ -96,6 +108,9 @@ def list_tool_cards() -> List[Dict[str, Any]]:
 
         description = getattr(tool, "description", "") or ""
 
+        # Get enriched data from discovery if available
+        discovery_data = discovery_cards.get(tool_name, {})
+
         # If a tool has multiple categories (rare), emit one card per category for cleaner UX.
         categories = sorted(meta.categories) or ["other"]
         for category in categories:
@@ -106,10 +121,15 @@ def list_tool_cards() -> List[Dict[str, Any]]:
                     "description": description,
                     "capabilities": sorted(meta.capabilities),
                     "required_params": required_params,
+                    # Enriched from discovery engine
+                    "use_when": discovery_data.get("use_when", ""),
+                    "not_for": discovery_data.get("not_for", ""),
+                    "example_queries": discovery_data.get("example_queries", []),
                 }
             )
 
     return cards
+
 
 
 def get_tool_for_capability(capability: str) -> Optional[BaseTool]:
@@ -489,6 +509,15 @@ def get_tool_descriptions() -> str:
     if not _tool_registry:
         return "No direct tools available."
     
+    # Try to get enhanced descriptions from discovery engine
+    try:
+        from orchestrator.tool_discovery import get_tool_discovery
+        discovery = get_tool_discovery()
+        return discovery.get_tool_summary_for_llm()
+    except Exception as e:
+        logger.debug(f"Discovery engine not available, using basic descriptions: {e}")
+    
+    # Fallback to basic descriptions
     descriptions = ["AVAILABLE DIRECT TOOLS (Fast, no agent needed):\n"]
     
     for category, capabilities in _tool_categories.items():
@@ -499,6 +528,7 @@ def get_tool_descriptions() -> str:
                 descriptions.append(f"  • {capability}: {tool.description}")
     
     return "\n".join(descriptions)
+
 
 
 def get_tool_registry():

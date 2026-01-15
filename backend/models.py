@@ -1,4 +1,4 @@
-# In Project_Agent_Directory/models.py
+# In Orbimesh Backend/models.py
 
 from sqlalchemy import Column, String, Float, Text, Enum as SAEnum, ForeignKey, Integer, Boolean, DateTime
 from sqlalchemy.orm import relationship

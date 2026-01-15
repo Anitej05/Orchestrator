@@ -107,7 +107,12 @@ class FileProcessor:
         )
         
         # Save vector store
-        index_path = f"storage/vector_store/{os.path.basename(file_path)}.faiss"
+        # Fix: Use absolute path to project root to avoid backend/storage split
+        PROJECT_ROOT = Path(__file__).parent.parent.parent.resolve()
+        storage_dir = PROJECT_ROOT / "storage" / "vector_store"
+        index_path = str(storage_dir / f"{os.path.basename(file_path)}.faiss")
+        
+        # Ensure directory exists
         os.makedirs(os.path.dirname(index_path), exist_ok=True)
         await asyncio.to_thread(vector_store.save_local, index_path)
         

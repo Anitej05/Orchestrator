@@ -1,4 +1,4 @@
-# In Project_Agent_Directory/schemas.py
+# In Orbimesh Backend/schemas.py
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 from typing import List, Literal, Optional, Dict, Any
