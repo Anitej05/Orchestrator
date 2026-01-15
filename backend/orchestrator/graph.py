@@ -41,7 +41,7 @@ from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, AI
 from langchain_cerebras import ChatCerebras
 from langchain_nvidia_ai_endpoints import ChatNVIDIA
 from langchain_groq import ChatGroq
-from typing import Protocol, Any, Dict
+from typing import Protocol, Any, Dict, List
 
 # Global orchestrator metrics
 ORCHESTRATOR_METRICS = {
@@ -465,6 +465,56 @@ def extract_json_from_response(text: str) -> str | None:
     return None
 
 
+def adaptive_compress_data(data: Any, max_chars: int = 25000) -> Any:
+    """
+    State-of-the-Art Adaptive Compression:
+    - Content-Agnostic: No hardcoded field names.
+    - Structure-Preserving: Keeps lists and dictionaries intact.
+    - Heuristics-Based: Truncates based on data TYPE and SIZE, not name.
+    """
+    # 1. Quick pass: If small enough, return raw
+    try:
+        json_str = json.dumps(data, default=str)
+        if len(json_str) < max_chars:
+            return data
+    except:
+        pass # If not serializable, proceed to manual traversal
+        
+    def compress_recursive(node: Any, depth: int = 0) -> Any:
+        if depth > 10: return "..." # Deep recursion guard
+        
+        if isinstance(node, dict):
+            new_dict = {}
+            for k, v in node.items():
+                # Heuristic: Keys themselves should never be truncated (schema)
+                # Recurse on values
+                new_dict[k] = compress_recursive(v, depth+1)
+            return new_dict
+            
+        elif isinstance(node, list):
+            # Heuristic: For lists, keep the head (context) and tail (recent) 
+            # if the list is extremely long.
+            if len(node) > 20: 
+                # Keep first 15 and last 5 (e.g. for logs or time-series)
+                subset = [compress_recursive(item, depth+1) for item in node[:15]]
+                subset.append(f"... [{len(node)-20} skipped] ...")
+                subset.extend([compress_recursive(item, depth+1) for item in node[-5:]])
+                return subset
+            return [compress_recursive(item, depth+1) for item in node]
+            
+        elif isinstance(node, str):
+            # Heuristic: Short strings are usually IDs, Names, Statuses - KEEP them.
+            # Long strings are usually Content, Logs, Bodies - TRUNCATE them.
+            if len(node) > 500:
+                # Keep start and end for context match
+                return node[:300] + f"... [{len(node)-400} chars] ..." + node[-100:]
+            return node
+            
+        return node # Integers, Bools, None
+
+    return compress_recursive(data)
+
+
 def _summarize_completed_tasks_for_context(completed_tasks: List[Dict]) -> List[Dict]:
     """
     Summarize completed tasks to reduce context size for LLM calls.
@@ -578,26 +628,19 @@ def _summarize_completed_tasks_for_context(completed_tasks: List[Dict]) -> List[
                     summary["result"] = answer_text[:max_length] + ("..." if len(answer_text) > max_length else "")
                     logger.info(f"📊 Spreadsheet answer extracted from nested result: length={len(answer_text)}, truncated_to={len(summary['result'])}")
                 else:
-                    # Fallback - keep the whole nested result if it's small enough
-                    result_str = json.dumps(nested_result, default=str)
-                    if len(result_str) < 2000:
-                        summary["result"] = nested_result
-                    else:
-                        summary["result"] = str(nested_result)[:500] + "..."
+                    # Fallback - use adaptive compression for nested results
+                    # This handles Mail Agent responses which match this structure (success=True, result={...})
+                    summary["result"] = adaptive_compress_data(nested_result, max_chars=25000)
             else:
-                # Check if result is structured data (small dict with simple values like numbers, bools, short strings)
-                # This preserves API responses, stock data, weather data, etc.
-                result_str = json.dumps(result, default=str)
-                if len(result_str) < 2000:  # Small structured data - keep it all
-                    summary["result"] = result
-                else:
-                    # Large result - extract key information
-                    if "status" in result:
-                        summary["result_status"] = result["status"]
-                    if "summary" in result:
-                        summary["result_summary"] = str(result["summary"])[:500]
-                    elif "task_summary" in result:
-                        summary["result_summary"] = str(result["task_summary"])[:500]
+                # Use Robust Content-Agnostic Compression
+                # This works for ANY schema (Mail, Jira, SQL) without hardcoded keys.
+                # It preserves structure (lists, short values) while compressing heavy content.
+                summary["result"] = adaptive_compress_data(result, max_chars=25000)
+                
+                # CRITICAL: Always preserve transparency notes (e.g., from Mail Agent)
+                if isinstance(result, dict) and "note" in result:
+                    summary["note"] = result["note"]
+                    logger.info(f"📝 Preserved transparency note: {result['note']}")
         
         # Handle browser agent raw_response specially - extract the useful content
         if raw_response and isinstance(raw_response, dict):
@@ -2503,6 +2546,8 @@ def plan_execution(state: State, config: RunnableConfig):
         1. You MUST use ONLY agent IDs from the list above. DO NOT invent new agent IDs!
         2. The `primary.id` field in your PlannedTask MUST be one of: {valid_agent_ids_str}
         3. If you use an agent ID not in this list, the task WILL FAIL.
+        4. You MUST use ONLY endpoints listed in the 'endpoints' list for the chosen agent.
+        5. DO NOT invent new endpoints (e.g. do not use '/fetch_today_emails' if only '/search' exists).
         
         ============================================================
         **CREATIVE PROBLEM SOLVING - FIND WORKAROUNDS:**
@@ -2557,6 +2602,21 @@ def plan_execution(state: State, config: RunnableConfig):
                                     if task.primary.http_method != correct_http_method:
                                         logger.warning(f"🔧 CORRECTING HTTP METHOD: LLM suggested {task.primary.http_method} for {endpoint_path}, but agent config requires {correct_http_method}")
                                         task.primary.http_method = correct_http_method
+                                else:
+                                    # CRITICAL FIX: Endpoint not found? Fallback to smart defaults
+                                    logger.warning(f"⚠️ Endpoint '{endpoint_path}' NOT FOUND in agent '{agent_id}' config. Triggering auto-recovery.")
+                                    
+                                    if "mail" in agent_id.lower():
+                                        # Mail Agent fallback: Default to /search for retrieval intents
+                                        logger.info(f"🔧 Auto-correcting Mail Agent endpoint: '{endpoint_path}' -> '/search'")
+                                        task.primary.endpoint = "/search"
+                                        task.primary.http_method = "POST"
+                                        
+                                        # Ensure payload has 'query'
+                                        if "query" not in task.primary.payload:
+                                            # Use task name as query if missing
+                                            task.primary.payload["query"] = task.task_name.replace("_", " ")
+                                            logger.info(f"🔧 Auto-injected query: '{task.primary.payload['query']}'")
                 
                 # CRITICAL FIX: Update task_agent_pairs with new task names from replan
                 # This ensures execute_batch can find matching agents for replanned tasks
@@ -4326,12 +4386,16 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                 has_uploaded_files = state.get('uploaded_files', [])
                 is_document_agent = 'document' in agent_details.name.lower() or 'analyze' in planned_task.task_name.lower()
                 
-                if has_uploaded_files and is_document_agent:
-                    # Use very long timeout for document analysis with multiple files
-                    timeout_seconds = 300.0  # 5 minutes for analyzing multiple large PDFs
-                    logger.info(f"📄 Using extended timeout ({timeout_seconds}s) for document agent with {len(has_uploaded_files)} files")
+                if is_document_agent:
+                    # Use very long timeout for document analysis (handling large files, model loading, etc)
+                    timeout_seconds = 300.0  # 5 minutes
+                    logger.info(f"📄 Using extended timeout ({timeout_seconds}s) for document agent task")
+                elif 'mail' in agent_details.id.lower() or 'complex' in planned_task.task_name.lower() or 'workflow' in planned_task.task_name.lower():
+                    # Allow extended time for Mail Agent batch operations or complex workflows
+                    timeout_seconds = 300.0
+                    logger.info(f"📧 Using extended timeout ({timeout_seconds}s) for Complex/Mail task: {planned_task.task_name}")
                 else:
-                    timeout_seconds = 30.0  # Standard timeout
+                    timeout_seconds = 60.0  # Increased standard timeout to 60s for better robustness
                 
                 # OPTIMIZATION: Check cache for GET requests
                 if http_method == 'GET':
@@ -6918,6 +6982,7 @@ def generate_final_response(state: State):
        - Be factual and accurate
        - **IMPORTANT**: If a task shows "edit_status": "success" or result contains "successfully", the operation WAS completed successfully
        - **IMPORTANT**: If you see "Document edited successfully" in the results, acknowledge the successful edit in your response
+       - **CRITICAL**: If any task result contains a "note" (e.g., "Fetched 10 of ~50 emails"), you MUST include this information in your response to be transparent with the user.
        
        **FORMATTING REQUIREMENTS for response_text:**
        - Use clear paragraph breaks for readability

@@ -8,7 +8,15 @@ import sys
 from pathlib import Path
 from dotenv import load_dotenv
 
-logging.basicConfig(level=logging.INFO)
+log_file_path = Path(__file__).parent / "document_agent.log"
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(log_file_path, mode='w')
+    ]
+)
 logger = logging.getLogger(__name__)
 load_dotenv()
 

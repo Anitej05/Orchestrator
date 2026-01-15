@@ -190,7 +190,7 @@ async def analyze_document(request: AnalyzeDocumentRequest):
         )
 
     except Exception as e:
-        logger.error(f"Analysis error: {e}")
+        logger.error(f"Analysis error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

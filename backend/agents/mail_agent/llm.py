@@ -452,6 +452,7 @@ Rules:
 2. Use 'use_history: true' to reference results from the previous step
 3. Keep steps atomic - one action per step
 4. Extract specific parameters from the user's request (names, keywords, etc.)
+5. If user asks for "all", "everything", or a specific number of emails, set 'max_results' in the search step accordingly (default to 10 if unspecified, map "all" to 50).
 
 Return JSON:
 {{

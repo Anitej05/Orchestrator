@@ -285,7 +285,7 @@ class AgentFileManager:
             cleanup_interval_hours: How often to run cleanup
         """
         self.agent_id = agent_id
-        self.storage_dir = Path(storage_dir)
+        self.storage_dir = Path(storage_dir).resolve()
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         
         self.registry_path = self.storage_dir / registry_filename

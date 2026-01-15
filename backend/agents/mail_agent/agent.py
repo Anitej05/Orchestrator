@@ -86,15 +86,40 @@ class CentralAgent:
         if not target_ids:
              return {"success": True, "data": {"summary": "No emails found to summarize. The search returned zero results.", "sources": [], "count": 0}}
 
-        emails = await self.gmail.batch_fetch_emails(target_ids, user_id)
-        if not emails:
-            return {"success": True, "data": {"summary": "No email content could be retrieved for summarization.", "sources": [], "count": 0}}
-
-        texts = [f"Subject: {e['subject']}\nFrom: {e['from']}\nContent:\n{e['body']}" for e in emails]
-        final_summary = await self.llm.summarize_text_batch(texts)
+        # MAP-REDUCE: Process in batches to handle large volumes (e.g., 50+)
+        BATCH_SIZE = 10
+        chunk_summaries = []
+        all_sources = []
+        
+        logger.info(f"Summarizing {len(target_ids)} emails in batches of {BATCH_SIZE}...")
+        
+        for i in range(0, len(target_ids), BATCH_SIZE):
+            batch_ids = target_ids[i : i + BATCH_SIZE]
+            logger.info(f"  Processing batch {i//BATCH_SIZE + 1} ({len(batch_ids)} emails)...")
+            
+            emails = await self.gmail.batch_fetch_emails(batch_ids, user_id)
+            if not emails:
+                continue
+                
+            batch_texts = [f"Subject: {e['subject']}\nFrom: {e['from']}\nContent:\n{e['body']}" for e in emails]
+            all_sources.extend([e["subject"] for e in emails])
+            
+            # Summarize this batch
+            if batch_texts:
+                batch_summary = await self.llm.summarize_text_batch(batch_texts)
+                chunk_summaries.append(batch_summary)
+        
+        # FINAL REDUCE: Summarize the batch summaries
+        if not chunk_summaries:
+            final_summary = "Could not retrieve content for any emails."
+        elif len(chunk_summaries) == 1:
+            final_summary = chunk_summaries[0]
+        else:
+            logger.info(f"  Reducing {len(chunk_summaries)} batch summaries into final summary...")
+            final_summary = await self.llm.summarize_text_batch(chunk_summaries)
         
         self.memory.add_turn(user_id, f"Summarize {len(target_ids)} emails", final_summary[:100], "summarize")
-        return {"success": True, "data": {"summary": final_summary, "sources": [e["subject"] for e in emails]}}
+        return {"success": True, "data": {"summary": final_summary, "sources": all_sources}}
 
     async def draft_reply(self, request: DraftReplyRequest) -> Dict[str, Any]:
         """Context-aware reply drafting"""
@@ -175,9 +200,19 @@ async def search(request: SemanticSearchRequest):
                  }
              )
         # -------------------------------------------------------
-
+        
         result = await central_agent.search(request.query, request.max_results, request.user_id)
-        logger.info(f"📤 [SEARCH] Response: success={result.get('success')}, count={result.get('data', {}).get('count', 0)}")
+
+        # TRANSPARENCY: Notify user if more results are available
+        data = result.get('data', {})
+        count = data.get('count', 0)
+        total = data.get('total', count)
+        
+        # Always inform the user if we fetched fewer than the total available
+        if count < total:
+             result['data']['note'] = f"Fetched {count} of ~{total} emails. To process the rest, request 'all emails' or a specific number."
+             
+        logger.info(f"📤 [SEARCH] Response: success={result.get('success')}, count={count}/{total}")
         return GmailResponse(success=result["success"], result=result.get("data"), error=result.get("error"))
     except Exception as e:
         logger.error(f"❌ [SEARCH] Failed: {e}", exc_info=True)
@@ -762,6 +797,14 @@ async def execute_action(message: OrchestratorMessage):
         elif action == "/extract_action_items" or action == "extract":
            req = ExtractActionItemsRequest(**payload)
            result = await extract_action_items(req)
+           if result.success:
+               return AgentResponse(status=AgentResponseStatus.COMPLETE, result=result.result)
+           else:
+               return AgentResponse(status=AgentResponseStatus.ERROR, error=result.error)
+
+        elif action == "/download_attachments" or action == "download" or action == "download_email_attachment":
+           req = DownloadAttachmentsRequest(**payload)
+           result = await download_attachments(req)
            if result.success:
                return AgentResponse(status=AgentResponseStatus.COMPLETE, result=result.result)
            else:

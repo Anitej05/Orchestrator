@@ -198,10 +198,39 @@ class DocumentAgent:
         try:
             # Collect all file paths to process
             file_paths = []
+            raw_paths = []
             if request.file_paths:
-                file_paths.extend(request.file_paths)
+                raw_paths.extend(request.file_paths)
             elif request.file_path:
-                file_paths.append(request.file_path)
+                raw_paths.append(request.file_path)
+
+            # Smart path resolution with recursive search
+            for p in raw_paths:
+                path_obj = Path(p)
+                if path_obj.exists():
+                    file_paths.append(str(path_obj.resolve()))
+                elif (WORKSPACE_ROOT / "backend" / p).exists():
+                    file_paths.append(str((WORKSPACE_ROOT / "backend" / p).resolve()))
+                    logger.info(f"redirecting path {p} -> backend/{p}")
+                else:
+                    # Recursive fallback: search in storage root
+                    storage_root = WORKSPACE_ROOT / "backend" / "storage"
+                    if storage_root.exists():
+                        closest_match = None
+                        try:
+                            # Search for file with same name
+                            matches = list(storage_root.rglob(path_obj.name))
+                            if matches:
+                                closest_match = matches[0].resolve()
+                                logger.info(f"🔍 [RECURSIVE] Found {path_obj.name} at {closest_match}")
+                                file_paths.append(str(closest_match))
+                            else:
+                                file_paths.append(p)
+                        except Exception as ex:
+                             logger.warning(f"Recursive search fail: {ex}")
+                             file_paths.append(p)
+                    else:
+                        file_paths.append(p)
             
             logger.info(f"📄 [ANALYZE] Processing {len(file_paths)} file(s): {file_paths}")
             
@@ -213,8 +242,23 @@ class DocumentAgent:
             else:
                 # Single file processing (optimized path)
                 self._files_processed += 1
-                logger.info(f"📄 [ANALYZE] Single file mode: processing {file_paths[0] if file_paths else 'unknown'}")
-                result = self._analyze_single_file(request, file_paths[0] if file_paths else None)
+                file_path = file_paths[0] if file_paths else None
+                logger.info(f"📄 [ANALYZE] Single file mode: processing {file_path}")
+                
+                # Check if we should use RAG (vector store provided) or Direct Analysis
+                if request.vector_store_path or request.vector_store_paths:
+                    result = self._analyze_single_file(request, file_path)
+                else:
+                    logger.info("ℹ️ [ANALYZE] No vector store provided, using direct content analysis")
+                    if file_path:
+                        result = self._process_single_file_safe(file_path, request.query)
+                        # Ensure result format compatibility
+                        if 'metrics' not in result:
+                            result['metrics'] = {}
+                        if 'sources' not in result:
+                            result['sources'] = [file_path]
+                    else:
+                        result = {'success': False, 'answer': 'No file path provided'}
             
             # Track performance metrics
             request_latency = (time.time() - request_start) * 1000
@@ -240,7 +284,7 @@ class DocumentAgent:
             # Track errors
             if not result.get('success', False):
                 self.metrics["errors"]["total"] += 1
-                error_msg = result.get('answer', 'Unknown error')
+                error_msg = result.get('answer') or result.get('error') or 'Unknown error'
                 if 'RAG' in str(error_msg):
                     self.metrics["errors"]["rag_errors"] += 1
                     logger.error(f"❌ [ANALYZE] RAG error: {error_msg[:200]}")
@@ -279,7 +323,8 @@ class DocumentAgent:
 
         except Exception as e:
             self.metrics["errors"]["total"] += 1
-            logger.error(f"❌ [ANALYZE] Critical error: {e}", exc_info=True)
+            error_msg = str(e) or "Unknown Critical Error"
+            logger.error(f"❌ [ANALYZE] Critical error: {error_msg}", exc_info=True)
             return {
                 'success': False,
                 'answer': f'Critical error: {str(e)}',

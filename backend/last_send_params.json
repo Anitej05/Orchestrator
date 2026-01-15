@@ -1,8 +1,7 @@
 {
   "recipient_email": "anitej473@gmail.com",
-  "subject": "Mail Agent Logic Test - Native Attachment",
-  "body": "This email was sent via the Mail Agent send_email function directly using a native file attachment.",
+  "subject": "Orchestrator Verification",
+  "body": "Testing full flow.",
   "is_html": false,
-  "user_id": "me",
-  "attachment": "D:\\Internship\\Orbimesh\\backend\\test_upload_service.txt"
+  "user_id": "me"
 }

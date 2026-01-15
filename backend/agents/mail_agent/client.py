@@ -32,7 +32,7 @@ class GmailClient:
         # Update to V3 Connection ID (Found via inspection: ca_xZUTNToOnUiQ)
         # The V2 UUID in env var is deprecated for this SDK version.
         self.connection_id = "ca_xZUTNToOnUiQ" 
-        self.attachments_dir = Path("storage/gmail_attachments")
+        self.attachments_dir = Path("storage/mail_agent/gmail_attachments")
         self.attachments_dir.mkdir(parents=True, exist_ok=True)
         
         # Initialize standardized file manager for attachments
@@ -202,39 +202,57 @@ class GmailClient:
         Handles both direct base64 data and external S3 URLs.
         """
         try:
-            from composio import Composio, Action
+            from composio import Composio
             
             client = Composio(api_key=self.api_key)
             
-            result = client.actions.execute(
-                action=Action.GMAIL_GET_ATTACHMENT,
-                params={
+            result = client.tools.execute(
+                slug="GMAIL_GET_ATTACHMENT",
+                arguments={
                     "message_id": message_id,
                     "attachment_id": attachment_id,
-                    "file_name": filename
+                    "file_name": filename,
+                    "user_id": user_id or "me"
                 },
-                connected_account=self.connection_id
+                connected_account_id=self.connection_id,
+                user_id="default",
+                dangerously_skip_version_check=True
             )
-            
+            logger.warning(f"DEBUG: Raw SDK Result: {result}")
             if result.get("successful") or result.get("successfull"):
                 data = result.get("data", {})
+                logger.warning(f"DEBUG: Attachment Response Data Keys: {list(data.keys())}")
+                if "file" in data: logger.warning(f"DEBUG: File info present: {data['file']}")
+                if "attachment_data" in data: logger.warning(f"DEBUG: Base64 data length: {len(data['attachment_data'])}")
                 
                 # Check for various response formats
                 attachment_data = data.get("attachment_data", "")
                 decoded = None
 
                 file_info = data.get("file")
-                if file_info and isinstance(file_info, dict):
-                    # Handle S3 URL format
-                    url = file_info.get("s3url") or file_info.get("url")
-                    if url:
-                        logger.info(f"Downloading attachment from URL: {url}")
-                        async with httpx.AsyncClient() as hclient:
-                            response = await hclient.get(url)
-                            if response.status_code == 200:
-                                decoded = response.content
+                if file_info:
+                    if isinstance(file_info, dict):
+                        # Handle S3 URL format
+                        url = file_info.get("s3url") or file_info.get("url")
+                        if url:
+                            logger.info(f"Downloading attachment from URL: {url}")
+                            async with httpx.AsyncClient() as hclient:
+                                response = await hclient.get(url)
+                                if response.status_code == 200:
+                                    decoded = response.content
+                                else:
+                                    logger.error(f"Failed to download from URL: {response.status_code}")
+                    elif isinstance(file_info, str):
+                        # Handle local file path (Composio sometimes saves to disk)
+                        try:
+                            logger.info(f"Reading attachment from local path: {file_info}")
+                            path = Path(file_info)
+                            if path.exists():
+                                decoded = path.read_bytes()
                             else:
-                                logger.error(f"Failed to download from URL: {response.status_code}")
+                                logger.error(f"Local attachment file not found: {file_info}")
+                        except Exception as e:
+                            logger.error(f"Failed to read local attachment file: {e}")
                 
                 if not decoded and attachment_data:
                     # Handle direct base64 format
@@ -276,6 +294,8 @@ class GmailClient:
                     
                     # Return orchestrator-compatible format
                     return metadata.to_orchestrator_format()
+            else:
+                 logger.error(f"DEBUG: Tool execution failed. Result keys: {list(result.keys())}, Result: {result}")
             
             return None
             
@@ -295,7 +315,7 @@ class GmailClient:
                 messages = data.get("messages", [])
                 processed_messages = []
                 
-                for msg in messages[:10]:  # Limit to prevent context overflow
+                for msg in messages:  # Process all messages returned by the API
                     processed = {
                         "id": msg.get("messageId") or msg.get("id"),
                         "subject": msg.get("subject", ""),
@@ -321,34 +341,61 @@ class GmailClient:
             
             elif tool_name == "GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID":
                 # Process single email with full details
-                payload = data.get("payload", {})
+                # Check if it's raw Gmail API format (payload) or Composio V3 flat format
+                payload = data.get("payload")
                 
-                # Extract clean text
-                clean_text = self._extract_clean_text(payload)
-                
-                # Find attachments
-                attachments = self._find_attachments(payload)
-                
-                # Get headers
-                headers = {h["name"]: h["value"] for h in payload.get("headers", [])}
-                
-                return {
-                    "id": data.get("id"),
-                    "subject": headers.get("Subject", ""),
-                    "from": headers.get("From", ""),
-                    "to": headers.get("To", ""),
-                    "date": headers.get("Date", ""),
-                    "body": clean_text[:2000] if clean_text else "(No plain text body)",  # Limit to 2000 chars
-                    "attachments": [
-                        {
-                            "filename": att["filename"],
-                            "size": att["size"],
-                            "type": att["mime_type"]
-                        }
-                        for att in attachments
-                    ],
-                    "attachment_ids": {att["filename"]: att["attachment_id"] for att in attachments}
-                }
+                if payload:
+                    # Logic for raw Gmail API structure
+                    clean_text = self._extract_clean_text(payload)
+                    attachments = self._find_attachments(payload)
+                    headers = {h["name"]: h["value"] for h in payload.get("headers", [])}
+                    
+                    return {
+                        "id": data.get("id"),
+                        "subject": headers.get("Subject", ""),
+                        "from": headers.get("From", ""),
+                        "to": headers.get("To", ""),
+                        "date": headers.get("Date", ""),
+                        "body": clean_text[:2000] if clean_text else "(No plain text body)",
+                        "attachments": [
+                            {
+                                "filename": att["filename"],
+                                "size": att["size"],
+                                "type": att["mime_type"]
+                            }
+                            for att in attachments
+                        ],
+                        "attachment_ids": {att["filename"]: att["attachment_id"] for att in attachments}
+                    }
+                else:
+                    # Logic for Composio V3 flattened structure
+                    logger.info("Using Composio V3 flat structure parsing for message details")
+                    attachments = []
+                    for att in data.get("attachmentList", []):
+                        attachments.append({
+                            "filename": att.get("filename", "unknown"),
+                            "size": att.get("size", 0),
+                            "mime_type": att.get("mimeType", "application/octet-stream"),
+                            "attachment_id": att.get("attachmentId")
+                        })
+                    
+                    return {
+                        "id": data.get("id") or data.get("messageId"),
+                        "subject": data.get("subject", ""),
+                        "from": data.get("sender", "") or data.get("from", ""),
+                        "to": data.get("to", "") or data.get("recipient", ""),
+                        "date": data.get("date") or data.get("messageTimestamp", ""),
+                        "body": data.get("messageText", "")[:2000],
+                        "attachments": [
+                            {
+                                "filename": att["filename"],
+                                "size": att["size"],
+                                "type": att["mime_type"]
+                            }
+                            for att in attachments
+                        ],
+                        "attachment_ids": {att["filename"]: att["attachment_id"] for att in attachments}
+                    }
             
             return data
             

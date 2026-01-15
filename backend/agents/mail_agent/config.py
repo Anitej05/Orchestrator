@@ -7,9 +7,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Configure logging with DEBUG level for verbose output
+# Configure logging with DEBUG level for verbose output
+log_file_path = Path(__file__).parent / "mail_agent.log"
 logging.basicConfig(
     level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(log_file_path, mode='w')
+    ]
 )
 logger = logging.getLogger("agents.mail_agent.config")
 
