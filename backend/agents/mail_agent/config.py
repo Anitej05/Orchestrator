@@ -6,17 +6,25 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Configure logging with DEBUG level for verbose output
-# Configure logging with DEBUG level for verbose output
+# Configure logging - INFO level for clean output (like browser agent)
 log_file_path = Path(__file__).parent / "mail_agent.log"
 logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
+    format='%(message)s',
     handlers=[
         logging.StreamHandler(),
         logging.FileHandler(log_file_path, mode='w')
     ]
 )
+
+# Silence noisy third-party loggers
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("openai").setLevel(logging.WARNING)
+logging.getLogger("composio").setLevel(logging.WARNING)
+
 logger = logging.getLogger("agents.mail_agent.config")
 
 # Configuration

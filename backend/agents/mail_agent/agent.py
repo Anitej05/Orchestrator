@@ -176,7 +176,7 @@ async def health_check():
 
 @app.post("/search", response_model=GmailResponse)
 async def search(request: SemanticSearchRequest):
-    logger.info(f"📨 [SEARCH] Incoming request: query='{request.query}', max_results={request.max_results}, user_id={request.user_id}")
+    logger.info(f"[INCOMING] [SEARCH] Incoming request: query='{request.query}', max_results={request.max_results}, user_id={request.user_id}")
     try:
         # --- MOCK PAUSE SCENARIO (Consistency with /execute) ---
         # If query asks for "john" without context, ask for clarification
@@ -185,7 +185,7 @@ async def search(request: SemanticSearchRequest):
         # This allows verifying the Orchestrator's pause/resume logic even via direct tool calls
         query_lower = request.query.lower()
         if "john" in query_lower and not any(name in query_lower for name in ["smith", "doe", "baker", "specific"]):
-             logger.info(f"⏸️ [PAUSE] Ambiguous query detected in /search: {request.query}")
+             logger.info(f"[PAUSE] Ambiguous query detected in /search: {request.query}")
              return GmailResponse(
                  success=True,
                  result={
@@ -212,21 +212,21 @@ async def search(request: SemanticSearchRequest):
         if count < total:
              result['data']['note'] = f"Fetched {count} of ~{total} emails. To process the rest, request 'all emails' or a specific number."
              
-        logger.info(f"📤 [SEARCH] Response: success={result.get('success')}, count={count}/{total}")
+        logger.info(f"[RESPONSE] [SEARCH] Response: success={result.get('success')}, count={count}/{total}")
         return GmailResponse(success=result["success"], result=result.get("data"), error=result.get("error"))
     except Exception as e:
-        logger.error(f"❌ [SEARCH] Failed: {e}", exc_info=True)
+        logger.error(f"[ERROR] [SEARCH] Failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/summarize_emails", response_model=GmailResponse)
 async def summarize_emails(request: SummarizeRequest):
-    logger.info(f"📨 [SUMMARIZE] Incoming request: message_ids={request.message_ids}, use_history={request.use_history}, user_id={request.user_id}")
+    logger.info(f"[INCOMING] [SUMMARIZE] Incoming request: message_ids={request.message_ids}, use_history={request.use_history}, user_id={request.user_id}")
     try:
         result = await central_agent.summarize_emails(request)
-        logger.info(f"📤 [SUMMARIZE] Response: success={result.get('success')}, summary_len={len(str(result.get('data', {}).get('summary', '')))}")
+        logger.info(f"[RESPONSE] [SUMMARIZE] Response: success={result.get('success')}, summary_len={len(str(result.get('data', {}).get('summary', '')))}")
         return GmailResponse(success=result["success"], result=result.get("data"), error=result.get("error"))
     except Exception as e:
-        logger.error(f"❌ [SUMMARIZE] Failed: {e}", exc_info=True)
+        logger.error(f"[ERROR] [SUMMARIZE] Failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/draft_reply", response_model=GmailResponse)
@@ -357,7 +357,7 @@ async def get_message(request: GmailRequest):
                 analysis = await llm_client.analyze_attachment_importance(str(body_content), attachment_names)
                 
                 if analysis.get("is_critical"):
-                    data["hint"] = f"⚠️ [AI ANALYSIS] Attachments are Critical: {analysis.get('reason')}. Call /download_attachments."
+                    data["hint"] = f"[WARNING] [AI ANALYSIS] Attachments are Critical: {analysis.get('reason')}. Call /download_attachments."
             
             return GmailResponse(success=True, result=data)
         else:
@@ -504,6 +504,13 @@ async def execute_action(message: OrchestratorMessage):
     1. SPECIFIC ACTION: When 'action' is provided (e.g., '/search'), executes that action directly
     2. COMPLEX PROMPT: When 'prompt' is provided, decomposes the request internally and executes sequentially
     """
+    # Helper to log metrics and return response
+    def finish_with_metrics(response: AgentResponse) -> AgentResponse:
+        """Log metrics and return response."""
+        success = response.status == AgentResponseStatus.COMPLETE
+        gmail_client.log_execution_metrics(success)
+        return response
+    
     try:
         payload = message.payload or {}
         
@@ -514,7 +521,7 @@ async def execute_action(message: OrchestratorMessage):
         prompt = payload.get("prompt") or getattr(message, "prompt", None)
         action = message.action
         
-        logger.info(f"🔄 [EXECUTE] Action={action} Prompt={prompt[:100] if prompt else 'None'}... TaskID={task_id}")
+        logger.info(f"[EXECUTE] Action={action} Prompt={prompt[:100] if prompt else 'None'}... TaskID={task_id}")
         
         # Initialize context
         context = DialogueManager.get_context(task_id)
@@ -523,11 +530,11 @@ async def execute_action(message: OrchestratorMessage):
         
         # ==================== COMPLEX PROMPT MODE ====================
         if prompt and not action:
-            logger.info(f"🧠 [COMPLEX] Processing complex prompt: {prompt}")
+            logger.info(f"[COMPLEX] Processing complex prompt: {prompt}")
 
             # --- VERIFICATION SHORTCUT: Force pause for test query ---
             if "Mahesh Patnala" in prompt and "important" in prompt:
-                 logger.info(f"⚡ VERIFICATION TRIGGER: Forcing NEEDS_INPUT for ambiguous bulk action.")
+                 logger.info(f"[TRIGGER] VERIFICATION TRIGGER: Forcing NEEDS_INPUT for ambiguous bulk action.")
                  response = AgentResponse(
                      status=AgentResponseStatus.NEEDS_INPUT,
                      question="You asked to mark emails from Mahesh Patnala as important. Do you want me to list the identified important emails for your review before marking them?",
@@ -536,7 +543,7 @@ async def execute_action(message: OrchestratorMessage):
                      context={"original_prompt": prompt, "task_id": task_id}
                  )
                  DialogueManager.pause_task(task_id, response)
-                 return response
+                 return finish_with_metrics(response)
             # ---------------------------------------------------------
             
             # Retry loop for robust execution
@@ -546,23 +553,23 @@ async def execute_action(message: OrchestratorMessage):
             
             while current_attempt < max_retries:
                 current_attempt += 1
-                logger.info(f"🔄 [COMPLEX] Execution Attempt {current_attempt}/{max_retries}")
+                logger.info(f"[RETRY] [COMPLEX] Execution Attempt {current_attempt}/{max_retries}")
                 
                 # Use internal LLM to decompose the prompt into steps (with error context if retry)
                 decomposition = await llm_client.decompose_complex_request(prompt, error_context=last_error)
                 
                 if not decomposition or not decomposition.get("steps"):
                     if current_attempt == max_retries:
-                        return AgentResponse(
+                        return finish_with_metrics(AgentResponse(
                             status=AgentResponseStatus.NEEDS_INPUT,
                             question="I couldn't understand your request fully. Could you please break it down into specific steps?",
                             question_type="text",
                             context={"original_prompt": prompt}
-                        )
+                        ))
                     continue # Try again
                 
                 steps = decomposition.get("steps", [])
-                logger.info(f"📋 [COMPLEX] Decomposed into {len(steps)} steps: {[s.get('action') for s in steps]}")
+                logger.info(f"[PLAN] [COMPLEX] Decomposed into {len(steps)} steps: {[s.get('action') for s in steps]}")
                 
                 # Execute steps sequentially
                 results = []
@@ -572,7 +579,7 @@ async def execute_action(message: OrchestratorMessage):
                     step_action = step.get("action", "").lower()
                     step_params = step.get("params", {})
                     
-                    logger.info(f"➡️ [STEP {i+1}/{len(steps)}] Executing: {step_action}")
+                    logger.info(f"[STEP] [STEP {i+1}/{len(steps)}] Executing: {step_action}")
                     
                     # Execute each step based on action type
                     result = None
@@ -716,14 +723,14 @@ async def execute_action(message: OrchestratorMessage):
                             except Exception as e:
                                 execution_error = str(e)
                         else:
-                            logger.warning(f"⚠️ [STEP {i+1}] Unknown action type: {step_action}, skipping")
+                            logger.warning(f"[WARNING] [STEP {i+1}] Unknown action type: {step_action}, skipping")
                             result = "Skipped (unknown action)"
                             
                     except Exception as e:
                         execution_error = str(e)
 
                     if execution_error:
-                        logger.error(f"❌ Step '{step_action}' failed: {execution_error}")
+                        logger.error(f"[ERROR] Step '{step_action}' failed: {execution_error}")
                         last_error = f"Step '{step_action}' failed with error: {execution_error}"
                         step_failed = True
                         break # Break step loop to retry with new plan
@@ -739,14 +746,14 @@ async def execute_action(message: OrchestratorMessage):
                     "steps_executed": len(results),
                     "results": results
                 }
-                return AgentResponse(status=AgentResponseStatus.COMPLETE, result=final_summary)
+                return finish_with_metrics(AgentResponse(status=AgentResponseStatus.COMPLETE, result=final_summary))
 
             # If retries exhausted
-            return AgentResponse(status=AgentResponseStatus.ERROR, error=f"Task failed after {max_retries} attempts. Last error: {last_error}")
+            return finish_with_metrics(AgentResponse(status=AgentResponseStatus.ERROR, error=f"Task failed after {max_retries} attempts. Last error: {last_error}"))
         
         # ==================== SPECIFIC ACTION MODE (Original) ====================
         if not action:
-            return AgentResponse(status=AgentResponseStatus.ERROR, error="Either 'action' or 'prompt' must be provided")
+            return finish_with_metrics(AgentResponse(status=AgentResponseStatus.ERROR, error="Either 'action' or 'prompt' must be provided"))
             
         # Routing Logic for specific actions
         if action == "/search" or action == "search":
@@ -756,7 +763,7 @@ async def execute_action(message: OrchestratorMessage):
             # --- MOCK PAUSE SCENARIO ---
             query_lower = query.lower()
             if "john" in query_lower and not any(name in query_lower for name in ["smith", "doe", "baker", "specific"]):
-                 logger.info(f"⏸️ [PAUSE] Ambiguous query detected: {query}")
+                 logger.info(f"[PAUSE] Ambiguous query detected: {query}")
                  response = AgentResponse(
                      status=AgentResponseStatus.NEEDS_INPUT,
                      question="I found multiple contacts matching 'John'. Which one are you referring to?",
@@ -765,7 +772,7 @@ async def execute_action(message: OrchestratorMessage):
                      context={"original_query": query}
                  )
                  DialogueManager.pause_task(task_id, response)
-                 return response
+                 return finish_with_metrics(response)
             # ---------------------------
                  
             # Normal execution
@@ -774,56 +781,56 @@ async def execute_action(message: OrchestratorMessage):
             
             # Extract actual result from GmailResponse
             if result.success:
-                return AgentResponse(status=AgentResponseStatus.COMPLETE, result=result.result)
+                return finish_with_metrics(AgentResponse(status=AgentResponseStatus.COMPLETE, result=result.result))
             else:
-                return AgentResponse(status=AgentResponseStatus.ERROR, error=result.error)
+                return finish_with_metrics(AgentResponse(status=AgentResponseStatus.ERROR, error=result.error))
             
         elif action == "/summarize_emails" or action == "summarize":
            req = SummarizeRequest(**payload)
            result = await summarize_emails(req)
            if result.success:
-               return AgentResponse(status=AgentResponseStatus.COMPLETE, result=result.result)
+               return finish_with_metrics(AgentResponse(status=AgentResponseStatus.COMPLETE, result=result.result))
            else:
-               return AgentResponse(status=AgentResponseStatus.ERROR, error=result.error)
+               return finish_with_metrics(AgentResponse(status=AgentResponseStatus.ERROR, error=result.error))
 
         elif action == "/draft_reply" or action == "draft":
            req = DraftReplyRequest(**payload)
            result = await draft_reply(req)
            if result.success:
-               return AgentResponse(status=AgentResponseStatus.COMPLETE, result=result.result)
+               return finish_with_metrics(AgentResponse(status=AgentResponseStatus.COMPLETE, result=result.result))
            else:
-               return AgentResponse(status=AgentResponseStatus.ERROR, error=result.error)
+               return finish_with_metrics(AgentResponse(status=AgentResponseStatus.ERROR, error=result.error))
                
         elif action == "/extract_action_items" or action == "extract":
            req = ExtractActionItemsRequest(**payload)
            result = await extract_action_items(req)
            if result.success:
-               return AgentResponse(status=AgentResponseStatus.COMPLETE, result=result.result)
+               return finish_with_metrics(AgentResponse(status=AgentResponseStatus.COMPLETE, result=result.result))
            else:
-               return AgentResponse(status=AgentResponseStatus.ERROR, error=result.error)
+               return finish_with_metrics(AgentResponse(status=AgentResponseStatus.ERROR, error=result.error))
 
         elif action == "/download_attachments" or action == "download" or action == "download_email_attachment":
            req = DownloadAttachmentsRequest(**payload)
            result = await download_attachments(req)
            if result.success:
-               return AgentResponse(status=AgentResponseStatus.COMPLETE, result=result.result)
+               return finish_with_metrics(AgentResponse(status=AgentResponseStatus.COMPLETE, result=result.result))
            else:
-               return AgentResponse(status=AgentResponseStatus.ERROR, error=result.error)
+               return finish_with_metrics(AgentResponse(status=AgentResponseStatus.ERROR, error=result.error))
                
         elif action == "/manage_emails" or action == "manage" or action == "mark":
            req = ManageEmailsRequest(**payload)
            result = await manage_emails(req)
            if result.success:
-               return AgentResponse(status=AgentResponseStatus.COMPLETE, result=result.result)
+               return finish_with_metrics(AgentResponse(status=AgentResponseStatus.COMPLETE, result=result.result))
            else:
-               return AgentResponse(status=AgentResponseStatus.ERROR, error=result.error)
+               return finish_with_metrics(AgentResponse(status=AgentResponseStatus.ERROR, error=result.error))
         
         else:
-            return AgentResponse(status=AgentResponseStatus.ERROR, error=f"Unknown action: {action}")
+            return finish_with_metrics(AgentResponse(status=AgentResponseStatus.ERROR, error=f"Unknown action: {action}"))
 
     except Exception as e:
         logger.error(f"❌ [EXECUTE] Failed: {e}", exc_info=True)
-        return AgentResponse(status=AgentResponseStatus.ERROR, error=str(e))
+        return finish_with_metrics(AgentResponse(status=AgentResponseStatus.ERROR, error=str(e)))
 
 @app.post("/continue", response_model=AgentResponse)
 async def continue_action(message: OrchestratorMessage):

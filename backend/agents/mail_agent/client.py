@@ -689,7 +689,7 @@ class GmailClient:
         Perform semantic search by generating a single optimized query with multiple terms.
         """
         try:
-            logger.info(f"🔎 Starting optimized semantic search for: {vague_query}")
+            logger.info(f"[SEARCH] Starting optimized semantic search for: {vague_query}")
             
             # 1. Generate optimized combined query using LLM
             optimized_query = await llm_client.generate_optimized_query(vague_query)
@@ -707,7 +707,7 @@ class GmailClient:
                 data = result.get("data", {})
                 messages = data.get("messages", [])
                 
-                logger.info(f"✨ Semantic search found {len(messages)} unique messages using query: {optimized_query}")
+                logger.info(f"[RESULT] Semantic search found {len(messages)} unique messages using query: {optimized_query}")
                 
                 return {
                     "success": True,
@@ -734,7 +734,7 @@ class GmailClient:
         Fetch an email and generate a concise summary.
         """
         try:
-            logger.info(f"📝 Summarizing email: {message_id}")
+            logger.info(f"[SUMMARIZE] Summarizing email: {message_id}")
             
             # 1. Fetch full message details
             result = await self.call_tool(
@@ -778,7 +778,7 @@ class GmailClient:
         Returns a list of dicts with {"id": ..., "subject": ..., "body": ...}
         """
         results = []
-        logger.info(f"📦 Batch fetching {len(message_ids)} emails...")
+        logger.info(f"[BATCH] Batch fetching {len(message_ids)} emails...")
         
         # Parallelize fetches with a semaphore to avoid rate limits (e.g. 10 concurrent)
         semaphore = asyncio.Semaphore(10)
@@ -830,6 +830,74 @@ class GmailClient:
             "errors": self.metrics["errors"].copy(),
             "resource": self.metrics["resource"].copy()
         }
+
+    def log_execution_metrics(self, success: bool):
+        """Log execution metrics with clean formatting (similar to browser agent)."""
+        # Use ASCII-safe characters for Windows cp1252 compatibility
+        status_indicator = "[SUCCESS]" if success else "[FAILED]"
+        
+        # Update resource usage
+        process = psutil.Process()
+        self.metrics["resource"]["current_memory_mb"] = process.memory_info().rss / 1024 / 1024
+        if self.metrics["resource"]["current_memory_mb"] > self.metrics["resource"]["peak_memory_mb"]:
+            self.metrics["resource"]["peak_memory_mb"] = self.metrics["resource"]["current_memory_mb"]
+        
+        # Use print() for clean output without verbose logger prefixes
+        print("")
+        print(f"{status_indicator} MAIL AGENT EXECUTION METRICS")
+        print("")
+        
+        # Performance
+        print("Performance:")
+        print(f"  Total Operations: {self.metrics['performance']['operations_completed']}")
+        print(f"  Total Time: {self.metrics['performance']['total_latency_ms']:.0f} ms")
+        print(f"  Avg Latency: {self.metrics['performance']['avg_latency_ms']:.0f} ms")
+        
+        # API Calls
+        print("")
+        print("API Calls:")
+        print(f"  Total: {self.metrics['api_calls']['total']}")
+        print(f"  Successful: {self.metrics['api_calls']['successful']}")
+        print(f"  Failed: {self.metrics['api_calls']['failed']}")
+        success_rate = (self.metrics['api_calls']['successful'] / self.metrics['api_calls']['total'] * 100) if self.metrics['api_calls']['total'] > 0 else 0
+        print(f"  Success Rate: {success_rate:.1f}%")
+        
+        # API Call breakdown by operation
+        if self.metrics['api_calls']['by_operation']:
+            print("")
+            print("Operations Breakdown:")
+            for op_type, count in self.metrics['api_calls']['by_operation'].items():
+                print(f"  {op_type.replace('_', ' ').title()}: {count}")
+        
+        # Emails
+        print("")
+        print("Email Operations:")
+        print(f"  Fetched: {self.metrics['emails']['fetched']}")
+        print(f"  Sent: {self.metrics['emails']['sent']}")
+        print(f"  Total Operations: {self.metrics['emails']['total_operations']}")
+        
+        # Attachments
+        if self.metrics['attachments']['downloaded'] > 0 or self.metrics['attachments']['uploaded'] > 0:
+            print("")
+            print("Attachments:")
+            print(f"  Downloaded: {self.metrics['attachments']['downloaded']}")
+            print(f"  Uploaded: {self.metrics['attachments']['uploaded']}")
+            print(f"  Total Size: {self.metrics['attachments']['total_size_mb']:.2f} MB")
+        
+        # Errors
+        if self.metrics['errors']['total'] > 0:
+            print("")
+            print("Errors:")
+            print(f"  Total: {self.metrics['errors']['total']}")
+            print(f"  API Errors: {self.metrics['errors']['api_errors']}")
+            print(f"  Processing Errors: {self.metrics['errors']['processing_errors']}")
+        
+        # Resources
+        print("")
+        print("Resources:")
+        print(f"  Current Memory: {self.metrics['resource']['current_memory_mb']:.1f} MB")
+        print(f"  Peak Memory: {self.metrics['resource']['peak_memory_mb']:.1f} MB")
+        print("")
 
 # Global client instance
 gmail_client = GmailClient()

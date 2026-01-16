@@ -147,7 +147,7 @@ Query:"""
 
         for provider in self.clients:
             try:
-                logger.info(f"🤖 Generating optimized query using {provider['name']}...")
+                logger.info(f"[LLM] Generating optimized query using {provider['name']}...")
                 # No timeout - let LLM respond fully, switch provider only on error
                 response = await provider['client'].chat.completions.create(
                     model=provider['model'],
@@ -156,7 +156,7 @@ Query:"""
                 )
                 
                 content = response.choices[0].message.content
-                logger.debug(f"🔍 Raw LLM response from {provider['name']}: {content[:200] if content else 'None'}...")
+                logger.debug(f"[DEBUG] Raw LLM response from {provider['name']}: {content[:200] if content else 'None'}...")
                 
                 if content:
                     # STEP 0: Use centralized strip_think_tags FIRST (matches Orchestrator)
@@ -199,14 +199,14 @@ Query:"""
                     )
                     
                     if is_garbage:
-                        logger.warning(f"⚠️ {provider['name']} produced garbage query, trying next provider: {cleaned_query[:100]}...")
+                        logger.warning(f"[WARNING] {provider['name']} produced garbage query, trying next provider: {cleaned_query[:100]}...")
                         continue  # TRY NEXT PROVIDER instead of returning fallback
                     
-                    logger.info(f"✅ Generated single query: {cleaned_query}")
+                    logger.info(f"[SUCCESS] Generated single query: {cleaned_query}")
                     return cleaned_query
                             
             except Exception as e:
-                logger.warning(f"⚠️ {provider['name']} query generation failed: {e}")
+                logger.warning(f"[WARNING] {provider['name']} query generation failed: {e}")
                 continue
                 
         # Hard fallback
@@ -228,7 +228,7 @@ Summary:"""
 
         for provider in self.clients:
             try:
-                logger.info(f"🤖 Summarizing email using {provider['name']}...")
+                logger.info(f"[LLM] Summarizing email using {provider['name']}...")
                 # No timeout - let LLM respond fully, switch provider only on error
                 response = await provider['client'].chat.completions.create(
                     model=provider['model'],
@@ -251,7 +251,7 @@ Summary:"""
                     return content.strip()
                         
             except Exception as e:
-                logger.warning(f"⚠️ {provider['name']} summarization failed: {e}")
+                logger.warning(f"[WARNING] {provider['name']} summarization failed: {e}")
                 continue
                 
         return "Failed to generate summary."
@@ -274,7 +274,7 @@ Summary:"""
             return await self.summarize_email_content(combined_text)
         
         # 2. Reduce: Chunking strategy
-        logger.info(f"📚 Batch too large ({len(combined_text)} chars). Performing hierarchical summarization...")
+        logger.info(f"[BATCH] Batch too large ({len(combined_text)} chars). Performing hierarchical summarization...")
         
         chunk_summaries = []
         current_chunk = ""
@@ -477,17 +477,17 @@ JSON:"""
                 # Strip thinking tags if present
                 content = strip_think_tags(content)
                 result = json.loads(content)
-                logger.info(f"🧠 [DECOMPOSE] Successfully decomposed into {len(result.get('steps', []))} steps")
+                logger.info(f"[DECOMPOSE] Successfully decomposed into {len(result.get('steps', []))} steps")
                 return result
             except json.JSONDecodeError as e:
-                logger.warning(f"⚠️ [DECOMPOSE] JSON parse error from {provider['name']}: {e}")
+                logger.warning(f"[WARNING] [DECOMPOSE] JSON parse error from {provider['name']}: {e}")
                 continue
             except Exception as e:
-                logger.warning(f"⚠️ [DECOMPOSE] Provider {provider['name']} failed: {e}")
+                logger.warning(f"[WARNING] [DECOMPOSE] Provider {provider['name']} failed: {e}")
                 continue
         
         # Fallback: Simple keyword-based decomposition
-        logger.warning("⚠️ [DECOMPOSE] All providers failed, using keyword fallback")
+        logger.warning("[WARNING] [DECOMPOSE] All providers failed, using keyword fallback")
         steps = []
         prompt_lower = prompt.lower()
         
