@@ -14,7 +14,26 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 
-from schemas import AgentResponseStatus
+# Import AgentResponseStatus from backend root schemas
+# Note: agents/document_agent/agent.py -> agents/document_agent -> agents -> backend
+import sys
+from pathlib import Path as ImportPath
+# Go up 2 levels: document_agent -> agents -> backend
+backend_root = ImportPath(__file__).parent.parent.parent
+if str(backend_root) not in sys.path:
+    sys.path.insert(0, str(backend_root))
+
+# Import from schemas at backend root (not local .schemas)
+import schemas as backend_schemas
+# Debug: verify correct schemas is loaded
+import logging
+_temp_logger = logging.getLogger(__name__)
+_temp_logger.debug(f"Loaded schemas from: {backend_schemas.__file__}")
+_temp_logger.debug(f"Has AgentResponseStatus: {hasattr(backend_schemas, 'AgentResponseStatus')}")
+if not hasattr(backend_schemas, 'AgentResponseStatus'):
+    raise ImportError(f"schemas module from {backend_schemas.__file__} does not have AgentResponseStatus. This is likely the wrong schemas module (local document_agent/schemas.py instead of backend/schemas.py)")
+AgentResponseStatus = backend_schemas.AgentResponseStatus
+
 from .schemas import (
     AnalyzeDocumentRequest, EditDocumentRequest, CreateDocumentRequest,
     UndoRedoRequest, VersionHistoryRequest, ExtractDataRequest, EditAction

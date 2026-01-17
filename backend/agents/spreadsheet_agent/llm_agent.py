@@ -884,6 +884,9 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
         
         self.metrics["cache"]["misses"] += 1
         
+        # Initialize current_df with the input dataframe
+        current_df = df.copy()
+        
         # Enhance question with column suggestions
         enhanced_question = self._enhance_query_with_column_suggestions(question, current_df)
         

@@ -1878,75 +1878,43 @@ async def execute_action(
         if is_analytical:
             logger.info(f"📊 [EXECUTE] Processing as analytical query")
             
-            # Handle category aggregation specifically
-            if ('categor' in instruction_lower or 'product' in instruction_lower) and ('total' in instruction_lower or 'quantit' in instruction_lower or 'sum' in instruction_lower):
-                try:
-                    # Look for category and quantity columns
-                    category_cols = [col for col in df.columns if 'categor' in col.lower()]
-                    quantity_cols = [col for col in df.columns if 'quantit' in col.lower() or 'qty' in col.lower()]
-                    
-                    if not category_cols:
-                        # Try other common category column names
-                        category_cols = [col for col in df.columns if any(term in col.lower() for term in ['type', 'class', 'group', 'product'])]
-                    
-                    if not quantity_cols:
-                        # Try other common quantity column names
-                        quantity_cols = [col for col in df.columns if any(term in col.lower() for term in ['amount', 'count', 'num', 'total', 'sales'])]
-                    
-                    if category_cols and quantity_cols:
-                        category_col = category_cols[0]
-                        quantity_col = quantity_cols[0]
-                        
-                        logger.info(f"📊 [EXECUTE] Aggregating {quantity_col} by {category_col}")
-                        
-                        # Perform aggregation
-                        result_df = df.groupby(category_col)[quantity_col].sum().reset_index()
-                        result_dict = result_df.to_dict(orient='records')
-                        
-                        # Format the result
-                        categories_summary = []
-                        for row in result_dict:
-                            categories_summary.append({
-                                "category": row[category_col],
-                                "total_quantity": row[quantity_col]
-                            })
-                        
-                        logger.info(f"✅ [EXECUTE] Successfully aggregated {len(categories_summary)} categories")
-                        
-                        return {
-                            "status": "complete",
-                            "result": {
-                                "categories": categories_summary,
-                                "total_categories": len(categories_summary),
-                                "summary": f"Found {len(categories_summary)} unique product categories with their total quantities",
-                                "columns_used": {
-                                    "category_column": category_col,
-                                    "quantity_column": quantity_col
-                                }
-                            },
-                            "explanation": f"Successfully scanned the file and found {len(categories_summary)} unique product categories with their total quantities.",
-                            "context": {"task_id": task_id}
-                        }
-                    else:
-                        missing = []
-                        if not category_cols:
-                            missing.append("category column")
-                        if not quantity_cols:
-                            missing.append("quantity column")
-                        
-                        return {
-                            "status": "error",
-                            "error": f"Could not find required columns: {', '.join(missing)}. Available columns: {', '.join(df.columns.tolist())}",
-                            "context": {"task_id": task_id, "available_columns": df.columns.tolist()}
-                        }
-                        
-                except Exception as e:
-                    logger.error(f"❌ [EXECUTE] Category aggregation failed: {e}", exc_info=True)
+            # Use the existing nl_query functionality for all analytical queries
+            try:
+                # Route to natural language query processing
+                from agents.spreadsheet_agent.models import NaturalLanguageQueryRequest
+                
+                nl_request = NaturalLanguageQueryRequest(
+                    file_id=file_id_param,
+                    question=prompt,
+                    max_iterations=3
+                )
+                
+                # Call the existing nl_query endpoint logic
+                logger.info(f"🤖 [EXECUTE] Routing to natural language processing")
+                nl_response = await natural_language_query(nl_request, thread_id_param)
+                
+                # Convert StandardResponse to AgentResponse format
+                if nl_response.success:
                     return {
-                        "status": "error",
-                        "error": f"Category aggregation failed: {str(e)}",
+                        "status": "complete",
+                        "result": nl_response.data,
+                        "explanation": nl_response.message,
                         "context": {"task_id": task_id}
                     }
+                else:
+                    return {
+                        "status": "error",
+                        "error": nl_response.message,
+                        "context": {"task_id": task_id}
+                    }
+                    
+            except Exception as e:
+                logger.error(f"❌ [EXECUTE] Natural language processing failed: {e}", exc_info=True)
+                return {
+                    "status": "error",
+                    "error": f"Natural language processing failed: {str(e)}",
+                    "context": {"task_id": task_id}
+                }
             
             # For other analytical queries, provide basic summary
             try:

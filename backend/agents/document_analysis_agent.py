@@ -28,7 +28,9 @@ BACKEND_DIR = SCRIPT_DIR.parent  # backend/ directory
 DOCUMENT_AGENT_DIR = SCRIPT_DIR / "document_agent"  # agents/document_agent/
 
 # Ensure paths are in sys.path for imports
-for path in [str(SCRIPT_DIR), str(BACKEND_DIR), str(DOCUMENT_AGENT_DIR)]:
+# IMPORTANT: Add BACKEND_DIR first so backend/schemas.py is found before document_agent/schemas.py
+# DO NOT add DOCUMENT_AGENT_DIR as it causes import conflicts with schemas module
+for path in [str(BACKEND_DIR), str(SCRIPT_DIR)]:
     if path not in sys.path:
         sys.path.insert(0, path)
 
