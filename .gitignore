@@ -39,7 +39,10 @@ test-*.js
 backend/logs/*.log
 
 *.txt
-backend/tests/spreadsheet_agent/edge_case_datasets
+backend/tests/agents/spreadsheet_agent/edge_case_datasets
 /.vscode/
 .pytest_cache/
 .github/
+/.kiro
+/.hypothesis
+

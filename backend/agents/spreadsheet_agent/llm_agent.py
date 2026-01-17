@@ -392,6 +392,100 @@ Column Statistics:
             logger.debug(f"Could not enhance answer with data: {e}")
             return template_answer
 
+    def _find_similar_columns(self, df: pd.DataFrame, search_terms: List[str]) -> Dict[str, List[str]]:
+        """
+        Find columns that might match the search terms using fuzzy matching.
+        
+        Args:
+            df: DataFrame to search in
+            search_terms: List of terms to search for (e.g., ['category', 'categories'])
+        
+        Returns:
+            Dict mapping search terms to list of matching column names
+        """
+        from difflib import get_close_matches
+        import re
+        
+        available_columns = list(df.columns)
+        matches = {}
+        
+        for term in search_terms:
+            term_lower = term.lower()
+            column_matches = []
+            
+            # Exact match (case insensitive)
+            for col in available_columns:
+                if term_lower == col.lower():
+                    column_matches.append(col)
+            
+            # Partial match (term appears in column name)
+            if not column_matches:
+                for col in available_columns:
+                    if term_lower in col.lower() or col.lower() in term_lower:
+                        column_matches.append(col)
+            
+            # Fuzzy match using difflib
+            if not column_matches:
+                fuzzy_matches = get_close_matches(term_lower, [col.lower() for col in available_columns], n=3, cutoff=0.6)
+                for fuzzy in fuzzy_matches:
+                    # Find the original column name
+                    for col in available_columns:
+                        if col.lower() == fuzzy:
+                            column_matches.append(col)
+                            break
+            
+            # Word boundary matching (e.g., "Product Category" matches "category")
+            if not column_matches:
+                for col in available_columns:
+                    col_words = re.findall(r'\b\w+\b', col.lower())
+                    if term_lower in col_words:
+                        column_matches.append(col)
+            
+            if column_matches:
+                matches[term] = column_matches
+        
+        return matches
+
+    def _enhance_query_with_column_suggestions(self, question: str, df: pd.DataFrame) -> str:
+        """
+        Enhance the user's question by suggesting actual column names when they use generic terms.
+        
+        Args:
+            question: Original user question
+            df: DataFrame to analyze
+        
+        Returns:
+            Enhanced question with column suggestions
+        """
+        # Common terms users might use that need column mapping
+        category_terms = ['category', 'categories', 'type', 'types', 'kind', 'group']
+        quantity_terms = ['quantity', 'quantities', 'amount', 'amounts', 'count', 'total', 'sum']
+        
+        # Find matching columns
+        category_matches = self._find_similar_columns(df, category_terms)
+        quantity_matches = self._find_similar_columns(df, quantity_terms)
+        
+        enhanced_question = question
+        suggestions = []
+        
+        # Add category column suggestions
+        for term, matches in category_matches.items():
+            if term.lower() in question.lower():
+                if matches:
+                    suggestions.append(f"For '{term}', I found column(s): {', '.join(matches)}")
+        
+        # Add quantity column suggestions
+        for term, matches in quantity_matches.items():
+            if term.lower() in question.lower():
+                if matches:
+                    suggestions.append(f"For '{term}', I found column(s): {', '.join(matches)}")
+        
+        if suggestions:
+            enhanced_question += "\n\nColumn suggestions based on your question:\n" + "\n".join(suggestions)
+            enhanced_question += f"\n\nAvailable columns: {', '.join(df.columns)}"
+        
+        return enhanced_question
+
     def _check_percentage_invariants(self, answer: str, current_result: Any) -> Optional[str]:
         """Lightweight sanity check: if answer expresses percentages, verify they sum ~100."""
         if not answer or "%" not in answer:
@@ -790,8 +884,8 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
         
         self.metrics["cache"]["misses"] += 1
         
-        # Working copy of dataframe for this session
-        current_df = df.copy()
+        # Enhance question with column suggestions
+        enhanced_question = self._enhance_query_with_column_suggestions(question, current_df)
         
         df_context = self._get_dataframe_context(current_df, file_id, thread_id)
         system_prompt = self._build_system_prompt(df_context, session_context, all_files_context)
@@ -799,7 +893,7 @@ Response: {{"thinking": "Count rows where Feature1 > 50", "needs_more_steps": fa
         steps_taken = []
         conversation = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Question: {question}"}
+            {"role": "user", "content": f"Question: {enhanced_question}"}
         ]
         
         current_result = None

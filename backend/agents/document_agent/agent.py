@@ -8,11 +8,13 @@ Designed for cloud deployment with efficient resource management.
 import logging
 import time
 import os
+import hashlib
 from typing import Dict, Any, Optional, List
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 
+from schemas import AgentResponseStatus
 from .schemas import (
     AnalyzeDocumentRequest, EditDocumentRequest, CreateDocumentRequest,
     UndoRedoRequest, VersionHistoryRequest, ExtractDataRequest, EditAction
@@ -127,6 +129,11 @@ class DocumentAgent:
             }
         }
 
+        # Risk controls for enterprise-grade editing
+        self._risky_action_types = {"delete_content", "replace_content", "convert_format"}
+        self._risk_keywords = ["delete", "remove", "overwrite", "purge", "wipe", "truncate"]
+        self._max_safe_actions = 25
+
     # ========== LLM CALL TRACKING WRAPPER ==========
     def _llm(self, func, operation_type: str, *args, **kwargs):
         """Wrapper to track LLM calls by operation type."""
@@ -193,10 +200,86 @@ class DocumentAgent:
         
         return {"message": "Metrics reset successfully", "previous_metrics": old_metrics}
 
+    # ========== SAFETY & RISK HELPERS ==========
+    def _classify_edit_intent(self, instruction: str) -> Dict[str, Any]:
+        """Lightweight intent/risk classifier to gate destructive edits."""
+        text = instruction.lower()
+        risk_hits = [kw for kw in self._risk_keywords if kw in text]
+        intent = "edit"
+        if any(kw in text for kw in ["delete", "remove", "purge", "wipe"]):
+            intent = "destructive"
+        elif any(kw in text for kw in ["replace", "rewrite", "overwrite"]):
+            intent = "overwrite"
+        score = min(1.0, 0.2 + 0.15 * len(risk_hits)) if intent != "edit" else 0.25 + 0.05 * len(risk_hits)
+        return {
+            "intent": intent,
+            "risk_score": round(score, 2),
+            "risk_signals": risk_hits,
+        }
+
+    def _validate_edit_plan(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate LLM-generated plan against allowed actions and payload size."""
+        actions = plan.get("actions") or []
+        issues = []
+        normalized = []
+        if not isinstance(actions, list):
+            return {"valid": False, "issues": ["Plan actions must be a list"], "actions": []}
+        if len(actions) > self._max_safe_actions:
+            issues.append(f"Plan proposes {len(actions)} actions (> {self._max_safe_actions})")
+        for idx, action in enumerate(actions):
+            a_type = str(action.get("type", "")).lower()
+            if not a_type:
+                issues.append(f"Action {idx+1} missing type")
+                continue
+            if a_type not in {
+                "add_paragraph",
+                "add_heading",
+                "format_text",
+                "replace_text",
+                "add_table",
+                "add_content",
+                "replace_content",
+                "delete_content",
+                "add_image",
+                "modify_style",
+                "convert_format",
+            }:
+                issues.append(f"Unsupported action type: {a_type}")
+            normalized.append({"type": a_type, **{k: v for k, v in action.items() if k != "type"}})
+        return {"valid": len(issues) == 0, "issues": issues, "actions": normalized}
+
+    def _build_needs_input_response(self, question: str, plan: Dict[str, Any], risk: Dict[str, Any]) -> Dict[str, Any]:
+        """Shape a pause/approval response compatible with orchestrator AgentResponse."""
+        return {
+            "success": False,
+            "status": AgentResponseStatus.NEEDS_INPUT.value,
+            "question": question,
+            "pending_plan": plan,
+            "risk_assessment": risk,
+        }
+
+    def _hash_file(self, file_path: str) -> Optional[str]:
+        """Return md5 hash for a file for change detection."""
+        try:
+            with open(file_path, "rb") as f:
+                data = f.read()
+            return hashlib.md5(data).hexdigest()
+        except Exception:
+            return None
+
+    def _verify_edit_result(self, before_hash: Optional[str], after_hash: Optional[str], actions: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Verify that edits produced a change and provide minimal telemetry."""
+        if not before_hash or not after_hash:
+            return {"verified": False, "reason": "Hash unavailable"}
+        if before_hash == after_hash:
+            return {"verified": False, "reason": "No change detected", "actions": len(actions)}
+        return {"verified": True, "reason": "Document content changed", "actions": len(actions)}
+
     # ========== ANALYSIS OPERATIONS ==========
 
     def analyze_document(self, request: AnalyzeDocumentRequest) -> Dict[str, Any]:
         """Analyze document(s) with RAG and answer queries. Supports multi-file batch processing."""
+        phase_trace = ["understand", "retrieve", "generate", "validate", "report"]
         request_start = time.time()
         self.metrics["api_calls"]["analyze"] += 1
         
@@ -325,6 +408,12 @@ class DocumentAgent:
                 operation_name="analyze",
                 success=result.get('success', False)
             )
+
+            result.setdefault(
+                'status',
+                AgentResponseStatus.COMPLETE.value if result.get('success') else AgentResponseStatus.ERROR.value
+            )
+            result.setdefault('phase_trace', phase_trace)
             
             return result
 
@@ -336,6 +425,8 @@ class DocumentAgent:
                 'success': False,
                 'answer': f'Critical error: {str(e)}',
                 'errors': [str(e)],
+                'status': AgentResponseStatus.ERROR.value,
+                'phase_trace': phase_trace,
                 'execution_metrics': {
                     'latency_ms': round((time.time() - request_start) * 1000, 2),
                     'error': True
@@ -484,7 +575,6 @@ Answer:"""
                 
                 answer = rag_chain.invoke(request.query)
                 metrics['llm_call_ms'] = (time.time() - llm_start) * 1000
-                
                 logger.info(f"✅ RAG analysis complete ({metrics['chunks_retrieved']} chunks, {metrics['llm_call_ms']:.0f}ms)")
                 
             except Exception as e:
@@ -500,7 +590,7 @@ Answer:"""
                 'success': True,
                 'answer': answer,
                 'sources': [file_path] if file_path else paths,
-                'metrics': metrics
+                'metrics': metrics,
             }
 
             # Cache result
@@ -748,7 +838,7 @@ Answer:"""
     # ========== EDITING OPERATIONS ==========
 
     def edit_document(self, request: EditDocumentRequest) -> Dict[str, Any]:
-        """Edit document using natural language instruction."""
+        """Edit document using natural language instruction with safety gates."""
         try:
             self.metrics["api_calls"]["edit"] += 1
             if not Path(request.file_path).exists():
@@ -756,6 +846,10 @@ Answer:"""
                     'success': False,
                     'message': f'File not found: {request.file_path}'
                 }
+
+            phase_trace = ["understand", "plan", "validate", "execute", "verify", "report"]
+            risk = self._classify_edit_intent(request.instruction)
+            before_hash = self._hash_file(request.file_path)
 
             # Get or create session
             session = self.session_manager.get_or_create_session(
@@ -780,19 +874,46 @@ Answer:"""
             if not plan.get('success', False):
                 return {
                     'success': False,
-                    'message': f'Failed to plan edits: {plan.get("error", "Unknown error")}'
+                    'message': f'Failed to plan edits: {plan.get("error", "Unknown error")}',
+                    'status': AgentResponseStatus.ERROR.value,
+                    'risk_assessment': risk,
+                    'phase_trace': phase_trace,
                 }
+
+            validation = self._validate_edit_plan(plan)
+            risky_actions = [a for a in validation.get('actions', []) if a.get('type') in self._risky_action_types]
+            if risky_actions:
+                risk['risk_score'] = max(risk['risk_score'], 0.7)
+                risk.setdefault('risk_signals', []).append('risky_action_types')
+
+            if not validation['valid']:
+                return {
+                    'success': False,
+                    'message': 'Edit plan validation failed',
+                    'status': AgentResponseStatus.ERROR.value,
+                    'errors': validation['issues'],
+                    'risk_assessment': risk,
+                    'phase_trace': phase_trace,
+                }
+
+            if (risk.get('risk_score', 0) >= 0.6 or risk.get('intent') == 'destructive') and not request.auto_approve:
+                question = f"Approve edit plan with {len(validation['actions'])} actions (risk_score={risk['risk_score']})?"
+                response = self._build_needs_input_response(question, {**plan, 'actions': validation['actions']}, risk)
+                response['phase_trace'] = phase_trace
+                return response
 
             # Execute edits
             editor = DocumentEditor(request.file_path)
             results = []
 
-            for action in plan.get('actions', []):
+            for action in validation.get('actions', []):
                 result = self._execute_edit_action(editor, action)
                 results.append(result)
 
             # Save document and create version
             editor.save()
+            after_hash = self._hash_file(request.file_path)
+            verification = self._verify_edit_result(before_hash, after_hash, results)
             self.version_manager.save_version(
                 request.file_path,
                 f"Edit: {request.instruction[:50]}"
@@ -811,17 +932,23 @@ Answer:"""
 
             return {
                 'success': True,
-                'message': f'Applied {len(results)} edits',
+                'message': f"Applied {len(results)} edits",
                 'file_path': request.file_path,
                 'can_undo': len(self.version_manager.get_versions(request.file_path)) > 1,
-                'can_redo': False
+                'can_redo': False,
+                'edit_summary': verification,
+                'risk_assessment': risk,
+                'status': AgentResponseStatus.COMPLETE.value,
+                'phase_trace': phase_trace,
             }
 
         except Exception as e:
             logger.error(f"Edit failed: {e}")
             return {
                 'success': False,
-                'message': f'Error: {str(e)}'
+                'message': f'Error: {str(e)}',
+                'status': AgentResponseStatus.ERROR.value,
+                'phase_trace': ["understand", "plan", "validate", "execute", "verify", "report"],
             }
 
     def _execute_edit_action(self, editor: DocumentEditor, action: Dict[str, Any]) -> Dict[str, Any]:
@@ -963,6 +1090,7 @@ Answer:"""
                     'message': f'File not found: {request.file_path}'
                 }
 
+            phase_trace = ["understand", "extract", "validate", "report"]
             content, _ = extract_document_content(request.file_path)
 
             self.metrics["llm_calls"]["extract"] += 1
@@ -972,11 +1100,23 @@ Answer:"""
                 request.extraction_type
             )
 
+            confidence = 0.8 if result.get('success') else 0.0
+            if not result.get('data') and not result.get('content'):
+                confidence = 0.2
+            grounding = {
+                'source_file': request.file_path,
+                'notes': 'LLM-only extraction; validate downstream',
+            }
+
             return {
                 'success': result.get('success', False),
                 'message': 'Data extracted' if result.get('success') else 'Extraction failed',
                 'extracted_data': result.get('data', result.get('content', '')),
-                'data_format': request.extraction_type
+                'data_format': request.extraction_type,
+                'status': AgentResponseStatus.COMPLETE.value if result.get('success') else AgentResponseStatus.ERROR.value,
+                'phase_trace': phase_trace,
+                'confidence': confidence,
+                'grounding': grounding,
             }
 
         except Exception as e:
@@ -985,7 +1125,11 @@ Answer:"""
                 'success': False,
                 'message': f'Error: {str(e)}',
                 'extracted_data': {},
-                'data_format': request.extraction_type
+                'data_format': request.extraction_type,
+                'status': AgentResponseStatus.ERROR.value,
+                'phase_trace': ["understand", "extract", "validate", "report"],
+                'confidence': 0.0,
+                'grounding': {'source_file': request.file_path, 'notes': 'exception raised'},
             }
 
     # ========== CLEANUP ==========

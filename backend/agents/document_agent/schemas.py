@@ -65,6 +65,19 @@ class AnalyzeDocumentResponse(BaseModel):
     answer: str
     canvas_display: Optional[Dict[str, Any]] = None
     sources: Optional[List[str]] = None
+    status: Optional[str] = Field(
+        None,
+        description="Execution status for orchestrator compatibility (complete | needs_input | error)",
+    )
+    phase_trace: Optional[List[str]] = Field(
+        None,
+        description="Ordered phases executed for analysis",
+    )
+    confidence: Optional[float] = Field(None, description="Confidence score for grounded answer")
+    grounding: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Grounding metadata such as chunk ids, source files, and validation issues",
+    )
     file_results: Optional[List[FileAnalysisResult]] = Field(None, description="Per-file results for batch processing")
     total_files: Optional[int] = Field(None, description="Total number of files processed")
     successful_files: Optional[int] = Field(None, description="Number of successfully processed files")
@@ -109,6 +122,10 @@ class EditDocumentRequest(BaseModel):
     instruction: str = Field(..., description="Natural language instruction describing the edit")
     thread_id: Optional[str] = Field(None, description="Conversation thread ID")
     use_vision: bool = Field(default=False, description="Use vision-based planning if available")
+    auto_approve: bool = Field(
+        default=False,
+        description="Auto-approve high-risk edit plans without pausing for confirmation",
+    )
 
 
 class EditDocumentResponse(BaseModel):
@@ -120,6 +137,23 @@ class EditDocumentResponse(BaseModel):
     can_undo: bool = False
     can_redo: bool = False
     edit_summary: Optional[str] = None
+    status: Optional[str] = Field(
+        None,
+        description="Execution status for orchestrator compatibility (complete | needs_input | error)",
+    )
+    phase_trace: Optional[List[str]] = Field(
+        None,
+        description="Ordered phases executed for the edit flow",
+    )
+    question: Optional[str] = Field(None, description="Clarifying or approval question when paused")
+    pending_plan: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Serialized plan awaiting approval when status is needs_input",
+    )
+    risk_assessment: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Risk/intention classification for the edit instruction",
+    )
 
 
 class UndoRedoRequest(BaseModel):
@@ -166,6 +200,16 @@ class ExtractDataResponse(BaseModel):
     message: str
     extracted_data: Dict[str, Any]
     data_format: str
+    status: Optional[str] = Field(
+        None,
+        description="Execution status for orchestrator compatibility (complete | needs_input | error)",
+    )
+    phase_trace: Optional[List[str]] = Field(
+        None,
+        description="Ordered phases executed for extraction",
+    )
+    confidence: Optional[float] = Field(None, description="Confidence score for extraction")
+    grounding: Optional[Dict[str, Any]] = Field(None, description="Grounding metadata for extracted fields")
 
 
 class DocumentStructure(BaseModel):
