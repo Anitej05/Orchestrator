@@ -36,7 +36,10 @@ from .schemas import (
     VersionHistoryRequest, VersionHistoryResponse,
     ExtractDataRequest, ExtractDataResponse
 )
+from . import agent as agent
 from .agent import DocumentAgent
+
+__all__ = ["DocumentAgent", "app"]
 from .state import DialogueStateManager
 
 # Load environment variables

@@ -247,7 +247,10 @@ class SpreadsheetQueryAgent:
         raise RuntimeError(f"All LLM providers failed. Last error: {last_error}")
     
     def _get_dataframe_context(self, df: pd.DataFrame, file_id: str = None, thread_id: str = "default") -> str:
-        """Generate context about the dataframe for the LLM (with caching)
+        """Generate intelligent context about the dataframe for the LLM (with caching)
+        
+        Uses intelligent parsing to provide structured document understanding,
+        metadata extraction, and context building for better LLM comprehension.
         
         Note: The LLM should be reminded that pandas (as pd) is already imported
         in the execution environment and no import statements should be generated.
@@ -258,6 +261,109 @@ class SpreadsheetQueryAgent:
             if cached_context:
                 return cached_context
         
+        # Try intelligent parsing first
+        try:
+            from agents.spreadsheet_agent.spreadsheet_parser import spreadsheet_parser
+            
+            # Parse the dataframe with intelligent analysis
+            parsed_spreadsheet = spreadsheet_parser.parse_dataframe(df, file_id or "temp", "Sheet1")
+            
+            # Build structured context
+            structured_context = spreadsheet_parser.build_context(parsed_spreadsheet, max_tokens=6000)
+            
+            # Convert structured context to LLM-friendly format
+            context = self._format_intelligent_context(structured_context, df)
+            
+            logger.info(f"✅ Using intelligent context for {file_id} (confidence: {parsed_spreadsheet.parsing_confidence:.2f})")
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Intelligent parsing failed for {file_id}: {e}, falling back to basic context")
+            # Fallback to basic context
+            context = self._build_basic_context(df)
+        
+        # Cache the context if file_id provided
+        if file_id:
+            spreadsheet_memory.store_context(thread_id, file_id, context)
+            spreadsheet_memory.cache_df_metadata(file_id, {
+                'shape': df.shape,
+                'columns': list(df.columns)
+            })
+        
+        return context
+    
+    def _format_intelligent_context(self, structured_context, df: pd.DataFrame) -> str:
+        """Format structured context into LLM-friendly text format."""
+        try:
+            context_dict = structured_context.to_dict()
+            
+            context = f"""INTELLIGENT DOCUMENT ANALYSIS:
+
+Document Type: {context_dict['document_type'].upper()}
+Parsing Confidence: {structured_context.metadata.validation_checksums.get('confidence', 'N/A')}
+
+DataFrame Shape: {df.shape[0]} rows × {df.shape[1]} columns
+Columns: {list(df.columns)}
+
+DOCUMENT STRUCTURE:
+"""
+            
+            # Add section information
+            for section_name, section_data in context_dict['sections'].items():
+                context += f"\n--- {section_name.upper()} SECTION ---\n"
+                
+                if isinstance(section_data, dict):
+                    if section_data.get('type') == 'table':
+                        context += f"Type: Data Table\n"
+                        if 'schema' in section_data:
+                            context += f"Headers: {section_data['schema']}\n"
+                        if 'row_count' in section_data:
+                            context += f"Rows: {section_data['row_count']}\n"
+                        if 'data' in section_data:
+                            context += f"Sample Data: {section_data['data'][:3]}\n"
+                    
+                    elif section_data.get('type') == 'metadata':
+                        context += f"Type: Metadata\n"
+                        if 'content' in section_data:
+                            for key, value in section_data['content'].items():
+                                context += f"{key}: {value}\n"
+                    
+                    elif section_data.get('type') == 'calculations':
+                        context += f"Type: Summary/Calculations\n"
+                        if 'content' in section_data:
+                            for key, value in section_data['content'].items():
+                                context += f"{key}: {value}\n"
+            
+            # Add data types and statistics
+            context += f"\nDATA TYPES:\n{df.dtypes.to_string()}\n"
+            
+            context += f"\nSAMPLE DATA (first 5 rows):\n{df.head().to_string()}\n"
+            
+            # Add column statistics
+            context += "\nCOLUMN STATISTICS:\n"
+            for col in df.columns:
+                if df[col].dtype in ['int64', 'float64']:
+                    context += f"{col}: min={df[col].min()}, max={df[col].max()}, mean={df[col].mean():.2f}\n"
+                else:
+                    unique_count = df[col].nunique()
+                    context += f"{col}: {unique_count} unique values"
+                    if unique_count <= 10:
+                        context += f", values: {df[col].unique().tolist()}"
+                    context += "\n"
+            
+            # Add anti-hallucination markers
+            if structured_context.metadata.validation_checksums:
+                context += "\nVALIDATION CHECKSUMS (for accuracy):\n"
+                for key, value in structured_context.metadata.validation_checksums.items():
+                    context += f"{key}: {value}\n"
+            
+            return context
+            
+        except Exception as e:
+            logger.error(f"Failed to format intelligent context: {e}")
+            return self._build_basic_context(df)
+    
+    def _build_basic_context(self, df: pd.DataFrame) -> str:
+        """Build basic context as fallback when intelligent parsing fails."""
         context = f"""DataFrame Information:
 - Shape: {df.shape[0]} rows × {df.shape[1]} columns
 - Columns: {list(df.columns)}
@@ -277,14 +383,6 @@ Column Statistics:
                 context += f"\n{col}: {unique_count} unique values"
                 if unique_count <= 10:
                     context += f", values: {df[col].unique().tolist()}"
-        
-        # Cache the context if file_id provided
-        if file_id:
-            spreadsheet_memory.store_context(thread_id, file_id, context)
-            spreadsheet_memory.cache_df_metadata(file_id, {
-                'shape': df.shape,
-                'columns': list(df.columns)
-            })
         
         return context
     

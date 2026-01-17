@@ -147,15 +147,15 @@ async def test_execute_endpoint_mock():
     # Test error case - no action or prompt
     try:
         empty_message = OrchestratorMessage(
-            source="orchestrator",
-            target="spreadsheet_agent",
+            type="execute",
             payload={}
         )
         
         # This would normally call the endpoint, but we'll just validate the message format
-        assert empty_message.source == "orchestrator"
-        assert empty_message.target == "spreadsheet_agent"
+        assert empty_message.type == "execute"
         assert empty_message.payload == {}
+        assert empty_message.action is None
+        assert empty_message.prompt is None
         
         logger.info("✅ OrchestratorMessage validation passed")
         

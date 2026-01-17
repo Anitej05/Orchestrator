@@ -33,7 +33,8 @@ from agents.spreadsheet_agent.parsing import (
     SchemaExtractor
 )
 from agents.spreadsheet_agent.parsing_models import ParsedSpreadsheet, DocumentType
-from agents.spreadsheet_agent.file_loader import FileLoader
+from agents.spreadsheet_agent.spreadsheet_parser import spreadsheet_parser
+# from agents.spreadsheet_agent.file_loader import FileLoader  # TODO: Implement FileLoader class
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +66,9 @@ class SpreadsheetAgent:
         self.context_builder = ContextBuilder()
         self.metadata_extractor = MetadataExtractor()
         self.schema_extractor = SchemaExtractor()
-        self.file_loader = FileLoader()
+        # Use the global spreadsheet parser instance
+        self.spreadsheet_parser = spreadsheet_parser
+        # self.file_loader = FileLoader()  # TODO: Implement FileLoader class
     
     # ========================================================================
     # MAIN ENDPOINTS (Task 10.1)

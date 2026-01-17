@@ -30,8 +30,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Get workspace root
-WORKSPACE_ROOT = Path(__file__).parent.parent.parent.parent.resolve()
+# Get workspace root (project root)
+WORKSPACE_ROOT = Path(__file__).parent.parent.parent.parent.parent.resolve()
 sys.path.insert(0, str(WORKSPACE_ROOT / "backend"))
 
 from agents.document_agent.agent import DocumentAgent
@@ -108,7 +108,7 @@ class TestSummary:
 
 DOCUMENT_TEST_REGISTRY = {
     "phd_thesis": {
-        "filename": "backend/tests/document_agent/test_data/2004_phdthesis_lip6.pdf",
+        "filename": "backend/tests/agents/document_agent/test_data/2004_phdthesis_lip6.pdf",
         "type": "PDF",
         "description": "PhD Thesis (Academic PDF)",
         "queries": {
@@ -130,7 +130,7 @@ DOCUMENT_TEST_REGISTRY = {
         }
     },
     "research_paper": {
-        "filename": "backend/tests/document_agent/test_data/2212.07286v2.pdf",
+        "filename": "backend/tests/agents/document_agent/test_data/2212.07286v2.pdf",
         "type": "PDF",
         "description": "Research Paper (ArXiv)",
         "queries": {
@@ -152,7 +152,7 @@ DOCUMENT_TEST_REGISTRY = {
         }
     },
     "sales_document": {
-        "filename": "backend/tests/document_agent/test_data/SampleDocs-sales-sample-data.docx",
+        "filename": "backend/tests/agents/document_agent/test_data/SampleDocs-sales-sample-data.docx",
         "type": "DOCX",
         "description": "Sales Document with Data",
         "queries": {
@@ -174,7 +174,7 @@ DOCUMENT_TEST_REGISTRY = {
         }
     },
     "generic_document": {
-        "filename": "backend/tests/document_agent/test_data/SampleDocs-Test Word File With Dummy Data.docx",
+        "filename": "backend/tests/agents/document_agent/test_data/SampleDocs-Test Word File With Dummy Data.docx",
         "type": "DOCX",
         "description": "Generic Word Document",
         "queries": {

@@ -672,7 +672,7 @@ async def transform_data(
 
 @app.post("/get_summary", response_model=StandardResponse)
 async def get_summary(file_id: str = Form(...), show_preview: bool = Form(False), thread_id: Optional[str] = Form(None)):
-    """Get summary of spreadsheet with headers, dtypes, and preview"""
+    """Get summary of spreadsheet with intelligent parsing and document structure analysis"""
     try:
         thread_id = thread_id or "default"
         
@@ -686,14 +686,81 @@ async def get_summary(file_id: str = Form(...), show_preview: bool = Form(False)
         metadata = file_manager.get_file(file_id)
         filename = metadata.original_name if metadata else "unknown.csv"
         
-        summary = {
-            "filename": filename,
-            "headers": df.columns.tolist(),
-            "rows": df.head(5).to_dict(orient="records"),
-            "dtypes": {k: str(v) for k, v in df.dtypes.to_dict().items()},
-            "total_rows": len(df),
-            "total_columns": len(df.columns)
-        }
+        # Import the global spreadsheet parser
+        from agents.spreadsheet_agent.spreadsheet_parser import spreadsheet_parser
+        
+        # Perform intelligent parsing
+        try:
+            parsed_spreadsheet = spreadsheet_parser.parse_dataframe(df, file_id, "Sheet1")
+            
+            # Get intelligent summary with document structure
+            intelligent_summary = spreadsheet_parser.get_metadata_summary(parsed_spreadsheet)
+            
+            # Build enhanced summary
+            summary = {
+                "filename": filename,
+                "headers": df.columns.tolist(),
+                "rows": df.head(5).to_dict(orient="records"),
+                "dtypes": {k: str(v) for k, v in df.dtypes.to_dict().items()},
+                "total_rows": len(df),
+                "total_columns": len(df.columns),
+                
+                # Intelligent parsing results
+                "document_analysis": {
+                    "document_type": intelligent_summary["document_type"],
+                    "parsing_confidence": intelligent_summary["parsing_confidence"],
+                    "sections_detected": intelligent_summary["sections_count"],
+                    "tables_detected": intelligent_summary["tables_count"],
+                    "has_metadata": intelligent_summary["has_metadata"],
+                    "has_line_items": intelligent_summary["has_line_items"],
+                    "has_summary": intelligent_summary["has_summary"],
+                    "intentional_gaps": intelligent_summary["intentional_gaps"],
+                    "metadata_items": intelligent_summary["metadata_items"]
+                },
+                
+                # Primary table information
+                "primary_table": None
+            }
+            
+            # Add primary table info if available
+            primary_table = spreadsheet_parser.get_primary_table(parsed_spreadsheet)
+            if primary_table:
+                region, table_df, schema = primary_table
+                summary["primary_table"] = {
+                    "region": {
+                        "start_row": region.start_row,
+                        "end_row": region.end_row,
+                        "start_col": region.start_col,
+                        "end_col": region.end_col,
+                        "confidence": region.confidence
+                    },
+                    "schema": {
+                        "headers": schema.headers,
+                        "dtypes": schema.dtypes,
+                        "row_count": schema.row_count,
+                        "col_count": schema.col_count
+                    }
+                }
+            
+            # Add extracted metadata if available
+            if parsed_spreadsheet.metadata:
+                summary["extracted_metadata"] = parsed_spreadsheet.metadata
+                
+        except Exception as e:
+            logger.warning(f"Intelligent parsing failed for {file_id}: {e}")
+            # Fallback to basic summary
+            summary = {
+                "filename": filename,
+                "headers": df.columns.tolist(),
+                "rows": df.head(5).to_dict(orient="records"),
+                "dtypes": {k: str(v) for k, v in df.dtypes.to_dict().items()},
+                "total_rows": len(df),
+                "total_columns": len(df.columns),
+                "document_analysis": {
+                    "parsing_error": str(e),
+                    "fallback_mode": True
+                }
+            }
         
         canvas_display = None
         if show_preview:
@@ -1922,17 +1989,76 @@ async def execute_action(
                     ).model_dump()
             
             elif action == "/analyze_structure" or action == "analyze_structure":
-                # Route to analyze_structure (if implemented)
+                # Route to intelligent structure analysis
                 try:
-                    # For now, provide basic structure analysis
+                    # Import the global spreadsheet parser
+                    from agents.spreadsheet_agent.spreadsheet_parser import spreadsheet_parser
+                    
+                    # Perform intelligent parsing
+                    parsed_spreadsheet = spreadsheet_parser.parse_dataframe(df, file_id_param, "Sheet1")
+                    
+                    # Get intelligent analysis
+                    intelligent_summary = spreadsheet_parser.get_metadata_summary(parsed_spreadsheet)
+                    
+                    # Build comprehensive structure info
                     structure_info = {
                         "file_id": file_id_param,
-                        "shape": {"rows": len(df), "columns": len(df.columns)},
-                        "columns": df.columns.tolist(),
-                        "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
-                        "sample_data": df.head(3).to_dict(orient='records'),
-                        "null_counts": df.isnull().sum().to_dict()
+                        "basic_info": {
+                            "shape": {"rows": len(df), "columns": len(df.columns)},
+                            "columns": df.columns.tolist(),
+                            "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
+                            "null_counts": df.isnull().sum().to_dict()
+                        },
+                        "document_analysis": {
+                            "document_type": intelligent_summary["document_type"],
+                            "parsing_confidence": intelligent_summary["parsing_confidence"],
+                            "sections_detected": intelligent_summary["sections_count"],
+                            "tables_detected": intelligent_summary["tables_count"],
+                            "has_metadata": intelligent_summary["has_metadata"],
+                            "has_line_items": intelligent_summary["has_line_items"],
+                            "has_summary": intelligent_summary["has_summary"],
+                            "intentional_gaps": intelligent_summary["intentional_gaps"],
+                            "metadata_items": intelligent_summary["metadata_items"]
+                        },
+                        "sections": [],
+                        "tables": [],
+                        "extracted_metadata": parsed_spreadsheet.metadata
                     }
+                    
+                    # Add section details
+                    for section in parsed_spreadsheet.sections:
+                        structure_info["sections"].append({
+                            "type": section.section_type.value,
+                            "content_type": section.content_type.value,
+                            "start_row": section.start_row,
+                            "end_row": section.end_row,
+                            "row_count": section.row_count,
+                            "confidence": section.confidence,
+                            "metadata": section.metadata
+                        })
+                    
+                    # Add table details
+                    for region, table_df, schema in parsed_spreadsheet.tables:
+                        structure_info["tables"].append({
+                            "region": {
+                                "start_row": region.start_row,
+                                "end_row": region.end_row,
+                                "start_col": region.start_col,
+                                "end_col": region.end_col,
+                                "confidence": region.confidence,
+                                "size": region.size
+                            },
+                            "schema": {
+                                "headers": schema.headers,
+                                "dtypes": schema.dtypes,
+                                "row_count": schema.row_count,
+                                "col_count": schema.col_count,
+                                "numeric_columns": schema.get_numeric_columns(),
+                                "text_columns": schema.get_text_columns(),
+                                "date_columns": schema.get_date_columns()
+                            },
+                            "sample_data": table_df.head(3).to_dict(orient='records') if not table_df.empty else []
+                        })
                     
                     # Create metrics
                     metrics = dialogue_manager.create_metrics(
@@ -1944,16 +2070,266 @@ async def execute_action(
                     return AgentResponse(
                         status=AgentResponseStatus.COMPLETE,
                         result=structure_info,
-                        explanation=f"Structure analysis for file with {len(df)} rows and {len(df.columns)} columns",
-                        metadata={"task_id": task_id, "action": action},
+                        explanation=f"Intelligent structure analysis complete: {intelligent_summary['document_type']} document with {intelligent_summary['sections_count']} sections and {intelligent_summary['tables_count']} tables (confidence: {intelligent_summary['parsing_confidence']:.2f})",
+                        metadata={"task_id": task_id, "action": action, "parsing_confidence": intelligent_summary['parsing_confidence']},
                         metrics=metrics.to_dict()
                     ).model_dump()
                     
                 except Exception as e:
                     logger.error(f"❌ [EXECUTE] analyze_structure failed: {e}", exc_info=True)
+                    # Fallback to basic structure analysis
+                    try:
+                        structure_info = {
+                            "file_id": file_id_param,
+                            "basic_info": {
+                                "shape": {"rows": len(df), "columns": len(df.columns)},
+                                "columns": df.columns.tolist(),
+                                "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
+                                "sample_data": df.head(3).to_dict(orient='records'),
+                                "null_counts": df.isnull().sum().to_dict()
+                            },
+                            "parsing_error": str(e),
+                            "fallback_mode": True
+                        }
+                        
+                        metrics = dialogue_manager.create_metrics(
+                            start_time=start_time,
+                            rows_processed=len(df),
+                            columns_affected=len(df.columns)
+                        )
+                        
+                        return AgentResponse(
+                            status=AgentResponseStatus.COMPLETE,
+                            result=structure_info,
+                            explanation=f"Basic structure analysis (intelligent parsing failed): {len(df)} rows and {len(df.columns)} columns",
+                            metadata={"task_id": task_id, "action": action, "fallback_mode": True},
+                            metrics=metrics.to_dict()
+                        ).model_dump()
+                        
+                    except Exception as fallback_error:
+                        return AgentResponse(
+                            status=AgentResponseStatus.ERROR,
+                            error=f"Structure analysis failed: {str(fallback_error)}",
+                            context={"task_id": task_id, "action": action}
+                        ).model_dump()
+            
+            elif action == "/detect_anomalies" or action == "detect_anomalies":
+                # Route to anomaly detection with orchestrator integration
+                try:
+                    # Import anomaly detector
+                    from agents.spreadsheet_agent.anomaly_detector import AnomalyDetector
+                    
+                    # Create detector instance
+                    anomaly_detector = AnomalyDetector()
+                    
+                    # Detect anomalies
+                    anomalies = anomaly_detector.detect_anomalies(df)
+                    
+                    logger.info(f"🔍 [EXECUTE] Detected {len(anomalies)} anomalies")
+                    
+                    # If anomalies found, return NEEDS_INPUT for user decision
+                    if anomalies:
+                        # Build choices for the first anomaly (handle one at a time)
+                        first_anomaly = anomalies[0]
+                        
+                        choices = []
+                        for fix in first_anomaly.suggested_fixes:
+                            choices.append({
+                                "id": fix.action,
+                                "label": fix.description,
+                                "safe": fix.safe,
+                                "parameters": fix.parameters
+                            })
+                        
+                        # Store anomaly context for continuation
+                        anomaly_context = {
+                            "anomalies": [anomaly.to_dict() for anomaly in anomalies],
+                            "current_anomaly_index": 0,
+                            "file_id": file_id_param,
+                            "thread_id": thread_id_param
+                        }
+                        
+                        # Store in dialogue manager for continuation
+                        dialogue_manager.store_pending_question(
+                            task_id=task_id,
+                            question=first_anomaly.message,
+                            question_type="anomaly_fix",
+                            choices=choices,
+                            context=anomaly_context
+                        )
+                        
+                        return AgentResponse(
+                            status=AgentResponseStatus.NEEDS_INPUT,
+                            question=first_anomaly.message,
+                            question_type="anomaly_fix",
+                            choices=choices,
+                            context={"task_id": task_id, "anomaly_type": first_anomaly.type},
+                            metadata={
+                                "task_id": task_id,
+                                "action": action,
+                                "anomalies_count": len(anomalies),
+                                "current_anomaly": first_anomaly.type
+                            }
+                        ).model_dump()
+                    
+                    else:
+                        # No anomalies found
+                        metrics = dialogue_manager.create_metrics(
+                            start_time=start_time,
+                            rows_processed=len(df),
+                            columns_affected=len(df.columns)
+                        )
+                        
+                        return AgentResponse(
+                            status=AgentResponseStatus.COMPLETE,
+                            result={
+                                "anomalies_detected": 0,
+                                "data_quality": "good",
+                                "message": "No data quality issues detected"
+                            },
+                            explanation="Data quality analysis complete: No anomalies detected",
+                            metadata={"task_id": task_id, "action": action},
+                            metrics=metrics.to_dict()
+                        ).model_dump()
+                        
+                except Exception as e:
+                    logger.error(f"❌ [EXECUTE] detect_anomalies failed: {e}", exc_info=True)
                     return AgentResponse(
                         status=AgentResponseStatus.ERROR,
-                        error=f"Structure analysis failed: {str(e)}",
+                        error=f"Anomaly detection failed: {str(e)}",
+                        context={"task_id": task_id, "action": action}
+                    ).model_dump()
+            
+            elif action == "/execute_plan" or action == "execute_plan":
+                # Route to multi-step plan execution
+                try:
+                    # Import planner
+                    from agents.spreadsheet_agent.planner import planner
+                    
+                    # Get plan parameters from payload
+                    plan_instruction = payload.get('plan_instruction') or prompt
+                    if not plan_instruction:
+                        return AgentResponse(
+                            status=AgentResponseStatus.ERROR,
+                            error="plan_instruction required for execute_plan action",
+                            context={"task_id": task_id, "action": action}
+                        ).model_dump()
+                    
+                    logger.info(f"📋 [EXECUTE] Multi-step planning for: {plan_instruction[:100]}...")
+                    
+                    # Generate DataFrame context
+                    df_context = {
+                        "shape": df.shape,
+                        "columns": df.columns.tolist(),
+                        "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
+                        "sample": df.head(3).to_dict(orient='records')
+                    }
+                    
+                    # Propose plan
+                    plan = await planner.propose_plan(df, plan_instruction, df_context)
+                    
+                    logger.info(f"📋 [EXECUTE] Generated plan with {len(plan.actions)} actions")
+                    
+                    # Simulate plan first
+                    simulation_result = planner.simulate_plan(plan, df)
+                    
+                    if not simulation_result["success"]:
+                        # Simulation failed - ask user if they want to proceed anyway
+                        simulation_warnings = simulation_result.get("warnings", [])
+                        simulation_errors = [step.get("error") for step in simulation_result.get("simulation_log", []) if step.get("error")]
+                        
+                        choices = [
+                            {
+                                "id": "proceed_anyway",
+                                "label": "Execute plan despite simulation warnings",
+                                "safe": False
+                            },
+                            {
+                                "id": "cancel_plan",
+                                "label": "Cancel plan execution",
+                                "safe": True
+                            }
+                        ]
+                        
+                        # Store plan context for continuation
+                        plan_context = {
+                            "plan_id": plan.plan_id,
+                            "file_id": file_id_param,
+                            "thread_id": thread_id_param,
+                            "simulation_result": simulation_result
+                        }
+                        
+                        dialogue_manager.store_pending_question(
+                            task_id=task_id,
+                            question=f"Plan simulation detected issues: {'; '.join(simulation_errors[:2])}. Do you want to proceed anyway?",
+                            question_type="plan_execution_confirmation",
+                            choices=choices,
+                            context=plan_context
+                        )
+                        
+                        return AgentResponse(
+                            status=AgentResponseStatus.NEEDS_INPUT,
+                            question=f"Plan simulation detected issues: {'; '.join(simulation_errors[:2])}. Do you want to proceed anyway?",
+                            question_type="plan_execution_confirmation",
+                            choices=choices,
+                            context={"task_id": task_id, "plan_id": plan.plan_id},
+                            metadata={
+                                "task_id": task_id,
+                                "action": action,
+                                "plan_id": plan.plan_id,
+                                "simulation_warnings": len(simulation_warnings),
+                                "simulation_errors": len(simulation_errors)
+                            }
+                        ).model_dump()
+                    
+                    # Simulation successful - execute plan
+                    modified_df, execution_result = planner.execute_plan(plan, df, force=False)
+                    
+                    if execution_result["success"]:
+                        # Update dataframe in session
+                        thread_paths = get_conversation_file_paths(thread_id_param)
+                        store_dataframe(file_id_param, modified_df, thread_paths.get(file_id_param, file_paths.get(file_id_param, "")), thread_id_param)
+                        
+                        # Create metrics
+                        metrics = dialogue_manager.create_metrics(
+                            start_time=start_time,
+                            rows_processed=len(modified_df),
+                            columns_affected=len(modified_df.columns)
+                        )
+                        
+                        return AgentResponse(
+                            status=AgentResponseStatus.COMPLETE,
+                            result={
+                                "plan_id": plan.plan_id,
+                                "actions_executed": execution_result["actions_executed"],
+                                "final_shape": {"rows": len(modified_df), "columns": len(modified_df.columns)},
+                                "execution_log": execution_result["execution_log"],
+                                "plan_reasoning": plan.reasoning,
+                                "message": f"Multi-step plan executed successfully: {execution_result['actions_executed']} actions completed"
+                            },
+                            explanation=f"Multi-step plan execution complete: {plan.reasoning}",
+                            metadata={"task_id": task_id, "action": action, "plan_id": plan.plan_id},
+                            metrics=metrics.to_dict()
+                        ).model_dump()
+                    
+                    else:
+                        # Execution failed
+                        return AgentResponse(
+                            status=AgentResponseStatus.ERROR,
+                            error=f"Plan execution failed: {execution_result.get('error', 'Unknown error')}",
+                            context={
+                                "task_id": task_id,
+                                "action": action,
+                                "plan_id": plan.plan_id,
+                                "execution_log": execution_result.get("execution_log", [])
+                            }
+                        ).model_dump()
+                        
+                except Exception as e:
+                    logger.error(f"❌ [EXECUTE] execute_plan failed: {e}", exc_info=True)
+                    return AgentResponse(
+                        status=AgentResponseStatus.ERROR,
+                        error=f"Multi-step plan execution failed: {str(e)}",
                         context={"task_id": task_id, "action": action}
                     ).model_dump()
             
@@ -2108,6 +2484,286 @@ async def continue_action(
         # Load dialogue state
         dialogue_state = dialogue_manager.load_state(task_id_param)
         
+        # Handle different question types
+        question_type = pending_question.get("question_type")
+        context = pending_question.get("context", {})
+        
+        if question_type == "anomaly_fix":
+            # Handle anomaly fix continuation
+            try:
+                # Get anomaly context
+                anomalies_data = context.get("anomalies", [])
+                current_index = context.get("current_anomaly_index", 0)
+                file_id = context.get("file_id")
+                thread_id = context.get("thread_id", "default")
+                
+                if not anomalies_data or current_index >= len(anomalies_data):
+                    return AgentResponse(
+                        status=AgentResponseStatus.ERROR,
+                        error="Invalid anomaly context",
+                        context={"task_id": task_id_param}
+                    ).model_dump()
+                
+                # Load dataframe
+                if not ensure_file_loaded(file_id, thread_id, file_manager):
+                    return AgentResponse(
+                        status=AgentResponseStatus.ERROR,
+                        error=f"File {file_id} not found",
+                        context={"task_id": task_id_param}
+                    ).model_dump()
+                
+                df = get_dataframe(file_id, thread_id)
+                if df is None:
+                    return AgentResponse(
+                        status=AgentResponseStatus.ERROR,
+                        error=f"Failed to load dataframe for file {file_id}",
+                        context={"task_id": task_id_param}
+                    ).model_dump()
+                
+                # Parse user answer (should be fix action ID)
+                selected_fix_action = user_answer.strip()
+                
+                # Get current anomaly
+                current_anomaly_data = anomalies_data[current_index]
+                
+                # Find the selected fix
+                selected_fix = None
+                for fix_data in current_anomaly_data.get("suggested_fixes", []):
+                    if fix_data.get("action") == selected_fix_action:
+                        selected_fix = fix_data
+                        break
+                
+                if not selected_fix:
+                    return AgentResponse(
+                        status=AgentResponseStatus.ERROR,
+                        error=f"Invalid fix selection: {selected_fix_action}",
+                        context={"task_id": task_id_param}
+                    ).model_dump()
+                
+                # Apply the fix
+                from agents.spreadsheet_agent.anomaly_detector import AnomalyDetector, Anomaly, AnomalyFix
+                
+                # Reconstruct anomaly and fix objects
+                anomaly = Anomaly(
+                    type=current_anomaly_data["type"],
+                    columns=current_anomaly_data["columns"],
+                    sample_values=current_anomaly_data["sample_values"],
+                    suggested_fixes=[],  # Not needed for apply_fix
+                    severity=current_anomaly_data["severity"],
+                    message=current_anomaly_data["message"],
+                    metadata=current_anomaly_data["metadata"]
+                )
+                
+                fix = AnomalyFix(
+                    action=selected_fix["action"],
+                    description=selected_fix["description"],
+                    safe=selected_fix["safe"],
+                    parameters=selected_fix["parameters"]
+                )
+                
+                # Apply fix
+                detector = AnomalyDetector()
+                modified_df = detector.apply_fix(df, anomaly, fix)
+                
+                # Update dataframe in session
+                thread_paths = get_conversation_file_paths(thread_id)
+                store_dataframe(file_id, modified_df, thread_paths.get(file_id, file_paths.get(file_id, "")), thread_id)
+                
+                # Check if there are more anomalies to handle
+                next_index = current_index + 1
+                if next_index < len(anomalies_data):
+                    # More anomalies to handle - ask about next one
+                    next_anomaly_data = anomalies_data[next_index]
+                    
+                    choices = []
+                    for fix_data in next_anomaly_data.get("suggested_fixes", []):
+                        choices.append({
+                            "id": fix_data["action"],
+                            "label": fix_data["description"],
+                            "safe": fix_data["safe"],
+                            "parameters": fix_data["parameters"]
+                        })
+                    
+                    # Update context for next anomaly
+                    updated_context = context.copy()
+                    updated_context["current_anomaly_index"] = next_index
+                    
+                    # Store next question
+                    dialogue_manager.store_pending_question(
+                        task_id=task_id_param,
+                        question=next_anomaly_data["message"],
+                        question_type="anomaly_fix",
+                        choices=choices,
+                        context=updated_context
+                    )
+                    
+                    return AgentResponse(
+                        status=AgentResponseStatus.NEEDS_INPUT,
+                        question=next_anomaly_data["message"],
+                        question_type="anomaly_fix",
+                        choices=choices,
+                        context={"task_id": task_id_param, "anomaly_type": next_anomaly_data["type"]},
+                        metadata={
+                            "task_id": task_id_param,
+                            "anomalies_remaining": len(anomalies_data) - next_index,
+                            "current_anomaly": next_anomaly_data["type"],
+                            "previous_fix_applied": selected_fix["description"]
+                        }
+                    ).model_dump()
+                
+                else:
+                    # All anomalies handled - return completion
+                    metrics = dialogue_manager.create_metrics(
+                        start_time=start_time,
+                        rows_processed=len(modified_df),
+                        columns_affected=len(modified_df.columns)
+                    )
+                    
+                    return AgentResponse(
+                        status=AgentResponseStatus.COMPLETE,
+                        result={
+                            "task_id": task_id_param,
+                            "anomalies_fixed": len(anomalies_data),
+                            "final_shape": {"rows": len(modified_df), "columns": len(modified_df.columns)},
+                            "last_fix_applied": selected_fix["description"],
+                            "message": f"All {len(anomalies_data)} anomalies have been resolved"
+                        },
+                        explanation=f"Anomaly detection and fixing complete: Applied {len(anomalies_data)} fixes to improve data quality",
+                        context={"task_id": task_id_param},
+                        metadata={"anomalies_fixed": len(anomalies_data)},
+                        metrics=metrics.to_dict()
+                    ).model_dump()
+                    
+            except Exception as e:
+                logger.error(f"❌ [CONTINUE] Anomaly fix failed: {e}", exc_info=True)
+                return AgentResponse(
+                    status=AgentResponseStatus.ERROR,
+                    error=f"Anomaly fix failed: {str(e)}",
+                    context={"task_id": task_id_param}
+                ).model_dump()
+        
+        elif question_type == "plan_execution_confirmation":
+            # Handle plan execution confirmation
+            try:
+                # Get plan context
+                plan_id = context.get("plan_id")
+                file_id = context.get("file_id")
+                thread_id = context.get("thread_id", "default")
+                simulation_result = context.get("simulation_result", {})
+                
+                if not plan_id:
+                    return AgentResponse(
+                        status=AgentResponseStatus.ERROR,
+                        error="Invalid plan context",
+                        context={"task_id": task_id_param}
+                    ).model_dump()
+                
+                # Load dataframe
+                if not ensure_file_loaded(file_id, thread_id, file_manager):
+                    return AgentResponse(
+                        status=AgentResponseStatus.ERROR,
+                        error=f"File {file_id} not found",
+                        context={"task_id": task_id_param}
+                    ).model_dump()
+                
+                df = get_dataframe(file_id, thread_id)
+                if df is None:
+                    return AgentResponse(
+                        status=AgentResponseStatus.ERROR,
+                        error=f"Failed to load dataframe for file {file_id}",
+                        context={"task_id": task_id_param}
+                    ).model_dump()
+                
+                # Parse user answer
+                user_choice = user_answer.strip()
+                
+                if user_choice == "cancel_plan":
+                    # User cancelled plan execution
+                    return AgentResponse(
+                        status=AgentResponseStatus.COMPLETE,
+                        result={
+                            "task_id": task_id_param,
+                            "plan_id": plan_id,
+                            "action": "cancelled",
+                            "message": "Plan execution cancelled by user"
+                        },
+                        explanation="Plan execution was cancelled due to simulation warnings",
+                        context={"task_id": task_id_param},
+                        metadata={"plan_cancelled": True}
+                    ).model_dump()
+                
+                elif user_choice == "proceed_anyway":
+                    # User wants to proceed despite warnings
+                    from agents.spreadsheet_agent.planner import planner
+                    
+                    # Get the plan
+                    plan = planner.history.get_plan(plan_id)
+                    if not plan:
+                        return AgentResponse(
+                            status=AgentResponseStatus.ERROR,
+                            error=f"Plan {plan_id} not found",
+                            context={"task_id": task_id_param}
+                        ).model_dump()
+                    
+                    # Execute plan with force=True
+                    modified_df, execution_result = planner.execute_plan(plan, df, force=True)
+                    
+                    if execution_result["success"]:
+                        # Update dataframe in session
+                        thread_paths = get_conversation_file_paths(thread_id)
+                        store_dataframe(file_id, modified_df, thread_paths.get(file_id, file_paths.get(file_id, "")), thread_id)
+                        
+                        # Create metrics
+                        metrics = dialogue_manager.create_metrics(
+                            start_time=start_time,
+                            rows_processed=len(modified_df),
+                            columns_affected=len(modified_df.columns)
+                        )
+                        
+                        return AgentResponse(
+                            status=AgentResponseStatus.COMPLETE,
+                            result={
+                                "task_id": task_id_param,
+                                "plan_id": plan_id,
+                                "actions_executed": execution_result["actions_executed"],
+                                "final_shape": {"rows": len(modified_df), "columns": len(modified_df.columns)},
+                                "execution_log": execution_result["execution_log"],
+                                "forced_execution": True,
+                                "message": f"Plan executed with force: {execution_result['actions_executed']} actions completed despite warnings"
+                            },
+                            explanation=f"Multi-step plan executed with force despite simulation warnings",
+                            context={"task_id": task_id_param},
+                            metadata={"forced_execution": True, "plan_id": plan_id},
+                            metrics=metrics.to_dict()
+                        ).model_dump()
+                    
+                    else:
+                        # Execution failed even with force
+                        return AgentResponse(
+                            status=AgentResponseStatus.ERROR,
+                            error=f"Plan execution failed even with force: {execution_result.get('error', 'Unknown error')}",
+                            context={
+                                "task_id": task_id_param,
+                                "plan_id": plan_id,
+                                "execution_log": execution_result.get("execution_log", [])
+                            }
+                        ).model_dump()
+                
+                else:
+                    return AgentResponse(
+                        status=AgentResponseStatus.ERROR,
+                        error=f"Invalid choice: {user_choice}",
+                        context={"task_id": task_id_param}
+                    ).model_dump()
+                    
+            except Exception as e:
+                logger.error(f"❌ [CONTINUE] Plan execution confirmation failed: {e}", exc_info=True)
+                return AgentResponse(
+                    status=AgentResponseStatus.ERROR,
+                    error=f"Plan execution confirmation failed: {str(e)}",
+                    context={"task_id": task_id_param}
+                ).model_dump()
+        
         # Create metrics
         metrics = dialogue_manager.create_metrics(
             start_time=start_time,
@@ -2118,9 +2774,7 @@ async def continue_action(
         # Clear the pending question
         dialogue_manager.clear_pending_question(task_id_param)
         
-        # For now, return a simple continuation response
-        # In a full implementation, this would resume the specific paused operation
-        # based on the dialogue state and user answer
+        # For other question types, return a simple continuation response
         return AgentResponse(
             status=AgentResponseStatus.COMPLETE,
             result={
