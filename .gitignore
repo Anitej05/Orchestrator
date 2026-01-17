@@ -43,3 +43,4 @@ backend/tests/spreadsheet_agent/edge_case_datasets
 /.vscode/
 .pytest_cache/
 .github/
+.kiro
