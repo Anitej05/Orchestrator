@@ -27,7 +27,6 @@ if str(backend_root) not in sys.path:
 # Import from schemas at backend root (not local .schemas)
 import schemas as backend_schemas
 # Debug: verify correct schemas is loaded
-import logging
 _temp_logger = logging.getLogger(__name__)
 _temp_logger.debug(f"Loaded schemas from: {backend_schemas.__file__}")
 _temp_logger.debug(f"Has AgentResponseStatus: {hasattr(backend_schemas, 'AgentResponseStatus')}")
@@ -338,81 +337,6 @@ class DocumentAgent:
         self.metrics["processing"] = {"files_processed": 0, "batch_operations": 0}
         
         return {"message": "Metrics reset successfully", "previous_metrics": old_metrics}
-
-    # ========== SAFETY & RISK HELPERS ==========
-    def _classify_edit_intent(self, instruction: str) -> Dict[str, Any]:
-        """Lightweight intent/risk classifier to gate destructive edits."""
-        text = instruction.lower()
-        risk_hits = [kw for kw in self._risk_keywords if kw in text]
-        intent = "edit"
-        if any(kw in text for kw in ["delete", "remove", "purge", "wipe"]):
-            intent = "destructive"
-        elif any(kw in text for kw in ["replace", "rewrite", "overwrite"]):
-            intent = "overwrite"
-        score = min(1.0, 0.2 + 0.15 * len(risk_hits)) if intent != "edit" else 0.25 + 0.05 * len(risk_hits)
-        return {
-            "intent": intent,
-            "risk_score": round(score, 2),
-            "risk_signals": risk_hits,
-        }
-
-    def _validate_edit_plan(self, plan: Dict[str, Any]) -> Dict[str, Any]:
-        """Validate LLM-generated plan against allowed actions and payload size."""
-        actions = plan.get("actions") or []
-        issues = []
-        normalized = []
-        if not isinstance(actions, list):
-            return {"valid": False, "issues": ["Plan actions must be a list"], "actions": []}
-        if len(actions) > self._max_safe_actions:
-            issues.append(f"Plan proposes {len(actions)} actions (> {self._max_safe_actions})")
-        for idx, action in enumerate(actions):
-            a_type = str(action.get("type", "")).lower()
-            if not a_type:
-                issues.append(f"Action {idx+1} missing type")
-                continue
-            if a_type not in {
-                "add_paragraph",
-                "add_heading",
-                "format_text",
-                "replace_text",
-                "add_table",
-                "add_content",
-                "replace_content",
-                "delete_content",
-                "add_image",
-                "modify_style",
-                "convert_format",
-            }:
-                issues.append(f"Unsupported action type: {a_type}")
-            normalized.append({"type": a_type, **{k: v for k, v in action.items() if k != "type"}})
-        return {"valid": len(issues) == 0, "issues": issues, "actions": normalized}
-
-    def _build_needs_input_response(self, question: str, plan: Dict[str, Any], risk: Dict[str, Any]) -> Dict[str, Any]:
-        """Shape a pause/approval response compatible with orchestrator AgentResponse."""
-        return {
-            "success": False,
-            "status": AgentResponseStatus.NEEDS_INPUT.value,
-            "question": question,
-            "pending_plan": plan,
-            "risk_assessment": risk,
-        }
-
-    def _hash_file(self, file_path: str) -> Optional[str]:
-        """Return md5 hash for a file for change detection."""
-        try:
-            with open(file_path, "rb") as f:
-                data = f.read()
-            return hashlib.md5(data).hexdigest()
-        except Exception:
-            return None
-
-    def _verify_edit_result(self, before_hash: Optional[str], after_hash: Optional[str], actions: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Verify that edits produced a change and provide minimal telemetry."""
-        if not before_hash or not after_hash:
-            return {"verified": False, "reason": "Hash unavailable"}
-        if before_hash == after_hash:
-            return {"verified": False, "reason": "No change detected", "actions": len(actions)}
-        return {"verified": True, "reason": "Document content changed", "actions": len(actions)}
 
     # ========== ANALYSIS OPERATIONS ==========
 

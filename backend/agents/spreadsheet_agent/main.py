@@ -44,6 +44,9 @@ from agents.spreadsheet_agent.models import (
 # Import contract models from backend
 from models import StandardResponse, StandardResponseMetrics, DecisionContract
 
+# Import orchestrator schemas for bidirectional communication
+from schemas import AgentResponse, AgentResponseStatus, OrchestratorMessage, DialogueContext
+
 from agents.spreadsheet_agent.memory import spreadsheet_memory
 from agents.spreadsheet_agent import session as session_module  # Import module for _thread_local access
 from agents.spreadsheet_agent.session import (
@@ -97,6 +100,9 @@ from agents.spreadsheet_agent.spreadsheet_session_manager import spreadsheet_ses
 
 # Import main agent class for orchestrator endpoints
 from agents.spreadsheet_agent.agent import spreadsheet_agent
+
+# Import DialogueManager for orchestrator communication
+from agents.spreadsheet_agent.dialogue_manager import dialogue_manager
 
 # Create FastAPI app
 app = FastAPI(title="Spreadsheet Agent", version="2.0.0")
@@ -1772,12 +1778,7 @@ async def health_check():
 
 @app.post("/execute")
 async def execute_action(
-    request: Request,
-    message: Optional[Dict[str, Any]] = None,
-    instruction: Optional[str] = Form(None),
-    file_id: Optional[str] = Form(None),
-    thread_id: Optional[str] = Form(None),
-    decision_contract: Optional[str] = Form(None)
+    request: Request
 ):
     """
     Unified execution endpoint supporting orchestrator communication.
@@ -1785,102 +1786,189 @@ async def execute_action(
     This endpoint handles requests from the orchestrator and returns AgentResponse format.
     Supports both JSON and form-encoded requests.
     """
+    start_time = time.time()
+    
     try:
         # Handle both JSON and form-data requests
         content_type = request.headers.get("content-type", "")
         
         if "application/json" in content_type:
-            # JSON request - get the body
+            # JSON request - parse OrchestratorMessage
             body = await request.json()
-            message = body
-        else:
-            # Form data request
-            if message is None:
-                message = {}
             
-            # If we have form parameters, build the message structure
-            if instruction or file_id or thread_id:
-                if 'payload' not in message:
-                    message['payload'] = {}
-                if instruction:
-                    message['payload']['instruction'] = instruction
-                if file_id:
-                    message['payload']['file_id'] = file_id
-                if thread_id:
-                    message['payload']['thread_id'] = thread_id
+            # Validate OrchestratorMessage format
+            try:
+                orchestrator_msg = OrchestratorMessage(**body)
+            except Exception as e:
+                logger.error(f"❌ [EXECUTE] Invalid OrchestratorMessage format: {e}")
+                return AgentResponse(
+                    status=AgentResponseStatus.ERROR,
+                    error=f"Invalid message format: {str(e)}"
+                ).model_dump()
+        else:
+            # Form data request - build OrchestratorMessage from form fields
+            form_data = await request.form()
+            
+            # Extract form fields
+            action = form_data.get('action')
+            prompt = form_data.get('prompt') or form_data.get('instruction')
+            file_id = form_data.get('file_id')
+            thread_id = form_data.get('thread_id', 'default')
+            
+            # Build OrchestratorMessage
+            orchestrator_msg = OrchestratorMessage(
+                action=action,
+                prompt=prompt,
+                payload={
+                    'file_id': file_id,
+                    'thread_id': thread_id
+                },
+                source="orchestrator",
+                target="spreadsheet_agent"
+            )
         
-        # Extract payload and parameters
-        payload = message.get('payload', {})
-        action = message.get('action')
-        prompt = payload.get('prompt') or payload.get('instruction')
+        # Extract parameters
+        payload = orchestrator_msg.payload or {}
+        action = orchestrator_msg.action
+        prompt = orchestrator_msg.prompt
+        file_id_param = payload.get('file_id')
+        thread_id_param = payload.get('thread_id', 'default')
         
-        # Generate task_id if not provided
+        # Generate task_id
         task_id = payload.get('task_id', f"task-{int(time.time())}")
         
         logger.info(f"🚀 [EXECUTE] Action={action}, Prompt={prompt[:100] if prompt else 'None'}..., TaskID={task_id}")
         
         # Validate required fields
-        file_id_param = payload.get('file_id')
         if not file_id_param:
             logger.error("❌ [EXECUTE] Missing file_id in payload")
-            return {
-                "status": "error",
-                "error": "Missing required field: file_id",
-                "context": {"task_id": task_id}
-            }
+            return AgentResponse(
+                status=AgentResponseStatus.ERROR,
+                error="Missing required field: file_id",
+                context={"task_id": task_id}
+            ).model_dump()
         
-        if not prompt:
-            logger.error("❌ [EXECUTE] Missing instruction/prompt in payload")
-            return {
-                "status": "error", 
-                "error": "Missing required field: instruction or prompt",
-                "context": {"task_id": task_id}
-            }
-        
-        thread_id_param = payload.get('thread_id', 'default')
+        if not prompt and not action:
+            logger.error("❌ [EXECUTE] Missing instruction/prompt and action in payload")
+            return AgentResponse(
+                status=AgentResponseStatus.ERROR,
+                error="Either 'action' or 'prompt' must be provided",
+                context={"task_id": task_id}
+            ).model_dump()
         
         logger.info(f"📁 [EXECUTE] Processing: file_id={file_id_param}, thread_id={thread_id_param}")
         
         # Ensure file is loaded
         if not ensure_file_loaded(file_id_param, thread_id_param, file_manager):
             logger.error(f"❌ [EXECUTE] File not found: {file_id_param}")
-            return {
-                "status": "error",
-                "error": f"File {file_id_param} not found or could not be loaded",
-                "context": {"task_id": task_id, "file_id": file_id_param}
-            }
+            return AgentResponse(
+                status=AgentResponseStatus.ERROR,
+                error=f"File {file_id_param} not found or could not be loaded",
+                context={"task_id": task_id, "file_id": file_id_param}
+            ).model_dump()
         
         # Get dataframe
         df = get_dataframe(file_id_param, thread_id_param)
         if df is None:
             logger.error(f"❌ [EXECUTE] Failed to load dataframe: {file_id_param}")
-            return {
-                "status": "error",
-                "error": f"Failed to load dataframe for file {file_id_param}",
-                "context": {"task_id": task_id, "file_id": file_id_param}
-            }
+            return AgentResponse(
+                status=AgentResponseStatus.ERROR,
+                error=f"Failed to load dataframe for file {file_id_param}",
+                context={"task_id": task_id, "file_id": file_id_param}
+            ).model_dump()
         
         logger.info(f"📊 [EXECUTE] Dataframe loaded: {len(df)} rows × {len(df.columns)} cols")
         
-        # Process the instruction
-        instruction_lower = prompt.lower()
-        
-        # Check for analytical/aggregation questions
-        analytical_keywords = [
-            'list', 'show', 'what', 'how many', 'count', 'total', 'sum', 'average', 'mean',
-            'categories', 'category', 'group', 'aggregate', 'analyze', 'analysis',
-            'find', 'identify', 'calculate', 'compute', 'determine', 'quantities', 'quantity',
-            'scan', 'unique', 'present'
-        ]
-        
-        is_analytical = any(keyword in instruction_lower for keyword in analytical_keywords)
-        
-        if is_analytical:
-            logger.info(f"📊 [EXECUTE] Processing as analytical query")
+        # Route based on action or process prompt
+        if action:
+            # Action-based routing
+            if action == "/get_summary" or action == "get_summary":
+                # Route to get_summary endpoint
+                try:
+                    summary_response = await get_summary(
+                        file_id=file_id_param,
+                        show_preview=True,
+                        thread_id=thread_id_param
+                    )
+                    
+                    # Create metrics
+                    metrics = dialogue_manager.create_metrics(
+                        start_time=start_time,
+                        rows_processed=len(df),
+                        columns_affected=len(df.columns)
+                    )
+                    
+                    if summary_response.success:
+                        return AgentResponse(
+                            status=AgentResponseStatus.COMPLETE,
+                            result=summary_response.data,
+                            explanation=summary_response.message,
+                            metadata={"task_id": task_id, "action": action},
+                            metrics=metrics.to_dict()
+                        ).model_dump()
+                    else:
+                        return AgentResponse(
+                            status=AgentResponseStatus.ERROR,
+                            error=summary_response.message,
+                            context={"task_id": task_id, "action": action}
+                        ).model_dump()
+                        
+                except Exception as e:
+                    logger.error(f"❌ [EXECUTE] get_summary failed: {e}", exc_info=True)
+                    return AgentResponse(
+                        status=AgentResponseStatus.ERROR,
+                        error=f"Summary generation failed: {str(e)}",
+                        context={"task_id": task_id, "action": action}
+                    ).model_dump()
             
-            # Use the existing nl_query functionality for all analytical queries
+            elif action == "/analyze_structure" or action == "analyze_structure":
+                # Route to analyze_structure (if implemented)
+                try:
+                    # For now, provide basic structure analysis
+                    structure_info = {
+                        "file_id": file_id_param,
+                        "shape": {"rows": len(df), "columns": len(df.columns)},
+                        "columns": df.columns.tolist(),
+                        "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
+                        "sample_data": df.head(3).to_dict(orient='records'),
+                        "null_counts": df.isnull().sum().to_dict()
+                    }
+                    
+                    # Create metrics
+                    metrics = dialogue_manager.create_metrics(
+                        start_time=start_time,
+                        rows_processed=len(df),
+                        columns_affected=len(df.columns)
+                    )
+                    
+                    return AgentResponse(
+                        status=AgentResponseStatus.COMPLETE,
+                        result=structure_info,
+                        explanation=f"Structure analysis for file with {len(df)} rows and {len(df.columns)} columns",
+                        metadata={"task_id": task_id, "action": action},
+                        metrics=metrics.to_dict()
+                    ).model_dump()
+                    
+                except Exception as e:
+                    logger.error(f"❌ [EXECUTE] analyze_structure failed: {e}", exc_info=True)
+                    return AgentResponse(
+                        status=AgentResponseStatus.ERROR,
+                        error=f"Structure analysis failed: {str(e)}",
+                        context={"task_id": task_id, "action": action}
+                    ).model_dump()
+            
+            else:
+                # Unknown action
+                return AgentResponse(
+                    status=AgentResponseStatus.ERROR,
+                    error=f"Unknown action: {action}",
+                    context={"task_id": task_id, "action": action}
+                ).model_dump()
+        
+        elif prompt:
+            # Prompt-based processing
             try:
-                # Route to natural language query processing
+                # Use natural language query processing
                 from agents.spreadsheet_agent.models import NaturalLanguageQueryRequest
                 
                 nl_request = NaturalLanguageQueryRequest(
@@ -1889,102 +1977,60 @@ async def execute_action(
                     max_iterations=3
                 )
                 
-                # Call the existing nl_query endpoint logic
-                logger.info(f"🤖 [EXECUTE] Routing to natural language processing")
+                logger.info(f"🤖 [EXECUTE] Processing prompt with natural language agent")
                 nl_response = await natural_language_query(nl_request, thread_id_param)
                 
-                # Convert StandardResponse to AgentResponse format
+                # Create metrics
+                metrics = dialogue_manager.create_metrics(
+                    start_time=start_time,
+                    rows_processed=len(df),
+                    columns_affected=len(df.columns),
+                    llm_calls=nl_response.metrics.llm_calls if nl_response.metrics else 0
+                )
+                
+                # Convert StandardResponse to AgentResponse
                 if nl_response.success:
-                    return {
-                        "status": "complete",
-                        "result": nl_response.data,
-                        "explanation": nl_response.message,
-                        "context": {"task_id": task_id}
-                    }
+                    return AgentResponse(
+                        status=AgentResponseStatus.COMPLETE,
+                        result=nl_response.data,
+                        explanation=nl_response.message,
+                        metadata={"task_id": task_id, "prompt": prompt[:100]},
+                        metrics=metrics.to_dict()
+                    ).model_dump()
                 else:
-                    return {
-                        "status": "error",
-                        "error": nl_response.message,
-                        "context": {"task_id": task_id}
-                    }
+                    return AgentResponse(
+                        status=AgentResponseStatus.ERROR,
+                        error=nl_response.message,
+                        context={"task_id": task_id, "prompt": prompt[:100]}
+                    ).model_dump()
                     
             except Exception as e:
-                logger.error(f"❌ [EXECUTE] Natural language processing failed: {e}", exc_info=True)
-                return {
-                    "status": "error",
-                    "error": f"Natural language processing failed: {str(e)}",
-                    "context": {"task_id": task_id}
-                }
-            
-            # For other analytical queries, provide basic summary
-            try:
-                summary = {
-                    "file_info": {
-                        "rows": len(df),
-                        "columns": len(df.columns),
-                        "column_names": df.columns.tolist()
-                    },
-                    "sample_data": df.head(5).to_dict(orient='records'),
-                    "instruction_processed": prompt
-                }
-                
-                return {
-                    "status": "complete",
-                    "result": summary,
-                    "explanation": f"Processed analytical query for file with {len(df)} rows and {len(df.columns)} columns",
-                    "context": {"task_id": task_id}
-                }
-                
-            except Exception as e:
-                logger.error(f"❌ [EXECUTE] Analytical processing failed: {e}", exc_info=True)
-                return {
-                    "status": "error",
-                    "error": f"Analytical processing failed: {str(e)}",
-                    "context": {"task_id": task_id}
-                }
+                logger.error(f"❌ [EXECUTE] Prompt processing failed: {e}", exc_info=True)
+                return AgentResponse(
+                    status=AgentResponseStatus.ERROR,
+                    error=f"Prompt processing failed: {str(e)}",
+                    context={"task_id": task_id, "prompt": prompt[:100]}
+                ).model_dump()
         
-        # Default: provide file summary
-        try:
-            result = {
-                "file_summary": {
-                    "file_id": file_id_param,
-                    "rows": len(df),
-                    "columns": len(df.columns),
-                    "column_names": df.columns.tolist(),
-                    "sample_data": df.head(3).to_dict(orient='records')
-                },
-                "instruction": prompt
-            }
-            
-            return {
-                "status": "complete",
-                "result": result,
-                "explanation": f"Processed instruction for spreadsheet with {len(df)} rows and {len(df.columns)} columns",
-                "context": {"task_id": task_id}
-            }
-            
-        except Exception as e:
-            logger.error(f"❌ [EXECUTE] Default processing failed: {e}", exc_info=True)
-            return {
-                "status": "error",
-                "error": f"Processing failed: {str(e)}",
-                "context": {"task_id": task_id}
-            }
+        # Should not reach here
+        return AgentResponse(
+            status=AgentResponseStatus.ERROR,
+            error="No valid action or prompt provided",
+            context={"task_id": task_id}
+        ).model_dump()
         
     except Exception as e:
         logger.error(f"❌ [EXECUTE] Unexpected error: {e}", exc_info=True)
-        return {
-            "status": "error",
-            "error": f"Unexpected error: {str(e)}",
-            "context": {"task_id": message.get('payload', {}).get('task_id', 'unknown') if message else 'unknown'}
-        }
+        return AgentResponse(
+            status=AgentResponseStatus.ERROR,
+            error=f"Unexpected error: {str(e)}",
+            context={"task_id": "unknown"}
+        ).model_dump()
 
 
 @app.post("/continue")
 async def continue_action(
-    message: Optional[Dict[str, Any]] = None,
-    task_id: Optional[str] = Form(None),
-    answer: Optional[str] = Form(None)
+    request: Request
 ):
     """
     Resume a paused task with user input.
@@ -1992,51 +2038,111 @@ async def continue_action(
     This endpoint handles continuation of paused tasks from the orchestrator.
     Supports both JSON and form-encoded requests.
     """
+    start_time = time.time()
+    
     try:
         # Handle both JSON and form-data requests
-        if message is None:
-            message = {}
+        content_type = request.headers.get("content-type", "")
         
-        # Extract parameters from form data if provided
-        if task_id:
-            if 'payload' not in message:
-                message['payload'] = {}
-            message['payload']['task_id'] = task_id
-        if answer:
-            message['answer'] = answer
+        if "application/json" in content_type:
+            # JSON request - parse OrchestratorMessage
+            body = await request.json()
+            
+            # Validate OrchestratorMessage format
+            try:
+                orchestrator_msg = OrchestratorMessage(**body)
+            except Exception as e:
+                logger.error(f"❌ [CONTINUE] Invalid OrchestratorMessage format: {e}")
+                return AgentResponse(
+                    status=AgentResponseStatus.ERROR,
+                    error=f"Invalid message format: {str(e)}"
+                ).model_dump()
+        else:
+            # Form data request - build OrchestratorMessage from form fields
+            form_data = await request.form()
+            
+            # Extract form fields
+            task_id = form_data.get('task_id')
+            answer = form_data.get('answer')
+            
+            # Build OrchestratorMessage
+            orchestrator_msg = OrchestratorMessage(
+                type="continue",
+                payload={'task_id': task_id},
+                answer=answer,
+                source="orchestrator",
+                target="spreadsheet_agent"
+            )
         
-        task_id_param = message.get('payload', {}).get('task_id')
-        user_answer = message.get('answer', '')
+        # Extract parameters
+        payload = orchestrator_msg.payload or {}
+        task_id_param = payload.get('task_id')
+        user_answer = orchestrator_msg.answer or ""
         
         if not task_id_param:
-            return {
-                "status": "error",
-                "error": "task_id required in payload",
-                "context": {}
-            }
+            logger.error("❌ [CONTINUE] Missing task_id in payload")
+            return AgentResponse(
+                status=AgentResponseStatus.ERROR,
+                error="task_id required in payload",
+                context={}
+            ).model_dump()
             
         logger.info(f"▶️ [CONTINUE] Resuming TaskID={task_id_param} with Answer='{user_answer}'")
         
+        # Check if we have a pending question for this task
+        pending_question = dialogue_manager.get_pending_question(task_id_param)
+        if not pending_question:
+            logger.warning(f"⚠️ [CONTINUE] No pending question found for task {task_id_param}")
+            # For now, return a simple continuation response
+            return AgentResponse(
+                status=AgentResponseStatus.COMPLETE,
+                result={
+                    "task_id": task_id_param,
+                    "user_answer": user_answer,
+                    "message": "Task continuation completed (no pending question found)"
+                },
+                explanation=f"Received continuation for task {task_id_param}",
+                context={"task_id": task_id_param}
+            ).model_dump()
+        
+        # Load dialogue state
+        dialogue_state = dialogue_manager.load_state(task_id_param)
+        
+        # Create metrics
+        metrics = dialogue_manager.create_metrics(
+            start_time=start_time,
+            llm_calls=0,
+            cache_hits=1  # State was cached
+        )
+        
+        # Clear the pending question
+        dialogue_manager.clear_pending_question(task_id_param)
+        
         # For now, return a simple continuation response
         # In a full implementation, this would resume the specific paused operation
-        return {
-            "status": "complete",
-            "result": {
+        # based on the dialogue state and user answer
+        return AgentResponse(
+            status=AgentResponseStatus.COMPLETE,
+            result={
                 "task_id": task_id_param,
                 "user_answer": user_answer,
-                "message": "Task continuation not fully implemented yet"
+                "previous_question": pending_question,
+                "dialogue_state": dialogue_state,
+                "message": "Task continuation completed successfully"
             },
-            "explanation": f"Received continuation for task {task_id_param}",
-            "context": {"task_id": task_id_param}
-        }
+            explanation=f"Resumed task {task_id_param} with user answer: {user_answer}",
+            context={"task_id": task_id_param},
+            metadata={"resumed_from": "needs_input"},
+            metrics=metrics.to_dict()
+        ).model_dump()
         
     except Exception as e:
         logger.error(f"❌ [CONTINUE] Failed: {e}", exc_info=True)
-        return {
-            "status": "error",
-            "error": f"Continue failed: {str(e)}",
-            "context": {"task_id": message.get('payload', {}).get('task_id', 'unknown') if message else 'unknown'}
-        }
+        return AgentResponse(
+            status=AgentResponseStatus.ERROR,
+            error=f"Continue failed: {str(e)}",
+            context={"task_id": "unknown"}
+        ).model_dump()
 
 
 def _convert_agent_response_to_standard(
