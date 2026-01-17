@@ -15,6 +15,25 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 
+# Import AgentResponseStatus from backend root schemas
+# Note: agents/document_agent/agent.py -> agents/document_agent -> agents -> backend
+import sys
+from pathlib import Path as ImportPath
+# Go up 2 levels: document_agent -> agents -> backend
+backend_root = ImportPath(__file__).parent.parent.parent
+if str(backend_root) not in sys.path:
+    sys.path.insert(0, str(backend_root))
+
+# Import from schemas at backend root (not local .schemas)
+import schemas as backend_schemas
+# Debug: verify correct schemas is loaded
+_temp_logger = logging.getLogger(__name__)
+_temp_logger.debug(f"Loaded schemas from: {backend_schemas.__file__}")
+_temp_logger.debug(f"Has AgentResponseStatus: {hasattr(backend_schemas, 'AgentResponseStatus')}")
+if not hasattr(backend_schemas, 'AgentResponseStatus'):
+    raise ImportError(f"schemas module from {backend_schemas.__file__} does not have AgentResponseStatus. This is likely the wrong schemas module (local document_agent/schemas.py instead of backend/schemas.py)")
+AgentResponseStatus = backend_schemas.AgentResponseStatus
+
 from .schemas import (
     AnalyzeDocumentRequest, EditDocumentRequest, CreateDocumentRequest,
     UndoRedoRequest, VersionHistoryRequest, ExtractDataRequest, EditAction
@@ -323,6 +342,7 @@ class DocumentAgent:
 
     def analyze_document(self, request: AnalyzeDocumentRequest) -> Dict[str, Any]:
         """Analyze document(s) with RAG and answer queries. Supports multi-file batch processing."""
+        phase_trace = ["understand", "retrieve", "generate", "validate", "report"]
         request_start = time.time()
         self.metrics["api_calls"]["analyze"] += 1
         
@@ -451,6 +471,12 @@ class DocumentAgent:
                 operation_name="analyze",
                 success=result.get('success', False)
             )
+
+            result.setdefault(
+                'status',
+                AgentResponseStatus.COMPLETE.value if result.get('success') else AgentResponseStatus.ERROR.value
+            )
+            result.setdefault('phase_trace', phase_trace)
             
             return result
 
@@ -462,6 +488,8 @@ class DocumentAgent:
                 'success': False,
                 'answer': f'Critical error: {str(e)}',
                 'errors': [str(e)],
+                'status': AgentResponseStatus.ERROR.value,
+                'phase_trace': phase_trace,
                 'execution_metrics': {
                     'latency_ms': round((time.time() - request_start) * 1000, 2),
                     'error': True
@@ -624,7 +652,6 @@ Answer:"""
                 
                 answer = rag_chain.invoke({"context": formatted_context, "question": request.query})
                 metrics['llm_call_ms'] = (time.time() - llm_start) * 1000
-                
                 logger.info(f"✅ RAG analysis complete ({metrics['chunks_retrieved']} chunks, {metrics['llm_call_ms']:.0f}ms)")
 
                 validation = self._validate_answer_confidence(answer, formatted_context, request.query)
@@ -1023,7 +1050,7 @@ Answer:"""
 
             return {
                 'success': True,
-                'message': f'Applied {len(results)} edits',
+                'message': f"Applied {len(results)} edits",
                 'file_path': request.file_path,
                 'can_undo': len(self.version_manager.get_versions(request.file_path)) > 1,
                 'can_redo': False,
@@ -1181,6 +1208,7 @@ Answer:"""
                     'message': f'File not found: {request.file_path}'
                 }
 
+            phase_trace = ["understand", "extract", "validate", "report"]
             content, _ = extract_document_content(request.file_path)
 
             self.metrics["llm_calls"]["extract"] += 1
@@ -1190,11 +1218,23 @@ Answer:"""
                 request.extraction_type
             )
 
+            confidence = 0.8 if result.get('success') else 0.0
+            if not result.get('data') and not result.get('content'):
+                confidence = 0.2
+            grounding = {
+                'source_file': request.file_path,
+                'notes': 'LLM-only extraction; validate downstream',
+            }
+
             return {
                 'success': result.get('success', False),
                 'message': 'Data extracted' if result.get('success') else 'Extraction failed',
                 'extracted_data': result.get('data', result.get('content', '')),
-                'data_format': request.extraction_type
+                'data_format': request.extraction_type,
+                'status': AgentResponseStatus.COMPLETE.value if result.get('success') else AgentResponseStatus.ERROR.value,
+                'phase_trace': phase_trace,
+                'confidence': confidence,
+                'grounding': grounding,
             }
 
         except Exception as e:
@@ -1203,7 +1243,11 @@ Answer:"""
                 'success': False,
                 'message': f'Error: {str(e)}',
                 'extracted_data': {},
-                'data_format': request.extraction_type
+                'data_format': request.extraction_type,
+                'status': AgentResponseStatus.ERROR.value,
+                'phase_trace': ["understand", "extract", "validate", "report"],
+                'confidence': 0.0,
+                'grounding': {'source_file': request.file_path, 'notes': 'exception raised'},
             }
 
     # ========== CLEANUP ==========

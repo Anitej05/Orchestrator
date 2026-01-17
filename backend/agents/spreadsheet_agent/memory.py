@@ -1,6 +1,7 @@
 """
 Memory and caching system for spreadsheet agent
 Provides fast access to frequently used data and context management
+Enhanced with advanced performance optimizations.
 """
 import json
 import hashlib
@@ -19,6 +20,20 @@ from .config import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Import advanced performance components
+try:
+    from .performance_optimizer import (
+        AdvancedLRUCache,
+        memory_optimizer,
+        token_optimizer,
+        performance_monitor
+    )
+    ADVANCED_PERFORMANCE_AVAILABLE = True
+    logger.info("✅ Advanced performance optimizations enabled")
+except ImportError as e:
+    logger.warning(f"⚠️ Advanced performance optimizations not available: {e}")
+    ADVANCED_PERFORMANCE_AVAILABLE = False
 
 
 class LRUCache:
@@ -91,12 +106,35 @@ class SpreadsheetMemory:
     - Stores recent queries and results
     - Maintains context for conversations
     - Provides fast access to frequently used information
+    - Enhanced with advanced performance optimizations
     """
     
     def __init__(self):
-        self.metadata_cache = LRUCache(max_size=MEMORY_CACHE_MAX_SIZE, ttl_seconds=MEMORY_CACHE_TTL_SECONDS)
-        self.query_cache = LRUCache(max_size=500, ttl_seconds=1800)  # 30 min for queries
-        self.context_cache = LRUCache(max_size=200, ttl_seconds=3600)  # 1 hour for context
+        if ADVANCED_PERFORMANCE_AVAILABLE:
+            # Use advanced caching with memory monitoring
+            self.metadata_cache = AdvancedLRUCache(
+                max_size=MEMORY_CACHE_MAX_SIZE, 
+                ttl_seconds=MEMORY_CACHE_TTL_SECONDS,
+                max_memory_mb=200
+            )
+            self.query_cache = AdvancedLRUCache(
+                max_size=500, 
+                ttl_seconds=1800,  # 30 min for queries
+                max_memory_mb=300
+            )
+            self.context_cache = AdvancedLRUCache(
+                max_size=200, 
+                ttl_seconds=3600,  # 1 hour for context
+                max_memory_mb=100
+            )
+            logger.info("🚀 Using advanced LRU caches with memory optimization")
+        else:
+            # Fallback to basic LRU caches
+            self.metadata_cache = LRUCache(max_size=MEMORY_CACHE_MAX_SIZE, ttl_seconds=MEMORY_CACHE_TTL_SECONDS)
+            self.query_cache = LRUCache(max_size=500, ttl_seconds=1800)  # 30 min for queries
+            self.context_cache = LRUCache(max_size=200, ttl_seconds=3600)  # 1 hour for context
+            logger.info("📦 Using basic LRU caches (fallback mode)")
+        
         self.memory_dir = Path(MEMORY_CACHE_DIR)
         self.memory_dir.mkdir(parents=True, exist_ok=True)
         
@@ -111,7 +149,7 @@ class SpreadsheetMemory:
     
     def cache_df_metadata(self, file_id: str, metadata: Dict[str, Any]):
         """
-        Cache dataframe metadata for fast access
+        Cache dataframe metadata for fast access with performance tracking
         
         Args:
             file_id: File identifier
@@ -120,7 +158,14 @@ class SpreadsheetMemory:
         key = f"df_meta:{file_id}"
         existing = self.metadata_cache.get(key) or {}
         merged = {**existing, **metadata}
-        self.metadata_cache.put(key, merged)
+        
+        # Estimate memory usage for advanced cache
+        if ADVANCED_PERFORMANCE_AVAILABLE:
+            estimated_size = len(str(merged)) / (1024 * 1024)  # Rough MB estimate
+            self.metadata_cache.put(key, merged, estimated_size)
+        else:
+            self.metadata_cache.put(key, merged)
+        
         logger.debug(f"Cached metadata for {file_id}")
     
     def get_df_metadata(self, file_id: str) -> Optional[Dict[str, Any]]:
@@ -137,7 +182,7 @@ class SpreadsheetMemory:
     
     def cache_query_result(self, file_id: str, query: str, result: Any, thread_id: str = None):
         """
-        Cache query result for reuse
+        Cache query result for reuse with performance optimization
         
         Args:
             file_id: File identifier
@@ -146,17 +191,25 @@ class SpreadsheetMemory:
             thread_id: Optional thread ID
         """
         key = self._make_key("query", file_id, query, thread_id or "default")
-        self.query_cache.put(key, {
+        cache_data = {
             'result': result,
             'timestamp': datetime.now().isoformat(),
             'file_id': file_id,
             'query': query
-        })
+        }
+        
+        # Estimate memory usage for advanced cache
+        if ADVANCED_PERFORMANCE_AVAILABLE:
+            estimated_size = len(str(cache_data)) / (1024 * 1024)  # Rough MB estimate
+            self.query_cache.put(key, cache_data, estimated_size)
+        else:
+            self.query_cache.put(key, cache_data)
+        
         logger.debug(f"Cached query result for file {file_id}")
     
     def get_cached_query(self, file_id: str, query: str, thread_id: str = None) -> Optional[Any]:
         """
-        Get cached query result
+        Get cached query result with performance tracking
         
         Args:
             file_id: File identifier
@@ -178,7 +231,7 @@ class SpreadsheetMemory:
     
     def store_context(self, thread_id: str, file_id: str, context: str):
         """
-        Store conversation context
+        Store conversation context with token optimization
         
         Args:
             thread_id: Thread identifier
@@ -186,7 +239,17 @@ class SpreadsheetMemory:
             context: Context string
         """
         key = self._make_key("context", thread_id, file_id)
-        self.context_cache.put(key, context)
+        
+        # Optimize context for token usage if advanced performance is available
+        if ADVANCED_PERFORMANCE_AVAILABLE:
+            # Truncate context if it's too long
+            optimized_context = token_optimizer.truncate_to_token_limit(
+                context, CONTEXT_MEMORY_MAX_TOKENS
+            )
+            estimated_size = len(optimized_context) / (1024 * 1024)
+            self.context_cache.put(key, optimized_context, estimated_size)
+        else:
+            self.context_cache.put(key, context)
     
     def get_context(self, thread_id: str, file_id: str) -> Optional[str]:
         """Get stored context"""
@@ -196,9 +259,14 @@ class SpreadsheetMemory:
     # ============== FILE SUMMARIES ==============
     
     def cache_file_summary(self, file_id: str, summary: Dict[str, Any]):
-        """Cache file summary (headers, sample, stats)"""
+        """Cache file summary (headers, sample, stats) with optimization"""
         key = f"summary:{file_id}"
-        self.metadata_cache.put(key, summary)
+        
+        if ADVANCED_PERFORMANCE_AVAILABLE:
+            estimated_size = len(str(summary)) / (1024 * 1024)
+            self.metadata_cache.put(key, summary, estimated_size)
+        else:
+            self.metadata_cache.put(key, summary)
     
     def get_file_summary(self, file_id: str) -> Optional[Dict[str, Any]]:
         """Get cached file summary"""
@@ -207,27 +275,37 @@ class SpreadsheetMemory:
     
     # ============== PERSISTENT MEMORY ==============
     
-    def save_to_disk(self, key: str, data: Any):
-        """Save data to persistent storage"""
+    def save_to_disk(self, key: str = "state", data: Any = None):
+        """Save data to persistent storage with performance monitoring"""
         try:
-            file_path = self.memory_dir / f"{key}.json"
-            with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2)
-            logger.debug(f"Saved {key} to disk")
+            if ADVANCED_PERFORMANCE_AVAILABLE:
+                with performance_monitor.time_operation(f"save_to_disk_{key}"):
+                    file_path = self.memory_dir / f"{key}.json"
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        json.dump(data or self.get_cache_stats(), f, indent=2)
+                    logger.debug(f"Saved {key} to disk with performance tracking")
+            else:
+                file_path = self.memory_dir / f"{key}.json"
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump(data or self.get_cache_stats(), f, indent=2)
+                logger.debug(f"Saved {key} to disk")
         except Exception as e:
             logger.error(f"Failed to save {key} to disk: {e}")
     
     def load_from_disk(self, key: str = "state") -> Optional[Any]:
-        """Load data from persistent storage.
-
-        The caller can optionally provide a key; defaults to "state" to keep
-        backward compatibility with older call sites that didn't pass a key.
-        """
+        """Load data from persistent storage with performance monitoring"""
         try:
-            file_path = self.memory_dir / f"{key}.json"
-            if file_path.exists():
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+            if ADVANCED_PERFORMANCE_AVAILABLE:
+                with performance_monitor.time_operation(f"load_from_disk_{key}"):
+                    file_path = self.memory_dir / f"{key}.json"
+                    if file_path.exists():
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            return json.load(f)
+            else:
+                file_path = self.memory_dir / f"{key}.json"
+                if file_path.exists():
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        return json.load(f)
         except Exception as e:
             logger.error(f"Failed to load {key} from disk: {e}")
         return None
@@ -235,22 +313,56 @@ class SpreadsheetMemory:
     # ============== STATISTICS ==============
     
     def get_cache_stats(self) -> Dict[str, Any]:
-        """Get cache statistics"""
-        return {
-            'metadata_cache_size': len(self.metadata_cache.cache),
-            'query_cache_size': len(self.query_cache.cache),
-            'context_cache_size': len(self.context_cache.cache),
-            'metadata_cache_max': self.metadata_cache.max_size,
-            'query_cache_max': self.query_cache.max_size,
-            'context_cache_max': self.context_cache.max_size
-        }
+        """Get comprehensive cache statistics"""
+        if ADVANCED_PERFORMANCE_AVAILABLE:
+            return {
+                'metadata_cache': self.metadata_cache.get_stats(),
+                'query_cache': self.query_cache.get_stats(),
+                'context_cache': self.context_cache.get_stats(),
+                'performance_enabled': True,
+                'memory_optimizer_stats': {
+                    'total_session_memory_mb': memory_optimizer.get_total_memory_usage(),
+                    'system_memory_info': memory_optimizer.get_system_memory_info()
+                }
+            }
+        else:
+            return {
+                'metadata_cache_size': len(self.metadata_cache.cache),
+                'query_cache_size': len(self.query_cache.cache),
+                'context_cache_size': len(self.context_cache.cache),
+                'metadata_cache_max': self.metadata_cache.max_size,
+                'query_cache_max': self.query_cache.max_size,
+                'context_cache_max': self.context_cache.max_size,
+                'performance_enabled': False
+            }
     
     def clear_all(self):
-        """Clear all caches"""
-        self.metadata_cache.clear()
-        self.query_cache.clear()
-        self.context_cache.clear()
-        logger.info("All caches cleared")
+        """Clear all caches with performance monitoring"""
+        if ADVANCED_PERFORMANCE_AVAILABLE:
+            with performance_monitor.time_operation("clear_all_caches"):
+                self.metadata_cache.clear()
+                self.query_cache.clear()
+                self.context_cache.clear()
+                logger.info("All advanced caches cleared")
+        else:
+            self.metadata_cache.clear()
+            self.query_cache.clear()
+            self.context_cache.clear()
+            logger.info("All caches cleared")
+    
+    def get_performance_report(self) -> Dict[str, Any]:
+        """Get comprehensive performance report"""
+        if ADVANCED_PERFORMANCE_AVAILABLE:
+            return {
+                'cache_stats': self.get_cache_stats(),
+                'performance_report': performance_monitor.get_performance_report(),
+                'memory_should_cleanup': memory_optimizer.should_trigger_cleanup()
+            }
+        else:
+            return {
+                'cache_stats': self.get_cache_stats(),
+                'performance_enabled': False
+            }
 
 
 # Global memory instance

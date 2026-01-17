@@ -26,7 +26,9 @@ load_dotenv()
 SCRIPT_DIR = Path(__file__).parent.absolute()  # agents/ directory
 BACKEND_DIR = SCRIPT_DIR.parent  # backend/ directory
 
-# Ensure backend is first so `import schemas` resolves to backend/schemas.py
+# Ensure paths are in sys.path for imports
+# IMPORTANT: Add BACKEND_DIR first so backend/schemas.py is found before document_agent/schemas.py
+# DO NOT add DOCUMENT_AGENT_DIR as it causes import conflicts with schemas module
 for path in [str(BACKEND_DIR), str(SCRIPT_DIR)]:
     if path not in sys.path:
         sys.path.insert(0, path)

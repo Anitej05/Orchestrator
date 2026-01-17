@@ -15,7 +15,6 @@ from aiofiles import open as aio_open
 from fastapi import File, UploadFile
 from typing import List, Dict, Optional
 from pathlib import Path
-import os
 
 # Import orchestrator-compatible schemas from backend root
 import sys
@@ -37,7 +36,11 @@ from .schemas import (
     VersionHistoryRequest, VersionHistoryResponse,
     ExtractDataRequest, ExtractDataResponse
 )
+from . import agent as agent
 from .agent import DocumentAgent
+
+__all__ = ["DocumentAgent", "app"]
+from .state import DialogueStateManager
 
 # Load environment variables
 load_dotenv()
@@ -79,41 +82,55 @@ def get_agent() -> DocumentAgent:
 
 
 # ============================================================================
-# ORCHESTRATOR DIALOGUE STATE (IN-MEMORY)
+# ORCHESTRATOR DIALOGUE STATE (PERSISTENT)
 # ============================================================================
 
-_dialogue_store: Dict[str, backend_schemas.DialogueContext] = {}
+_dialogue_state = DialogueStateManager()
 
 
 class DialogueManager:
     @staticmethod
     def get(task_id: str) -> Optional[backend_schemas.DialogueContext]:
-        return _dialogue_store.get(task_id)
+        record = _dialogue_state.get(task_id)
+        if not record:
+            return None
+        current_question = None
+        if record.current_question:
+            try:
+                current_question = backend_schemas.AgentResponse(**record.current_question)
+            except Exception:
+                current_question = None
+        return backend_schemas.DialogueContext(
+            task_id=record.task_id,
+            agent_id=record.agent_id,
+            status=record.status,
+            history=[],
+            current_question=current_question,
+        )
 
     @staticmethod
     def create(task_id: str, agent_id: str = "document_agent") -> backend_schemas.DialogueContext:
-        ctx = backend_schemas.DialogueContext(task_id=task_id, agent_id=agent_id, status="active")
-        _dialogue_store[task_id] = ctx
-        return ctx
+        record = _dialogue_state.get_or_create(task_id, agent_id)
+        return backend_schemas.DialogueContext(
+            task_id=record.task_id,
+            agent_id=record.agent_id,
+            status=record.status,
+            history=[],
+            current_question=None,
+        )
 
     @staticmethod
     def pause(task_id: str, question: backend_schemas.AgentResponse) -> None:
-        ctx = _dialogue_store.get(task_id)
-        if ctx:
-            ctx.status = "paused"
-            ctx.current_question = question
+        payload = question.model_dump() if hasattr(question, "model_dump") else question.dict()
+        _dialogue_state.set_question(task_id, payload)
 
     @staticmethod
     def resume(task_id: str) -> None:
-        ctx = _dialogue_store.get(task_id)
-        if ctx:
-            ctx.status = "active"
+        _dialogue_state.update_status(task_id, "active")
 
     @staticmethod
     def complete(task_id: str) -> None:
-        ctx = _dialogue_store.get(task_id)
-        if ctx:
-            ctx.status = "completed"
+        _dialogue_state.update_status(task_id, "completed")
 
 
 # ============================================================================
@@ -354,7 +371,7 @@ async def execute(message: backend_schemas.OrchestratorMessage):
     """Unified orchestrator endpoint supporting execute/continue/cancel/context_update."""
     agent = get_agent()
     payload = message.payload or {}
-    task_id = payload.get("task_id") or f"doc-{len(_dialogue_store)+1}"
+    task_id = payload.get("task_id") or f"doc-{int(asyncio.get_event_loop().time()*1000)}"
 
     ctx = DialogueManager.get(task_id) or DialogueManager.create(task_id)
 
@@ -404,8 +421,8 @@ async def execute(message: backend_schemas.OrchestratorMessage):
 
     # CONTEXT UPDATE
     if message.type == "context_update":
-        if message.additional_context and ctx.current_question and ctx.current_question.context:
-            ctx.current_question.context.update(message.additional_context)
+        if message.additional_context:
+            _dialogue_state.update_context(task_id, message.additional_context)
         return backend_schemas.AgentResponse(
             status=backend_schemas.AgentResponseStatus.COMPLETE,
             result={"context_updated": True},

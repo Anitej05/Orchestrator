@@ -63,7 +63,7 @@ async def upload_files(files: List[UploadFile] = File(...)):
 
         file_objects.append(FileObject(
             file_name=file.filename,
-            file_path=file_path,
+            file_path=str(file_path),  # Convert Path to string
             file_type=file_type
         ))
     return file_objects
