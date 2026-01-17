@@ -2,8 +2,7 @@
 Dialogue Manager for Spreadsheet Agent
 
 Manages conversation state and orchestrator communication patterns.
-Formats responses in orchestrator-compatible format with proper status codes,
-execution metrics, and structured data.
+Uses standardized AgentResponse from schemas.py for consistency with other agents.
 
 Requirements: 9.1, 9.2, 9.3, 12.1, 12.2, 12.4, 12.5, 10.2
 """
@@ -12,21 +11,11 @@ import logging
 import time
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field
-from enum import Enum
+
+# Import standardized AgentResponse from schemas.py
+from schemas import AgentResponse, AgentResponseStatus
 
 logger = logging.getLogger(__name__)
-
-
-# ============================================================================
-# RESPONSE STATUS ENUM
-# ============================================================================
-
-class ResponseStatus(str, Enum):
-    """Status codes for agent responses"""
-    COMPLETE = "complete"
-    ERROR = "error"
-    NEEDS_INPUT = "needs_input"
-    PARTIAL = "partial"
 
 
 # ============================================================================
@@ -55,76 +44,6 @@ class ExecutionMetrics:
         if self.token_usage:
             result["token_usage"] = self.token_usage
         return result
-
-
-@dataclass
-class AgentResponse:
-    """
-    Standardized response format for orchestrator communication.
-    
-    Supports:
-    - Success/error status
-    - Result data with explanations
-    - NEEDS_INPUT for user clarification
-    - Execution metrics
-    - Partial results with progress
-    """
-    status: ResponseStatus
-    result: Optional[Any] = None
-    explanation: str = ""
-    error: Optional[str] = None
-    
-    # For NEEDS_INPUT status
-    question: Optional[str] = None
-    question_type: Optional[str] = None  # 'choice', 'text', 'confirmation'
-    choices: Optional[List[Dict[str, Any]]] = None
-    context: Optional[Dict[str, Any]] = None
-    
-    # For PARTIAL status
-    partial_result: Optional[Any] = None
-    progress: Optional[float] = None  # 0.0 to 1.0
-    
-    # Execution metrics
-    metrics: Optional[ExecutionMetrics] = None
-    
-    # Additional metadata
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for JSON serialization"""
-        response = {
-            "status": self.status.value,
-            "result": self.result,
-            "explanation": self.explanation
-        }
-        
-        if self.error:
-            response["error"] = self.error
-        
-        # NEEDS_INPUT fields
-        if self.status == ResponseStatus.NEEDS_INPUT:
-            response["question"] = self.question
-            response["question_type"] = self.question_type
-            if self.choices:
-                response["choices"] = self.choices
-            if self.context:
-                response["context"] = self.context
-        
-        # PARTIAL fields
-        if self.status == ResponseStatus.PARTIAL:
-            response["partial_result"] = self.partial_result
-            if self.progress is not None:
-                response["progress"] = self.progress
-        
-        # Metrics
-        if self.metrics:
-            response["metrics"] = self.metrics.to_dict()
-        
-        # Metadata
-        if self.metadata:
-            response["metadata"] = self.metadata
-        
-        return response
 
 
 @dataclass
@@ -185,11 +104,9 @@ class DialogueManager:
         Requirements: 12.1, 12.2
         """
         return AgentResponse(
-            status=ResponseStatus.COMPLETE,
+            status=AgentResponseStatus.COMPLETE,
             result=result,
-            explanation=explanation,
-            metrics=metrics,
-            metadata=metadata or {}
+            context=metadata or {}
         )
     
     def create_error_response(
@@ -211,16 +128,14 @@ class DialogueManager:
             
         Requirements: 12.1
         """
-        metadata = {}
+        context = {}
         if error_details:
-            metadata["error_details"] = error_details
+            context["error_details"] = error_details
         
         return AgentResponse(
-            status=ResponseStatus.ERROR,
+            status=AgentResponseStatus.ERROR,
             error=error_message,
-            explanation=f"Operation failed: {error_message}",
-            metrics=metrics,
-            metadata=metadata
+            context=context
         )
     
     def create_partial_response(
@@ -247,12 +162,10 @@ class DialogueManager:
         Requirements: 12.5
         """
         return AgentResponse(
-            status=ResponseStatus.PARTIAL,
+            status=AgentResponseStatus.PARTIAL,
             partial_result=partial_result,
-            explanation=explanation,
             progress=progress,
-            metrics=metrics,
-            metadata=metadata or {}
+            context=metadata or {}
         )
     
     # ========================================================================
@@ -282,14 +195,17 @@ class DialogueManager:
             
         Requirements: 9.1, 9.2
         """
+        # Convert choices to options list for standardized AgentResponse
+        options = None
+        if choices:
+            options = [choice.get("id", str(i)) for i, choice in enumerate(choices)]
+        
         return AgentResponse(
-            status=ResponseStatus.NEEDS_INPUT,
+            status=AgentResponseStatus.NEEDS_INPUT,
             question=question,
             question_type=question_type,
-            choices=choices,
-            context=context,
-            explanation=f"User input required: {question}",
-            metrics=metrics
+            options=options,
+            context=context or {}
         )
     
     def create_anomaly_response(
@@ -333,6 +249,7 @@ class DialogueManager:
         
         # Convert suggested fixes to choice format
         choices = []
+        options = []
         for fix in anomaly.suggested_fixes:
             choice = {
                 "id": fix.action,
@@ -341,6 +258,7 @@ class DialogueManager:
                 "is_safe": fix.safe
             }
             choices.append(choice)
+            options.append(fix.action)
         
         # Build context with anomaly details
         context = {
@@ -349,15 +267,16 @@ class DialogueManager:
             "severity": anomaly.severity,
             "message": anomaly.message,
             "sample_values": anomaly.sample_values,
-            "metadata": anomaly.metadata
+            "metadata": anomaly.metadata,
+            "choices": choices  # Store detailed choices in context
         }
         
-        return self.create_needs_input_response(
+        return AgentResponse(
+            status=AgentResponseStatus.NEEDS_INPUT,
             question=question,
             question_type="choice",
-            choices=choices,
-            context=context,
-            metrics=metrics
+            options=options,
+            context=context
         )
     
     # ========================================================================
@@ -453,6 +372,50 @@ class DialogueManager:
         if thread_id in self.dialogue_states:
             self.dialogue_states[thread_id].pending_question = None
             self.logger.debug(f"Cleared pending question for thread {thread_id}")
+    
+    def store_pending_question(
+        self,
+        task_id: str,
+        question: str,
+        question_type: str,
+        choices: Optional[List[Dict[str, Any]]] = None,
+        context: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """
+        Store a pending question for later continuation.
+        
+        Args:
+            task_id: Task identifier
+            question: The question to ask
+            question_type: Type of question
+            choices: Available choices
+            context: Additional context
+        """
+        pending_data = {
+            "question": question,
+            "question_type": question_type,
+            "choices": choices,
+            "context": context or {}
+        }
+        
+        # Use task_id as thread_id for consistency
+        self.save_state(task_id, {"pending_question": pending_data})
+        self.set_pending_question(task_id, question, pending_data)
+        
+        self.logger.info(f"Stored pending question for task {task_id}: {question[:50]}...")
+    
+    def get_pending_question(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get the pending question data for a task.
+        
+        Args:
+            task_id: Task identifier
+            
+        Returns:
+            Pending question data or None
+        """
+        state = self.load_state(task_id)
+        return state.get("pending_question")
     
     # ========================================================================
     # METRICS TRACKING

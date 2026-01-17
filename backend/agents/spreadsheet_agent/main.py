@@ -101,7 +101,7 @@ from agents.spreadsheet_agent.spreadsheet_session_manager import spreadsheet_ses
 # Import main agent class for orchestrator endpoints
 from agents.spreadsheet_agent.agent import spreadsheet_agent
 
-# Import DialogueManager for orchestrator communication
+# Import DialogueManager for orchestrator communication - use schemas.py AgentResponse
 from agents.spreadsheet_agent.dialogue_manager import dialogue_manager
 
 # Create FastAPI app
@@ -700,7 +700,7 @@ async def get_summary(file_id: str = Form(...), show_preview: bool = Form(False)
             summary = {
                 "filename": filename,
                 "headers": df.columns.tolist(),
-                "rows": df.head(5).to_dict(orient="records"),
+                "rows": convert_numpy_types(df.head(5).to_dict(orient="records")),
                 "dtypes": {k: str(v) for k, v in df.dtypes.to_dict().items()},
                 "total_rows": len(df),
                 "total_columns": len(df.columns),
@@ -752,7 +752,7 @@ async def get_summary(file_id: str = Form(...), show_preview: bool = Form(False)
             summary = {
                 "filename": filename,
                 "headers": df.columns.tolist(),
-                "rows": df.head(5).to_dict(orient="records"),
+                "rows": convert_numpy_types(df.head(5).to_dict(orient="records")),
                 "dtypes": {k: str(v) for k, v in df.dtypes.to_dict().items()},
                 "total_rows": len(df),
                 "total_columns": len(df.columns),
@@ -777,7 +777,7 @@ async def get_summary(file_id: str = Form(...), show_preview: bool = Form(False)
             success=True,
             route="/get_summary",
             task_type="summary",
-            data=summary,
+            data=convert_numpy_types(summary),
             preview={"canvas_display": canvas_display} if canvas_display else None,
             artifact=None,
             metrics=StandardResponseMetrics(
@@ -1969,9 +1969,7 @@ async def execute_action(
                         return AgentResponse(
                             status=AgentResponseStatus.COMPLETE,
                             result=summary_response.data,
-                            explanation=summary_response.message,
-                            metadata={"task_id": task_id, "action": action},
-                            metrics=metrics.to_dict()
+                            context={"task_id": task_id, "action": action}
                         ).model_dump()
                     else:
                         return AgentResponse(
@@ -2057,7 +2055,7 @@ async def execute_action(
                                 "text_columns": schema.get_text_columns(),
                                 "date_columns": schema.get_date_columns()
                             },
-                            "sample_data": table_df.head(3).to_dict(orient='records') if not table_df.empty else []
+                            "sample_data": convert_numpy_types(table_df.head(3).to_dict(orient='records')) if not table_df.empty else []
                         })
                     
                     # Create metrics
@@ -2070,9 +2068,7 @@ async def execute_action(
                     return AgentResponse(
                         status=AgentResponseStatus.COMPLETE,
                         result=structure_info,
-                        explanation=f"Intelligent structure analysis complete: {intelligent_summary['document_type']} document with {intelligent_summary['sections_count']} sections and {intelligent_summary['tables_count']} tables (confidence: {intelligent_summary['parsing_confidence']:.2f})",
-                        metadata={"task_id": task_id, "action": action, "parsing_confidence": intelligent_summary['parsing_confidence']},
-                        metrics=metrics.to_dict()
+                        context={"task_id": task_id, "action": action, "parsing_confidence": intelligent_summary['parsing_confidence']}
                     ).model_dump()
                     
                 except Exception as e:
@@ -2085,7 +2081,7 @@ async def execute_action(
                                 "shape": {"rows": len(df), "columns": len(df.columns)},
                                 "columns": df.columns.tolist(),
                                 "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
-                                "sample_data": df.head(3).to_dict(orient='records'),
+                                "sample_data": convert_numpy_types(df.head(3).to_dict(orient='records')),
                                 "null_counts": df.isnull().sum().to_dict()
                             },
                             "parsing_error": str(e),
@@ -2101,9 +2097,7 @@ async def execute_action(
                         return AgentResponse(
                             status=AgentResponseStatus.COMPLETE,
                             result=structure_info,
-                            explanation=f"Basic structure analysis (intelligent parsing failed): {len(df)} rows and {len(df.columns)} columns",
-                            metadata={"task_id": task_id, "action": action, "fallback_mode": True},
-                            metrics=metrics.to_dict()
+                            context={"task_id": task_id, "action": action, "fallback_mode": True}
                         ).model_dump()
                         
                     except Exception as fallback_error:
@@ -2187,9 +2181,7 @@ async def execute_action(
                                 "data_quality": "good",
                                 "message": "No data quality issues detected"
                             },
-                            explanation="Data quality analysis complete: No anomalies detected",
-                            metadata={"task_id": task_id, "action": action},
-                            metrics=metrics.to_dict()
+                            context={"task_id": task_id, "action": action}
                         ).model_dump()
                         
                 except Exception as e:
@@ -2271,15 +2263,8 @@ async def execute_action(
                             status=AgentResponseStatus.NEEDS_INPUT,
                             question=f"Plan simulation detected issues: {'; '.join(simulation_errors[:2])}. Do you want to proceed anyway?",
                             question_type="confirmation",
-                            choices=choices,
-                            context={"task_id": task_id, "plan_id": plan.plan_id},
-                            metadata={
-                                "task_id": task_id,
-                                "action": action,
-                                "plan_id": plan.plan_id,
-                                "simulation_warnings": len(simulation_warnings),
-                                "simulation_errors": len(simulation_errors)
-                            }
+                            options=["proceed_anyway", "cancel_plan"],
+                            context={"task_id": task_id, "plan_id": plan.plan_id}
                         ).model_dump()
                     
                     # Simulation successful - execute plan
@@ -2307,9 +2292,7 @@ async def execute_action(
                                 "plan_reasoning": plan.reasoning,
                                 "message": f"Multi-step plan executed successfully: {execution_result['actions_executed']} actions completed"
                             },
-                            explanation=f"Multi-step plan execution complete: {plan.reasoning}",
-                            metadata={"task_id": task_id, "action": action, "plan_id": plan.plan_id},
-                            metrics=metrics.to_dict()
+                            context={"task_id": task_id, "action": action, "plan_id": plan.plan_id}
                         ).model_dump()
                     
                     else:
@@ -2369,9 +2352,7 @@ async def execute_action(
                     return AgentResponse(
                         status=AgentResponseStatus.COMPLETE,
                         result=nl_response.data,
-                        explanation=nl_response.message,
-                        metadata={"task_id": task_id, "prompt": prompt[:100]},
-                        metrics=metrics.to_dict()
+                        context={"task_id": task_id, "prompt": prompt[:100]}
                     ).model_dump()
                 else:
                     return AgentResponse(
@@ -2601,14 +2582,8 @@ async def continue_action(
                         status=AgentResponseStatus.NEEDS_INPUT,
                         question=next_anomaly_data["message"],
                         question_type="choice",
-                        choices=choices,
-                        context={"task_id": task_id_param, "anomaly_type": next_anomaly_data["type"]},
-                        metadata={
-                            "task_id": task_id_param,
-                            "anomalies_remaining": len(anomalies_data) - next_index,
-                            "current_anomaly": next_anomaly_data["type"],
-                            "previous_fix_applied": selected_fix["description"]
-                        }
+                        options=[choice["id"] for choice in choices],
+                        context={"task_id": task_id_param, "anomaly_type": next_anomaly_data["type"]}
                     ).model_dump()
                 
                 else:
@@ -2628,10 +2603,7 @@ async def continue_action(
                             "last_fix_applied": selected_fix["description"],
                             "message": f"All {len(anomalies_data)} anomalies have been resolved"
                         },
-                        explanation=f"Anomaly detection and fixing complete: Applied {len(anomalies_data)} fixes to improve data quality",
-                        context={"task_id": task_id_param},
-                        metadata={"anomalies_fixed": len(anomalies_data)},
-                        metrics=metrics.to_dict()
+                        context={"task_id": task_id_param}
                     ).model_dump()
                     
             except Exception as e:
@@ -2687,9 +2659,7 @@ async def continue_action(
                             "action": "cancelled",
                             "message": "Plan execution cancelled by user"
                         },
-                        explanation="Plan execution was cancelled due to simulation warnings",
-                        context={"task_id": task_id_param},
-                        metadata={"plan_cancelled": True}
+                        context={"task_id": task_id_param}
                     ).model_dump()
                 
                 elif user_choice == "proceed_anyway":
@@ -2731,10 +2701,7 @@ async def continue_action(
                                 "forced_execution": True,
                                 "message": f"Plan executed with force: {execution_result['actions_executed']} actions completed despite warnings"
                             },
-                            explanation=f"Multi-step plan executed with force despite simulation warnings",
-                            context={"task_id": task_id_param},
-                            metadata={"forced_execution": True, "plan_id": plan_id},
-                            metrics=metrics.to_dict()
+                            context={"task_id": task_id_param}
                         ).model_dump()
                     
                     else:
@@ -2784,10 +2751,7 @@ async def continue_action(
                 "dialogue_state": dialogue_state,
                 "message": "Task continuation completed successfully"
             },
-            explanation=f"Resumed task {task_id_param} with user answer: {user_answer}",
-            context={"task_id": task_id_param},
-            metadata={"resumed_from": "needs_input"},
-            metrics=metrics.to_dict()
+            context={"task_id": task_id_param}
         ).model_dump()
         
     except Exception as e:

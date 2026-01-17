@@ -16,9 +16,9 @@ import pandas as pd
 
 from agents.spreadsheet_agent.dialogue_manager import (
     dialogue_manager,
-    ResponseStatus,
     ExecutionMetrics
 )
+from schemas import AgentResponseStatus  # Import from schemas.py instead
 from agents.spreadsheet_agent.dataframe_cache import DataFrameCache
 from agents.spreadsheet_agent.query_executor import QueryExecutor, QueryPlan
 from agents.spreadsheet_agent.anomaly_detector import AnomalyDetector
