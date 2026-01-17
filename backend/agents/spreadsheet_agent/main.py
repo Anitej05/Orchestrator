@@ -2153,7 +2153,7 @@ async def execute_action(
                         dialogue_manager.store_pending_question(
                             task_id=task_id,
                             question=first_anomaly.message,
-                            question_type="anomaly_fix",
+                            question_type="choice",
                             choices=choices,
                             context=anomaly_context
                         )
@@ -2161,12 +2161,12 @@ async def execute_action(
                         return AgentResponse(
                             status=AgentResponseStatus.NEEDS_INPUT,
                             question=first_anomaly.message,
-                            question_type="anomaly_fix",
-                            choices=choices,
-                            context={"task_id": task_id, "anomaly_type": first_anomaly.type},
-                            metadata={
-                                "task_id": task_id,
-                                "action": action,
+                            question_type="choice",
+                            options=[choice["id"] for choice in choices],
+                            context={
+                                "task_id": task_id, 
+                                "anomaly_type": first_anomaly.type,
+                                "choices": choices,
                                 "anomalies_count": len(anomalies),
                                 "current_anomaly": first_anomaly.type
                             }
@@ -2262,7 +2262,7 @@ async def execute_action(
                         dialogue_manager.store_pending_question(
                             task_id=task_id,
                             question=f"Plan simulation detected issues: {'; '.join(simulation_errors[:2])}. Do you want to proceed anyway?",
-                            question_type="plan_execution_confirmation",
+                            question_type="confirmation",
                             choices=choices,
                             context=plan_context
                         )
@@ -2270,7 +2270,7 @@ async def execute_action(
                         return AgentResponse(
                             status=AgentResponseStatus.NEEDS_INPUT,
                             question=f"Plan simulation detected issues: {'; '.join(simulation_errors[:2])}. Do you want to proceed anyway?",
-                            question_type="plan_execution_confirmation",
+                            question_type="confirmation",
                             choices=choices,
                             context={"task_id": task_id, "plan_id": plan.plan_id},
                             metadata={
@@ -2488,8 +2488,8 @@ async def continue_action(
         question_type = pending_question.get("question_type")
         context = pending_question.get("context", {})
         
-        if question_type == "anomaly_fix":
-            # Handle anomaly fix continuation
+        if question_type == "choice":
+            # Handle anomaly fix continuation (and other choice-based questions)
             try:
                 # Get anomaly context
                 anomalies_data = context.get("anomalies", [])
@@ -2592,7 +2592,7 @@ async def continue_action(
                     dialogue_manager.store_pending_question(
                         task_id=task_id_param,
                         question=next_anomaly_data["message"],
-                        question_type="anomaly_fix",
+                        question_type="choice",
                         choices=choices,
                         context=updated_context
                     )
@@ -2600,7 +2600,7 @@ async def continue_action(
                     return AgentResponse(
                         status=AgentResponseStatus.NEEDS_INPUT,
                         question=next_anomaly_data["message"],
-                        question_type="anomaly_fix",
+                        question_type="choice",
                         choices=choices,
                         context={"task_id": task_id_param, "anomaly_type": next_anomaly_data["type"]},
                         metadata={
@@ -2642,8 +2642,8 @@ async def continue_action(
                     context={"task_id": task_id_param}
                 ).model_dump()
         
-        elif question_type == "plan_execution_confirmation":
-            # Handle plan execution confirmation
+        elif question_type == "confirmation":
+            # Handle plan execution confirmation (and other confirmation questions)
             try:
                 # Get plan context
                 plan_id = context.get("plan_id")
@@ -2933,6 +2933,98 @@ async def reset_metrics():
     
     except Exception as e:
         logger.error(f"Metrics reset failed: {e}")
+        return ApiResponse(success=False, error=str(e))
+
+
+@app.get("/performance/report", response_model=ApiResponse)
+async def get_performance_report():
+    """Get comprehensive performance report with advanced optimizations"""
+    try:
+        # Get basic performance report
+        report = {
+            "basic_metrics": {
+                "uptime_seconds": time.time() - call_metrics["start_time"],
+                "total_api_calls": sum(call_metrics["api_calls"].values()),
+                "total_errors": sum(call_metrics["api_errors"].values()),
+                "cache_stats": spreadsheet_memory.get_cache_stats()
+            }
+        }
+        
+        # Add advanced performance metrics if available
+        try:
+            from agents.spreadsheet_agent.performance_optimizer import (
+                performance_monitor,
+                memory_optimizer,
+                advanced_cache
+            )
+            
+            report["advanced_metrics"] = {
+                "performance_monitor": performance_monitor.get_performance_report(),
+                "memory_optimizer": {
+                    "total_session_memory_mb": memory_optimizer.get_total_memory_usage(),
+                    "system_memory_info": memory_optimizer.get_system_memory_info(),
+                    "should_cleanup": memory_optimizer.should_trigger_cleanup()
+                },
+                "advanced_cache_stats": {
+                    "metadata_cache": advanced_cache.get_stats() if hasattr(advanced_cache, 'get_stats') else {},
+                }
+            }
+            
+            # Get spreadsheet parser performance stats
+            try:
+                from agents.spreadsheet_agent.spreadsheet_parser import spreadsheet_parser
+                parser_stats = spreadsheet_parser.get_performance_stats()
+                report["advanced_metrics"]["parser_stats"] = parser_stats
+            except Exception as e:
+                logger.warning(f"Could not get parser stats: {e}")
+            
+            report["performance_optimizations_enabled"] = True
+            
+        except ImportError:
+            report["performance_optimizations_enabled"] = False
+            report["message"] = "Advanced performance optimizations not available"
+        
+        return ApiResponse(success=True, result=report)
+    
+    except Exception as e:
+        logger.error(f"Performance report failed: {e}")
+        return ApiResponse(success=False, error=str(e))
+
+
+@app.post("/performance/optimize", response_model=ApiResponse)
+async def trigger_performance_optimization():
+    """Manually trigger performance optimizations"""
+    try:
+        optimizations_applied = []
+        
+        # Clear old caches
+        spreadsheet_memory.clear_all()
+        optimizations_applied.append("Cleared all caches")
+        
+        # Force garbage collection if advanced optimizations available
+        try:
+            from agents.spreadsheet_agent.performance_optimizer import memory_optimizer
+            
+            if memory_optimizer.should_trigger_cleanup():
+                memory_optimizer.force_garbage_collection()
+                optimizations_applied.append("Forced garbage collection")
+            
+            # Get memory info after optimization
+            memory_info = memory_optimizer.get_system_memory_info()
+            
+        except ImportError:
+            import gc
+            gc.collect()
+            optimizations_applied.append("Basic garbage collection")
+            memory_info = {"basic_gc_only": True}
+        
+        return ApiResponse(success=True, result={
+            "optimizations_applied": optimizations_applied,
+            "memory_info_after": memory_info
+        })
+    
+    except Exception as e:
+        logger.error(f"Performance optimization failed: {e}")
         return ApiResponse(success=False, error=str(e))
 
 

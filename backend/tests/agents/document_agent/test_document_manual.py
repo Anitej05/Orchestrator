@@ -35,11 +35,7 @@ WORKSPACE_ROOT = Path(__file__).parent.parent.parent.parent.parent.resolve()
 sys.path.insert(0, str(WORKSPACE_ROOT / "backend"))
 
 from agents.document_agent.agent import DocumentAgent
-from agents.document_agent.schemas import (
-    AnalyzeDocumentRequest,
-    EditDocumentRequest,
-    CreateDocumentRequest
-)
+from agents.document_agent.schemas import AnalyzeDocumentRequest
 
 # ============================================================================
 # ENUMS AND DATA CLASSES
@@ -67,6 +63,11 @@ class TestResult:
     provider: str = "cerebras"
     libraries: List[str] = field(default_factory=list)
     execution_steps: int = 0
+    status: Optional[str] = None
+    phase_trace: Optional[List[str]] = None
+    grounding: Optional[Dict[str, Any]] = None
+    confidence: Optional[float] = None
+    review_required: Optional[bool] = None
 
 
 @dataclass
@@ -107,94 +108,141 @@ class TestSummary:
 # ============================================================================
 
 DOCUMENT_TEST_REGISTRY = {
-    "phd_thesis": {
-        "filename": "backend/tests/agents/document_agent/test_data/2004_phdthesis_lip6.pdf",
+    "simple_text": {
+        "filename": "backend/tests/agents/document_agent/test_data/simple_test.txt",
+        "type": "TXT",
+        "description": "Simple Text Document",
+        "queries": {
+            DifficultyLevel.SIMPLE: [
+                "What is the first line of this document?",
+                "Summarize the document in one sentence.",
+                "How many words are in this document?",
+            ],
+            DifficultyLevel.MEDIUM: [
+                "List any key terms or phrases that stand out.",
+                "What is the main topic and supporting points?",
+                "Identify any dates, numbers, or specific data mentioned.",
+                "What type of document is this (email, report, note, etc.)?",
+            ],
+            DifficultyLevel.HARD: [
+                "Provide a concise outline of the document content.",
+                "Analyze the writing style and tone of this document.",
+                "Extract all actionable items or instructions if any exist.",
+                "Compare the beginning and ending sections - what changed?",
+            ],
+        },
+    },
+    "simple_pdf": {
+        "filename": "backend/tests/agents/document_agent/test_data/simple_test.pdf",
         "type": "PDF",
-        "description": "PhD Thesis (Academic PDF)",
+        "description": "Simple PDF Document",
         "queries": {
             DifficultyLevel.SIMPLE: [
                 "What is the title of this document?",
-                "Who is the author of this thesis?",
-                "What is the publication year?",
+                "Summarize the document in one sentence.",
+                "How many pages does this PDF have?",
             ],
             DifficultyLevel.MEDIUM: [
-                "What are the main chapters or sections in this thesis?",
-                "Summarize the abstract of this thesis",
-                "What are the primary research contributions?",
+                "List any headings or section titles.",
+                "Extract all bold or emphasized text.",
+                "What is the document structure (paragraphs, lists, tables)?",
+                "Identify any metadata (author, creation date, etc.).",
             ],
             DifficultyLevel.HARD: [
-                "Compare the methodology section with the results section and identify key differences",
-                "What are the major limitations mentioned in the thesis?",
-                "Create a brief outline of the entire thesis",
-            ]
-        }
-    },
-    "research_paper": {
-        "filename": "backend/tests/agents/document_agent/test_data/2212.07286v2.pdf",
-        "type": "PDF",
-        "description": "Research Paper (ArXiv)",
-        "queries": {
-            DifficultyLevel.SIMPLE: [
-                "What is the title of this paper?",
-                "Who are the authors?",
-                "What is the main topic?",
+                "Provide a concise outline of the document content.",
+                "Analyze the document layout and formatting choices.",
+                "Compare the font styles used across different sections.",
+                "Generate a table of contents based on the document structure.",
             ],
-            DifficultyLevel.MEDIUM: [
-                "What is the abstract summarizing the paper?",
-                "What are the key findings?",
-                "What methodology was used?",
-            ],
-            DifficultyLevel.HARD: [
-                "How does this paper compare to related work mentioned in the introduction?",
-                "What are the limitations and future work mentioned?",
-                "Explain the technical approach in detail",
-            ]
-        }
+        },
     },
-    "sales_document": {
-        "filename": "backend/tests/agents/document_agent/test_data/SampleDocs-sales-sample-data.docx",
+    "simple_docx": {
+        "filename": "backend/tests/agents/document_agent/test_data/simple_test.docx",
         "type": "DOCX",
-        "description": "Sales Document with Data",
-        "queries": {
-            DifficultyLevel.SIMPLE: [
-                "What is the document about?",
-                "List any company or product names mentioned",
-                "What sales figures are mentioned?",
-            ],
-            DifficultyLevel.MEDIUM: [
-                "What are the main sections in this document?",
-                "Extract key metrics or statistics from the document",
-                "Who are the intended recipients of this document?",
-            ],
-            DifficultyLevel.HARD: [
-                "Create a summary of the sales data and trends",
-                "What insights can be derived from the sales information?",
-                "Format a professional sales report based on the data",
-            ]
-        }
-    },
-    "generic_document": {
-        "filename": "backend/tests/agents/document_agent/test_data/SampleDocs-Test Word File With Dummy Data.docx",
-        "type": "DOCX",
-        "description": "Generic Word Document",
+        "description": "Simple Word Document",
         "queries": {
             DifficultyLevel.SIMPLE: [
                 "What is the title of this document?",
-                "What text content is in the document?",
-                "How many paragraphs are there?",
+                "Summarize the document in one sentence.",
+                "What is the first paragraph about?",
             ],
             DifficultyLevel.MEDIUM: [
-                "What is the main topic or subject?",
-                "List all headings and subheadings",
-                "What formatting styles are used?",
+                "List any headings or section titles.",
+                "Extract any bulleted or numbered lists.",
+                "Identify any tables, images, or embedded objects.",
+                "What formatting styles are applied (bold, italic, underline)?",
             ],
             DifficultyLevel.HARD: [
-                "Create a detailed outline of the document structure",
-                "Generate a comprehensive summary",
-                "What would be the best way to restructure this document?",
-            ]
-        }
-    }
+                "Provide a concise outline of the document content.",
+                "Analyze the document's information hierarchy.",
+                "Extract and organize all structured data (lists, tables, etc.).",
+                "Suggest improvements to document organization and clarity.",
+            ],
+        },
+    },
+    "simple_png": {
+        "filename": "backend/tests/agents/document_agent/test_data/simple_test.png",
+        "type": "PNG",
+        "description": "Simple Image Document",
+        "queries": {
+            DifficultyLevel.SIMPLE: [
+                "Describe the visible text in this image.",
+                "What is the main content of this image?",
+            ],
+            DifficultyLevel.MEDIUM: [
+                "Extract any readable text from the image.",
+                "Describe the layout and organization of content in the image.",
+                "Identify any headers, titles, or emphasized text.",
+            ],
+            DifficultyLevel.HARD: [
+                "Summarize the content of the image in one sentence.",
+                "Extract all text and organize it by sections.",
+                "Analyze the text quality and OCR confidence level.",
+            ],
+        },
+    },
+    "unsupported_file": {
+        "filename": "backend/tests/agents/document_agent/test_data/unsupported.xyz",
+        "type": "XYZ",
+        "description": "Unsupported File (should fail gracefully)",
+        "queries": {
+            DifficultyLevel.SIMPLE: [
+                "What does this file contain?",
+                "Can you read this file?",
+            ],
+            DifficultyLevel.MEDIUM: [
+                "Attempt to summarize this file.",
+                "What file format is this?",
+                "Provide information about this file type.",
+            ],
+            DifficultyLevel.HARD: [
+                "Extract any structured information from this file.",
+                "Suggest alternative methods to process this file.",
+                "Explain why this file cannot be processed.",
+            ],
+        },
+    },
+    "corrupted_pdf": {
+        "filename": "backend/tests/agents/document_agent/test_data/corrupted.pdf",
+        "type": "PDF",
+        "description": "Corrupted PDF (edge case for error handling)",
+        "queries": {
+            DifficultyLevel.SIMPLE: [
+                "Can you read this document?",
+                "What content is visible in this file?",
+            ],
+            DifficultyLevel.MEDIUM: [
+                "Attempt to extract any readable portions.",
+                "Identify what parts of the document are corrupted.",
+                "What error messages appear when processing this file?",
+            ],
+            DifficultyLevel.HARD: [
+                "Provide a detailed diagnosis of the file corruption.",
+                "Suggest recovery methods for this corrupted PDF.",
+                "Compare what should be in the file versus what's accessible.",
+            ],
+        },
+    },
 }
 
 
@@ -249,14 +297,42 @@ def print_summary(summary: TestSummary):
     print(f"  Document: {summary.document_key} ({summary.document_type})")
     print(f"  Filename: {summary.document_filename}")
     print(f"  Timestamp: {summary.timestamp}")
-    print(f"")
-    print(f"  Results:")
+    print("")
+    print("  Results:")
     print(f"    [SUCCESSFUL]: {summary.successful}/{summary.total_queries} ({summary.success_rate:.1f}%)")
     print(f"    [FAILED]:     {summary.failed}/{summary.total_queries}")
     print(f"    Avg Duration: {summary.avg_duration_ms:.2f} ms")
     print(f"    Total Tokens: {summary.total_tokens}")
-    print(f"")
+    print("")
     print_separator("=")
+
+
+def resolve_test_file_path(rel_path: str) -> Path:
+    """Resolve a dataset path to backend/tests/agents/document_agent/test_data."""
+    original = Path(rel_path)
+    base_dir = Path(__file__).parent / "test_data"
+
+    if original.exists():
+        return original
+
+    name = original.name
+    candidate = base_dir / name
+    if candidate.exists():
+        return candidate
+
+    repo_root = Path(__file__).parent.parent.parent.parent.parent
+    candidate2 = repo_root / "backend" / "tests" / "agents" / "document_agent" / "test_data" / name
+    if candidate2.exists():
+        return candidate2
+
+    return candidate
+
+
+def list_available_test_files() -> List[str]:
+    base_dir = Path(__file__).parent / "test_data"
+    if not base_dir.exists():
+        return []
+    return [p.name for p in base_dir.iterdir() if p.is_file()]
 
 
 # ============================================================================
@@ -275,7 +351,7 @@ async def run_document_test(
     
     try:
         # Get full file path
-        file_path = WORKSPACE_ROOT / doc_info['filename']
+        file_path = resolve_test_file_path(doc_info['filename'])
         
         if not file_path.exists():
             return TestResult(
@@ -327,18 +403,45 @@ async def run_document_test(
         
         duration_ms = (asyncio.get_event_loop().time() - start_time) * 1000
         
+        # Handle None result (e.g., from unsupported file types)
+        if result is None:
+            return TestResult(
+                document_key=document_key,
+                query_index=query_index,
+                query=query,
+                difficulty=difficulty,
+                success=False,
+                error="Agent returned None - file processing failed",
+                duration_ms=(asyncio.get_event_loop().time() - start_time) * 1000
+            )
+        
+        success = result.get('success', False)
+        error_message = None
+        if not success:
+            error_message = result.get('error') or result.get('message')
+        
+        # Safely get answer with fallback
+        answer = result.get('answer', '') or ''
+        answer_truncated = answer[:200] if answer else None
+
         return TestResult(
             document_key=document_key,
             query_index=query_index,
             query=query,
             difficulty=difficulty,
-            success=result.get('success', False),
-            answer=result.get('answer', '')[:200],
+            success=success,
+            answer=answer_truncated,
+            error=error_message,
             duration_ms=duration_ms,
             tokens_used=execution_metrics.get('total_tokens_input', 0),
             provider=execution_metrics.get('provider_used', 'cerebras'),
             libraries=all_libraries,
-            execution_steps=len(execution_steps)
+            execution_steps=len(execution_steps),
+            status=result.get('status'),
+            phase_trace=result.get('phase_trace'),
+            grounding=result.get('grounding'),
+            confidence=result.get('confidence'),
+            review_required=result.get('review_required')
         )
     
     except Exception as e:
@@ -363,12 +466,14 @@ async def run_document_tests(
         raise ValueError(f"Unknown document: {document_key}")
     
     doc_info = DOCUMENT_TEST_REGISTRY[document_key]
-    file_path = WORKSPACE_ROOT / doc_info['filename']
+    file_path = resolve_test_file_path(doc_info['filename'])
     
     # Verify file exists
     if not file_path.exists():
         print(f"\n[ERROR] Document file not found: {file_path}")
-        print(f"       Available test documents should be in: {WORKSPACE_ROOT / 'backend' / 'tests' / 'document_agent' / 'test_data'}/")
+        available = list_available_test_files()
+        if available:
+            print(f"       Available test documents: {', '.join(available)}")
         sys.exit(1)
     
     print_header(f"Testing Document: {document_key.upper()}", "*")
@@ -387,18 +492,15 @@ async def run_document_tests(
             queries.extend(doc_info['queries'].get(diff, []))
             difficulties.extend([diff] * len(doc_info['queries'].get(diff, [])))
     
-    # Run all tests concurrently
+    # Run all tests sequentially
     print(f"Running {len(queries)} queries...\n")
     print_separator("-", 70)
-    
-    tasks = []
+
+    results = []
     for idx, (query, diff) in enumerate(zip(queries, difficulties), 1):
         print(f"[{idx}/{len(queries)}] ({diff.value}) {query[:60]}...")
-        task = run_document_test(document_key, idx, query, diff, doc_info)
-        tasks.append(task)
-    
-    # Execute all tests
-    results = await asyncio.gather(*tasks)
+        result = await run_document_test(document_key, idx, query, diff, doc_info)
+        results.append(result)
     
     print("\n" + "=" * 70)
     
@@ -456,7 +558,7 @@ async def list_available_documents():
     print_header("AVAILABLE TEST DOCUMENTS", "*")
     
     for key, doc_info in DOCUMENT_TEST_REGISTRY.items():
-        file_path = WORKSPACE_ROOT / doc_info['filename']
+        file_path = resolve_test_file_path(doc_info['filename'])
         exists = "[OK]" if file_path.exists() else "[MISSING]"
         
         print(f"{key:20} {exists:12} {doc_info['type']:6} {doc_info['description']}")
@@ -557,7 +659,8 @@ async def main():
                     "failed": s.failed,
                     "success_rate": s.success_rate,
                     "avg_duration_ms": s.avg_duration_ms,
-                    "total_tokens": s.total_tokens
+                    "total_tokens": s.total_tokens,
+                    "results": [asdict(r) for r in s.results]
                 }
                 for s in all_summaries
             ]

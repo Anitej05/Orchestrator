@@ -5,6 +5,8 @@ This class coordinates all parsing components to provide comprehensive
 spreadsheet analysis including table detection, schema extraction,
 metadata extraction, and context building.
 
+Enhanced with advanced performance optimizations.
+
 Requirements: 1, 2, 4, 16, 17, 18
 """
 
@@ -39,6 +41,20 @@ from .parsing import (
 
 logger = logging.getLogger(__name__)
 
+# Import performance optimizations
+try:
+    from .performance_optimizer import (
+        performance_monitor,
+        memory_optimizer,
+        token_optimizer,
+        advanced_cache
+    )
+    PERFORMANCE_OPTIMIZATION_ENABLED = True
+    logger.info("✅ Performance optimizations enabled for SpreadsheetParser")
+except ImportError as e:
+    logger.warning(f"⚠️ Performance optimizations not available: {e}")
+    PERFORMANCE_OPTIMIZATION_ENABLED = False
+
 
 class SpreadsheetParser:
     """
@@ -70,6 +86,12 @@ class SpreadsheetParser:
         self._parse_times = []
         self._cache_hits = 0
         self._cache_misses = 0
+        
+        # Performance optimization integration
+        if PERFORMANCE_OPTIMIZATION_ENABLED:
+            self.logger.info("🚀 Advanced performance monitoring enabled")
+        else:
+            self.logger.info("📊 Basic performance tracking enabled")
     
     def parse_file(
         self,
@@ -94,83 +116,112 @@ class SpreadsheetParser:
             
         Requirements: 1.1, 1.2, 5.1, 5.2, 16.1, 16.5
         """
+        # Performance monitoring
+        if PERFORMANCE_OPTIMIZATION_ENABLED:
+            timer = performance_monitor.time_operation("parse_file")
+            timer.__enter__()
+        
         start_time = time.time()
         
         try:
             self.logger.info(f"🔍 Parsing file: {file_path} (sheet: {sheet_name}, all_sheets: {parse_all_sheets})")
             
+            # Check cache first
+            cache_key = f"parse:{file_id}:{sheet_name}:{max_rows}:{parse_all_sheets}"
+            if PERFORMANCE_OPTIMIZATION_ENABLED:
+                cached_result = advanced_cache.get(cache_key)
+                if cached_result:
+                    self._cache_hits += 1
+                    self.logger.info(f"🎯 Cache HIT for {file_id}")
+                    return cached_result
+                self._cache_misses += 1
+            
             # Handle multi-sheet parsing
             if parse_all_sheets and Path(file_path).suffix.lower() in ['.xlsx', '.xls']:
-                return self._parse_all_sheets(file_path, file_id, max_rows)
-            
-            # Load the spreadsheet
-            raw_df = self._load_spreadsheet(file_path, sheet_name, max_rows)
-            
-            if raw_df is None or raw_df.empty:
-                self.logger.warning(f"Empty or invalid spreadsheet: {file_path}")
-                return self._create_empty_parsed_spreadsheet(file_id, sheet_name or "Sheet1")
-            
-            self.logger.info(f"📊 Loaded spreadsheet: {len(raw_df)} rows × {len(raw_df.columns)} cols")
-            
-            # Detect document type
-            document_type = self._detect_document_type(raw_df)
-            self.logger.info(f"📋 Document type detected: {document_type.value}")
-            
-            # Detect document sections
-            sections = self.document_section_detector.detect_sections(raw_df)
-            self.logger.info(f"📑 Detected {len(sections)} document sections")
-            
-            # Detect intentional gaps
-            intentional_gaps = self.intentional_gap_detector.detect_gaps(raw_df)
-            self.logger.info(f"🔍 Detected {len(intentional_gaps)} intentional gaps")
-            
-            # Detect tables
-            table_regions = self.table_detector.detect_tables(raw_df)
-            self.logger.info(f"📊 Detected {len(table_regions)} table regions")
-            
-            # Process each table
-            tables = []
-            for region in table_regions:
-                table_df = self._extract_table_dataframe(raw_df, region)
-                schema = self.schema_extractor.extract_schema(table_df, region)
-                tables.append((region, table_df, schema))
-            
-            # Extract metadata
-            metadata = self.metadata_extractor.extract_metadata(raw_df, sections)
-            self.logger.info(f"📝 Extracted metadata: {len(metadata)} items")
-            
-            # Calculate parsing confidence
-            parsing_confidence = self._calculate_parsing_confidence(
-                sections, table_regions, metadata
-            )
-            
-            # Create parsed spreadsheet
-            parsed = ParsedSpreadsheet(
-                file_id=file_id,
-                sheet_name=sheet_name or "Sheet1",
-                document_type=document_type,
-                metadata=metadata,
-                sections=sections,
-                tables=tables,
-                raw_df=raw_df,
-                intentional_gaps=intentional_gaps,
-                parsing_confidence=parsing_confidence
-            )
+                result = self._parse_all_sheets(file_path, file_id, max_rows)
+            else:
+                # Load the spreadsheet
+                raw_df = self._load_spreadsheet(file_path, sheet_name, max_rows)
+                
+                if raw_df is None or raw_df.empty:
+                    self.logger.warning(f"Empty or invalid spreadsheet: {file_path}")
+                    result = self._create_empty_parsed_spreadsheet(file_id, sheet_name or "Sheet1")
+                else:
+                    self.logger.info(f"📊 Loaded spreadsheet: {len(raw_df)} rows × {len(raw_df.columns)} cols")
+                    
+                    # Track memory usage
+                    if PERFORMANCE_OPTIMIZATION_ENABLED:
+                        memory_usage = raw_df.memory_usage(deep=True).sum() / (1024 * 1024)
+                        memory_optimizer.track_session_memory(file_id, memory_usage)
+                    
+                    # Detect document type
+                    document_type = self._detect_document_type(raw_df)
+                    self.logger.info(f"📋 Document type detected: {document_type.value}")
+                    
+                    # Detect document sections
+                    sections = self.document_section_detector.detect_sections(raw_df)
+                    self.logger.info(f"📑 Detected {len(sections)} document sections")
+                    
+                    # Detect intentional gaps
+                    intentional_gaps = self.intentional_gap_detector.classify_empty_rows(raw_df)
+                    self.logger.info(f"🔍 Classified {len(intentional_gaps)} empty rows")
+                    
+                    # Detect tables
+                    table_regions = self.table_detector.detect_all_tables(raw_df)
+                    self.logger.info(f"📊 Detected {len(table_regions)} table regions")
+                    
+                    # Process each table
+                    tables = []
+                    for region in table_regions:
+                        table_df = self._extract_table_dataframe(raw_df, region)
+                        schema = self.schema_extractor.extract_schema(table_df, region)
+                        tables.append((region, table_df, schema))
+                    
+                    # Extract metadata
+                    metadata = self.metadata_extractor.extract_metadata(raw_df, sections)
+                    self.logger.info(f"📝 Extracted metadata: {len(metadata)} items")
+                    
+                    # Calculate parsing confidence
+                    parsing_confidence = self._calculate_parsing_confidence(
+                        sections, table_regions, metadata
+                    )
+                    
+                    # Create parsed spreadsheet
+                    result = ParsedSpreadsheet(
+                        file_id=file_id,
+                        sheet_name=sheet_name or "Sheet1",
+                        document_type=document_type,
+                        metadata=metadata,
+                        sections=sections,
+                        tables=tables,
+                        raw_df=raw_df,
+                        intentional_gaps=intentional_gaps,
+                        parsing_confidence=parsing_confidence
+                    )
             
             parse_time = time.time() - start_time
             self._parse_times.append(parse_time)
             
+            # Cache the result
+            if PERFORMANCE_OPTIMIZATION_ENABLED:
+                estimated_size = len(str(result)) / (1024 * 1024)  # Rough estimate
+                advanced_cache.put(cache_key, result, estimated_size)
+            
             self.logger.info(
                 f"✅ Parsing complete in {parse_time:.2f}s "
-                f"(confidence: {parsing_confidence:.2f})"
+                f"(confidence: {getattr(result, 'parsing_confidence', 0.0):.2f})"
             )
             
-            return parsed
+            return result
             
         except Exception as e:
             self.logger.error(f"❌ Parsing failed for {file_path}: {e}", exc_info=True)
             # Return basic parsed spreadsheet with error info
-            return self._create_error_parsed_spreadsheet(file_id, sheet_name, str(e))
+            result = self._create_error_parsed_spreadsheet(file_id, sheet_name, str(e))
+            return result
+        finally:
+            if PERFORMANCE_OPTIMIZATION_ENABLED and 'timer' in locals():
+                timer.__exit__(None, None, None)
     
     def parse_dataframe(
         self,
@@ -206,10 +257,10 @@ class SpreadsheetParser:
             sections = self.document_section_detector.detect_sections(df)
             
             # Detect intentional gaps
-            intentional_gaps = self.intentional_gap_detector.detect_gaps(df)
+            intentional_gaps = self.intentional_gap_detector.classify_empty_rows(df)
             
             # Detect tables
-            table_regions = self.table_detector.detect_tables(df)
+            table_regions = self.table_detector.detect_all_tables(df)
             
             # Process each table
             tables = []
@@ -260,12 +311,12 @@ class SpreadsheetParser:
         sampling_strategy: Optional[SamplingStrategy] = None
     ) -> StructuredContext:
         """
-        Build structured context for LLM consumption.
+        Build structured context for LLM consumption with token optimization.
         
         Args:
             parsed: The parsed spreadsheet
             max_tokens: Maximum tokens for the context
-            sampling_strategy: Strategy for sampling large datasets
+            sampling_strategy: Strategy for sampling large datasets (currently unused)
             
         Returns:
             StructuredContext ready for LLM consumption
@@ -273,8 +324,44 @@ class SpreadsheetParser:
         Requirements: 3.1, 3.2, 8.1, 8.3, 18.1-18.7
         """
         try:
+            # Use token optimizer if available
+            if PERFORMANCE_OPTIMIZATION_ENABLED:
+                with performance_monitor.time_operation("build_context"):
+                    # Get primary table for optimization
+                    primary_table = self.get_primary_table(parsed)
+                    if primary_table:
+                        region, table_df, schema = primary_table
+                        
+                        # Use token optimizer for efficient context building
+                        optimized_context = token_optimizer.optimize_dataframe_context(
+                            df=table_df,
+                            max_tokens=max_tokens,
+                            include_columns=None,  # Include all columns
+                            priority_columns=None  # No priority columns for now
+                        )
+                        
+                        # Convert to StructuredContext format
+                        return StructuredContext(
+                            document_type=parsed.document_type,
+                            sections={
+                                "optimized_table": {
+                                    "type": "table",
+                                    "schema": optimized_context["schema"],
+                                    "sample_data": optimized_context["sample_data"],
+                                    "metadata": optimized_context["metadata"]
+                                },
+                                "document_metadata": {
+                                    "type": "metadata",
+                                    "content": parsed.metadata,
+                                    "sections_count": len(parsed.sections),
+                                    "parsing_confidence": parsed.parsing_confidence
+                                }
+                            }
+                        )
+            
+            # Fallback to standard context building
             return self.context_builder.build_structured_context(
-                parsed, max_tokens, sampling_strategy
+                parsed, max_tokens
             )
         except Exception as e:
             self.logger.error(f"❌ Context building failed: {e}", exc_info=True)

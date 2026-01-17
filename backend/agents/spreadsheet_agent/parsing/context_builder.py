@@ -177,9 +177,7 @@ class ContextBuilder:
         # Create structured context
         context = StructuredContext(
             document_type=parsed.document_type,
-            sections=sections_dict,
-            sampling_info=sampling_info,
-            validation_checksums=validation_checksums
+            sections=sections_dict
         )
         
         # Validate completeness
@@ -575,9 +573,9 @@ class ContextBuilder:
                 # Log but don't fail - some fields might be optional
         
         # Validate checksums if present
-        if context.validation_checksums:
+        if context.metadata.validation_checksums:
             self.logger.debug(
-                f"Context includes {len(context.validation_checksums)} validation checksums"
+                f"Context includes {len(context.metadata.validation_checksums)} validation checksums"
             )
         
         if validation_passed:

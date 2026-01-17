@@ -86,6 +86,9 @@ class SchemaExtractor:
         # Infer data types from the data
         dtypes = self.infer_dtypes(data_df, headers)
         
+        # Calculate null counts
+        null_counts = data_df.isnull().sum().to_dict()
+        
         # Detect mixed type columns
         mixed_type_columns = self.detect_mixed_types(data_df, headers, dtypes)
         
@@ -94,8 +97,7 @@ class SchemaExtractor:
             dtypes=dtypes,
             row_count=len(data_df),
             col_count=len(headers),
-            has_explicit_headers=has_explicit_headers,
-            mixed_type_columns=mixed_type_columns
+            null_counts=null_counts
         )
         
         self.logger.info(
