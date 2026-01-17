@@ -25,7 +25,6 @@ load_dotenv()
 
 SCRIPT_DIR = Path(__file__).parent.absolute()  # agents/ directory
 BACKEND_DIR = SCRIPT_DIR.parent  # backend/ directory
-DOCUMENT_AGENT_DIR = SCRIPT_DIR / "document_agent"  # agents/document_agent/
 
 # Ensure paths are in sys.path for imports
 # IMPORTANT: Add BACKEND_DIR first so backend/schemas.py is found before document_agent/schemas.py
@@ -35,7 +34,7 @@ for path in [str(BACKEND_DIR), str(SCRIPT_DIR)]:
         sys.path.insert(0, path)
 
 logger.info(f"🔧 Path setup: script_dir={SCRIPT_DIR}, backend_dir={BACKEND_DIR}")
-logger.info(f"🔧 sys.path includes: agents/, backend/, document_agent/")
+logger.info(f"🔧 sys.path includes: backend/, agents/")
 
 # Import new modularized Document Agent with proper error handling
 app = None

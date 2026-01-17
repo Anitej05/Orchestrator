@@ -13,9 +13,16 @@ import asyncio
 from dotenv import load_dotenv
 from aiofiles import open as aio_open
 from fastapi import File, UploadFile
-from typing import List
+from typing import List, Dict, Optional
 from pathlib import Path
 import os
+
+# Import orchestrator-compatible schemas from backend root
+import sys
+BACKEND_DIR = Path(__file__).resolve().parents[2]
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+import schemas as backend_schemas
 
 # Get workspace root
 WORKSPACE_ROOT = Path(__file__).parent.parent.parent.parent.resolve()
@@ -83,6 +90,44 @@ def get_agent() -> DocumentAgent:
         logger.info("Initializing DocumentAgent...")
         _agent = DocumentAgent()
     return _agent
+
+
+# ============================================================================
+# ORCHESTRATOR DIALOGUE STATE (IN-MEMORY)
+# ============================================================================
+
+_dialogue_store: Dict[str, backend_schemas.DialogueContext] = {}
+
+
+class DialogueManager:
+    @staticmethod
+    def get(task_id: str) -> Optional[backend_schemas.DialogueContext]:
+        return _dialogue_store.get(task_id)
+
+    @staticmethod
+    def create(task_id: str, agent_id: str = "document_agent") -> backend_schemas.DialogueContext:
+        ctx = backend_schemas.DialogueContext(task_id=task_id, agent_id=agent_id, status="active")
+        _dialogue_store[task_id] = ctx
+        return ctx
+
+    @staticmethod
+    def pause(task_id: str, question: backend_schemas.AgentResponse) -> None:
+        ctx = _dialogue_store.get(task_id)
+        if ctx:
+            ctx.status = "paused"
+            ctx.current_question = question
+
+    @staticmethod
+    def resume(task_id: str) -> None:
+        ctx = _dialogue_store.get(task_id)
+        if ctx:
+            ctx.status = "active"
+
+    @staticmethod
+    def complete(task_id: str) -> None:
+        ctx = _dialogue_store.get(task_id)
+        if ctx:
+            ctx.status = "completed"
 
 
 # ============================================================================
@@ -191,16 +236,15 @@ async def analyze_document(request: AnalyzeDocumentRequest):
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, agent.analyze_document, request)
 
-        if not result.get('success'):
-            raise HTTPException(
-                status_code=400,
-                detail=result.get('answer', 'Analysis failed')
-            )
-
         return AnalyzeDocumentResponse(
-            success=True,
-            answer=result['answer'],
-            sources=result.get('sources')
+            success=bool(result.get('success')),
+            answer=result.get('answer', ''),
+            sources=result.get('sources'),
+            status=result.get('status'),
+            phase_trace=result.get('phase_trace'),
+            grounding=result.get('grounding'),
+            confidence=result.get('confidence'),
+            review_required=result.get('review_required')
         )
 
     except Exception as e:
@@ -293,19 +337,19 @@ async def edit_document(request: EditDocumentRequest):
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, agent.edit_document, request)
 
-        if not result.get('success'):
-            raise HTTPException(
-                status_code=400,
-                detail=result.get('message', 'Edit failed')
-            )
-
         return EditDocumentResponse(
-            success=True,
-            message=result['message'],
-            file_path=result['file_path'],
+            success=bool(result.get('success')),
+            message=result.get('message', ''),
+            file_path=result.get('file_path', request.file_path),
             can_undo=result.get('can_undo', False),
             can_redo=result.get('can_redo', False),
-            edit_summary=result.get('edit_summary')
+            edit_summary=result.get('edit_summary'),
+            status=result.get('status'),
+            question=result.get('question'),
+            question_type=result.get('question_type'),
+            pending_plan=result.get('pending_plan'),
+            risk_assessment=result.get('risk_assessment'),
+            phase_trace=result.get('phase_trace')
         )
 
     except HTTPException:
@@ -313,6 +357,127 @@ async def edit_document(request: EditDocumentRequest):
     except Exception as e:
         logger.error(f"Edit error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# ORCHESTRATOR INTEGRATION ENDPOINT
+# ============================================================================
+
+@app.post("/execute", response_model=backend_schemas.AgentResponse)
+async def execute(message: backend_schemas.OrchestratorMessage):
+    """Unified orchestrator endpoint supporting execute/continue/cancel/context_update."""
+    agent = get_agent()
+    payload = message.payload or {}
+    task_id = payload.get("task_id") or f"doc-{len(_dialogue_store)+1}"
+
+    ctx = DialogueManager.get(task_id) or DialogueManager.create(task_id)
+
+    # CONTINUE
+    if message.type == "continue":
+        if not message.answer:
+            return backend_schemas.AgentResponse(
+                status=backend_schemas.AgentResponseStatus.ERROR,
+                error="Missing answer for continue",
+                context={"task_id": task_id},
+            )
+        if not ctx.current_question or not ctx.current_question.context:
+            return backend_schemas.AgentResponse(
+                status=backend_schemas.AgentResponseStatus.ERROR,
+                error="No pending question for this task",
+                context={"task_id": task_id},
+            )
+
+        pending_edit = ctx.current_question.context.get("pending_edit")
+        if not pending_edit:
+            return backend_schemas.AgentResponse(
+                status=backend_schemas.AgentResponseStatus.ERROR,
+                error="Missing pending edit payload",
+                context={"task_id": task_id},
+            )
+
+        # Execute approved edit
+        edit_req = EditDocumentRequest(**{**pending_edit, "auto_approve": True, "approval_response": message.answer})
+        result = agent.edit_document(edit_req)
+        DialogueManager.resume(task_id)
+        DialogueManager.complete(task_id)
+        return backend_schemas.AgentResponse(
+            status=backend_schemas.AgentResponseStatus.COMPLETE if result.get("success") else backend_schemas.AgentResponseStatus.ERROR,
+            result=result,
+            error=None if result.get("success") else result.get("message"),
+            context={"task_id": task_id},
+        )
+
+    # CANCEL
+    if message.type == "cancel":
+        DialogueManager.complete(task_id)
+        return backend_schemas.AgentResponse(
+            status=backend_schemas.AgentResponseStatus.COMPLETE,
+            result={"cancelled": True},
+            context={"task_id": task_id},
+        )
+
+    # CONTEXT UPDATE
+    if message.type == "context_update":
+        if message.additional_context and ctx.current_question and ctx.current_question.context:
+            ctx.current_question.context.update(message.additional_context)
+        return backend_schemas.AgentResponse(
+            status=backend_schemas.AgentResponseStatus.COMPLETE,
+            result={"context_updated": True},
+            context={"task_id": task_id},
+        )
+
+    # EXECUTE
+    action = message.action
+    if action == "/edit":
+        edit_req = EditDocumentRequest(**payload)
+        result = agent.edit_document(edit_req)
+        if result.get("status") == backend_schemas.AgentResponseStatus.NEEDS_INPUT.value:
+            question = backend_schemas.AgentResponse(
+                status=backend_schemas.AgentResponseStatus.NEEDS_INPUT,
+                question=result.get("question"),
+                question_type="confirmation",
+                context={
+                    "task_id": task_id,
+                    "pending_edit": payload,
+                    "pending_plan": result.get("pending_plan"),
+                    "risk_assessment": result.get("risk_assessment"),
+                },
+            )
+            DialogueManager.pause(task_id, question)
+            return question
+
+        return backend_schemas.AgentResponse(
+            status=backend_schemas.AgentResponseStatus.COMPLETE if result.get("success") else backend_schemas.AgentResponseStatus.ERROR,
+            result=result,
+            error=None if result.get("success") else result.get("message"),
+            context={"task_id": task_id},
+        )
+
+    if action == "/analyze":
+        req = AnalyzeDocumentRequest(**payload)
+        result = agent.analyze_document(req)
+        return backend_schemas.AgentResponse(
+            status=backend_schemas.AgentResponseStatus.COMPLETE if result.get("success") else backend_schemas.AgentResponseStatus.ERROR,
+            result=result,
+            error=None if result.get("success") else result.get("answer"),
+            context={"task_id": task_id},
+        )
+
+    if action == "/extract":
+        req = ExtractDataRequest(**payload)
+        result = agent.extract_data(req)
+        return backend_schemas.AgentResponse(
+            status=backend_schemas.AgentResponseStatus.COMPLETE if result.get("success") else backend_schemas.AgentResponseStatus.ERROR,
+            result=result,
+            error=None if result.get("success") else result.get("message"),
+            context={"task_id": task_id},
+        )
+
+    return backend_schemas.AgentResponse(
+        status=backend_schemas.AgentResponseStatus.ERROR,
+        error=f"Unsupported action: {action}",
+        context={"task_id": task_id},
+    )
 
 
 # ============================================================================

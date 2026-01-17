@@ -10,6 +10,18 @@ from enum import Enum
 
 
 # ============================================================================
+# ORCHESTRATOR-COMPATIBLE STATUS FIELDS (OPTIONAL)
+# ============================================================================
+
+class AgentResponseStatus(str, Enum):
+    """Status compatible with backend.schemas.AgentResponseStatus."""
+    COMPLETE = "complete"
+    ERROR = "error"
+    NEEDS_INPUT = "needs_input"
+    PARTIAL = "partial"
+
+
+# ============================================================================
 # ENUMS
 # ============================================================================
 
@@ -84,6 +96,17 @@ class AnalyzeDocumentResponse(BaseModel):
     failed_files: Optional[int] = Field(None, description="Number of failed files")
     errors: Optional[List[str]] = Field(None, description="List of errors encountered")
 
+    # Enterprise/orchestrator metadata (non-breaking)
+    status: Optional[AgentResponseStatus] = None
+    question: Optional[str] = None
+    question_type: Optional[str] = None
+    pending_plan: Optional[Dict[str, Any]] = None
+    risk_assessment: Optional[Dict[str, Any]] = None
+    phase_trace: Optional[List[str]] = None
+    grounding: Optional[Dict[str, Any]] = None
+    confidence: Optional[float] = None
+    review_required: Optional[bool] = None
+
 
 class DisplayDocumentRequest(BaseModel):
     """Request to display a document."""
@@ -126,6 +149,10 @@ class EditDocumentRequest(BaseModel):
         default=False,
         description="Auto-approve high-risk edit plans without pausing for confirmation",
     )
+
+    # Enterprise: allow orchestrator to resume/approve a paused edit.
+    auto_approve: bool = Field(default=False, description="If true, bypass approval gating and execute the plan")
+    approval_response: Optional[str] = Field(default=None, description="Optional user approval text/answer (for audit)")
 
 
 class EditDocumentResponse(BaseModel):
