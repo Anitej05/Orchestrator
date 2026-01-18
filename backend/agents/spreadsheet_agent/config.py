@@ -76,9 +76,31 @@ MAX_RETRIES = 3
 BACKOFF_FACTOR = 2
 
 # ============== MEMORY/CACHE SETTINGS ==============
-MEMORY_CACHE_MAX_SIZE = 1000  # Max number of cache entries
-MEMORY_CACHE_TTL_SECONDS = 3600  # 1 hour
-CONTEXT_MEMORY_MAX_TOKENS = 2000  # Max tokens for context
+MEMORY_CACHE_MAX_SIZE = 2000  # Increased from 1000 for better performance
+MEMORY_CACHE_TTL_SECONDS = 7200  # Increased from 3600 (2 hours)
+CONTEXT_MEMORY_MAX_TOKENS = 4000  # Increased from 2000 for better context
+
+# ============== PERFORMANCE OPTIMIZATION SETTINGS ==============
+# Advanced caching
+ADVANCED_CACHE_MAX_MEMORY_MB = 1000  # Maximum memory for advanced cache
+ADVANCED_CACHE_CLEANUP_INTERVAL = 300  # 5 minutes
+
+# Memory optimization
+MAX_MEMORY_PER_SESSION_MB = 150  # Maximum memory per session
+MEMORY_CLEANUP_INTERVAL_SECONDS = 300  # 5 minutes
+FORCE_GC_MEMORY_THRESHOLD_PERCENT = 80  # Force GC when system memory > 80%
+
+# Token optimization
+TOKEN_BUDGET_SCHEMA_PERCENT = 0.2  # 20% of tokens for schema
+TOKEN_BUDGET_SAMPLE_PERCENT = 0.6  # 60% of tokens for sample data
+TOKEN_BUDGET_METADATA_PERCENT = 0.2  # 20% of tokens for metadata
+MAX_SAMPLE_ROWS_LARGE_DATASET = 20  # Maximum sample rows for large datasets
+MAX_STRING_LENGTH_IN_SAMPLE = 50  # Truncate strings longer than this
+
+# Performance monitoring
+PERFORMANCE_MONITORING_ENABLED = True
+OPERATION_HISTORY_SIZE = 100  # Keep last 100 operations for each type
+MEMORY_SNAPSHOT_INTERVAL = 300  # Take memory snapshot every 5 minutes
 
 # ============== SESSION SETTINGS ==============
 SESSION_TIMEOUT_HOURS = 24

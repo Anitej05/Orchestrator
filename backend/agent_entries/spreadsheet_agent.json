@@ -14,6 +14,32 @@
   },
   "endpoints": [
     {
+      "endpoint": "/execute",
+      "http_method": "POST",
+      "request_format": "form",
+      "description": "Execute any spreadsheet task from natural language instruction. ORCHESTRATOR COMPATIBILITY ENDPOINT. Routes to appropriate specialized endpoint based on instruction content. USE for any spreadsheet operation when unsure of specific endpoint. LLM-DRIVEN.",
+      "parameters": [
+        {
+          "name": "instruction",
+          "param_type": "string",
+          "required": true,
+          "description": "Natural language instruction describing the task to perform."
+        },
+        {
+          "name": "file_id",
+          "param_type": "string",
+          "required": true,
+          "description": "The file_id from /upload endpoint."
+        },
+        {
+          "name": "thread_id",
+          "param_type": "string",
+          "required": false,
+          "description": "Conversation thread ID for multi-turn sessions."
+        }
+      ]
+    },
+    {
       "endpoint": "/upload",
       "http_method": "POST",
       "request_format": "form",
@@ -68,8 +94,8 @@
         {
           "name": "instruction",
           "param_type": "string",
-          "required": true,
-          "description": "Natural language instruction. Examples: 'add a Sl.No. column', 'rename Feature1 to Subject1', 'add Total column summing each row'."
+          "required": false,
+          "description": "Natural language instruction. Examples: 'add a Sl.No. column', 'rename Feature1 to Subject1', 'add Total column summing each row'. If not provided, defaults to category aggregation."
         },
         {
           "name": "show_result",
@@ -134,8 +160,8 @@
         {
           "name": "instruction",
           "param_type": "string",
-          "required": true,
-          "description": "For 'propose' stage: natural language instruction (e.g., 'Add a Total column and filter rows > 1000'). For 'revise': JSON {\"plan_id\": \"uuid\", \"feedback\": \"string\"}. For 'simulate'/'execute': JSON {\"plan_id\": \"uuid\"}."
+          "required": false,
+          "description": "For 'propose' stage: natural language instruction (e.g., 'Add a Total column and filter rows > 1000'). For 'revise': JSON {\"plan_id\": \"uuid\", \"feedback\": \"string\"}. For 'simulate'/'execute': JSON {\"plan_id\": \"uuid\"}. If not provided, defaults to category aggregation."
         },
         {
           "name": "stage",
@@ -259,14 +285,20 @@
         {
           "name": "operation",
           "param_type": "string",
-          "required": true,
-          "description": "Operation: 'filter', 'sort', 'group', 'drop_duplicates', 'fillna'."
+          "required": false,
+          "description": "Operation: 'filter', 'sort', 'group', 'drop_duplicates', 'fillna'. If not provided, defaults to 'group'."
         },
         {
           "name": "params",
           "param_type": "string",
-          "required": true,
-          "description": "JSON string with operation parameters."
+          "required": false,
+          "description": "JSON string with operation parameters. If not provided, defaults to category aggregation."
+        },
+        {
+          "name": "instruction",
+          "param_type": "string",
+          "required": false,
+          "description": "Alternative: Natural language instruction instead of operation/params."
         }
       ]
     },

@@ -16,8 +16,141 @@ from threading import RLock
 import shutil
 import time
 import logging
+import sqlite3
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class DialogueRecord:
+    task_id: str
+    agent_id: str
+    status: str
+    current_question: Optional[Dict[str, Any]]
+    context: Dict[str, Any]
+    updated_at: str
+
+
+class DialogueStateManager:
+    """Persistent dialogue state for orchestrator pause/resume flows (SQLite)."""
+
+    def __init__(self, db_path: Optional[str] = None):
+        if db_path is None:
+            workspace_root = Path(__file__).parent.parent.parent.parent.resolve()
+            db_path = workspace_root / "storage" / "document_agent" / "dialogue_state.db"
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = RLock()
+        self._ensure_table()
+
+    def _ensure_table(self) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS dialogue_state (
+                    task_id TEXT PRIMARY KEY,
+                    agent_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    current_question TEXT,
+                    context TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.commit()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self.db_path))
+        return conn
+
+    def get(self, task_id: str) -> Optional[DialogueRecord]:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT task_id, agent_id, status, current_question, context, updated_at FROM dialogue_state WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            if not row:
+                return None
+            current_question = json.loads(row[3]) if row[3] else None
+            context = json.loads(row[4]) if row[4] else {}
+            return DialogueRecord(
+                task_id=row[0],
+                agent_id=row[1],
+                status=row[2],
+                current_question=current_question,
+                context=context,
+                updated_at=row[5],
+            )
+
+    def get_or_create(self, task_id: str, agent_id: str) -> DialogueRecord:
+        record = self.get(task_id)
+        if record:
+            return record
+        now = datetime.utcnow().isoformat()
+        record = DialogueRecord(
+            task_id=task_id,
+            agent_id=agent_id,
+            status="active",
+            current_question=None,
+            context={},
+            updated_at=now,
+        )
+        self.save(record)
+        return record
+
+    def save(self, record: DialogueRecord) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO dialogue_state (task_id, agent_id, status, current_question, context, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    agent_id=excluded.agent_id,
+                    status=excluded.status,
+                    current_question=excluded.current_question,
+                    context=excluded.context,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    record.task_id,
+                    record.agent_id,
+                    record.status,
+                    json.dumps(record.current_question) if record.current_question is not None else None,
+                    json.dumps(record.context or {}),
+                    record.updated_at,
+                ),
+            )
+            conn.commit()
+
+    def update_status(self, task_id: str, status: str) -> None:
+        record = self.get(task_id)
+        if not record:
+            return
+        record.status = status
+        record.updated_at = datetime.utcnow().isoformat()
+        self.save(record)
+
+    def set_question(self, task_id: str, question: Dict[str, Any]) -> None:
+        record = self.get(task_id)
+        if not record:
+            return
+        record.status = "paused"
+        record.current_question = question
+        record.updated_at = datetime.utcnow().isoformat()
+        self.save(record)
+
+    def update_context(self, task_id: str, patch: Dict[str, Any]) -> None:
+        record = self.get(task_id)
+        if not record:
+            return
+        record.context = {**(record.context or {}), **(patch or {})}
+        record.updated_at = datetime.utcnow().isoformat()
+        self.save(record)
+
+    def clear(self, task_id: str) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute("DELETE FROM dialogue_state WHERE task_id = ?", (task_id,))
+            conn.commit()
 
 
 @dataclass

@@ -18,7 +18,7 @@ from reportlab.lib.pagesizes import letter
 
 # Agent imports (will be mocked where needed)
 import sys
-backend_path = Path(__file__).parent.parent.parent
+backend_path = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(backend_path))
 
 

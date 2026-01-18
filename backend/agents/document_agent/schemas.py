@@ -10,6 +10,18 @@ from enum import Enum
 
 
 # ============================================================================
+# ORCHESTRATOR-COMPATIBLE STATUS FIELDS (OPTIONAL)
+# ============================================================================
+
+class AgentResponseStatus(str, Enum):
+    """Status compatible with backend.schemas.AgentResponseStatus."""
+    COMPLETE = "complete"
+    ERROR = "error"
+    NEEDS_INPUT = "needs_input"
+    PARTIAL = "partial"
+
+
+# ============================================================================
 # ENUMS
 # ============================================================================
 
@@ -71,6 +83,17 @@ class AnalyzeDocumentResponse(BaseModel):
     failed_files: Optional[int] = Field(None, description="Number of failed files")
     errors: Optional[List[str]] = Field(None, description="List of errors encountered")
 
+    # Enterprise/orchestrator metadata (non-breaking)
+    status: Optional[AgentResponseStatus] = None
+    question: Optional[str] = None
+    question_type: Optional[str] = None
+    pending_plan: Optional[Dict[str, Any]] = None
+    risk_assessment: Optional[Dict[str, Any]] = None
+    phase_trace: Optional[List[str]] = None
+    grounding: Optional[Dict[str, Any]] = None
+    confidence: Optional[float] = None
+    review_required: Optional[bool] = None
+
 
 class DisplayDocumentRequest(BaseModel):
     """Request to display a document."""
@@ -109,6 +132,9 @@ class EditDocumentRequest(BaseModel):
     instruction: str = Field(..., description="Natural language instruction describing the edit")
     thread_id: Optional[str] = Field(None, description="Conversation thread ID")
     use_vision: bool = Field(default=False, description="Use vision-based planning if available")
+    # Enterprise: allow orchestrator to resume/approve a paused edit.
+    auto_approve: bool = Field(default=False, description="If true, bypass approval gating and execute the plan")
+    approval_response: Optional[str] = Field(default=None, description="Optional user approval text/answer (for audit)")
 
 
 class EditDocumentResponse(BaseModel):
@@ -119,7 +145,13 @@ class EditDocumentResponse(BaseModel):
     canvas_display: Optional[Dict[str, Any]] = None
     can_undo: bool = False
     can_redo: bool = False
-    edit_summary: Optional[str] = None
+    edit_summary: Optional[Any] = None
+    status: Optional[AgentResponseStatus] = None
+    phase_trace: Optional[List[str]] = None
+    question: Optional[str] = None
+    question_type: Optional[str] = None
+    pending_plan: Optional[Dict[str, Any]] = None
+    risk_assessment: Optional[Dict[str, Any]] = None
 
 
 class UndoRedoRequest(BaseModel):
@@ -166,6 +198,16 @@ class ExtractDataResponse(BaseModel):
     message: str
     extracted_data: Dict[str, Any]
     data_format: str
+    status: Optional[str] = Field(
+        None,
+        description="Execution status for orchestrator compatibility (complete | needs_input | error)",
+    )
+    phase_trace: Optional[List[str]] = Field(
+        None,
+        description="Ordered phases executed for extraction",
+    )
+    confidence: Optional[float] = Field(None, description="Confidence score for extraction")
+    grounding: Optional[Dict[str, Any]] = Field(None, description="Grounding metadata for extracted fields")
 
 
 class DocumentStructure(BaseModel):

@@ -1,0 +1,233 @@
+{
+  "timestamp": "2026-01-18T02:37:09.186183",
+  "summaries": [
+    {
+      "document_key": "simple_text",
+      "document_filename": "backend/tests/agents/document_agent/test_data/simple_test.txt",
+      "document_type": "TXT",
+      "total_queries": 1,
+      "successful": 1,
+      "failed": 0,
+      "success_rate": 100.0,
+      "avg_duration_ms": 6531.134299992118,
+      "total_tokens": 0,
+      "results": [
+        {
+          "document_key": "simple_text",
+          "query_index": 1,
+          "query": "What is the first line of this document?",
+          "difficulty": "simple",
+          "success": true,
+          "answer": "The first line of the document is: \u201cThis is a simple text file.\u201d",
+          "error": null,
+          "duration_ms": 6531.134299992118,
+          "tokens_used": 0,
+          "provider": "cerebras",
+          "libraries": [],
+          "execution_steps": 0,
+          "status": "complete",
+          "phase_trace": [
+            "understand",
+            "retrieve",
+            "generate",
+            "validate",
+            "report"
+          ],
+          "grounding": null,
+          "confidence": null,
+          "review_required": null
+        }
+      ]
+    },
+    {
+      "document_key": "simple_pdf",
+      "document_filename": "backend/tests/agents/document_agent/test_data/simple_test.pdf",
+      "document_type": "PDF",
+      "total_queries": 1,
+      "successful": 1,
+      "failed": 0,
+      "success_rate": 100.0,
+      "avg_duration_ms": 1207.6888000010513,
+      "total_tokens": 0,
+      "results": [
+        {
+          "document_key": "simple_pdf",
+          "query_index": 1,
+          "query": "What is the title of this document?",
+          "difficulty": "simple",
+          "success": true,
+          "answer": "The document\u2019s title is **\u201cTest Document.\u201d**",
+          "error": null,
+          "duration_ms": 1207.6888000010513,
+          "tokens_used": 0,
+          "provider": "cerebras",
+          "libraries": [],
+          "execution_steps": 0,
+          "status": "complete",
+          "phase_trace": [
+            "understand",
+            "retrieve",
+            "generate",
+            "validate",
+            "report"
+          ],
+          "grounding": null,
+          "confidence": null,
+          "review_required": null
+        }
+      ]
+    },
+    {
+      "document_key": "simple_docx",
+      "document_filename": "backend/tests/agents/document_agent/test_data/simple_test.docx",
+      "document_type": "DOCX",
+      "total_queries": 1,
+      "successful": 1,
+      "failed": 0,
+      "success_rate": 100.0,
+      "avg_duration_ms": 1171.8679000041448,
+      "total_tokens": 0,
+      "results": [
+        {
+          "document_key": "simple_docx",
+          "query_index": 1,
+          "query": "What is the title of this document?",
+          "difficulty": "simple",
+          "success": true,
+          "answer": "The title of the document is **\u201cTest Document.\u201d**",
+          "error": null,
+          "duration_ms": 1171.8679000041448,
+          "tokens_used": 0,
+          "provider": "cerebras",
+          "libraries": [],
+          "execution_steps": 0,
+          "status": "complete",
+          "phase_trace": [
+            "understand",
+            "retrieve",
+            "generate",
+            "validate",
+            "report"
+          ],
+          "grounding": null,
+          "confidence": null,
+          "review_required": null
+        }
+      ]
+    },
+    {
+      "document_key": "simple_png",
+      "document_filename": "backend/tests/agents/document_agent/test_data/simple_test.png",
+      "document_type": "PNG",
+      "total_queries": 1,
+      "successful": 0,
+      "failed": 1,
+      "success_rate": 0.0,
+      "avg_duration_ms": 621.9461000000592,
+      "total_tokens": 0,
+      "results": [
+        {
+          "document_key": "simple_png",
+          "query_index": 1,
+          "query": "Describe the visible text in this image.",
+          "difficulty": "simple",
+          "success": false,
+          "answer": null,
+          "error": "Unsupported file format: .png",
+          "duration_ms": 621.9461000000592,
+          "tokens_used": 0,
+          "provider": "cerebras",
+          "libraries": [],
+          "execution_steps": 0,
+          "status": "error",
+          "phase_trace": [
+            "understand",
+            "retrieve",
+            "generate",
+            "validate",
+            "report"
+          ],
+          "grounding": null,
+          "confidence": null,
+          "review_required": null
+        }
+      ]
+    },
+    {
+      "document_key": "unsupported_file",
+      "document_filename": "backend/tests/agents/document_agent/test_data/unsupported.xyz",
+      "document_type": "XYZ",
+      "total_queries": 1,
+      "successful": 0,
+      "failed": 1,
+      "success_rate": 0.0,
+      "avg_duration_ms": 638.090699998429,
+      "total_tokens": 0,
+      "results": [
+        {
+          "document_key": "unsupported_file",
+          "query_index": 1,
+          "query": "What does this file contain?",
+          "difficulty": "simple",
+          "success": false,
+          "answer": null,
+          "error": "Unsupported file format: .xyz",
+          "duration_ms": 638.090699998429,
+          "tokens_used": 0,
+          "provider": "cerebras",
+          "libraries": [],
+          "execution_steps": 0,
+          "status": "error",
+          "phase_trace": [
+            "understand",
+            "retrieve",
+            "generate",
+            "validate",
+            "report"
+          ],
+          "grounding": null,
+          "confidence": null,
+          "review_required": null
+        }
+      ]
+    },
+    {
+      "document_key": "corrupted_pdf",
+      "document_filename": "backend/tests/agents/document_agent/test_data/corrupted.pdf",
+      "document_type": "PDF",
+      "total_queries": 1,
+      "successful": 0,
+      "failed": 1,
+      "success_rate": 0.0,
+      "avg_duration_ms": 634.5354999939445,
+      "total_tokens": 0,
+      "results": [
+        {
+          "document_key": "corrupted_pdf",
+          "query_index": 1,
+          "query": "Can you read this document?",
+          "difficulty": "simple",
+          "success": false,
+          "answer": null,
+          "error": "Stream has ended unexpectedly",
+          "duration_ms": 634.5354999939445,
+          "tokens_used": 0,
+          "provider": "cerebras",
+          "libraries": [],
+          "execution_steps": 0,
+          "status": "error",
+          "phase_trace": [
+            "understand",
+            "retrieve",
+            "generate",
+            "validate",
+            "report"
+          ],
+          "grounding": null,
+          "confidence": null,
+          "review_required": null
+        }
+      ]
+    }
+  ]
+}
