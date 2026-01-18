@@ -2,7 +2,7 @@
   "id": "mail_agent",
   "owner_id": "orbimesh-vendor",
   "name": "Mail Agent",
-  "description": "Smart, stateful Gmail assistant. Understands context, drafts replies, summarizes batches, and extracts tasks from your inbox.",
+  "description": "Smart, stateful Gmail assistant. Understands context, drafts replies (use /draft_reply), sends emails (use /send_email), summarizes batches, and extracts tasks from your inbox. TO REPLY: Draft first, then use /send_email.",
   "agent_type": "http_rest",
   "version": "2.0.0",
   "status": "active",
@@ -152,7 +152,7 @@
     {
       "endpoint": "/send_email",
       "http_method": "POST",
-      "description": "Send a new email. Supports HTML, attachments, and PREVIEW. To pause and review draft, set show_preview=true first.",
+      "description": "Send a new email OR REPLY to an existing thread. To send a reply, use this endpoint with the draft content. Supports HTML, attachments, and PREVIEW. To pause and review draft, set show_preview=true first.",
       "parameters": [
         {
           "name": "to",

@@ -593,10 +593,27 @@ class GmailClient:
                     
                     return {"success": True, "data": processed_data}
                 elif "error" in result:
+                    error_obj = result.get("error", {})
+                    error_msg = str(error_obj) if isinstance(error_obj, dict) else str(error_obj)
+                    
+                    # Issue #36: Graceful error handling for NOT FOUND or INVALID ID
+                    is_not_found = "404" in error_msg or "not found" in error_msg.lower()
+                    is_invalid_id = "400" in error_msg or "invalid id" in error_msg.lower()
+                    
+                    if is_not_found or is_invalid_id:
+                        res_id = parameters.get('message_id', 'unknown')
+                        logger.warning(f"Resource error for {res_id}: {error_msg}")
+                        clean_msg = f"Email with ID '{res_id}' is invalid or not found. Please verify the ID."
+                        return {
+                            "success": False, 
+                            "error": clean_msg,
+                            "error_type": "RESOURCE_ERROR"
+                        }
+                    
                     self.metrics["api_calls"]["failed"] += 1
                     self.metrics["errors"]["total"] += 1
                     self.metrics["errors"]["api_errors"] += 1
-                    return {"success": False, "error": result["error"]}
+                    return {"success": False, "error": error_msg}
                 else:
                     # Assume success if no error
                     self.metrics["api_calls"]["successful"] += 1

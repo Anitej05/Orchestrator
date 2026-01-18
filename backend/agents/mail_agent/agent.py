@@ -51,6 +51,122 @@ class DialogueManager:
             dialogue_store[task_id].status = "active"
             dialogue_store[task_id].current_question = None
 
+# ==================== SMART DATA RESOLVER ====================
+
+class SmartDataResolver:
+    """
+    Self-Resolving Pipeline System.
+    
+    Each step can reliably get the data it needs through:
+    1. History (fast path) - if recent search matches the requirement
+    2. Inline fetch (reliable path) - if history unavailable or irrelevant
+    
+    This ensures steps NEVER fail due to missing data.
+    """
+    
+    def __init__(self, gmail_client, memory):
+        self.gmail = gmail_client
+        self.memory = memory
+    
+    async def resolve_message_ids(
+        self, 
+        step_params: dict, 
+        user_id: str = "me",
+        single_id: bool = False
+    ) -> list:
+        """
+        Smart resolution of message IDs for any step.
+        
+        Resolution order:
+        1. Explicit message_id/message_ids in params → Use directly
+        2. target_query specified → Execute search to get IDs
+        3. use_history=True → Try history (with optional validation)
+        4. Fallback → Return empty list (step will handle error)
+        
+        Args:
+            step_params: The step parameters from LLM
+            user_id: Gmail user ID
+            single_id: If True, return just the first ID (for draft_reply)
+            
+        Returns:
+            List of message IDs, or single ID string if single_id=True
+        """
+        resolved_ids = []
+        
+        # Method 1: Explicit IDs provided
+        if step_params.get("message_id"):
+            msg_id = step_params["message_id"]
+            # Check if it's a valid ID (not a template variable)
+            if not self._is_template_variable(msg_id):
+                logger.info(f"[RESOLVER] Using explicit message_id: {msg_id}")
+                resolved_ids = [msg_id]
+        
+        if step_params.get("message_ids") and not resolved_ids:
+            msg_ids = step_params["message_ids"]
+            if isinstance(msg_ids, list) and msg_ids and not self._is_template_variable(msg_ids[0]):
+                logger.info(f"[RESOLVER] Using explicit message_ids: {len(msg_ids)} IDs")
+                resolved_ids = msg_ids
+        
+        # Method 2: target_query specified - Execute inline search (MOST RELIABLE)
+        if not resolved_ids and step_params.get("target_query"):
+            query = step_params["target_query"]
+            max_results = step_params.get("max_results", 10)
+            logger.info(f"[RESOLVER] Fetching via target_query: '{query}'")
+            
+            # Execute inline search
+            search_result = await self.gmail.semantic_search(query, max_results, user_id)
+            if search_result.get("success"):
+                messages = search_result.get("data", {}).get("messages", [])
+                resolved_ids = [msg.get("id") for msg in messages if msg.get("id")]
+                # Also save to memory for potential future use
+                if resolved_ids:
+                    self.memory.save_search_results(user_id, resolved_ids)
+                logger.info(f"[RESOLVER] Inline search found {len(resolved_ids)} emails for: '{query}'")
+            else:
+                logger.warning(f"[RESOLVER] Inline search failed for: '{query}'")
+        
+        # Method 3: use_history - Try history as fallback
+        if not resolved_ids and step_params.get("use_history"):
+            history_ids = self.memory.get_last_search_results(user_id) or []
+            if history_ids:
+                logger.info(f"[RESOLVER] Using {len(history_ids)} IDs from history")
+                resolved_ids = history_ids
+            else:
+                logger.warning(f"[RESOLVER] use_history=True but no history available")
+                # If we have a fallback query, try it
+                if step_params.get("fallback_query"):
+                    query = step_params["fallback_query"]
+                    logger.info(f"[RESOLVER] Trying fallback_query: '{query}'")
+                    search_result = await self.gmail.semantic_search(query, 10, user_id)
+                    if search_result.get("success"):
+                        messages = search_result.get("data", {}).get("messages", [])
+                        resolved_ids = [msg.get("id") for msg in messages if msg.get("id")]
+                        if resolved_ids:
+                            self.memory.save_search_results(user_id, resolved_ids)
+                        logger.info(f"[RESOLVER] Fallback search found {len(resolved_ids)} emails")
+        
+        # Return based on single_id flag
+        if single_id:
+            return resolved_ids[0] if resolved_ids else None
+        return resolved_ids
+    
+    def _is_template_variable(self, value) -> bool:
+        """Detect if a value is a template variable that needs resolution."""
+        if not value or not isinstance(value, str):
+            return False
+        template_patterns = ['{{', '}}', '${', '$search', 'search_result', 'result[', 
+                             'previous_result', 'history[', '{result']
+        return any(pattern in str(value).lower() for pattern in template_patterns)
+
+# Initialize the smart resolver (will be set after gmail_client is initialized)
+smart_resolver = None
+
+def init_smart_resolver():
+    """Initialize the smart resolver after all dependencies are ready."""
+    global smart_resolver
+    smart_resolver = SmartDataResolver(gmail_client, agent_memory)
+    logger.info("[RESOLVER] Smart Data Resolver initialized")
+
 # ==================== CENTRAL INTELLIGENCE ====================
 
 class CentralAgent:
@@ -86,37 +202,29 @@ class CentralAgent:
         if not target_ids:
              return {"success": True, "data": {"summary": "No emails found to summarize. The search returned zero results.", "sources": [], "count": 0}}
 
-        # MAP-REDUCE: Process in batches to handle large volumes (e.g., 50+)
-        BATCH_SIZE = 10
-        chunk_summaries = []
+        # COLLECT ALL BODIES: Fetch in batches but summarize globally for best context
+        BATCH_SIZE = 15 # Increased fetch batch size
+        all_bodies = []
         all_sources = []
         
-        logger.info(f"Summarizing {len(target_ids)} emails in batches of {BATCH_SIZE}...")
+        logger.info(f"Fetching {len(target_ids)} emails for global high-fidelity processing...")
         
         for i in range(0, len(target_ids), BATCH_SIZE):
             batch_ids = target_ids[i : i + BATCH_SIZE]
-            logger.info(f"  Processing batch {i//BATCH_SIZE + 1} ({len(batch_ids)} emails)...")
-            
             emails = await self.gmail.batch_fetch_emails(batch_ids, user_id)
             if not emails:
                 continue
-                
-            batch_texts = [f"Subject: {e['subject']}\nFrom: {e['from']}\nContent:\n{e['body']}" for e in emails]
-            all_sources.extend([e["subject"] for e in emails])
             
-            # Summarize this batch
-            if batch_texts:
-                batch_summary = await self.llm.summarize_text_batch(batch_texts)
-                chunk_summaries.append(batch_summary)
+            for e in emails:
+                body_token = f"--- EMAIL {len(all_bodies)+1} ---\nSubject: {e['subject']}\nFrom: {e['from']}\nContent:\n{e['body']}"
+                all_bodies.append(body_token)
+                all_sources.append(e["subject"])
         
-        # FINAL REDUCE: Summarize the batch summaries
-        if not chunk_summaries:
-            final_summary = "Could not retrieve content for any emails."
-        elif len(chunk_summaries) == 1:
-            final_summary = chunk_summaries[0]
-        else:
-            logger.info(f"  Reducing {len(chunk_summaries)} batch summaries into final summary...")
-            final_summary = await self.llm.summarize_text_batch(chunk_summaries)
+        if not all_bodies:
+            return {"success": True, "data": {"summary": "Could not retrieve content for any emails.", "sources": [], "count": 0}}
+
+        # GLOBAL PROCESSING: One call handles Urgency Pass and Recursive Map-Reduce
+        final_summary = await self.llm.summarize_text_batch(all_bodies)
         
         self.memory.add_turn(user_id, f"Summarize {len(target_ids)} emails", final_summary[:100], "summarize")
         return {"success": True, "data": {"summary": final_summary, "sources": all_sources}}
@@ -129,7 +237,7 @@ class CentralAgent:
             {"message_id": request.message_id, "format": "full", "user_id": request.user_id}
         )
         if not thread_res.get("success"):
-            return {"success": False, "error": "Could not fetch original email"}
+            return {"success": False, "error": thread_res.get("error", "Could not fetch original email")}
             
         data = thread_res.get("data", {})
         thread_context = f"Sender: {data.get('from')}\nSubject: {data.get('subject')}\nBody:\n{data.get('body')}"
@@ -140,7 +248,14 @@ class CentralAgent:
         # 3. Store in memory
         self.memory.add_turn(request.user_id, f"Draft reply: {request.intent}", f"Subject: {draft['subject']}", "draft_reply")
         
-        return {"success": True, "data": draft}
+        return {
+            "success": True, 
+            "data": {
+                **draft,
+                "to": [data.get('from')],  # Explicitly provide recipient to prevent Orchestrator guessing
+                "original_message_id": request.message_id
+            }
+        }
 
     async def extract_actions(self, request: ExtractActionItemsRequest) -> Dict[str, Any]:
         """Extract Todo items from emails"""
@@ -153,10 +268,20 @@ class CentralAgent:
         if not target_ids:
             return {"success": False, "error": "No emails to scan."}
             
-        emails = await self.gmail.batch_fetch_emails(target_ids, user_id)
-        texts = [f"{e['subject']}\n{e['body']}" for e in emails]
-        
-        actions = await self.llm.extract_actions(texts)
+        # GLOBAL COLLECTION for lossless extraction
+        all_texts = []
+        BATCH_SIZE = 15
+        for i in range(0, len(target_ids), BATCH_SIZE):
+            batch_ids = target_ids[i : i + BATCH_SIZE]
+            emails = await self.gmail.batch_fetch_emails(batch_ids, user_id)
+            if not emails: continue
+            all_texts.extend([f"Subject: {e['subject']}\nFrom: {e['from']}\nContent:\n{e['body']}" for e in emails])
+
+        if not all_texts:
+            return {"success": False, "error": "Could not retrieve content for any emails."}
+            
+        # High-fidelity Extraction pass
+        actions = await self.llm.extract_actions(all_texts)
         
         self.memory.add_turn(user_id, "Extract actions", f"Found {len(actions)} items", "extract_actions")
         return {"success": True, "data": {"actions": actions, "count": len(actions)}}
@@ -571,6 +696,11 @@ async def execute_action(message: OrchestratorMessage):
                 steps = decomposition.get("steps", [])
                 logger.info(f"[PLAN] [COMPLEX] Decomposed into {len(steps)} steps: {[s.get('action') for s in steps]}")
                 
+                # Initialize smart resolver if not already done
+                global smart_resolver
+                if smart_resolver is None:
+                    init_smart_resolver()
+                
                 # Execute steps sequentially
                 results = []
                 step_failed = False
@@ -597,9 +727,19 @@ async def execute_action(message: OrchestratorMessage):
                             else: execution_error = op_res.error
 
                         elif "summarize" in step_action or "summary" in step_action:
+                            # SMART RESOLVER: Get message IDs from target_query or history
+                            message_ids = await smart_resolver.resolve_message_ids(
+                                step_params,
+                                user_id="me",
+                                single_id=False
+                            )
+                            
+                            if message_ids:
+                                logger.info(f"[SMART] Resolved {len(message_ids)} emails for summarize")
+                            
                             req = SummarizeRequest(
-                                message_ids=step_params.get("message_ids"),
-                                use_history=True,
+                                message_ids=message_ids if message_ids else None,
+                                use_history=True if not message_ids else False,  # Fallback to history if resolver failed
                                 user_id=step_params.get("user_id", "me")
                             )
                             op_res = await summarize_emails(req)
@@ -607,10 +747,17 @@ async def execute_action(message: OrchestratorMessage):
                             else: execution_error = op_res.error
                             
                         elif "archive" in step_action:
+                            # SMART RESOLVER
+                            message_ids = await smart_resolver.resolve_message_ids(
+                                step_params,
+                                user_id="me",
+                                single_id=False
+                            )
+                            
                             req = ManageEmailsRequest(
-                                message_ids=step_params.get("message_ids"),
+                                message_ids=message_ids if message_ids else None,
                                 action=EmailAction.ARCHIVE,
-                                use_history=True,
+                                use_history=True if not message_ids else False,
                                 user_id=step_params.get("user_id", "me")
                             )
                             op_res = await manage_emails(req)
@@ -618,14 +765,33 @@ async def execute_action(message: OrchestratorMessage):
                             else: execution_error = op_res.error
 
                         elif "mark" in step_action or "label" in step_action or "important" in step_action:
-                            email_action = EmailAction.STAR if "important" in step_action or "star" in step_action else EmailAction.ADD_LABELS
-                            labels = step_params.get("labels", ["IMPORTANT"]) if email_action == EmailAction.ADD_LABELS else None
+                            # SMART RESOLVER: Get message IDs
+                            message_ids = await smart_resolver.resolve_message_ids(
+                                step_params,
+                                user_id="me",
+                                single_id=False
+                            )
+                            
+                            # Issue: Normalization for tests (Issue #11: Smart normalization)
+                            labels = step_params.get("labels", [])
+                            if isinstance(labels, list) and any(l.lower() == "archive" for l in labels):
+                                email_action = EmailAction.ARCHIVE
+                                labels = None
+                            elif isinstance(labels, list) and any(l.lower() == "read" for l in labels):
+                                email_action = EmailAction.MARK_READ
+                                labels = None
+                            elif "important" in step_action or "star" in step_action:
+                                email_action = EmailAction.STAR
+                                labels = None
+                            else:
+                                email_action = EmailAction.ADD_LABELS
+                                if not labels: labels = ["IMPORTANT"]
                             
                             req = ManageEmailsRequest(
-                                message_ids=step_params.get("message_ids"),
+                                message_ids=message_ids if message_ids else None,
                                 action=email_action,
                                 labels=labels,
-                                use_history=True,
+                                use_history=True if not message_ids else False,
                                 user_id=step_params.get("user_id", "me")
                             )
                             op_res = await manage_emails(req)
@@ -633,53 +799,86 @@ async def execute_action(message: OrchestratorMessage):
                             else: execution_error = op_res.error
 
                         elif "draft" in step_action:
+                            # SMART RESOLVER: Self-sufficient data fetching
+                            # Can use target_query, use_history, or fallback_query
+                            message_id = await smart_resolver.resolve_message_ids(
+                                step_params, 
+                                user_id="me", 
+                                single_id=True
+                            )
+                            
+                            if not message_id:
+                                execution_error = "Could not resolve message_id. Please specify which email to reply to."
+                                continue
+                            
+                            logger.info(f"[SMART] Resolved message_id: {message_id}")
+                            
                             req = DraftReplyRequest(
-                                message_id=step_params.get("message_id"), 
+                                message_id=message_id, 
                                 intent=step_params.get("intent", "Reply politely"),
                                 user_id=step_params.get("user_id", "me")
                             )
-                            # Basic context resolution for message_id if missing and use_history is true
-                            if not req.message_id and step_params.get("use_history"):
-                                last_ids = agent_memory.get_last_search_results("me")
-                                if last_ids: req.message_id = last_ids[0]
 
                             op_res = await central_agent.draft_reply(req)
                             if op_res["success"]: result = op_res["data"]
                             else: execution_error = op_res.get("error")
 
                         elif "download" in step_action:
-                            # Resolve message_id from history if needed
-                            msg_id = step_params.get("message_id")
+                            all_downloaded_files = []
+                            total_size_bytes = 0
                             
-                            # HELPER: Check plural 'message_ids' if singular is missing
-                            if not msg_id and step_params.get("message_ids"):
-                                ids = step_params.get("message_ids")
-                                if isinstance(ids, list) and len(ids) > 0: msg_id = ids[0]
-                                elif isinstance(ids, str): msg_id = ids
-                                
-                            if not msg_id and step_params.get("use_history"):
-                                last_ids = agent_memory.get_last_search_results("me")
-                                if last_ids: msg_id = last_ids[0]
+                            # SMART RESOLVER: Self-sufficient data fetching
+                            msg_ids = await smart_resolver.resolve_message_ids(
+                                step_params,
+                                user_id="me",
+                                single_id=False
+                            )
                             
-                            if not msg_id:
-                                execution_error = "No message_id provided for download"
+                            if not msg_ids:
+                                execution_error = "Could not resolve message_ids for download. Please specify which emails."
                             else:
-                                req = DownloadAttachmentsRequest(
-                                    message_id=msg_id,
-                                    thread_id=step_params.get("thread_id"),
-                                    user_id=step_params.get("user_id", "me")
-                                )
+                                logger.info(f"[SMART] Resolved {len(msg_ids)} emails for download")
+                                logger.info(f"[BATCH] Downloading attachments from {len(msg_ids)} emails...")
+                                for msg_id in msg_ids:
+                                    try:
+                                        dl_res = await gmail_client.download_email_attachments(
+                                            message_id=msg_id,
+                                            thread_id=step_params.get("thread_id"),
+                                            user_id=step_params.get("user_id", "me")
+                                        )
+                                        if dl_res.get("success") and dl_res.get("files"):
+                                            for f in dl_res["files"]:
+                                                all_downloaded_files.append(f)
+                                                # Properly track and sum sizes (Issue #10)
+                                                total_size_bytes += f.get("size", 0)
+                                    except Exception as e:
+                                        logger.warning(f"Failed to download from {msg_id}: {e}")
                                 
-                                try:
-                                    dl_res = await gmail_client.download_email_attachments(
-                                        message_id=req.message_id,
-                                        thread_id=req.thread_id,
-                                        user_id=req.user_id
-                                    )
-                                    if dl_res["success"]: result = dl_res
-                                    else: execution_error = dl_res.get("error")
-                                except Exception as e:
-                                    execution_error = str(e)
+                                result = {
+                                    "files": all_downloaded_files,
+                                    "total_files": len(all_downloaded_files),
+                                    "total_size_mb": round(total_size_bytes / (1024 * 1024), 2)
+                                }
+
+                        elif "extract" in step_action or "action" in step_action:
+                            # SMART RESOLVER: Get message IDs
+                            message_ids = await smart_resolver.resolve_message_ids(
+                                step_params,
+                                user_id="me",
+                                single_id=False
+                            )
+                            
+                            if message_ids:
+                                logger.info(f"[SMART] Resolved {len(message_ids)} emails for extract_actions")
+                            
+                            req = ExtractActionItemsRequest(
+                                message_ids=message_ids if message_ids else None,
+                                use_history=True if not message_ids else False,
+                                user_id=step_params.get("user_id", "me")
+                            )
+                            op_res = await extract_action_items(req)
+                            if op_res.success: result = op_res.result
+                            else: execution_error = op_res.error
 
                         elif "send" in step_action:
                             # Handling sending email with attachments
