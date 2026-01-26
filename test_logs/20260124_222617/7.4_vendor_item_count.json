@@ -1,0 +1,27 @@
+{
+  "test_id": "7.4_vendor_item_count",
+  "file": "DENISCO_CHEMICALS_PRIVATE_LIMITEDMaterial_Received_Note__MRN__677045.xlsx",
+  "query": "How many different items did each vendor supply? Show top 10.",
+  "success": true,
+  "response": {
+    "status": "needs_input",
+    "success": true,
+    "result": null,
+    "error": null,
+    "question": "Which column in the dataset should be considered the vendor identifier for this analysis (e.g., 'voucher_no', 'cost_center_name', or another column)?",
+    "question_type": "text",
+    "options": null,
+    "context": {
+      "task_id": "task-5"
+    },
+    "canvas_display": null,
+    "standard_response": null,
+    "metrics": null
+  },
+  "error": null,
+  "execution_time": 3.212368,
+  "status_code": 200,
+  "description": "Group by Vendor, count distinct items, top 10",
+  "expected_column": "Vendor Account Name",
+  "file_key": "MRN"
+}

@@ -1,0 +1,27 @@
+{
+  "test_id": "6.3_top_vendors_mrn",
+  "file": "DENISCO_CHEMICALS_PRIVATE_LIMITEDMaterial_Received_Note__MRN__677045.xlsx",
+  "query": "Which are the top 5 vendors by total quantity received?",
+  "success": true,
+  "response": {
+    "status": "needs_input",
+    "success": true,
+    "result": null,
+    "error": null,
+    "question": "Which column in the dataset represents the vendor (or supplier) that you want to rank by total quantity received?",
+    "question_type": "text",
+    "options": null,
+    "context": {
+      "task_id": "task-3"
+    },
+    "canvas_display": null,
+    "standard_response": null,
+    "metrics": null
+  },
+  "error": null,
+  "execution_time": 3.789628,
+  "status_code": 200,
+  "description": "Group by vendor, sum quantity, top 5",
+  "expected_column": "Vendor Account Name",
+  "file_key": "MRN"
+}

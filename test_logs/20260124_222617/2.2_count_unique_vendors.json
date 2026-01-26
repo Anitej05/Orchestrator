@@ -1,0 +1,27 @@
+{
+  "test_id": "2.2_count_unique_vendors",
+  "file": "DENISCO_CHEMICALS_PRIVATE_LIMITEDMaterial_Received_Note__MRN__677045.xlsx",
+  "query": "How many unique vendors are there?",
+  "success": true,
+  "response": {
+    "status": "needs_input",
+    "success": true,
+    "result": null,
+    "error": null,
+    "question": "Which column in the data represents the vendor information you want to count unique values for?",
+    "question_type": "text",
+    "options": null,
+    "context": {
+      "task_id": "task-0"
+    },
+    "canvas_display": null,
+    "standard_response": null,
+    "metrics": null
+  },
+  "error": null,
+  "execution_time": 2.144421,
+  "status_code": 200,
+  "description": "Count unique vendors in MRN - uses Vendor Account Name",
+  "expected_column": "Vendor Account Name",
+  "file_key": "MRN"
+}

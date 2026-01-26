@@ -2,421 +2,180 @@
   "id": "spreadsheet_agent",
   "owner_id": "orbimesh-vendor",
   "name": "Spreadsheet Agent",
-  "description": "PRIORITY AGENT for ALL CSV and Excel files (.csv, .xlsx, .xls). Use this agent EXCLUSIVELY for any spreadsheet file. Handles display, analysis, and modification. DO NOT use Document Agent for CSV files.",
+  "description": "PRIORITY AGENT for ALL CSV and Excel files (.csv, .xlsx, .xls). Use this agent EXCLUSIVELY for any spreadsheet file. Unified LLM-powered interface for display, analysis, queries, and transformations. DO NOT use Document Agent for CSV files.",
   "agent_type": "http_rest",
-  "version": "1.0.0",
+  "version": "3.0.0",
   "status": "active",
   "price_per_call_usd": 0.002,
   "requires_credentials": false,
   "credential_fields": [],
   "connection_config": {
-    "base_url": "http://localhost:8041"
+    "base_url": "http://localhost:9000"
   },
   "endpoints": [
     {
       "endpoint": "/execute",
       "http_method": "POST",
       "request_format": "form",
-      "description": "Execute any spreadsheet task from natural language instruction. ORCHESTRATOR COMPATIBILITY ENDPOINT. Routes to appropriate specialized endpoint based on instruction content. USE for any spreadsheet operation when unsure of specific endpoint. LLM-DRIVEN.",
+      "description": "UNIFIED execution endpoint for ALL spreadsheet operations. Supports: file upload (include 'file'), natural language queries (include 'prompt'), and direct actions (include 'action' + 'params'). LLM-powered task decomposition handles complex multi-step operations automatically.",
       "parameters": [
         {
-          "name": "instruction",
-          "param_type": "string",
-          "required": true,
-          "description": "Natural language instruction describing the task to perform."
-        },
-        {
-          "name": "file_id",
-          "param_type": "string",
-          "required": true,
-          "description": "The file_id from /upload endpoint."
-        },
-        {
-          "name": "thread_id",
+          "name": "prompt",
           "param_type": "string",
           "required": false,
-          "description": "Conversation thread ID for multi-turn sessions."
-        }
-      ]
-    },
-    {
-      "endpoint": "/upload",
-      "http_method": "POST",
-      "request_format": "form",
-      "description": "Register new spreadsheet file for operations. USE as first step for all CSV/Excel files. DO NOT USE for existing file_ids. CREATES FILE. DETERMINISTIC.",
-      "parameters": [
-        {
-          "name": "file",
-          "param_type": "file",
-          "required": true,
-          "description": "The CSV or Excel file to upload."
-        }
-      ]
-    },
-    {
-      "endpoint": "/display",
-      "http_method": "POST",
-      "request_format": "form",
-      "description": "Show spreadsheet preview in canvas. USE for viewing data structure. DO NOT USE for analysis or questions. READ-ONLY. DETERMINISTIC.",
-      "parameters": [
-        {
-          "name": "file_id",
-          "param_type": "string",
-          "required": true,
-          "description": "The file_id from /upload endpoint."
+          "description": "Natural language instruction. Examples: 'What is the total revenue?', 'Add a profit margin column'. If omitted but a file is loaded, defaults to a summary."
         },
         {
-          "name": "display_mode",
+          "name": "action",
           "param_type": "string",
           "required": false,
-          "description": "Display mode: 'full' (all rows), 'head' (first 10), 'tail' (last 10), 'sample' (random 10). Default: 'full'."
-        },
-        {
-          "name": "max_rows",
-          "param_type": "integer",
-          "required": false,
-          "description": "Maximum rows to display. Default: 100."
-        }
-      ]
-    },
-    {
-      "endpoint": "/execute_pandas",
-      "http_method": "POST",
-      "request_format": "form",
-      "description": "Execute single-step spreadsheet transformation from instruction. USE for simple edits. DO NOT USE for complex multi-step operations (use /plan_operation). MODIFIES DATA. LLM-DRIVEN.",
-      "parameters": [
-        {
-          "name": "file_id",
-          "param_type": "string",
-          "required": true,
-          "description": "The file_id from /upload endpoint."
-        },
-        {
-          "name": "instruction",
-          "param_type": "string",
-          "required": false,
-          "description": "Natural language instruction. Examples: 'add a Sl.No. column', 'rename Feature1 to Subject1', 'add Total column summing each row'. If not provided, defaults to category aggregation."
-        },
-        {
-          "name": "show_result",
-          "param_type": "boolean",
-          "required": false,
-          "description": "Whether to show the result in canvas. Default: true."
-        }
-      ]
-    },
-    {
-      "endpoint": "/query",
-      "http_method": "POST",
-      "request_format": "form",
-      "description": "Execute pandas query string for filtering or assignment. USE for SQL-like filtering. DO NOT USE for open-ended questions. READ-ONLY OR MODIFIES (depends on expression). DETERMINISTIC.",
-      "parameters": [
-        {
-          "name": "file_id",
-          "param_type": "string",
-          "required": true,
-          "description": "The file_id from /upload endpoint."
-        },
-        {
-          "name": "query",
-          "param_type": "string",
-          "required": true,
-          "description": "Pandas query string for filtering (e.g., 'age > 28') OR assignment expression (e.g., 'Total = Feature1 + Feature2')."
-        }
-      ]
-    },
-    {
-      "endpoint": "/simulate_operation",
-      "http_method": "POST",
-      "request_format": "form",
-      "description": "Test pandas code without saving changes. USE for previewing operations. DO NOT USE for actual execution. READ-ONLY. DETERMINISTIC.",
-      "parameters": [
-        {
-          "name": "file_id",
-          "param_type": "string",
-          "required": true,
-          "description": "The file_id from /upload endpoint."
-        },
-        {
-          "name": "pandas_code",
-          "param_type": "string",
-          "required": true,
-          "description": "Pandas code to simulate (e.g., 'df = df[df[\"Sales\"] > 100]')."
-        }
-      ]
-    },
-    {
-      "endpoint": "/plan_operation",
-      "http_method": "POST",
-      "request_format": "form",
-      "description": "Execute multi-step transformations with approval workflow (propose, revise, simulate, execute). USE for complex operations requiring confirmation. DO NOT USE for simple reads or single-step edits. MODIFIES DATA. CONFIRMATION REQUIRED. LLM-DRIVEN.",
-      "parameters": [
-        {
-          "name": "file_id",
-          "param_type": "string",
-          "required": true,
-          "description": "The file_id from /upload endpoint."
-        },
-        {
-          "name": "instruction",
-          "param_type": "string",
-          "required": false,
-          "description": "For 'propose' stage: natural language instruction (e.g., 'Add a Total column and filter rows > 1000'). For 'revise': JSON {\"plan_id\": \"uuid\", \"feedback\": \"string\"}. For 'simulate'/'execute': JSON {\"plan_id\": \"uuid\"}. If not provided, defaults to category aggregation."
-        },
-        {
-          "name": "stage",
-          "param_type": "string",
-          "required": false,
-          "description": "Planning stage: 'propose' (returns canvas_display requiring confirmation), 'revise' (adjusts plan based on feedback), 'simulate' (tests on copy, returns before/after), 'execute' (applies to actual data). Default: 'propose'."
-        },
-        {
-          "name": "thread_id",
-          "param_type": "string",
-          "required": false,
-          "description": "Conversation thread ID for multi-turn sessions. Optional."
-        }
-      ],
-      "response_schema": {
-        "propose": {
-          "success": true,
-          "result": {
-            "status": "plan_ready",
-            "plan_id": "uuid string for tracking",
-            "message": "string"
-          },
-          "canvas_display": {
-            "canvas_type": "spreadsheet_plan",
-            "requires_confirmation": true,
-            "canvas_data": {
-              "headers": ["Step", "Action", "Description"],
-              "rows": [["1", "Action Type", "Description"], "..."],
-              "plan_summary": "reasoning",
-              "estimated_steps": 3
-            }
-          }
-        },
-        "execute": {
-          "success": true,
-          "result": {
-            "status": "executed",
-            "execution": {
-              "actions_executed": 3,
-              "success": true
-            },
-            "shape": [100, 5],
-            "columns": ["col1", "col2", "..."],
-            "preview": "[...]"
-          }
-        }
-      }
-    },
-    {
-      "endpoint": "/nl_query",
-      "http_method": "POST",
-      "request_format": "json",
-      "description": "Answer analytical questions with iterative reasoning. USE ONLY for open-ended analysis (why/how/anomaly detection). DO NOT USE for summaries, previews, or schema info. READ-ONLY. LLM-DRIVEN.",
-      "parameters": [
-        {
-          "name": "file_id",
-          "param_type": "string",
-          "required": true,
-          "description": "The file_id from /upload endpoint."
-        },
-        {
-          "name": "question",
-          "param_type": "string",
-          "required": true,
-          "description": "Natural language question about the data."
-        },
-        {
-          "name": "max_iterations",
-          "param_type": "integer",
-          "required": false,
-          "description": "Maximum reasoning iterations for complex queries. Default: 5."
-        }
-      ]
-    },
-    {
-      "endpoint": "/get_summary",
-      "http_method": "POST",
-      "request_format": "form",
-      "description": "Retrieve spreadsheet structure and basic statistics. PRIMARY ROUTE for overview, size, headers, dtypes. DO NOT USE for analysis or questions. READ-ONLY. DETERMINISTIC.",
-      "parameters": [
-        {
-          "name": "file_id",
-          "param_type": "string",
-          "required": true,
-          "description": "The file_id from /upload endpoint."
-        }
-      ]
-    },
-    {
-      "endpoint": "/get_column_stats",
-      "http_method": "POST",
-      "request_format": "form",
-      "description": "Calculate descriptive statistics for single column. USE for specific column analysis. DO NOT USE for multi-column or open-ended questions. READ-ONLY. DETERMINISTIC.",
-      "parameters": [
-        {
-          "name": "file_id",
-          "param_type": "string",
-          "required": true,
-          "description": "The file_id from /upload endpoint."
-        },
-        {
-          "name": "column_name",
-          "param_type": "string",
-          "required": true,
-          "description": "The name of the column to get statistics for."
-        }
-      ]
-    },
-    {
-      "endpoint": "/transform",
-      "http_method": "POST",
-      "request_format": "form",
-      "description": "Apply standard operations (filter, sort, group, deduplicate, fillna). USE for common transformations. DO NOT USE for complex multi-step operations. MODIFIES DATA. DETERMINISTIC.",
-      "parameters": [
-        {
-          "name": "file_id",
-          "param_type": "string",
-          "required": true,
-          "description": "The file_id from /upload endpoint."
-        },
-        {
-          "name": "operation",
-          "param_type": "string",
-          "required": false,
-          "description": "Operation: 'filter', 'sort', 'group', 'drop_duplicates', 'fillna'. If not provided, defaults to 'group'."
+          "description": "Direct action name: 'filter', 'sort', 'aggregate', 'add_column', 'drop_column', 'transform', 'export'. Use with 'params' for programmatic access."
         },
         {
           "name": "params",
           "param_type": "string",
           "required": false,
-          "description": "JSON string with operation parameters. If not provided, defaults to category aggregation."
+          "description": "JSON string with action parameters. Required when using 'action' parameter."
         },
         {
-          "name": "instruction",
+          "name": "file",
+          "param_type": "file",
+          "required": false,
+          "description": "CSV or Excel file to upload. Include this to register a new file for operations."
+        },
+        {
+          "name": "thread_id",
           "param_type": "string",
           "required": false,
-          "description": "Alternative: Natural language instruction instead of operation/params."
+          "description": "Conversation thread ID for multi-turn sessions. Files and context persist within a thread."
+        },
+        {
+          "name": "task_id",
+          "param_type": "string",
+          "required": false,
+          "description": "Task ID for resuming paused operations (use with /continue endpoint)."
         }
       ]
     },
     {
-      "endpoint": "/compare",
+      "endpoint": "/execute/json",
       "http_method": "POST",
       "request_format": "json",
-      "description": "Compare multiple spreadsheets for schema and row differences. PRIMARY ROUTE for file comparison. USE for identifying changes between files. DO NOT USE for single-file analysis. READ-ONLY (creates artifact if non-JSON format). DETERMINISTIC.",
+      "description": "JSON body version of /execute for programmatic access. Same functionality as /execute but accepts JSON body instead of form data.",
       "parameters": [
         {
-          "name": "file_ids",
-          "param_type": "array",
-          "required": true,
-          "description": "Array of file_ids (minimum 2) to compare. Auto-injected by orchestrator from uploaded_files."
-        },
-        {
-          "name": "comparison_mode",
+          "name": "prompt",
           "param_type": "string",
           "required": false,
-          "description": "Comparison mode: 'schema_only' (columns/types), 'schema_and_key' (schema + row diff by key), 'full_diff' (all rows). Default: 'schema_and_key'."
+          "description": "Natural language instruction."
         },
         {
-          "name": "key_columns",
-          "param_type": "array",
-          "required": false,
-          "description": "List of column names to use as keys for row comparison. Auto-detected if omitted."
-        },
-        {
-          "name": "output_format",
+          "name": "action",
           "param_type": "string",
           "required": false,
-          "description": "Output format: 'json', 'csv', 'markdown'. Default: 'json'."
+          "description": "Direct action name."
+        },
+        {
+          "name": "params",
+          "param_type": "object",
+          "required": false,
+          "description": "Action parameters as object."
         },
         {
           "name": "thread_id",
           "param_type": "string",
           "required": false,
-          "description": "Conversation thread ID for multi-turn sessions."
-        }
-      ],
-      "response_schema": {
-        "success": true,
-        "result": {
-          "comparison_summary": "string",
-          "diff_artifact_id": "uuid for diff report file",
-          "schema_diff": {
-            "common_columns": ["col1", "col2"],
-            "unique_columns": {"file1": ["col_a"], "file2": ["col_b"]},
-            "dtype_mismatches": {"col1": {"file1": "int64", "file2": "float64"}}
-          },
-          "row_diff": {
-            "added": {"file2": 10},
-            "removed": {"file1": 5},
-            "changed": 3
-          }
+          "description": "Thread ID for session persistence."
         },
-        "canvas_display": {
-          "type": "json",
-          "content": "diff report preview"
+        {
+          "name": "file_content",
+          "param_type": "string",
+          "required": false,
+          "description": "Base64-encoded file content for uploads."
+        },
+        {
+          "name": "filename",
+          "param_type": "string",
+          "required": false,
+          "description": "Filename when using file_content."
+        },
+        {
+          "name": "file_path",
+          "param_type": "string",
+          "required": false,
+          "description": "Full local file path to load. Used by orchestrator to pass spreadsheet location."
+        },
+        {
+          "name": "file_id",
+          "param_type": "string",
+          "required": false,
+          "description": "File ID for referencing an already-uploaded spreadsheet file."
         }
-      }
+      ]
     },
     {
-      "endpoint": "/merge",
+      "endpoint": "/continue",
       "http_method": "POST",
       "request_format": "json",
-      "description": "Combine multiple spreadsheets into one file via join/union/concat. PRIMARY ROUTE for merging files. USE for joining or stacking data. DO NOT USE for single-file operations. CREATES NEW FILE. DETERMINISTIC.",
+      "description": "Resume a paused task with user input. Use when /execute returns status='needs_input' and a task_id.",
       "parameters": [
         {
-          "name": "file_ids",
-          "param_type": "array",
+          "name": "task_id",
+          "param_type": "string",
           "required": true,
-          "description": "Array of file_ids (minimum 2) to merge. Auto-injected by orchestrator from uploaded_files."
+          "description": "The task_id returned from /execute when status was 'needs_input'."
         },
         {
-          "name": "merge_type",
+          "name": "user_response",
           "param_type": "string",
-          "required": false,
-          "description": "Merge type: 'join' (SQL-like join), 'union' (stack with matching columns), 'concat' (stack all columns). Default: 'join'."
-        },
-        {
-          "name": "join_type",
-          "param_type": "string",
-          "required": false,
-          "description": "Join type for 'join' merge: 'inner', 'outer', 'left', 'right'. Default: 'inner'."
-        },
-        {
-          "name": "key_columns",
-          "param_type": "array",
-          "required": false,
-          "description": "List of column names to use as join keys. Required for 'join' merge. Auto-detected if omitted."
-        },
-        {
-          "name": "output_filename",
-          "param_type": "string",
-          "required": false,
-          "description": "Name for merged file. Default: 'merged_TIMESTAMP.xlsx'."
+          "required": true,
+          "description": "User's response to the clarification question."
         },
         {
           "name": "thread_id",
           "param_type": "string",
           "required": false,
-          "description": "Conversation thread ID for multi-turn sessions."
+          "description": "Thread ID for session context."
         }
-      ],
-      "response_schema": {
-        "success": true,
-        "result": {
-          "merged_file_id": "uuid for new merged file",
-          "merge_summary": "string",
-          "shape": [100, 10],
-          "columns": ["col1", "col2", "..."]
+      ]
+    },
+    {
+      "endpoint": "/health",
+      "http_method": "GET",
+      "description": "Health check endpoint with cache statistics.",
+      "parameters": []
+    },
+    {
+      "endpoint": "/files",
+      "http_method": "GET",
+      "description": "List all files in the current session.",
+      "parameters": [
+        {
+          "name": "thread_id",
+          "param_type": "string",
+          "required": false,
+          "description": "Thread ID to list files for. Default: 'default'."
+        }
+      ]
+    },
+    {
+      "endpoint": "/files/{file_id}",
+      "http_method": "GET",
+      "description": "Get metadata for a specific file.",
+      "parameters": [
+        {
+          "name": "file_id",
+          "param_type": "string",
+          "required": true,
+          "description": "The file ID to get metadata for."
         },
-        "canvas_display": {
-          "type": "spreadsheet",
-          "content": "merged data preview"
+        {
+          "name": "thread_id",
+          "param_type": "string",
+          "required": false,
+          "description": "Thread ID for session context."
         }
-      }
+      ]
     }
   ],
   "tool_functions": null,

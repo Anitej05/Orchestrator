@@ -46,3 +46,7 @@ backend/tests/agents/spreadsheet_agent/edge_case_datasets
 /.kiro
 /.hypothesis
 
+# DENISCO temporary files
+DENISCO_CHEMICALS_PRIVATE_LIMITED*.xlsx
+
+

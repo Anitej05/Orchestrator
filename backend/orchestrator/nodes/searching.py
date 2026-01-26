@@ -47,15 +47,17 @@ def get_all_capabilities() -> Tuple[List[str], Any]:
         capabilities = db.query(AgentCapability).all()
         texts = [cap.capability_text for cap in capabilities]
         embeddings = [cap.embedding for cap in capabilities if cap.embedding is not None]
+        agent_ids = [cap.agent_id for cap in capabilities if cap.embedding is not None]
         db.close()
         
         cached_capabilities = {
             "texts": texts,
             "embeddings": embeddings,
+            "agent_ids": agent_ids,
             "timestamp": current_time
         }
         
-        return texts, embeddings
+        return texts, embeddings, agent_ids
     except Exception as e:
         logger.error(f"Failed to fetch capabilities: {e}")
         return [], None

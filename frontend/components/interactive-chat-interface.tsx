@@ -401,13 +401,13 @@ export function InteractiveChatInterface({
                         ))}
                       </div>
                     )}
-                    {/* View in Canvas button for messages with canvas content */}
-                    {message.has_canvas && message.canvas_content && message.canvas_type && (
+                    {/* View in Canvas button for messages with canvas content or data */}
+                    {message.has_canvas && (message.canvas_content || (message as any).canvas_data) && message.canvas_type && (
                       <Button
                         variant="outline"
                         size="sm"
                         className="mt-2 text-xs"
-                        onClick={() => onViewCanvas?.(message.canvas_content!, message.canvas_type!)}
+                        onClick={() => onViewCanvas?.(message.canvas_content || JSON.stringify((message as any).canvas_data || {}), message.canvas_type!)}
                       >
                         <FileText className="w-3 h-3 mr-1" />
                         View in Canvas

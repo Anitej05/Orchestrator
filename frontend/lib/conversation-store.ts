@@ -79,13 +79,14 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
   task_statuses: {},
   current_executing_task: null,
   isLoading: false,
+  canvas_data: undefined,
 
   actions: {
     startConversation: async (input: string, files: File[] = [], planningMode: boolean = false, owner?: string) => {
       // Clear previous conversation state when starting a new conversation
       console.debug(`Starting conversation with planning mode: ${planningMode}`);
-      set({ 
-        isLoading: true, 
+      set({
+        isLoading: true,
         status: 'processing',
         thread_id: undefined,
         messages: [],
@@ -99,8 +100,9 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
         browser_view: undefined,
         plan_view: undefined,
         current_view: 'browser',
+        canvas_data: undefined,
       });
-      
+
       try {
         let uploadedFiles: FileObject[] = [];
         if (files.length > 0) {
@@ -117,7 +119,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
 
         const timestamp = Date.now();
         const messageId = createMessageId(input, 'user', timestamp);
-          console.debug(`Frontend creating user message (continue): id=${messageId}, timestamp=${timestamp}, content=${input.substring(0, 50)}`);
+        console.debug(`Frontend creating user message (continue): id=${messageId}, timestamp=${timestamp}, content=${input.substring(0, 50)}`);
         const userMessage: Message = {
           id: messageId,
           type: 'user',
@@ -136,7 +138,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
           const maxAttempts = 50; // Increase attempts
           const delayMs = 300; // Reduce delay
           const maxWaitTime = (maxAttempts * delayMs); // ~15 seconds total
-          
+
           // Check if WebSocket is closed and trigger reconnection
           const ws = (window as any).__websocket;
           if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
@@ -146,11 +148,11 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
             // Wait a bit for reconnection to start
             await new Promise(resolve => setTimeout(resolve, 500));
           }
-          
+
           for (let attempt = 0; attempt < maxAttempts; attempt++) {
             try {
               const ws = (window as any).__websocket;
-              
+
               // Check if WebSocket exists and is open
               if (!ws) {
                 if (attempt === 0) {
@@ -172,7 +174,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
                       file_type: file.file_type
                     }))
                   };
-                  console.log('📤 Sending WebSocket message:', { 
+                  console.log('📤 Sending WebSocket message:', {
                     thread_id: message.thread_id,
                     has_prompt: !!message.prompt,
                     planning_mode: message.planning_mode,
@@ -193,7 +195,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
               } else if (ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) {
                 console.warn(`❌ WebSocket in ${ws.readyState === WebSocket.CLOSING ? 'closing' : 'closed'} state`);
               }
-              
+
               // Wait before retrying
               if (attempt < maxAttempts - 1) {
                 await new Promise(resolve => setTimeout(resolve, delayMs));
@@ -205,12 +207,12 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
               }
             }
           }
-          
+
           // If we've exhausted all attempts, show an error
           console.error(`❌ WebSocket not connected after ${maxAttempts} attempts (~${maxWaitTime}ms)`);
           console.error('Backend might not be running. Please check: http://localhost:8000');
           set({ status: 'error', isLoading: false });
-          
+
           // Add detailed error message to chat
           const errorSystemMessage: Message = {
             id: Date.now().toString(),
@@ -220,20 +222,20 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
           };
           set((state: ConversationStore) => ({ messages: [...state.messages, errorSystemMessage] }));
         };
-        
+
         await sendMessageToWebSocket();
-        
+
         // Note: Timeout handling is done by the WebSocket connection itself
         // The backend will send __end__ or __error__ events to complete the request
-        
+
       } catch (error: any) {
         const errorMessage = error instanceof Error ? error.message : (error?.message || 'An unknown error occurred');
         console.error('Error in startConversation:', errorMessage, error);
-        
+
         // Don't add error messages here - the orchestrator will send its response via WebSocket
         // Just reset the loading state and let the WebSocket handle the response
         set({ isLoading: false, status: 'idle' });
-        
+
         // The orchestrator's actual response will come through the WebSocket __end__ event
         // Don't throw - let the user continue
       }
@@ -245,10 +247,10 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
         console.error('Cannot continue conversation without a thread ID.');
         return;
       }
-      
+
       // Capture isWaitingForUser BEFORE we modify it
       const wasWaitingForUser = get().isWaitingForUser;
-      
+
       console.log(`Continuing conversation with thread_id: ${thread_id}, planning_mode: ${planningMode}, wasWaitingForUser: ${wasWaitingForUser}`);
       set({ isLoading: true, status: 'processing', isWaitingForUser: false, task_statuses: {}, current_executing_task: null });
 
@@ -267,8 +269,8 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
         );
 
         // Check if this is an approval/cancel response (should not be shown as a message)
-        const isApprovalResponse = wasWaitingForUser && get().approval_required === false && 
-                                   (input.toLowerCase() === 'approve' || input.toLowerCase() === 'cancel');
+        const isApprovalResponse = wasWaitingForUser && get().approval_required === false &&
+          (input.toLowerCase() === 'approve' || input.toLowerCase() === 'cancel');
 
         // Only add user message if it's not an approval response
         if (!isApprovalResponse) {
@@ -299,13 +301,13 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
         const sendMessageToWebSocket = async () => {
           const maxAttempts = 30; // Increased from 10 to 30 attempts
           const delayMs = 500; // Increased from 200ms to 500ms
-          
+
           for (let attempt = 0; attempt < maxAttempts; attempt++) {
             const ws = (window as any).__websocket;
             if (ws && ws.readyState === WebSocket.OPEN) {
               // Use the captured state from before we modified it
               const isAnsweringQuestion = wasWaitingForUser;
-              
+
               const messageData = {
                 thread_id: thread_id,
                 // Use 'user_response' only when answering a question, otherwise use 'prompt'
@@ -325,7 +327,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
               console.debug('  input:', input);
               console.debug('  planning_mode:', planningMode);
               console.debug('  full message:', messageData);
-              
+
               try {
                 ws.send(JSON.stringify(messageData));
                 console.debug(`WebSocket message sent successfully on attempt ${attempt + 1}`);
@@ -335,17 +337,17 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
                 throw new Error('Failed to send message to server');
               }
             }
-            
+
             console.debug(`WebSocket not ready, attempt ${attempt + 1}/${maxAttempts}, waiting ${delayMs}ms...`);
             // Wait before retrying
             await new Promise(resolve => setTimeout(resolve, delayMs));
           }
-          
+
           // If we've exhausted all attempts, show an error
           const maxWaitTime = maxAttempts * delayMs;
           console.error(`WebSocket not connected after ${maxAttempts} attempts (~${maxWaitTime}ms)`);
           set({ status: 'error', isLoading: false });
-          
+
           // Add detailed error message to chat
           const errorSystemMessage: Message = {
             id: Date.now().toString(),
@@ -355,20 +357,20 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
           };
           set((state: ConversationStore) => ({ messages: [...state.messages, errorSystemMessage] }));
         };
-        
+
         await sendMessageToWebSocket();
-        
+
         // Note: Timeout handling is done by the WebSocket connection itself
         // The backend will send __end__ or __error__ events to complete the request
-        
+
       } catch (error: any) {
         const errorMessage = error.message || 'An unknown error occurred';
         console.error('Error in continueConversation:', errorMessage, error);
-        
+
         // Don't add error messages here - the orchestrator will send its response via WebSocket
         // Just reset the loading state and let the WebSocket handle the response
         set({ isLoading: false, status: 'idle' });
-        
+
         // The orchestrator's actual response will come through the WebSocket __end__ event
         // Don't throw - let the user continue and wait for WebSocket response
       }
@@ -380,11 +382,11 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
       try {
         // Sanitize threadId - remove any appended index like :1 that LangGraph might add
         const cleanThreadId = threadId.split(':')[0];
-        
+
         // Use authFetch helper which handles Clerk JWT properly
         const { authFetch } = await import('./auth-fetch');
         const response = await authFetch(`http://localhost:8000/api/conversations/${cleanThreadId}`);
-        
+
         if (!response.ok) {
           if (response.status === 404) {
             console.log('Conversation not found, starting fresh');
@@ -394,16 +396,16 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
           console.error('Failed to load conversation:', response.status, errorText);
           throw new Error(`Failed to load conversation history: ${response.status}`);
         }
-        
+
         const conversationData = await response.json();
         console.log('Loaded conversation data:', conversationData);
-        
+
         // Convert message timestamps from strings to Date objects
         const messages = (conversationData.messages || []).map((msg: any) => ({
           ...msg,
           timestamp: new Date(msg.timestamp)
         }));
-        
+
         // Set the full conversation state
         const conversationState: Partial<ConversationState> = {
           thread_id: conversationData.thread_id || threadId,
@@ -418,20 +420,21 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
           plan: conversationData.plan || conversationData.task_plan || [],
           original_prompt: conversationData.original_prompt || undefined,
           canvas_content: conversationData.canvas_content,
+          canvas_data: conversationData.canvas_data,
           canvas_type: conversationData.canvas_type,
           has_canvas: conversationData.has_canvas || false,
         };
-        
+
         get().actions._setConversationState(conversationState);
-        
+
         // Explicitly set isLoading to false after loading
         set({ isLoading: false });
-        
+
         // Save thread_id to localStorage for persistence (use clean version)
         if (typeof window !== 'undefined') {
           localStorage.setItem('thread_id', cleanThreadId);
         }
-        
+
         console.log('Conversation loaded successfully:', threadId);
       } catch (error: any) {
         console.error('Failed to load conversation:', error);
@@ -465,6 +468,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
         canvas_content: undefined, // Clear canvas
         has_canvas: false,
         canvas_type: undefined,
+        canvas_data: undefined,
       });
       // Also clear from localStorage
       if (typeof window !== 'undefined') {
@@ -476,19 +480,19 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
     sendCanvasConfirmation: async (action: 'confirm' | 'cancel', taskName?: string) => {
       const thread_id = get().thread_id;
       const pending_task = get().pending_confirmation_task;
-      
+
       if (!thread_id) {
         console.error('Cannot send confirmation without thread_id');
         return;
       }
-      
+
       console.log(`📤 Sending canvas ${action} for task: ${taskName || pending_task?.task_name}`);
-      
+
       // Send confirmation message via WebSocket
       const sendConfirmation = async () => {
         const maxAttempts = 30;
         const delayMs = 500;
-        
+
         for (let attempt = 0; attempt < maxAttempts; attempt++) {
           const ws = (window as any).__websocket;
           if (ws && ws.readyState === WebSocket.OPEN) {
@@ -499,10 +503,10 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
                 action: action,
                 task_name: taskName || pending_task?.task_name
               };
-              
+
               ws.send(JSON.stringify(message));
               console.log(`✅ Canvas ${action} sent successfully`);
-              
+
               // Clear pending confirmation state
               set({
                 pending_confirmation: false,
@@ -510,19 +514,19 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
                 isLoading: true,
                 status: 'processing'
               });
-              
+
               // Automatically send a follow-up message to trigger the actual action
               if (action === 'confirm') {
                 // Wait a moment for the confirmation to be processed
                 await new Promise(resolve => setTimeout(resolve, 500));
-                
+
                 // Send the actual command to apply changes WITHOUT preview
                 const followUpMessage = {
                   thread_id: thread_id,
                   prompt: 'Apply the changes to the document without showing preview',
                   planning_mode: false
                 };
-                
+
                 ws.send(JSON.stringify(followUpMessage));
                 console.log('✅ Sent follow-up message to apply changes without preview');
               } else {
@@ -532,21 +536,21 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
                   status: 'idle'
                 });
               }
-              
+
               return;
             } catch (sendErr) {
               console.error(`Failed to send confirmation: ${sendErr instanceof Error ? sendErr.message : String(sendErr)}`);
             }
           }
-          
+
           if (attempt < maxAttempts - 1) {
             await new Promise(resolve => setTimeout(resolve, delayMs));
           }
         }
-        
+
         console.error('Failed to send canvas confirmation - WebSocket not connected');
       };
-      
+
       await sendConfirmation();
     },
 
@@ -555,7 +559,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
         // When loading a conversation (has thread_id but different from current), replace data
         // When updating current conversation (same thread_id), merge data
         const isLoadingConversation = newState.thread_id && newState.thread_id !== state.thread_id;
-        
+
         // Handle uploaded_files
         let updatedUploadedFiles = state.uploaded_files || [];
         if (newState.uploaded_files !== undefined) {
@@ -572,7 +576,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
             updatedUploadedFiles = [...updatedUploadedFiles, ...newFiles];
           }
         }
-        
+
         // Handle task_agent_pairs
         let updatedTaskAgentPairs = state.task_agent_pairs || [];
         if (newState.task_agent_pairs !== undefined) {
@@ -589,7 +593,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
             updatedTaskAgentPairs = [...updatedTaskAgentPairs, ...newPairs];
           }
         }
-        
+
         // Handle plan
         let updatedPlan = state.plan || [];
         if (newState.plan !== undefined) {
@@ -598,7 +602,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
             updatedPlan = newState.plan;
           }
         }
-        
+
         // Handle metadata
         let updatedMetadata = state.metadata || {};
         if (newState.metadata) {
@@ -611,30 +615,31 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
             const existingCompletedTasks = updatedMetadata.completed_tasks || [];
             const newCompletedTasks = newState.metadata.completed_tasks || [];
             const mergedCompletedTasks = [...existingCompletedTasks];
-            
+
             // Add new completed tasks that aren't already in the list
             newCompletedTasks.forEach((newTask: any) => {
               if (!mergedCompletedTasks.some((existingTask: any) => existingTask.task_name === newTask.task_name)) {
                 mergedCompletedTasks.push(newTask);
               }
             });
-            
+
             const existingParsedTasks = updatedMetadata.parsed_tasks || [];
             const newParsedTasks = newState.metadata.parsed_tasks || [];
             const mergedParsedTasks = [...existingParsedTasks];
-            
+
             // Add new parsed tasks that aren't already in the list
             newParsedTasks.forEach((newTask: any) => {
               if (!mergedParsedTasks.some((existingTask: any) => existingTask.task_name === newTask.task_name)) {
                 mergedParsedTasks.push(newTask);
               }
             });
-            
+
             updatedMetadata = {
               ...updatedMetadata,
               ...newState.metadata,
-              completed_tasks: mergedCompletedTasks,
-              parsed_tasks: mergedParsedTasks,
+              // MEMORY FIX: Limit to last 20 entries to prevent unbounded growth
+              completed_tasks: mergedCompletedTasks.slice(-20),
+              parsed_tasks: mergedParsedTasks.slice(-20),
               // Preserve original_prompt throughout conversation
               original_prompt: newState.metadata.original_prompt || updatedMetadata.original_prompt || state.metadata?.original_prompt
             };
@@ -663,7 +668,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
             const existingMessagesMap = new Map(
               updatedMessages.map((msg: any) => [msg.id, msg])
             );
-            
+
             // Process backend messages
             const backendMessages = newState.messages
               .filter((msg: any) => {
@@ -676,23 +681,23 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
                 ...msg,
                 timestamp: msg.timestamp instanceof Date ? msg.timestamp : new Date(msg.timestamp || Date.now()),
               }));
-            
+
             // Merge: Add new messages from backend that don't exist in frontend
             // Use content-based deduplication as fallback since IDs might not match
             backendMessages.forEach((backendMsg: any) => {
               // First try ID-based matching
               let isDuplicate = existingMessagesMap.has(backendMsg.id);
-              
+
               // If not found by ID, check for content-based duplicates
               // (in case hash algorithms don't match between frontend and backend)
               if (!isDuplicate) {
-                isDuplicate = updatedMessages.some((existingMsg: any) => 
+                isDuplicate = updatedMessages.some((existingMsg: any) =>
                   existingMsg.type === backendMsg.type &&
                   existingMsg.content === backendMsg.content
                   // Don't check timestamp - same content + type = duplicate regardless of time
                 );
               }
-              
+
               if (!isDuplicate) {
                 // New message from backend - add it
                 console.log(`Adding new message from backend: id=${backendMsg.id}, type=${backendMsg.type}, content=${backendMsg.content?.substring(0, 50)}`);
@@ -701,8 +706,8 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
                 // Message exists - skip or update
                 console.log(`Skipping duplicate message: id=${backendMsg.id}, type=${backendMsg.type}, content=${backendMsg.content?.substring(0, 50)}`);
                 // Optionally update the existing message with backend data
-                const existingMsg = existingMessagesMap.get(backendMsg.id) || 
-                  updatedMessages.find((msg: any) => 
+                const existingMsg = existingMessagesMap.get(backendMsg.id) ||
+                  updatedMessages.find((msg: any) =>
                     msg.type === backendMsg.type &&
                     msg.content === backendMsg.content
                   );
@@ -711,7 +716,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
                 }
               }
             });
-            
+
             // Sort messages by timestamp to maintain order
             updatedMessages.sort((a: any, b: any) => {
               const timeA = a.timestamp instanceof Date ? a.timestamp.getTime() : new Date(a.timestamp).getTime();
@@ -729,10 +734,17 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
           plan: updatedPlan,
           metadata: updatedMetadata,
           messages: updatedMessages,
-          // Handle canvas data
+          // Handle canvas data - ensure explicit null/undefined handling to allow clearing
           canvas_content: newState.canvas_content !== undefined ? newState.canvas_content : state.canvas_content,
+          canvas_data: newState.canvas_data !== undefined ? newState.canvas_data : state.canvas_data,
           canvas_type: newState.canvas_type !== undefined ? newState.canvas_type : state.canvas_type,
           has_canvas: newState.has_canvas !== undefined ? newState.has_canvas : state.has_canvas,
+          // Explicitly clear canvas if has_canvas is false in the update
+          ...(newState.has_canvas === false ? {
+            canvas_content: newState.canvas_content !== undefined ? newState.canvas_content : undefined,
+            canvas_data: newState.canvas_data !== undefined ? newState.canvas_data : undefined,
+            canvas_type: newState.canvas_type !== undefined ? newState.canvas_type : undefined,
+          } : {}),
           // Handle browser and plan views
           browser_view: (newState as any).browser_view !== undefined ? (newState as any).browser_view : (state as any).browser_view,
           plan_view: (newState as any).plan_view !== undefined ? (newState as any).plan_view : (state as any).plan_view,

@@ -1,0 +1,13 @@
+{
+  "test_id": "1.3_load_pod",
+  "file": "DENISCO_CHEMICALS_PRIVATE_LIMITEDPurchase_Order_Domestic__POD_635387.xlsx",
+  "query": "Describe the structure of this spreadsheet.",
+  "success": false,
+  "response": null,
+  "error": "HTTP 500: Internal Server Error",
+  "execution_time": 4.746909,
+  "status_code": 500,
+  "description": "Test POD file loading and structure description",
+  "expected_column": null,
+  "file_key": "POD"
+}

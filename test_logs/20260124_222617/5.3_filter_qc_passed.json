@@ -1,0 +1,27 @@
+{
+  "test_id": "5.3_filter_qc_passed",
+  "file": "DENISCO_CHEMICALS_PRIVATE_LIMITEDMaterial_Received_Note__MRN__677045.xlsx",
+  "query": "Show materials that passed QC.",
+  "success": true,
+  "response": {
+    "status": "needs_input",
+    "success": true,
+    "result": null,
+    "error": null,
+    "question": "Which column in the dataset indicates whether a material passed QC (e.g., a QC status, pass/fail flag, or similar)?",
+    "question_type": "text",
+    "options": null,
+    "context": {
+      "task_id": "task-2"
+    },
+    "canvas_display": null,
+    "standard_response": null,
+    "metrics": null
+  },
+  "error": null,
+  "execution_time": 3.68162,
+  "status_code": 200,
+  "description": "Filter by QCStatus = 'Passed'",
+  "expected_column": "QCStatus",
+  "file_key": "MRN"
+}

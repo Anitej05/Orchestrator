@@ -1,1153 +1,1710 @@
 """
-Main Spreadsheet Agent Class
+Spreadsheet Agent v3.0 - Main Agent
 
-Handles orchestrator communication with proper request/response formatting.
-Routes actions to appropriate components (parser, executor, anomaly detector).
-
-Requirements: 9.1, 9.3, 14.1, 14.2, 14.3
+Central orchestrator for spreadsheet operations.
+Unified /execute endpoint with LLM-powered task decomposition.
 """
 
 import logging
-import time
-from typing import Dict, Any, Optional
-from difflib import get_close_matches
-
+import traceback
+import os
+import json
+from typing import Dict, Any, Optional, List
 import pandas as pd
+import uuid
 
-from agents.spreadsheet_agent.dialogue_manager import (
-    dialogue_manager,
-    ExecutionMetrics
+from .config import logger
+from .schemas import (
+    ExecuteRequest, ExecuteResponse, ExecutionPlan, StepResult,
+    TaskStatus, FileInfo
 )
-from schemas import AgentResponseStatus  # Import from schemas.py instead
-from agents.spreadsheet_agent.dataframe_cache import DataFrameCache
-from agents.spreadsheet_agent.query_executor import QueryExecutor, QueryPlan
-from agents.spreadsheet_agent.anomaly_detector import AnomalyDetector
+from .state import session_state, Session
+from .client import df_client, SmartDataResolver
+from .llm import llm_client
 
-# Import parsing components
-from agents.spreadsheet_agent.parsing import (
-    DocumentSectionDetector,
-    IntentionalGapDetector,
-    TableDetector,
-    ContextBuilder,
-    MetadataExtractor,
-    SchemaExtractor
-)
-from agents.spreadsheet_agent.parsing_models import ParsedSpreadsheet, DocumentType
-from agents.spreadsheet_agent.spreadsheet_parser import spreadsheet_parser
-# from agents.spreadsheet_agent.file_loader import FileLoader  # TODO: Implement FileLoader class
-
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("spreadsheet_agent.agent")
 
 
 class SpreadsheetAgent:
     """
-    Main agent class for spreadsheet operations.
+    Central orchestrator for spreadsheet operations.
     
-    Responsibilities:
-    - Handle /execute and /continue endpoints
-    - Route actions to appropriate components
-    - Format responses for orchestrator
-    - Handle errors gracefully with user-friendly messages
-    - Implement fuzzy column name matching
+    Features:
+    - Unified /execute endpoint
+    - LLM-powered task decomposition
+    - Smart data resolution
+    - Session management
     """
     
     def __init__(self):
-        """Initialize the spreadsheet agent"""
-        self.logger = logging.getLogger(f"{__name__}.SpreadsheetAgent")
-        self.dialogue_manager = dialogue_manager
-        self.dataframe_cache = DataFrameCache()
-        self.query_executor = QueryExecutor()
-        self.anomaly_detector = AnomalyDetector()
+        self.state = session_state
+        self.client = df_client
+        self.llm = llm_client
+        self.resolver = SmartDataResolver(self.client, self.state)
         
-        # Initialize parsing components
-        self.document_section_detector = DocumentSectionDetector()
-        self.intentional_gap_detector = IntentionalGapDetector()
-        self.table_detector = TableDetector()
-        self.context_builder = ContextBuilder()
-        self.metadata_extractor = MetadataExtractor()
-        self.schema_extractor = SchemaExtractor()
-        # Use the global spreadsheet parser instance
-        self.spreadsheet_parser = spreadsheet_parser
-        # self.file_loader = FileLoader()  # TODO: Implement FileLoader class
-    
-    # ========================================================================
-    # MAIN ENDPOINTS (Task 10.1)
-    # ========================================================================
-    
-    def execute(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        logger.info("SpreadsheetAgent initialized")
+        
+    def _extract_prompt(self, params: Dict[str, Any]) -> Optional[str]:
         """
-        Handle new task execution from orchestrator.
-        
-        Args:
-            request: Dictionary with:
-                - thread_id: str
-                - file_id: Optional[str]
-                - action: Optional[str] (e.g., 'analyze', 'query', 'aggregate')
-                - prompt: Optional[str] (natural language query)
-                - parameters: Dict[str, Any]
-        
-        Returns:
-            AgentResponse dictionary with status, result, explanation, metrics
+        Robustly extract prompt/instruction from parameters.
+        Checks multiple common fields used by the Orchestrator.
+        """
+        if not params:
+            return None
             
-        Requirements: 9.1, 9.3
-        """
-        start_time = time.time()
-        thread_id = request.get('thread_id', 'default')
-        file_id = request.get('file_id')
-        action = request.get('action')
-        prompt = request.get('prompt')
-        parameters = request.get('parameters', {})
+        # Priority order of fields to check
+        fields = ['prompt', 'query', 'instruction', 'q', 'p', 'content', 'message']
         
-        self.logger.info(f"[EXECUTE] thread_id={thread_id}, file_id={file_id}, action={action}")
+        for field in fields:
+            if params.get(field):
+                return str(params[field])
+                
+        return None
+    
+    # ========================================================================
+    # PUBLIC API
+    # ========================================================================
+    
+    async def execute(
+        self,
+        prompt: str = None,
+        action: str = None,
+        params: Dict[str, Any] = None,
+        thread_id: str = "default",
+        task_id: str = None,
+        file_content: bytes = None,
+        filename: str = None
+    ) -> ExecuteResponse:
+        """
+        Unified execution endpoint.
+        
+        Supports:
+        1. Complex prompt mode: LLM decomposes into steps
+        2. Direct action mode: Execute specific action
+        3. File upload mode: Load file from content
+        """
+        params = params or {}
         
         try:
-            # Validate request
-            if not file_id:
-                return self._error_response(
-                    "file_id is required",
-                    start_time,
-                    error_details={"request": request}
+            # Get or create session
+            session = self.state.get_or_create(thread_id)
+            
+            # ORCHESTRATOR COMPATIBILITY: Robust prompt extraction
+            # The orchestrator may send instructions in various fields (query, instruction, etc.)
+            if not prompt:
+                prompt = self._extract_prompt(params)
+                if prompt:
+                    logger.info(f"Extracted prompt from params: {prompt[:50]}...")
+
+            # Handle file upload if content provided
+            # CRITICAL FIX: Load file first, but don't return immediately if prompt is also provided
+            if file_content and filename:
+                # Load the file into session
+                upload_result = await self._handle_file_upload(
+                    file_content, filename, thread_id, session
                 )
+                
+                # If no prompt was provided, just return the upload result
+                if not prompt:
+                    return upload_result
+                    
+                # If upload failed, return the error
+                if not upload_result.success:
+                    return upload_result
+                    
+                # Otherwise, continue to process the prompt with the newly loaded file
+                logger.info(f"File loaded successfully, now processing prompt: {prompt[:50]}...")
             
-            # Load dataframe
-            df, error = self._load_dataframe(file_id, thread_id)
-            if error:
-                return error
+            # ORCHESTRATOR COMPATIBILITY: Auto-load from file_path in params
+            # The orchestrator sends local file paths in params, we must load them!
+            file_path = params.get('file_path')
             
-            # Route to action handler
+            # DEBUG: Log what we received
+            logger.info(f"[DEBUG] Params received: {list(params.keys())}")
+            logger.info(f"[DEBUG] file_path from params: {file_path}")
+            logger.info(f"[DEBUG] file_id from params: {params.get('file_id')}")
+            
+            # FALLBACK 1: Check if file_id is actually a full path
+            if not file_path and params.get('file_id'):
+                potential_path = params.get('file_id')
+                if os.path.exists(potential_path):
+                    file_path = potential_path
+                    logger.info(f"[EXTRACT] file_id was actually a path: {file_path}")
+            
+            # FALLBACK 2: Extract file reference from prompt text if params is empty
+            # The orchestrator sometimes embeds file info in prompt like: "file_id='...' or (file_id='...')"
+            if not file_path and prompt:
+                import re
+                # Try to extract file_id/file_path from prompt text
+                path_match = re.search(r"(?:file_path|path)=['\"]?([^'\")\s]+)['\"]?", prompt, re.IGNORECASE)
+                if path_match:
+                    potential_path = path_match.group(1)
+                    if os.path.exists(potential_path):
+                        file_path = potential_path
+                        logger.info(f"[EXTRACT] Found file_path in prompt: {file_path}")
+                
+                if not file_path:
+                    file_id_match = re.search(r"file_id=['\"]?([^'\")\s]+)['\"]?", prompt)
+                    if file_id_match:
+                        extracted_file_id = file_id_match.group(1)
+                        logger.info(f"[EXTRACT] Found file_id in prompt: {extracted_file_id}")
+                        
+                        # Try to find this file in the storage directories
+                        storage_dirs = [
+                            "d:/Internship/Orbimesh/storage/spreadsheets",
+                            "d:/Internship/Orbimesh/storage/spreadsheet_agent"
+                        ]
+                        for storage_dir in storage_dirs:
+                            potential_path = os.path.join(storage_dir, extracted_file_id)
+                            if os.path.exists(potential_path):
+                                file_path = potential_path
+                                logger.info(f"[EXTRACT] Found file at: {file_path}")
+                                break
+                            # Also try without extension matching
+                            for ext in ['.xlsx', '.xls', '.csv']:
+                                if not extracted_file_id.endswith(ext):
+                                    potential_path = os.path.join(storage_dir, extracted_file_id + ext)
+                                    if os.path.exists(potential_path):
+                                        file_path = potential_path
+                                        logger.info(f"[EXTRACT] Found file at: {file_path}")
+                                        break
+            
+            # Now load the file if we have a path
+            if file_path and not session.dataframes:
+                try:
+                    logger.info(f"Auto-loading local file from path: {file_path}")
+                    df, detection = await self.client.load_file(file_path=file_path)
+                    
+                    # Use filename from path as ID
+                    file_id = os.path.basename(file_path)
+                    self.state.store_dataframe(thread_id, file_id, df, str(file_path))
+                    logger.info(f"Successfully auto-loaded file: {file_id}, shape: {df.shape}")
+                except Exception as e:
+                    logger.warning(f"Failed to auto-load file from path {file_path}: {e}")
+            else:
+                if not file_path:
+                    logger.warning(f"[DEBUG] No file_path found in params or prompt")
+
+            
+            # Complex prompt mode
+            if prompt and not action:
+                return await self._execute_complex(prompt, thread_id, session, params)
+            
+            # Direct action mode
             if action:
-                response = self._route_action(action, df, file_id, thread_id, parameters, start_time)
-            elif prompt:
-                response = self._handle_prompt(prompt, df, file_id, thread_id, parameters, start_time)
-            else:
-                return self._error_response(
-                    "Either 'action' or 'prompt' is required",
-                    start_time
-                )
+                return await self._execute_action(action, params, thread_id, session)
             
-            return response
+            # Auto-generated prompt if file exists but no instruction
+            if not prompt and session.get_latest_file_id():
+                logger.info("No prompt/action provided but file exists in session. Defaulting to summary.")
+                prompt = "Provide a comprehensive summary of this data including columns, rows, and key statistics."
+                return await self._execute_complex(prompt, thread_id, session, params)
+            
+            # No valid input
+            return ExecuteResponse(
+                status=TaskStatus.ERROR,
+                success=False,
+                error="Either 'prompt' or 'action' must be provided"
+            )
             
         except Exception as e:
-            self.logger.error(f"[EXECUTE] Unexpected error: {e}", exc_info=True)
-            return self._error_response(
-                f"Unexpected error: {str(e)}",
-                start_time,
-                error_details={"exception_type": type(e).__name__}
+            logger.error(f"Execute failed: {e}\n{traceback.format_exc()}")
+            return ExecuteResponse(
+                status=TaskStatus.ERROR,
+                success=False,
+                error=str(e)
             )
     
-    def continue_execution(self, thread_id: str, user_input: str) -> Dict[str, Any]:
-        """
-        Resume paused execution with user input.
-        
-        Args:
-            thread_id: Thread identifier
-            user_input: User's answer to the pending question
-        
-        Returns:
-            AgentResponse dictionary
-            
-        Requirements: 9.3
-        """
-        start_time = time.time()
-        
-        self.logger.info(f"[CONTINUE] thread_id={thread_id}, user_input={user_input[:50]}...")
-        
+    async def continue_task(
+        self,
+        task_id: str,
+        user_response: str,
+        thread_id: str = "default"
+    ) -> ExecuteResponse:
+        """Resume a paused task with user input."""
         try:
-            # Load dialogue state
-            state = self.dialogue_manager.load_state(thread_id)
-            
-            if not state:
-                return self._error_response(
-                    f"No pending dialogue found for thread {thread_id}",
-                    start_time
+            # Get paused task context
+            paused = self.state.resume_task(thread_id, task_id)
+            if not paused:
+                return ExecuteResponse(
+                    status=TaskStatus.ERROR,
+                    success=False,
+                    error=f"No paused task found with ID: {task_id}"
                 )
             
-            # Get pending operation context
-            pending_operation = state.get('pending_operation')
-            file_id = state.get('file_id')
-            anomaly = state.get('anomaly')
+            # Get original context
+            context = paused.get('context', {})
+            original_prompt = context.get('original_prompt', '')
             
-            if not pending_operation:
-                return self._error_response(
-                    "No pending operation to continue",
-                    start_time
-                )
+            # Modify prompt with user response
+            modified_prompt = f"{original_prompt}\n\nUser clarification: {user_response}"
             
-            # Load dataframe
-            df, error = self._load_dataframe(file_id, thread_id)
-            if error:
-                return error
-            
-            # Handle anomaly resolution
-            if anomaly and pending_operation == 'anomaly_resolution':
-                response = self._handle_anomaly_resolution(
-                    df, file_id, thread_id, anomaly, user_input, start_time
-                )
-            else:
-                response = self._error_response(
-                    f"Unknown pending operation: {pending_operation}",
-                    start_time
-                )
-            
-            # Clear pending question
-            self.dialogue_manager.clear_pending_question(thread_id)
-            
-            return response
+            # Re-execute with clarification
+            return await self.execute(
+                prompt=modified_prompt,
+                thread_id=thread_id,
+                task_id=task_id
+            )
             
         except Exception as e:
-            self.logger.error(f"[CONTINUE] Unexpected error: {e}", exc_info=True)
-            return self._error_response(
-                f"Unexpected error: {str(e)}",
-                start_time
+            logger.error(f"Continue failed: {e}")
+            return ExecuteResponse(
+                status=TaskStatus.ERROR,
+                success=False,
+                error=str(e)
             )
     
     # ========================================================================
-    # ACTION ROUTING (Task 10.1)
+    # COMPLEX PROMPT EXECUTION
     # ========================================================================
     
-    def _route_action(
-        self,
-        action: str,
-        df: pd.DataFrame,
-        file_id: str,
-        thread_id: str,
-        parameters: Dict[str, Any],
-        start_time: float
-    ) -> Dict[str, Any]:
-        """
-        Route action to appropriate handler.
-        
-        Args:
-            action: Action name (e.g., 'analyze', 'query', 'aggregate')
-            df: DataFrame to operate on
-            file_id: File identifier
-            thread_id: Thread identifier
-            parameters: Action parameters
-            start_time: Operation start time
-        
-        Returns:
-            AgentResponse dictionary
-            
-        Requirements: 9.1
-        """
-        self.logger.info(f"[ROUTE] action={action}, parameters={list(parameters.keys())}")
-        
-        # Map actions to handlers
-        action_handlers = {
-            'analyze': self._handle_analyze,
-            'parse': self._handle_parse,
-            'query': self._handle_query,
-            'aggregate': self._handle_aggregate,
-            'filter': self._handle_filter,
-            'sort': self._handle_sort,
-            'transform': self._handle_transform,
-            'detect_anomalies': self._handle_detect_anomalies,
-            'build_context': self._handle_build_context
-        }
-        
-        handler = action_handlers.get(action)
-        
-        if not handler:
-            return self._error_response(
-                f"Unknown action: {action}. Available actions: {list(action_handlers.keys())}",
-                start_time
-            )
-        
-        try:
-            return handler(df, file_id, thread_id, parameters, start_time)
-        except Exception as e:
-            self.logger.error(f"[ROUTE] Handler error for action '{action}': {e}", exc_info=True)
-            return self._error_response(
-                f"Action '{action}' failed: {str(e)}",
-                start_time,
-                error_details={"action": action, "exception_type": type(e).__name__}
-            )
-    
-    # ========================================================================
-    # ACTION HANDLERS
-    # ========================================================================
-    
-    def _handle_analyze(
-        self,
-        df: pd.DataFrame,
-        file_id: str,
-        thread_id: str,
-        parameters: Dict[str, Any],
-        start_time: float
-    ) -> Dict[str, Any]:
-        """Handle analyze action - return basic DataFrame information"""
-        self.logger.info(f"[ANALYZE] file_id={file_id}")
-        
-        # Create metrics
-        metrics = self.dialogue_manager.create_metrics(
-            start_time=start_time,
-            rows_processed=len(df),
-            columns_affected=len(df.columns)
-        )
-        
-        # Format result with basic DataFrame info
-        result = {
-            "file_id": file_id,
-            "shape": df.shape,
-            "columns": df.columns.tolist(),
-            "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
-            "sample_data": df.head(5).to_dict(orient='records'),
-            "summary_stats": df.describe().to_dict() if len(df.select_dtypes(include='number').columns) > 0 else {}
-        }
-        
-        response = self.dialogue_manager.create_success_response(
-            result=result,
-            explanation=f"Analyzed spreadsheet: {df.shape[0]} rows × {df.shape[1]} columns",
-            metrics=metrics
-        )
-        
-        return response.to_dict()
-    
-    def _handle_query(
-        self,
-        df: pd.DataFrame,
-        file_id: str,
-        thread_id: str,
-        parameters: Dict[str, Any],
-        start_time: float
-    ) -> Dict[str, Any]:
-        """Handle query action - execute pandas query"""
-        query_str = parameters.get('query')
-        
-        if not query_str:
-            return self._error_response("'query' parameter is required", start_time)
-        
-        self.logger.info(f"[QUERY] query={query_str[:100]}")
-        
-        try:
-            # Create query plan for pandas query
-            query_plan = QueryPlan(
-                operation='filter',
-                conditions={'query_string': query_str}
-            )
-            
-            # Execute query using query executor
-            result = self.query_executor.execute_pandas_query(df, query_str)
-            
-            if not result.success:
-                return self._error_response(result.error or "Query execution failed", start_time)
-            
-            result_df = result.data
-            
-            # Check for anomalies in the result
-            anomaly = self.anomaly_detector.detect_anomalies(result_df)
-            
-            if anomaly:
-                # Save state and return NEEDS_INPUT
-                self.dialogue_manager.save_state(thread_id, {
-                    'pending_operation': 'anomaly_resolution',
-                    'file_id': file_id,
-                    'anomaly': anomaly,
-                    'query': query_str
-                })
-                
-                metrics = self.dialogue_manager.create_metrics(
-                    start_time=start_time,
-                    rows_processed=len(df)
-                )
-                
-                response = self.dialogue_manager.create_anomaly_response(
-                    anomaly=anomaly,
-                    metrics=metrics
-                )
-                
-                return response.to_dict()
-            
-            # Create metrics
-            metrics = self.dialogue_manager.create_metrics(
-                start_time=start_time,
-                rows_processed=len(result_df),
-                columns_affected=len(result_df.columns)
-            )
-            
-            # Format result
-            result_data = {
-                "query": query_str,
-                "rows_returned": len(result_df),
-                "data": result_df.head(100).to_dict(orient='records')
-            }
-            
-            response = self.dialogue_manager.create_success_response(
-                result=result_data,
-                explanation=f"Query returned {len(result_df)} rows",
-                metrics=metrics
-            )
-            
-            return response.to_dict()
-            
-        except Exception as e:
-            return self._handle_pandas_error(e, start_time, df, context="query execution")
-    
-    def _handle_aggregate(
-        self,
-        df: pd.DataFrame,
-        file_id: str,
-        thread_id: str,
-        parameters: Dict[str, Any],
-        start_time: float
-    ) -> Dict[str, Any]:
-        """Handle aggregate action - compute aggregations"""
-        column = parameters.get('column')
-        operation = parameters.get('operation', 'sum')
-        
-        if not column:
-            return self._error_response("'column' parameter is required", start_time)
-        
-        # Validate column exists
-        if column not in df.columns:
-            return self._handle_column_not_found(column, df, start_time)
-        
-        self.logger.info(f"[AGGREGATE] column={column}, operation={operation}")
-        
-        try:
-            # Create query plan for aggregation
-            query_plan = QueryPlan(
-                operation='aggregate',
-                conditions={
-                    'function': operation,
-                    'column': column
-                }
-            )
-            
-            # Execute aggregation using query executor
-            result = self.query_executor.execute_query(df, query_plan)
-            
-            if not result.success:
-                return self._error_response(result.error or "Aggregation failed", start_time)
-            
-            result_value = result.data
-            
-            # Create metrics
-            metrics = self.dialogue_manager.create_metrics(
-                start_time=start_time,
-                rows_processed=len(df),
-                columns_affected=1
-            )
-            
-            # Format result
-            result_data = {
-                "column": column,
-                "operation": operation,
-                "value": float(result_value) if pd.notna(result_value) else None
-            }
-            
-            response = self.dialogue_manager.create_success_response(
-                result=result_data,
-                explanation=f"{operation.title()} of '{column}': {result_value}",
-                metrics=metrics
-            )
-            
-            return response.to_dict()
-            
-        except Exception as e:
-            return self._handle_pandas_error(e, start_time, df, context=f"aggregation on column '{column}'")
-    
-    def _handle_filter(
-        self,
-        df: pd.DataFrame,
-        file_id: str,
-        thread_id: str,
-        parameters: Dict[str, Any],
-        start_time: float
-    ) -> Dict[str, Any]:
-        """Handle filter action"""
-        column = parameters.get('column')
-        operator = parameters.get('operator', '==')
-        value = parameters.get('value')
-        
-        if not column or value is None:
-            return self._error_response("'column' and 'value' parameters are required", start_time)
-        
-        # Validate column exists
-        if column not in df.columns:
-            return self._handle_column_not_found(column, df, start_time)
-        
-        self.logger.info(f"[FILTER] column={column}, operator={operator}, value={value}")
-        
-        try:
-            # Create query plan for filter
-            query_plan = QueryPlan(
-                operation='filter',
-                conditions={
-                    'column': column,
-                    'operator': operator,
-                    'value': value
-                }
-            )
-            
-            # Execute filter using query executor
-            result = self.query_executor.execute_query(df, query_plan)
-            
-            if not result.success:
-                return self._error_response(result.error or "Filter failed", start_time)
-            
-            result_df = result.data
-            
-            # Create metrics
-            metrics = self.dialogue_manager.create_metrics(
-                start_time=start_time,
-                rows_processed=len(df),
-                columns_affected=len(df.columns)
-            )
-            
-            # Format result
-            result_data = {
-                "filter": f"{column} {operator} {value}",
-                "rows_matched": len(result_df),
-                "data": result_df.head(100).to_dict(orient='records')
-            }
-            
-            response = self.dialogue_manager.create_success_response(
-                result=result_data,
-                explanation=f"Filter matched {len(result_df)} rows",
-                metrics=metrics
-            )
-            
-            return response.to_dict()
-            
-        except Exception as e:
-            return self._handle_pandas_error(e, start_time, df, context=f"filter on column '{column}'")
-    
-    def _handle_sort(
-        self,
-        df: pd.DataFrame,
-        file_id: str,
-        thread_id: str,
-        parameters: Dict[str, Any],
-        start_time: float
-    ) -> Dict[str, Any]:
-        """Handle sort action"""
-        columns = parameters.get('columns', [])
-        ascending = parameters.get('ascending', True)
-        
-        if not columns:
-            return self._error_response("'columns' parameter is required", start_time)
-        
-        # Validate columns exist
-        missing_cols = [col for col in columns if col not in df.columns]
-        if missing_cols:
-            return self._handle_column_not_found(missing_cols[0], df, start_time)
-        
-        self.logger.info(f"[SORT] columns={columns}, ascending={ascending}")
-        
-        try:
-            # Create query plan for sort
-            query_plan = QueryPlan(
-                operation='sort',
-                conditions={
-                    'columns': columns,
-                    'ascending': ascending
-                }
-            )
-            
-            # Execute sort using query executor
-            result = self.query_executor.execute_query(df, query_plan)
-            
-            if not result.success:
-                return self._error_response(result.error or "Sort failed", start_time)
-            
-            result_df = result.data
-            
-            # Create metrics
-            metrics = self.dialogue_manager.create_metrics(
-                start_time=start_time,
-                rows_processed=len(df),
-                columns_affected=len(df.columns)
-            )
-            
-            # Format result
-            result_data = {
-                "sorted_by": columns,
-                "ascending": ascending,
-                "rows": len(result_df),
-                "data": result_df.head(100).to_dict(orient='records')
-            }
-            
-            response = self.dialogue_manager.create_success_response(
-                result=result_data,
-                explanation=f"Sorted by {', '.join(columns)} ({'ascending' if ascending else 'descending'})",
-                metrics=metrics
-            )
-            
-            return response.to_dict()
-            
-        except Exception as e:
-            return self._handle_pandas_error(e, start_time, df, context=f"sort by columns {columns}")
-    
-    def _handle_transform(
-        self,
-        df: pd.DataFrame,
-        file_id: str,
-        thread_id: str,
-        parameters: Dict[str, Any],
-        start_time: float
-    ) -> Dict[str, Any]:
-        """Handle transform action - apply transformation code"""
-        code = parameters.get('code')
-        
-        if not code:
-            return self._error_response("'code' parameter is required", start_time)
-        
-        self.logger.info(f"[TRANSFORM] code={code[:100]}")
-        
-        try:
-            # Execute transformation
-            local_vars = {"df": df.copy(), "pd": pd}
-            exec(code, {"__builtins__": {}}, local_vars)
-            result_df = local_vars.get("df", df)
-            
-            # Store modified dataframe
-            self.dataframe_cache.store(thread_id, file_id, result_df, {})
-            
-            # Create metrics
-            metrics = self.dialogue_manager.create_metrics(
-                start_time=start_time,
-                rows_processed=len(result_df),
-                columns_affected=len(result_df.columns)
-            )
-            
-            # Format result
-            result = {
-                "before_shape": df.shape,
-                "after_shape": result_df.shape,
-                "data": result_df.head(100).to_dict(orient='records')
-            }
-            
-            response = self.dialogue_manager.create_success_response(
-                result=result,
-                explanation=f"Transformation applied: {df.shape} → {result_df.shape}",
-                metrics=metrics
-            )
-            
-            return response.to_dict()
-            
-        except Exception as e:
-            return self._handle_pandas_error(e, start_time, df, context="transformation")
-    
-    def _handle_detect_anomalies(
-        self,
-        df: pd.DataFrame,
-        file_id: str,
-        thread_id: str,
-        parameters: Dict[str, Any],
-        start_time: float
-    ) -> Dict[str, Any]:
-        """Handle detect_anomalies action"""
-        self.logger.info(f"[DETECT_ANOMALIES] file_id={file_id}")
-        
-        # Detect anomalies
-        anomalies = self.anomaly_detector.detect_all_anomalies(df)
-        
-        # Create metrics
-        metrics = self.dialogue_manager.create_metrics(
-            start_time=start_time,
-            rows_processed=len(df),
-            columns_affected=len(df.columns)
-        )
-        
-        # Format result
-        result = {
-            "anomalies_found": len(anomalies),
-            "anomalies": [
-                {
-                    "type": anomaly.type,
-                    "columns": anomaly.columns,
-                    "message": anomaly.message,
-                    "severity": anomaly.severity,
-                    "sample_values": anomaly.sample_values
-                }
-                for anomaly in anomalies
-            ]
-        }
-        
-        response = self.dialogue_manager.create_success_response(
-            result=result,
-            explanation=f"Found {len(anomalies)} anomalies",
-            metrics=metrics
-        )
-        
-        return response.to_dict()
-    
-    def _handle_parse(
-        self,
-        df: pd.DataFrame,
-        file_id: str,
-        thread_id: str,
-        parameters: Dict[str, Any],
-        start_time: float
-    ) -> Dict[str, Any]:
-        """
-        Handle parse action - perform intelligent spreadsheet parsing.
-        
-        This integrates all parsing components to:
-        1. Detect document sections and intentional gaps
-        2. Identify and extract primary data tables
-        3. Extract schema and metadata
-        4. Build structured context for LLM consumption
-        """
-        self.logger.info(f"[PARSE] file_id={file_id}")
-        
-        try:
-            # Step 1: Detect document sections
-            sections = self.document_section_detector.detect_sections(df)
-            
-            # Step 2: Detect intentional gaps
-            intentional_gaps = self.intentional_gap_detector.identify_intentional_gaps(df)
-            
-            # Step 3: Detect primary data table
-            table_regions = self.table_detector.detect_all_tables(df)
-            primary_table = self.table_detector.detect_primary_table(df) if table_regions else None
-            
-            # Step 4: Extract schema for primary table
-            schema = None
-            if primary_table:
-                # Detect header row (returns row index, not TableRegion)
-                header_row_idx = self.table_detector.detect_header_row(df, primary_table)
-                
-                # Extract schema using the table region and header row index
-                schema = self.schema_extractor.extract_schema(df, primary_table, header_row_idx)
-            
-            # Step 5: Extract metadata
-            metadata = self.metadata_extractor.extract_metadata(df, sections)
-            
-            # Step 6: Create ParsedSpreadsheet object
-            tables = []
-            if primary_table and schema:
-                # Extract table dataframe
-                table_df = df.iloc[
-                    primary_table.start_row:primary_table.end_row + 1,
-                    primary_table.start_col:primary_table.end_col + 1
-                ].copy()
-                tables.append((primary_table, table_df, schema))
-            
-            parsed_spreadsheet = ParsedSpreadsheet(
-                file_id=file_id,
-                sheet_name="Sheet1",  # Default sheet name
-                document_type=DocumentType.DATA_TABLE,  # Default document type
-                metadata=metadata,
-                sections=sections,
-                tables=tables,
-                raw_df=df,
-                intentional_gaps=intentional_gaps
-            )
-            
-            # Step 7: Build structured context
-            max_tokens = parameters.get('max_tokens', 4000)
-            context = self.context_builder.build_structured_context(
-                parsed=parsed_spreadsheet,
-                max_tokens=max_tokens
-            )
-            
-            # Create metrics
-            metrics = self.dialogue_manager.create_metrics(
-                start_time=start_time,
-                rows_processed=len(df),
-                columns_affected=len(df.columns)
-            )
-            
-            # Format result
-            result = {
-                "file_id": file_id,
-                "document_type": metadata.get('document_type', 'unknown'),
-                "sections": [
-                    {
-                        "type": section.section_type,
-                        "start_row": section.start_row,
-                        "end_row": section.end_row,
-                        "content_type": section.content_type
-                    }
-                    for section in sections
-                ],
-                "primary_table": {
-                    "start_row": primary_table.start_row,
-                    "end_row": primary_table.end_row,
-                    "start_col": primary_table.start_col,
-                    "end_col": primary_table.end_col,
-                    "confidence": primary_table.confidence
-                } if primary_table else None,
-                "schema": {
-                    "headers": schema.headers,
-                    "dtypes": schema.dtypes,
-                    "row_count": schema.row_count,
-                    "col_count": schema.col_count
-                } if schema else None,
-                "metadata": metadata,
-                "intentional_gaps": intentional_gaps,
-                "structured_context": context
-            }
-            
-            response = self.dialogue_manager.create_success_response(
-                result=result,
-                explanation=f"Parsed spreadsheet: found {len(sections)} sections, {len(table_regions)} tables",
-                metrics=metrics
-            )
-            
-            return response.to_dict()
-            
-        except Exception as e:
-            return self._handle_pandas_error(e, start_time, df, context="parsing")
-    
-    def _handle_build_context(
-        self,
-        df: pd.DataFrame,
-        file_id: str,
-        thread_id: str,
-        parameters: Dict[str, Any],
-        start_time: float
-    ) -> Dict[str, Any]:
-        """
-        Handle build_context action - build LLM context from parsed spreadsheet.
-        
-        This creates token-efficient context representations for LLM consumption
-        while preserving document structure and preventing hallucination.
-        """
-        self.logger.info(f"[BUILD_CONTEXT] file_id={file_id}")
-        
-        try:
-            # Get context format preference
-            format_type = parameters.get('format', 'structured')  # 'structured', 'compact', 'full'
-            max_tokens = parameters.get('max_tokens', 4000)
-            
-            # First parse the document if not already done
-            sections = self.document_section_detector.detect_sections(df)
-            intentional_gaps = self.intentional_gap_detector.identify_intentional_gaps(df)
-            table_regions = self.table_detector.detect_all_tables(df)
-            primary_table = self.table_detector.detect_primary_table(df) if table_regions else None
-            
-            # Extract schema and metadata
-            schema = None
-            if primary_table:
-                header_row_idx = self.table_detector.detect_header_row(df, primary_table)
-                schema = self.schema_extractor.extract_schema(df, primary_table, header_row_idx)
-            
-            metadata = self.metadata_extractor.extract_metadata(df, sections)
-            
-            # Create ParsedSpreadsheet object
-            tables = []
-            if primary_table and schema:
-                table_df = df.iloc[
-                    primary_table.start_row:primary_table.end_row + 1,
-                    primary_table.start_col:primary_table.end_col + 1
-                ].copy()
-                tables.append((primary_table, table_df, schema))
-            
-            parsed_spreadsheet = ParsedSpreadsheet(
-                file_id=file_id,
-                sheet_name="Sheet1",
-                document_type=DocumentType.DATA_TABLE,
-                metadata=metadata,
-                sections=sections,
-                tables=tables,
-                raw_df=df,
-                intentional_gaps=intentional_gaps
-            )
-            
-            # Build context based on format type
-            if format_type == 'structured':
-                context = self.context_builder.build_structured_context(
-                    parsed=parsed_spreadsheet,
-                    max_tokens=max_tokens
-                )
-            elif format_type == 'compact':
-                context = self.context_builder.build_compact_context(
-                    parsed=parsed_spreadsheet,
-                    max_tokens=max_tokens
-                )
-            else:  # full
-                context = self.context_builder.build_full_context(
-                    parsed=parsed_spreadsheet
-                )
-            
-            # Create metrics
-            metrics = self.dialogue_manager.create_metrics(
-                start_time=start_time,
-                rows_processed=len(df),
-                columns_affected=len(df.columns)
-            )
-            
-            # Format result
-            result = {
-                "file_id": file_id,
-                "format_type": format_type,
-                "context": context,
-                "token_estimate": len(str(context).split()) * 1.3,  # Rough token estimate
-                "sections_count": len(sections),
-                "tables_count": len(table_regions),
-                "has_primary_table": primary_table is not None
-            }
-            
-            response = self.dialogue_manager.create_success_response(
-                result=result,
-                explanation=f"Built {format_type} context with ~{result['token_estimate']:.0f} tokens",
-                metrics=metrics
-            )
-            
-            return response.to_dict()
-            
-        except Exception as e:
-            return self._handle_pandas_error(e, start_time, df, context="context building")
-    
-    def _handle_prompt(
+    async def _execute_complex(
         self,
         prompt: str,
-        df: pd.DataFrame,
-        file_id: str,
         thread_id: str,
-        parameters: Dict[str, Any],
-        start_time: float
-    ) -> Dict[str, Any]:
-        """Handle natural language prompt"""
-        self.logger.info(f"[PROMPT] prompt={prompt[:100]}")
+        session: Session,
+        params: Dict[str, Any],
+        max_step_retries: int = 3,
+        max_plan_retries: int = 2
+    ) -> ExecuteResponse:
+        """
+        LLM-powered task decomposition and execution with:
+        - Per-step retries with error feedback
+        - Dynamic plan re-evaluation on failures
+        - Cumulative error learning
+        """
+        logger.info(f"[COMPLEX] Processing: {prompt[:100]}...")
         
-        # For now, return error - this would integrate with LLM for complex queries
-        return self._error_response(
-            "Natural language prompts not yet implemented. Use specific actions instead.",
-            start_time,
-            error_details={"prompt": prompt[:200]}
+        # Track errors across all attempts
+        execution_errors = []
+        plan_attempts = 0
+        
+        while plan_attempts < max_plan_retries:
+            plan_attempts += 1
+            
+            
+            # Build context with current state (with ACTUAL DATA!)
+            context = await self._build_context(session, prompt=prompt)
+            context['previous_errors'] = execution_errors if execution_errors else None
+            
+            # Decompose into steps (with error context if retrying)
+            error_summary = None
+            if execution_errors:
+                error_summary = "Previous execution failed:\n" + "\n".join([
+                    f"- Step '{e['step']}': {e['error']}" for e in execution_errors[-5:]
+                ])
+            
+            plan = await self.llm.decompose_request(prompt, context, error_context=error_summary)
+            
+            # Check if clarification needed
+            if plan.needs_clarification:
+                task_id = f"task-{len(session.pending_tasks)}"
+                self.state.pause_task(
+                    thread_id, task_id,
+                    plan.question,
+                    {"original_prompt": prompt, "plan": plan.model_dump(), "errors": execution_errors}
+                )
+                
+                return ExecuteResponse(
+                    status=TaskStatus.NEEDS_INPUT,
+                    success=True,
+                    question=plan.question,
+                    question_type="choice" if plan.options else "text",
+                    options=plan.options,
+                    context={"task_id": task_id}
+                )
+            
+            # Execute steps with retries
+            logger.info(f"[PLAN {plan_attempts}] Executing {len(plan.steps)} steps: {[s.action for s in plan.steps]}")
+            
+            results = []
+            plan_failed = False
+            
+            # CRITICAL: Initialize current_df from session if data is already loaded
+            # This ensures the auto-loaded dataframe is available for processing
+            current_df = None
+            latest_id = session.get_latest_file_id()
+            if latest_id:
+                current_df = session.dataframes.get(latest_id)
+                if current_df is not None:
+                    logger.info(f"[EXEC] Using already loaded dataframe: {latest_id}, shape: {current_df.shape}")
+            
+            for i, step in enumerate(plan.steps):
+                step_result = await self._execute_step_with_retry(
+                    step=step,
+                    session=session,
+                    current_df=current_df,
+                    thread_id=thread_id,
+                    max_retries=max_step_retries,
+                    step_number=i + 1,
+                    total_steps=len(plan.steps)
+                )
+                
+                results.append(step_result)
+                
+                if step_result.success:
+                    # Update current_df if step modified data
+                    if step_result.df_modified:
+                        latest_id = session.get_latest_file_id()
+                        if latest_id:
+                            current_df = session.dataframes.get(latest_id)
+                    
+                    session.add_operation(
+                        step.action,
+                        step.description or str(step.params),
+                        {"success": True}
+                    )
+                else:
+                    # Step failed after all retries
+                    execution_errors.append({
+                        'step': step.action,
+                        'error': step_result.error,
+                        'params': str(step.params)[:100]
+                    })
+                    
+                    logger.warning(f"Step {step.action} failed after retries: {step_result.error}")
+                    
+                    # Check if we should re-evaluate the entire plan
+                    if i < len(plan.steps) - 1:  # Not the last step
+                        logger.info("Re-evaluating plan due to mid-execution failure...")
+                        plan_failed = True
+                        break
+            
+            if not plan_failed:
+                # All steps completed (some may have failed)
+                return self._build_response(results, session, prompt)
+        
+        # All plan attempts exhausted
+        logger.error(f"All {max_plan_retries} plan attempts failed")
+        return ExecuteResponse(
+            status=TaskStatus.ERROR,
+            success=False,
+            error=f"Failed after {max_plan_retries} plan attempts. Errors: {execution_errors}",
+            context={"errors": execution_errors}
         )
     
-    def _handle_anomaly_resolution(
+    async def _execute_step_with_retry(
         self,
-        df: pd.DataFrame,
-        file_id: str,
+        step,
+        session: Session,
+        current_df: pd.DataFrame,
         thread_id: str,
-        anomaly: Any,
-        user_choice: str,
-        start_time: float
-    ) -> Dict[str, Any]:
-        """Handle user's choice for anomaly resolution"""
-        self.logger.info(f"[ANOMALY_RESOLUTION] choice={user_choice}")
+        max_retries: int,
+        step_number: int,
+        total_steps: int
+    ) -> StepResult:
+        """
+        Execute a step with retry loop and error learning.
+        """
+        step_errors = []
         
+        for attempt in range(1, max_retries + 1):
+            logger.info(f"[STEP {step_number}/{total_steps}] {step.action} - Attempt {attempt}/{max_retries}")
+            
+            try:
+                result = await self._execute_step(step, session, current_df, thread_id)
+                
+                if result.success:
+                    if attempt > 1:
+                        logger.info(f"Step {step.action} succeeded on attempt {attempt}")
+                    return result
+                else:
+                    # Step returned failure (not exception)
+                    step_errors.append({
+                        'attempt': attempt,
+                        'error': result.error
+                    })
+                    
+                    if attempt < max_retries:
+                        # Modify step params based on error
+                        step = await self._adjust_step_for_retry(
+                            step, result.error, step_errors, current_df
+                        )
+                        
+            except Exception as e:
+                step_errors.append({
+                    'attempt': attempt,
+                    'error': str(e),
+                    'type': type(e).__name__
+                })
+                logger.warning(f"Step {step.action} attempt {attempt} exception: {e}")
+                
+                if attempt < max_retries:
+                    # Try to adjust step for next attempt
+                    step = await self._adjust_step_for_retry(
+                        step, str(e), step_errors, current_df
+                    )
+        
+        # All retries exhausted
+        return StepResult(
+            action=step.action,
+            success=False,
+            error=f"Failed after {max_retries} attempts: {step_errors[-1]['error']}",
+            context={'all_errors': step_errors}
+        )
+    
+    async def _adjust_step_for_retry(
+        self,
+        step,
+        error: str,
+        previous_errors: List[Dict],
+        current_df: pd.DataFrame
+    ):
+        """
+        Ask LLM to adjust step parameters based on error.
+        """
         try:
-            # Apply fix based on user choice
-            fixed_df = self.anomaly_detector.apply_fix(df, anomaly, user_choice)
+            # Build context about the failure
+            df_context = ""
+            if current_df is not None:
+                df_context = f"Current DataFrame columns: {current_df.columns.tolist()}"
             
-            # Store fixed dataframe
-            self.dataframe_cache.store(thread_id, file_id, fixed_df, {})
+            error_history = "\n".join([
+                f"Attempt {e['attempt']}: {e['error']}" for e in previous_errors
+            ])
             
-            # Create metrics
-            metrics = self.dialogue_manager.create_metrics(
-                start_time=start_time,
-                rows_processed=len(fixed_df),
-                columns_affected=len(anomaly.columns)
+            # Ask LLM for adjusted step
+            adjusted = await self.llm.adjust_step(
+                action=step.action,
+                original_params=step.params,
+                error=error,
+                error_history=error_history,
+                df_context=df_context
             )
             
-            # Format result
-            result = {
-                "anomaly_type": anomaly.type,
-                "fix_applied": user_choice,
-                "affected_columns": anomaly.columns,
-                "before_shape": df.shape,
-                "after_shape": fixed_df.shape
-            }
-            
-            response = self.dialogue_manager.create_success_response(
-                result=result,
-                explanation=f"Applied fix '{user_choice}' to {len(anomaly.columns)} column(s)",
-                metrics=metrics
-            )
-            
-            return response.to_dict()
-            
+            if adjusted:
+                from .schemas import StepPlan
+                return StepPlan(
+                    action=adjusted.get('action', step.action),
+                    params=adjusted.get('params', step.params),
+                    description=f"Adjusted: {adjusted.get('reasoning', 'retry')}"
+                )
         except Exception as e:
-            return self._handle_pandas_error(e, start_time, df, context="anomaly resolution")
+            logger.warning(f"Could not adjust step: {e}")
+        
+        return step  # Return original if adjustment fails
     
-    # ========================================================================
-    # ERROR HANDLING (Task 10.2)
-    # ========================================================================
-    
-    def _handle_pandas_error(
+    async def _execute_step(
         self,
-        error: Exception,
-        start_time: float,
-        df: pd.DataFrame,
-        context: str = "operation"
-    ) -> Dict[str, Any]:
-        """
-        Handle pandas exceptions with user-friendly messages.
-        
-        Args:
-            error: The exception that occurred
-            start_time: Operation start time
-            df: DataFrame being operated on
-            context: Description of the operation
-        
-        Returns:
-            AgentResponse dictionary with ERROR status
-            
-        Requirements: 14.1
-        """
-        error_str = str(error)
-        error_type = type(error).__name__
-        
-        self.logger.error(f"[PANDAS_ERROR] {error_type} during {context}: {error_str}")
-        
-        # Provide user-friendly error messages
-        if "KeyError" in error_type:
-            # Extract column name from error
-            import re
-            match = re.search(r"'([^']+)'", error_str)
-            if match:
-                column = match.group(1)
-                return self._handle_column_not_found(column, df, start_time)
-        
-        if "TypeError" in error_type and "numeric" in error_str.lower():
-            user_message = (
-                f"Cannot perform {context} because the column contains non-numeric values. "
-                f"Try converting the column to numeric first or filtering out non-numeric rows."
-            )
-        elif "ValueError" in error_type:
-            user_message = f"Invalid value provided for {context}: {error_str}"
-        elif "AttributeError" in error_type:
-            user_message = f"Invalid operation for {context}: {error_str}"
-        else:
-            user_message = f"Error during {context}: {error_str}"
-        
-        return self._error_response(
-            user_message,
-            start_time,
-            error_details={
-                "error_type": error_type,
-                "original_error": error_str,
-                "context": context
-            }
-        )
-    
-    def _handle_column_not_found(
-        self,
-        column: str,
-        df: pd.DataFrame,
-        start_time: float
-    ) -> Dict[str, Any]:
-        """
-        Handle column not found error with fuzzy matching suggestions.
-        
-        Args:
-            column: The column name that wasn't found
-            df: DataFrame to search for similar columns
-            start_time: Operation start time
-        
-        Returns:
-            AgentResponse dictionary with ERROR status and suggestions
-            
-        Requirements: 14.2
-        """
-        # Use fuzzy matching to find similar column names
-        similar_columns = get_close_matches(column, df.columns.tolist(), n=3, cutoff=0.6)
-        
-        error_message = f"Column '{column}' not found."
-        
-        if similar_columns:
-            error_message += f" Did you mean: {', '.join(similar_columns)}?"
-        else:
-            error_message += f" Available columns: {', '.join(df.columns.tolist())}"
-        
-        self.logger.warning(f"[COLUMN_NOT_FOUND] {error_message}")
-        
-        return self._error_response(
-            error_message,
-            start_time,
-            error_details={
-                "requested_column": column,
-                "available_columns": df.columns.tolist(),
-                "suggestions": similar_columns
-            }
-        )
-    
-    def _load_dataframe(
-        self,
-        file_id: str,
+        step,
+        session: Session,
+        current_df: pd.DataFrame,
         thread_id: str
-    ) -> tuple[Optional[pd.DataFrame], Optional[Dict[str, Any]]]:
-        """
-        Load dataframe from cache or session.
+    ) -> StepResult:
+        """Execute a single step from the plan."""
+        action = step.action
+        params = step.params
         
-        Args:
-            file_id: File identifier
-            thread_id: Thread identifier
+        # Smart data resolution if needed
+        if current_df is None and action not in ['load_file', 'create']:
+            try:
+                current_df = await self.resolver.resolve_dataframe(params, thread_id, require_data=False)
+            except:
+                pass
         
-        Returns:
-            Tuple of (dataframe, error_response)
-            If successful, returns (df, None)
-            If failed, returns (None, error_response_dict)
+        # Route to appropriate handler - SIMPLIFIED ARCHITECTURE
+        # Only 3 core actions: load_file, process, export
+        # Everything else routes through process (LLM-powered)
+        
+        if action == 'load_file':
+            return await self._step_load_file(params, session, thread_id)
+        elif action == 'export':
+            return await self._step_export(params, current_df, session, thread_id)
+        elif action == 'process':
+            # The core LLM-powered action - full pandas freedom
+            return await self._step_process(params, current_df, session, thread_id)
+        else:
+            # ALL other actions route through process for maximum flexibility
+            # This includes: query, filter, sort, aggregate, add_column, drop_column,
+            # rename_column, fill_na, transform, compare, merge, etc.
+            instruction = params.get('instruction') or params.get('question') or str(params)
+            if action not in ['process']:
+                instruction = f"{action}: {instruction}"
+            return await self._step_process(
+                {'instruction': instruction},
+                current_df, session, thread_id
+            )
+    
+    # ========================================================================
+    # STEP HANDLERS
+    # ========================================================================
+    
+    async def _step_load_file(
+        self,
+        params: Dict,
+        session: Session,
+        thread_id: str
+    ) -> StepResult:
+        """Load a file."""
+        try:
+            file_path = params.get('file_path') or params.get('filename')
+            content = params.get('content')
             
-        Requirements: 14.3
+            # Fallback: If no file_path but we have a filename/id, try storage dir
+            if not file_path and not content:
+                candidate = params.get('filename') or params.get('file_id')
+                if candidate:
+                    # Clean filename (remove potential path components)
+                    candidate_name = os.path.basename(candidate)
+                    potential_path = self.client.storage_dir / candidate_name
+                    if potential_path.exists():
+                        file_path = str(potential_path)
+                        logger.info(f"Using fallback file path from storage: {file_path}")
+                    elif candidate != candidate_name:
+                         # Try full path if provided
+                         if os.path.exists(candidate):
+                             file_path = candidate
+                             logger.info(f"Using provided candidate as path: {file_path}")
+
+            # Safety check
+            if not file_path and not content:
+                 # Last resort: check if file_id matches a known file in state?
+                 # Handled by state retrieval usually, but load_file implies new load.
+                 pass
+            
+            df, detection_info = await self.client.load_file(
+                file_path=file_path,
+                content=content,
+                filename=params.get('filename')
+            )
+            
+            # Store in session
+            file_id = params.get('file_id', params.get('filename', 'file'))
+            self.state.store_dataframe(thread_id, file_id, df, str(file_path or ''))
+            
+            return StepResult(
+                action='load_file',
+                success=True,
+                result={
+                    'file_id': file_id,
+                    'shape': df.shape,
+                    'columns': df.columns.tolist(),
+                    'detection': detection_info
+                },
+                df_modified=True
+            )
+        except Exception as e:
+            return StepResult(action='load_file', success=False, error=str(e))
+    
+    async def _step_process(
+        self,
+        params: Dict,
+        df: pd.DataFrame,
+        session: Session,
+        thread_id: str
+    ) -> StepResult:
+        """
+        Unified LLM-powered data processing - handles ALL data operations.
+        
+        This is the core method that gives the LLM complete pandas freedom.
+        It can handle: queries, aggregations, filters, sorts, transforms,
+        column operations, calculations, and any other pandas operation.
         """
         try:
-            # Try to retrieve from cache
-            df, metadata = self.dataframe_cache.retrieve(thread_id, file_id)
-            
-            if df is not None:
-                self.logger.debug(f"[LOAD] Retrieved from cache: file_id={file_id}")
-                return df, None
-            
-            # Try to load from session
-            from agents.spreadsheet_agent.session import get_dataframe
-            self.logger.info(f"[LOAD] Loading from session: file_id={file_id}")
-            df = get_dataframe(file_id, thread_id)
+            instruction = params.get('instruction') or params.get('question') or ''
             
             if df is None:
-                error_response = self._error_response(
-                    f"File {file_id} not found",
-                    time.time(),
-                    error_details={"file_id": file_id, "thread_id": thread_id}
+                return StepResult(action='process', success=False, error="No data loaded")
+            
+            # Build rich context for the LLM
+            df_context = await self.client.build_context(df, instruction)
+            
+            # Generate pandas code with full freedom
+            logger.info(f"[_step_process] Instruction: {instruction}")
+            answer = await self.llm.answer_question(
+                instruction,
+                df_context,
+                session.get_recent_history()
+            )
+            
+            # Execute the generated code
+            result_data = None
+            computed_answer = None
+            df_modified = False
+            
+            if answer.get('code'):
+                code = answer['code']
+                logger.info(f"[_step_process] Executing code: {code}")
+            # Track created files to return the ID for canvas
+            created_files = []
+            
+            # Define safe file saving helper
+            def save_spreadsheet(data, filename):
+                import os
+                
+                # backend/agents/spreadsheet_agent/agent.py -> backend/agents -> backend -> Orbimesh
+                # We want Orbimesh/storage/spreadsheet_agent
+                
+                # Use relative path logic precisely
+                root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+                storage_dir = os.path.join(root_dir, 'storage', 'spreadsheet_agent')
+                os.makedirs(storage_dir, exist_ok=True)
+                
+                if not any(filename.lower().endswith(ext) for ext in ['.xlsx', '.csv']):
+                     filename += '.xlsx'
+                
+                filepath = os.path.join(storage_dir, filename)
+                
+                if hasattr(data, 'head'): # DataFrame or Series
+                    if filename.lower().endswith('.csv'):
+                        data.to_csv(filepath, index=False)
+                    else:
+                        data.to_excel(filepath, index=False)
+                    
+                    # CRITICAL FIX: Register the new file in session state!
+                    # This makes it the "latest" file so it gets displayed on canvas.
+                    if 'thread_id' in locals() or 'thread_id' in globals():
+                        # thread_id is captured from outer scope (_step_process)
+                        self.state.store_dataframe(thread_id, filename, data, filepath)
+                        logger.info(f"Registered new file in session: {filename}")
+                        created_files.append({
+                            "file_name": filename,
+                            "file_path": filepath,
+                            "file_type": "spreadsheet",
+                            "file_id": filename
+                        }) # Track it properly!
+                else:
+                     raise ValueError("Data must be a pandas DataFrame or Series")
+                
+                # Make relative to project root for display
+                try:
+                    return filepath 
+                except:
+                    return filepath
+
+            # Use combined scope to avoid closure/scope issues
+            exec_globals = {
+                '__builtins__': self.SAFE_BUILTINS,
+                'df': df.copy() if df is not None else None,
+                'pd': pd,
+                'save_spreadsheet': save_spreadsheet,
+                'result': None # Explicitly init result
+            }
+                
+            try:
+                exec(code, exec_globals)
+                
+                # Check for explicit result or modified df
+                result_data = exec_globals.get('result')
+                
+                # Intelligent DataFrame detection:
+                # If 'result' wasn't set, look for ANY new pandas Local variable that is a DataFrame
+                if result_data is None:
+                     # Check if 'df' was modified in place?
+                     if exec_globals.get('df') is not None and not exec_globals.get('df').equals(df):
+                          result_data = exec_globals.get('df')
+                     else:
+                          # Look for other DataFrames created in the scope (e.g. new_df)
+                          # We prefer variables that look like "df" or "result" or "output"
+                          candidates = []
+                          for k, v in exec_globals.items():
+                               if k not in ['df', 'pd', 'save_spreadsheet', 'result', '__builtins__'] and not k.startswith('_'):
+                                    if isinstance(v, pd.DataFrame):
+                                         candidates.append(k)
+                          
+                          if candidates:
+                               # Pick the last defined candidate (heuristic) or prefers specific names
+                               logger.info(f"[_step_process] Found new DataFrames in scope: {candidates}")
+                               # Use the last one found as the result
+                               result_data = exec_globals[candidates[-1]]
+                               # Update the main df reference for subsequent logic
+                               exec_globals['df'] = result_data
+
+                if result_data is None:
+                     result_data = exec_globals.get('df')
+
+                
+                # Check if the dataframe was modified
+                # CRITICAL FIX: Treat 'result_data' as the potentially modified dataframe if it is a DataFrame
+                # This handles cases where code does `result = df[...]` instead of modifying `df` in-place
+                modified_df = result_data if isinstance(result_data, pd.DataFrame) else exec_globals.get('df')
+                
+                if modified_df is not None and isinstance(modified_df, pd.DataFrame):
+                    # Check if it differs from input df
+                    if not modified_df.equals(df):
+                        df_modified = True
+                        # Store the modified dataframe
+                        # overwrite the latest file in session essentially updating the state
+                        file_id = session.get_latest_file_id()
+                        if file_id:
+                            self.state.store_dataframe(thread_id, file_id, modified_df)
+                            logger.info(f"[_step_process] State updated: {file_id} modified (cols: {len(modified_df.columns)})")
+                
+                # Handle different result types
+                if isinstance(result_data, (int, float)):
+                    computed_answer = str(result_data)
+                    logger.info(f"[_step_process] Scalar result: {computed_answer}")
+                elif isinstance(result_data, str) and result_data.strip():
+                    computed_answer = result_data
+                    logger.info(f"[_step_process] String result: {computed_answer}")
+                elif hasattr(result_data, 'item'):  # numpy scalar
+                    computed_answer = str(result_data.item())
+                    logger.info(f"[_step_process] Numpy scalar: {computed_answer}")
+                elif isinstance(result_data, pd.DataFrame):
+                    if len(result_data) <= 50:
+                        result_data = result_data.head(50).to_dict('records') # sanitize later
+                    else:
+                        result_data = result_data.head(50).to_dict('records')
+                    if result_data:
+                        computed_answer = self._format_dataframe_answer(result_data, instruction)
+                elif isinstance(result_data, pd.Series):
+                    if len(result_data) <= 20:
+                        result_data = result_data.to_dict()
+                        computed_answer = str(result_data)
+                    else:
+                        computed_answer = f"Series with {len(result_data)} items"
+                        result_data = result_data.head(20).to_dict()
+                elif isinstance(result_data, (dict, list, tuple)):
+                    try:
+                        # Format pretty string
+                        formatted = json.dumps(self._sanitize_for_json(result_data), indent=2)
+                        if len(formatted) > 3000:
+                            formatted = formatted[:3000] + "\\n... (truncated)"
+                        computed_answer = f"Result:\\n{formatted}"
+                    except:
+                            computed_answer = str(result_data)
+                    logger.info(f"[_step_process] Structured result len: {len(computed_answer)}")
+                
+                logger.info(f"[_step_process] Execution success, modified={df_modified}")
+                
+            except Exception as e:
+                logger.error(f"[_step_process] Code execution failed: {e}")
+                logger.error(f"[_step_process] Code was: {code}")
+                # Return the error so LLM can retry with different approach
+                return StepResult(
+                    action='process',
+                    success=False,
+                    error=f"Code execution failed: {e}. Code: {code}"
                 )
-                return None, error_response
             
-            # Store in cache
-            self.dataframe_cache.store(thread_id, file_id, df, {"loaded_from": "session"})
+            # Build the final answer
+            final_answer = computed_answer if computed_answer else answer.get('answer', '')
+            logger.info(f"[_step_process] Final answer: {final_answer[:200] if final_answer else 'None'}...")
             
-            return df, None
+            result_payload = {
+                'answer': final_answer,
+                'data': self._sanitize_for_json(result_data),
+                'code': answer.get('code'),
+                'confidence': answer.get('confidence', 0.8)
+            }
+            
+            # CRITICAL: Return the created file_id so _build_response can show it on Canvas
+            if created_files:
+                 result_payload['file_id'] = created_files[-1]
+                 result_payload['generated_files'] = created_files # Inform orchestrator state management
+                 logger.info(f"[_step_process] Returning result with file_id: {created_files[-1]} and {len(created_files)} generated files")
+            
+            return StepResult(
+                action='process',
+                success=True,
+                result=result_payload,
+                df_modified=df_modified
+            )
             
         except Exception as e:
-            self.logger.error(f"[LOAD] Error loading file {file_id}: {e}", exc_info=True)
-            error_response = self._error_response(
-                f"Failed to load file {file_id}: {str(e)}",
-                time.time(),
-                error_details={
-                    "file_id": file_id,
-                    "thread_id": thread_id,
-                    "error_type": type(e).__name__
+            logger.error(f"[_step_process] Error: {e}")
+            return StepResult(action='process', success=False, error=str(e))
+    
+    
+    def _format_dataframe_answer(self, data: list, question: str) -> str:
+        """Format DataFrame results into a readable answer string."""
+        if not data:
+            return "No results found."
+        
+        # For small result sets, include the data in the answer
+        if len(data) <= 10:
+            # Get column names
+            columns = list(data[0].keys()) if data else []
+            
+            # Build a simple table representation
+            lines = []
+            for i, row in enumerate(data, 1):
+                row_parts = [f"{k}: {v}" for k, v in row.items()]
+                lines.append(f"{i}. " + ", ".join(row_parts))
+            
+            return "\n".join(lines)
+        else:
+            # For larger results, just summarize
+            return f"Found {len(data)} results. Showing first {min(len(data), 50)} in the data field."
+    
+    
+    async def _step_filter(
+        self,
+        params: Dict,
+        df: pd.DataFrame,
+        session: Session,
+        thread_id: str
+    ) -> StepResult:
+        """Filter rows."""
+        try:
+            column = params.get('column')
+            operator = params.get('operator', '==')
+            value = params.get('value')
+            
+            if df is None:
+                return StepResult(action='filter', success=False, error="No data loaded")
+            
+            # Resolve column name
+            cols = self.resolver.resolve_columns(df, [column])
+            if not cols:
+                return StepResult(action='filter', success=False, error=f"Column not found: {column}")
+            
+            col = cols[0]
+            
+            # Apply filter
+            if operator == '==':
+                filtered = df[df[col] == value]
+            elif operator == '!=':
+                filtered = df[df[col] != value]
+            elif operator == '>':
+                filtered = df[df[col] > value]
+            elif operator == '<':
+                filtered = df[df[col] < value]
+            elif operator == '>=':
+                filtered = df[df[col] >= value]
+            elif operator == '<=':
+                filtered = df[df[col] <= value]
+            elif operator == 'contains':
+                filtered = df[df[col].astype(str).str.contains(str(value), case=False, na=False)]
+            else:
+                filtered = df[df[col] == value]
+            
+            # Store result
+            file_id = session.get_latest_file_id()
+            if file_id:
+                self.state.store_dataframe(thread_id, file_id, filtered)
+            
+            return StepResult(
+                action='filter',
+                success=True,
+                result={
+                    'original_rows': len(df),
+                    'filtered_rows': len(filtered),
+                    'removed': len(df) - len(filtered),
+                    'data': filtered.head(100).to_dict('records')  # Include actual filtered data
+                },
+                df_modified=True
+            )
+        except Exception as e:
+            return StepResult(action='filter', success=False, error=str(e))
+    
+    async def _step_sort(
+        self,
+        params: Dict,
+        df: pd.DataFrame,
+        session: Session,
+        thread_id: str
+    ) -> StepResult:
+        """Sort data."""
+        try:
+            column = params.get('column')
+            ascending = params.get('ascending', True)
+            
+            if df is None:
+                return StepResult(action='sort', success=False, error="No data loaded")
+            
+            cols = self.resolver.resolve_columns(df, [column])
+            if not cols:
+                return StepResult(action='sort', success=False, error=f"Column not found: {column}")
+            
+            sorted_df = df.sort_values(by=cols[0], ascending=ascending)
+            
+            file_id = session.get_latest_file_id()
+            if file_id:
+                self.state.store_dataframe(thread_id, file_id, sorted_df)
+            
+            return StepResult(
+                action='sort',
+                success=True,
+                result={'sorted_by': cols[0], 'ascending': ascending},
+                df_modified=True
+            )
+        except Exception as e:
+            return StepResult(action='sort', success=False, error=str(e))
+    
+    async def _step_aggregate(
+        self,
+        params: Dict,
+        df: pd.DataFrame,
+        session: Session,
+        thread_id: str
+    ) -> StepResult:
+        """Group and aggregate data."""
+        try:
+            group_by = params.get('group_by')
+            column = params.get('column')
+            function = params.get('function', 'sum')
+            
+            if df is None:
+                return StepResult(action='aggregate', success=False, error="No data loaded")
+            
+            # Resolve columns
+            group_cols = []
+            if group_by:
+                group_cols = self.resolver.resolve_columns(df, [group_by] if isinstance(group_by, str) else group_by)
+                if not group_cols:
+                     return StepResult(action='aggregate', success=False, error=f"Group column not found: {group_by}")
+
+            agg_cols = self.resolver.resolve_columns(df, [column])
+            if not agg_cols and column:
+                 return StepResult(action='aggregate', success=False, error=f"Aggregate column not found: {column}")
+            
+            # Perform aggregation
+            if agg_cols:
+                target_col = agg_cols[0]
+                if group_cols:
+                    # Grouped aggregation
+                    if function == 'sum':
+                        result = df.groupby(group_cols)[target_col].sum().reset_index()
+                    elif function == 'mean':
+                        result = df.groupby(group_cols)[target_col].mean().reset_index()
+                    elif function == 'count':
+                        result = df.groupby(group_cols)[target_col].count().reset_index()
+                    elif function in ('nunique', 'count_unique', 'unique_count'):
+                        result = df.groupby(group_cols)[target_col].nunique().reset_index()
+                    elif function == 'min':
+                        result = df.groupby(group_cols)[target_col].min().reset_index()
+                    elif function == 'max':
+                        result = df.groupby(group_cols)[target_col].max().reset_index()
+                    else:
+                        result = df.groupby(group_cols)[target_col].sum().reset_index()
+                else:
+                    # Global aggregation (no group by)
+                    if function == 'sum':
+                        val = df[target_col].sum()
+                    elif function == 'mean':
+                        val = df[target_col].mean()
+                    elif function == 'count':
+                        val = df[target_col].count()
+                    elif function in ('nunique', 'count_unique', 'unique_count'):
+                        val = df[target_col].nunique()
+                    elif function == 'min':
+                        val = df[target_col].min()
+                    elif function == 'max':
+                        val = df[target_col].max()
+                    else:
+                        val = df[target_col].sum()
+                    
+                    # Create a simple result dataframe
+                    result = pd.DataFrame([{function: val}])
+                    
+                    # Optimization: Return scalar answer directly if it's a global aggregation
+                    return StepResult(
+                        action='aggregate',
+                        success=True,
+                        result={
+                            'answer': f"The {function} of {target_col} is {val}",
+                            'value': float(val) if hasattr(val, 'item') else val,
+                            'data': result.to_dict('records')
+                        },
+                        df_modified=False # Don't update main df context for simple scalar queries
+                    )
+
+            else:
+                # Count only if no agg column
+                if group_cols:
+                    result = df.groupby(group_cols).size().reset_index(name='count')
+                else:
+                    val = len(df)
+                    return StepResult(
+                        action='aggregate',
+                        success=True,
+                        result={
+                             'answer': f"Count is {val}",
+                             'value': val
+                        }
+                    )
+            
+            # For grouped results, we generally want to store them
+            file_id = f"agg_{uuid.uuid4().hex[:8]}"
+            self.state.store_dataframe(thread_id, file_id, result)
+
+            return StepResult(
+                action='aggregate',
+                success=True,
+                result={
+                    'file_id': file_id,
+                    'groups': len(result),
+                    'data': result.head(100).to_dict('records') # Limit return size
+                },
+                df_modified=True
+            )
+        except Exception as e:
+            return StepResult(action='aggregate', success=False, error=str(e))
+    
+    async def _step_add_column(
+        self,
+        params: Dict,
+        df: pd.DataFrame,
+        session: Session,
+        thread_id: str
+    ) -> StepResult:
+        """Add a calculated column."""
+        try:
+            name = params.get('name')
+            expression = params.get('expression')
+            
+            if df is None:
+                return StepResult(action='add_column', success=False, error="No data loaded")
+            
+            # Generate code if expression is natural language
+            if not expression.startswith('df['):
+                code = await self.llm.generate_pandas_code(
+                    f"Add a new column called '{name}' where: {expression}",
+                    await self.client.build_context(df)
+                )
+            else:
+                code = f"df['{name}'] = {expression}"
+            
+            # Execute
+            exec_globals = {
+                '__builtins__': self.SAFE_BUILTINS,
+                'df': df.copy(),
+                'pd': pd
+            }
+            exec(code, exec_globals)
+            result_df = exec_globals['df']
+            
+            file_id = session.get_latest_file_id()
+            if file_id:
+                self.state.store_dataframe(thread_id, file_id, result_df)
+            
+            return StepResult(
+                action='add_column',
+                success=True,
+                result={'column': name, 'code': code},
+                df_modified=True
+            )
+        except Exception as e:
+            return StepResult(action='add_column', success=False, error=str(e))
+    
+    async def _step_drop_column(
+        self,
+        params: Dict,
+        df: pd.DataFrame,
+        session: Session,
+        thread_id: str
+    ) -> StepResult:
+        """Drop a column."""
+        try:
+            column = params.get('column')
+            
+            if df is None:
+                return StepResult(action='drop_column', success=False, error="No data loaded")
+            
+            cols = self.resolver.resolve_columns(df, [column])
+            if not cols:
+                return StepResult(action='drop_column', success=False, error=f"Column not found: {column}")
+            
+            result_df = df.drop(columns=cols)
+            
+            file_id = session.get_latest_file_id()
+            if file_id:
+                self.state.store_dataframe(thread_id, file_id, result_df)
+            
+            return StepResult(
+                action='drop_column',
+                success=True,
+                result={'dropped': cols[0]},
+                df_modified=True
+            )
+        except Exception as e:
+            return StepResult(action='drop_column', success=False, error=str(e))
+    
+    # Safe builtins for code execution
+    SAFE_BUILTINS = {
+        'print': print, 'len': len, 'sum': sum, 'min': min, 'max': max,
+        'abs': abs, 'round': round, 'sorted': sorted, 'list': list,
+        'dict': dict, 'str': str, 'int': int, 'float': float, 'bool': bool,
+        'range': range, 'enumerate': enumerate, 'zip': zip,
+        'True': True, 'False': False, 'None': None,
+        '__import__': __import__,
+        # Additional commonly needed builtins for pandas operations
+        'isinstance': isinstance, 'type': type, 'tuple': tuple, 'set': set,
+        'any': any, 'all': all, 'map': map, 'filter': filter,
+        'hasattr': hasattr, 'getattr': getattr, 'setattr': setattr,
+        'slice': slice, 'reversed': reversed, 'iter': iter, 'next': next,
+        'callable': callable, 'repr': repr, 'format': format,
+    }
+
+    async def _step_transform(
+        self,
+        params: Dict,
+        df: pd.DataFrame,
+        session: Session,
+        thread_id: str
+    ) -> StepResult:
+        """Apply a custom transformation via LLM."""
+        try:
+            instruction = params.get('instruction')
+            
+            if df is None:
+                return StepResult(action='transform', success=False, error="No data loaded")
+            
+            # Generate code
+            code = await self.llm.generate_pandas_code(
+                instruction,
+                await self.client.build_context(df)
+            )
+            
+            # Execute
+            # Execute
+            exec_globals = {
+                '__builtins__': self.SAFE_BUILTINS,
+                'df': df.copy(),
+                'pd': pd
+            }
+            exec(code, exec_globals)
+            result_df = exec_globals['df']
+            
+            file_id = session.get_latest_file_id()
+            if file_id:
+                self.state.store_dataframe(thread_id, file_id, result_df)
+            
+            return StepResult(
+                action='transform',
+                success=True,
+                result={
+                    'code': code,
+                    'shape': result_df.shape
+                },
+                df_modified=True
+            )
+        except Exception as e:
+            return StepResult(action='transform', success=False, error=str(e))
+    
+    async def _step_export(
+        self,
+        params: Dict,
+        df: pd.DataFrame,
+        session: Session,
+        thread_id: str
+    ) -> StepResult:
+        """Export data to file."""
+        try:
+            filename = params.get('filename', 'export.csv')
+            format = params.get('format', 'csv')
+            
+            if df is None:
+                return StepResult(action='export', success=False, error="No data loaded")
+            
+            file_id, file_path = await self.client.save_file(
+                df, filename, format, thread_id
+            )
+            
+            return StepResult(
+                action='export',
+                success=True,
+                result={
+                    'file_id': file_id,
+                    'file_path': file_path,
+                    'format': format,
+                    'rows': len(df)
                 }
             )
-            return None, error_response
+        except Exception as e:
+            return StepResult(action='export', success=False, error=str(e))
     
-    def _error_response(
+    async def _step_merge(
         self,
-        error_message: str,
-        start_time: float,
-        error_details: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
+        params: Dict,
+        df: pd.DataFrame,
+        session: Session,
+        thread_id: str
+    ) -> StepResult:
+        """Merge/Join files."""
+        try:
+            # params: file_ids (list), how, on (optional)
+            file_ids = params.get('file_ids', [])
+            how = params.get('how', 'inner')
+            on = params.get('on')
+            
+            # If current df is one of them, use it
+            dfs_to_merge = []
+            
+            # Resolve dataframes
+            for fid in file_ids:
+                if fid in session.dataframes:
+                    dfs_to_merge.append(session.dataframes[fid])
+            
+            # If current df is not in list but we have it, maybe add it?
+            # Usually file_ids should specify exactly what to merge
+            
+            if len(dfs_to_merge) < 2:
+                # Try to use current_df if available
+                if df is not None and len(dfs_to_merge) == 1:
+                     # Check if current_df is already in dfs_to_merge (by identity or content)
+                     # Simpler: just append and assume user meant to merge current with another
+                     dfs_to_merge.insert(0, df)
+                
+            if len(dfs_to_merge) < 2:
+                return StepResult(action='merge', success=False, error="Need at least 2 DataFrames to merge")
+            
+            # Perform merge
+            left = dfs_to_merge[0]
+            right = dfs_to_merge[1]
+            
+            if on:
+                result_df = pd.merge(left, right, how=how, on=on)
+            else:
+                # Let pandas infer or merge on index if no common columns?
+                # Safer to let pandas infer
+                result_df = pd.merge(left, right, how=how)
+                
+            # Store result
+            file_id = f"merged_{uuid.uuid4().hex[:8]}"
+            self.state.store_dataframe(thread_id, file_id, result_df)
+            
+            return StepResult(
+                action='merge',
+                success=True,
+                result={
+                    'file_id': file_id,
+                    'rows': len(result_df),
+                    'columns': len(result_df.columns)
+                },
+                df_modified=True
+            )
+        except Exception as e:
+            return StepResult(action='merge', success=False, error=str(e))
+
+    async def _step_rename_column(
+        self,
+        params: Dict,
+        df: pd.DataFrame,
+        session: Session,
+        thread_id: str
+    ) -> StepResult:
+        """Rename a column."""
+        try:
+            old_name = params.get('old_name')
+            new_name = params.get('new_name')
+            
+            if df is None:
+                return StepResult(action='rename_column', success=False, error="No data loaded")
+            
+            cols = self.resolver.resolve_columns(df, [old_name])
+            if not cols:
+                return StepResult(action='rename_column', success=False, error=f"Column not found: {old_name}")
+            
+            result_df = df.rename(columns={cols[0]: new_name})
+            
+            file_id = session.get_latest_file_id()
+            if file_id:
+                self.state.store_dataframe(thread_id, file_id, result_df)
+            
+            return StepResult(
+                action='rename_column',
+                success=True,
+                result={'old': cols[0], 'new': new_name},
+                df_modified=True
+            )
+        except Exception as e:
+            return StepResult(action='rename_column', success=False, error=str(e))
+
+    async def _step_fill_na(
+        self,
+        params: Dict,
+        df: pd.DataFrame,
+        session: Session,
+        thread_id: str
+    ) -> StepResult:
+        """Fill missing values."""
+        try:
+            column = params.get('column')
+            value = params.get('value', 0)
+            
+            if df is None:
+                return StepResult(action='fill_na', success=False, error="No data loaded")
+            
+            if column:
+                cols = self.resolver.resolve_columns(df, [column])
+                if not cols:
+                    return StepResult(action='fill_na', success=False, error=f"Column not found: {column}")
+                
+                df_copy = df.copy()
+                df_copy[cols[0]] = df_copy[cols[0]].fillna(value)
+                result_df = df_copy
+            else:
+                # Fill all
+                result_df = df.fillna(value)
+            
+            file_id = session.get_latest_file_id()
+            if file_id:
+                self.state.store_dataframe(thread_id, file_id, result_df)
+            
+            return StepResult(
+                action='fill_na',
+                success=True,
+                result={'filled': True, 'value': value},
+                df_modified=True
+            )
+        except Exception as e:
+            return StepResult(action='fill_na', success=False, error=str(e))
+
+    # ========================================================================
+    # DIRECT ACTION EXECUTION
+    # ========================================================================
+    
+    async def _execute_action(
+        self,
+        action: str,
+        params: Dict[str, Any],
+        thread_id: str,
+        session: Session
+    ) -> ExecuteResponse:
+        """Execute a specific action directly."""
+        try:
+            # Resolve dataframe
+            df = await self.resolver.resolve_dataframe(params, thread_id, require_data=False)
+            
+            # Create step and execute
+            from .schemas import StepPlan
+            step = StepPlan(action=action, params=params)
+            result = await self._execute_step(step, session, df, thread_id)
+            
+            session.add_operation(action, str(params), result.result)
+            
+            return ExecuteResponse(
+                status=TaskStatus.COMPLETE if result.success else TaskStatus.ERROR,
+                success=result.success,
+                result=result.result,
+                error=result.error
+            )
+            
+        except Exception as e:
+            return ExecuteResponse(
+                status=TaskStatus.ERROR,
+                success=False,
+                error=str(e)
+            )
+    
+    # ========================================================================
+    # FILE UPLOAD
+    # ========================================================================
+    
+    async def _handle_file_upload(
+        self,
+        content: bytes,
+        filename: str,
+        thread_id: str,
+        session: Session
+    ) -> ExecuteResponse:
+        """Handle file upload."""
+        try:
+            # Load file
+            df, detection_info = await self.client.load_file(
+                content=content,
+                filename=filename
+            )
+            
+            # Save to storage
+            file_id, file_path = await self.client.save_file(
+                df, filename, thread_id=thread_id
+            )
+            
+            # Store in session
+            self.state.store_dataframe(thread_id, file_id, df, file_path)
+            
+            session.add_operation('upload', filename, {'shape': df.shape})
+            
+            # Build canvas display
+            canvas = self._build_canvas(df, f"Uploaded: {filename}", file_id)
+            
+            return ExecuteResponse(
+                status=TaskStatus.COMPLETE,
+                success=True,
+                result={
+                    'file_id': file_id,
+                    'filename': filename,
+                    'rows': len(df),
+                    'columns': len(df.columns),
+                    'column_names': df.columns.tolist(),
+                    'detection': detection_info
+                },
+                canvas_display=canvas
+            )
+            
+        except Exception as e:
+            return ExecuteResponse(
+                status=TaskStatus.ERROR,
+                success=False,
+                error=f"Upload failed: {e}"
+            )
+    
+    # ========================================================================
+    # HELPERS
+    # ========================================================================
+    
+    async def _build_context(self, session: Session, prompt: str = None) -> Dict[str, Any]:
         """
-        Create a standardized error response.
+        Build rich context for LLM from session with ACTUAL DATA PREVIEW.
         
-        Args:
-            error_message: User-friendly error message
-            start_time: Operation start time
-            error_details: Optional detailed error information
-        
-        Returns:
-            AgentResponse dictionary with ERROR status
+        This is the critical context used for task decomposition.
+        The LLM needs to SEE the data to make intelligent decisions!
         """
-        metrics = self.dialogue_manager.create_metrics(start_time=start_time)
+        has_data = bool(session.dataframes)
+        columns = []
+        data_preview = None
         
-        response = self.dialogue_manager.create_error_response(
-            error_message=error_message,
-            error_details=error_details,
-            metrics=metrics
+        if has_data:
+            latest_id = session.get_latest_file_id()
+            if latest_id:
+                # Get the actual DataFrame
+                df = session.dataframes.get(latest_id)
+                
+                if df is not None:
+                    # Get column names
+                    columns = df.columns.tolist()
+                    
+                    # Get ACTUAL DATA PREVIEW using our smart context builder!
+                    # This shows the LLM real data, not just column names
+                    try:
+                        data_preview = await self.client.build_context(df, query=prompt)
+                        logger.info(f"Built rich data context: {len(df)} rows, {len(columns)} columns")
+                        logger.info(f"[CONTEXT] Data preview length: {len(data_preview) if data_preview else 0} chars")
+                    except Exception as e:
+                        logger.warning(f"Failed to build data preview: {e}")
+                        # Fallback to basic info
+                        data_preview = f"DataFrame with {len(df)} rows and {len(columns)} columns\nColumns: {columns}"
+        
+        return {
+            'has_data': has_data,
+            'columns': columns,
+            'data_preview': data_preview,  # NEW: Actual data for LLM to see!
+            'history': session.get_recent_history()
+        }
+    
+    def _build_response(
+        self,
+        results: List[StepResult],
+        session: Session,
+        original_prompt: str
+    ) -> ExecuteResponse:
+        """Build final response from step results."""
+        all_success = all(r.success for r in results)
+        
+        # Combine results with data truncation for lightweight transport
+        safe_results = []
+        for r in results:
+            res_copy = r.result.copy() if isinstance(r.result, dict) else r.result
+            if isinstance(res_copy, dict) and 'data' in res_copy:
+                 # Truncate data in the log to prevent flooding
+                 data = res_copy['data']
+                 if isinstance(data, list) and len(data) > 3:
+                     res_copy['data'] = data[:3] + [f"... {len(data)-3} more items ..."]
+            
+            safe_results.append({
+                'action': r.action,
+                'success': r.success,
+                'result': res_copy,
+                'error': r.error
+            })
+
+        combined_result = {
+            'prompt': original_prompt,
+            'steps_executed': len(results),
+            'results': safe_results
+        }
+        
+        # Get last successful result for primary answer
+        canvas_df = None
+        canvas_title = "Result"
+        canvas_file_id = None
+        
+        # Check if ANY step modified the dataframe
+        any_df_modified = any(r.df_modified for r in results if r.success)
+        
+        summary_parts = []
+        
+        # If any step modified data, the session's latest file IS the source of truth
+        if any_df_modified:
+            latest_id = session.get_latest_file_id()
+            if latest_id:
+                canvas_df = session.dataframes.get(latest_id)
+                canvas_file_id = latest_id
+                canvas_title = "Result Data"
+                logger.info(f"[_build_response] Using latest modified session file: {latest_id}")
+
+        for r in reversed(results):
+            if r.success and r.result:
+                if 'answer' in r.result:
+                    combined_result['answer'] = r.result['answer']
+                    summary_parts.append(f"Answer: {r.result['answer']}")
+                
+                # Check for explicit file_id in result (if we haven't already found one via modification)
+                if canvas_df is None and 'file_id' in r.result:
+                    canvas_file_id = r.result['file_id']
+                    if canvas_file_id in session.dataframes:
+                        canvas_df = session.dataframes[canvas_file_id]
+                        if r.action == 'aggregate':
+                            canvas_title = "Aggregation Result"
+                            summary_parts.append(f"Aggregated data into {len(canvas_df)} rows")
+                        elif r.action == 'sort':
+                            canvas_title = "Sorted Data"
+                        elif r.action == 'filter':
+                            canvas_title = "Filtered Data"
+                            summary_parts.append(f"Filtered data to {len(canvas_df)} rows")
+                        else:
+                            canvas_title = f"Result: {r.action}"
+                        break
+        
+        # Fallback to latest file if still no canvas (e.g. just loaded file)
+        if canvas_df is None:
+            latest_id = session.get_latest_file_id()
+            if latest_id:
+                canvas_df = session.dataframes.get(latest_id)
+                canvas_file_id = latest_id
+                canvas_title = "Current Data"
+        
+        # Custom canvas logic
+        canvas = None
+        if canvas_df is not None:
+            canvas = self._build_canvas(canvas_df, canvas_title, canvas_file_id)
+            
+        # NEW: Collect generated files for Orchestrator awareness
+        generated_files = []
+        if canvas_file_id and canvas_file_id in session.file_paths:
+             path = session.file_paths[canvas_file_id]
+             generated_files.append({
+                 "file_id": canvas_file_id,
+                 "file_name": canvas_file_id, # often same as ID
+                 "file_path": path,
+                 "file_type": "spreadsheet"
+             })
+        
+        # Add to combined result
+        combined_result['generated_files'] = generated_files
+        
+        # Construct StandardAgentResponse (v2)
+        # Fix: Ensure canvas_data is explicitly exposed for Orchestrator V2 extraction
+        standard_response = {
+            'status': "success" if all_success else "error",
+            'summary': combined_result.get('summary', "Execution completed."),
+            'data': combined_result.get('results', []), # Client gets full details
+            # 'canvas_display': canvas, # REMOVED: Legacy support removed to prevent conflicts
+            'canvas_data': canvas.get('canvas_data') if canvas else None,
+            'canvas_type': canvas.get('canvas_type', 'spreadsheet') if canvas else None,
+            'canvas_title': canvas.get('canvas_title') if canvas else None,
+            'error_message': None if all_success else "; ".join(r.error for r in results if r.error)
+        }
+
+        # Legacy nesting for orchestrator compatibility
+        combined_result['standard_response'] = standard_response
+
+        return ExecuteResponse(
+            status=TaskStatus.COMPLETE if all_success else TaskStatus.ERROR,
+            success=all_success,
+            result=combined_result,
+            canvas_display=canvas,
+            standard_response=standard_response,
+            error=None if all_success else "; ".join(r.error for r in results if r.error)
         )
+    
+    async def _step_export(
+        self,
+        params: Dict,
+        df: pd.DataFrame,
+        session: Session,
+        thread_id: str
+    ) -> StepResult:
+        """Export data to file."""
+        try:
+            filename = params.get('filename') or params.get('file_name') or 'export.xlsx'
+            file_format = params.get('format') or params.get('file_type') or 'xlsx'
+            
+            if df is None:
+                return StepResult(action='export', success=False, error="No data loaded")
+            
+            import os
+            # Standard root storage
+            root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+            storage_dir = os.path.join(root_dir, 'storage', 'spreadsheet_agent')
+            os.makedirs(storage_dir, exist_ok=True)
+            
+            # Helper to ensure extension
+            target_ext = f".{file_format.lstrip('.')}"
+            if not filename.lower().endswith(target_ext.lower()):
+                filename += target_ext
+                
+            filepath = os.path.join(storage_dir, filename)
+            
+            if 'csv' in file_format.lower():
+                df.to_csv(filepath, index=False)
+            else:
+                df.to_excel(filepath, index=False)
+                
+            # CRITICAL: Register in session state!
+            self.state.store_dataframe(thread_id, filename, df, filepath)
+            logger.info(f"[_step_export] Registered exported file in session: {filename}")
+            
+            return StepResult(
+                action='export',
+                success=True,
+                result={
+                    'file_path': filepath, 
+                    'filename': filename,
+                    'file_id': filename, # Use filename as ID for simplicity
+                    'generated_files': [{
+                        "file_name": filename,
+                        "file_path": filepath,
+                        "file_type": "spreadsheet",
+                        "file_id": filename
+                    }] # Inform orchestrator with full metadata
+                },
+                df_modified=False
+            )
+        except Exception as e:
+            logger.error(f"Export failed: {e}")
+            return StepResult(action='export', success=False, error=str(e))
+
+    def _sanitize_for_json(self, obj: Any) -> Any:
+        """Ensure object is JSON serializable."""
+        if obj is None:
+            return None
+        if isinstance(obj, (str, int, float, bool)):
+            return obj
+        if isinstance(obj, pd.DataFrame):
+            return self._sanitize_for_json(obj.head(50).to_dict(orient='records'))
+        if isinstance(obj, pd.Series):
+             return self._sanitize_for_json(obj.to_dict())
+        if hasattr(obj, 'item') and hasattr(obj, 'dtype'): # numpy scalar
+             return obj.item()
+        if isinstance(obj, dict):
+            return {str(k): self._sanitize_for_json(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple, set)):
+             return [self._sanitize_for_json(v) for v in obj]
         
-        return response.to_dict()
+        # Fallback to string representation for unknown objects
+        return str(obj)
+
+    def _build_canvas(
+        self,
+        df: pd.DataFrame,
+        title: str,
+        file_id: str = None
+    ) -> Dict[str, Any]:
+        """Build canvas display for frontend."""
+        # Limit rows for display - optimize payload size
+        display_df = df.head(50)
+        
+        return {
+            'canvas_type': 'spreadsheet',
+            'canvas_title': title,
+            'canvas_data': {
+                'headers': df.columns.tolist(),
+                'rows': display_df.values.tolist(),
+                'dtypes': {k: str(v) for k, v in df.dtypes.items()},
+                'total_rows': len(df),
+                'total_columns': len(df.columns),
+                'showing_rows': len(display_df)
+            },
+            'file_id': file_id
+        }
 
 
-# ============================================================================
+# ========================================================================
 # GLOBAL INSTANCE
-# ============================================================================
+# ========================================================================
 
-# Create a global agent instance for use in endpoints
 spreadsheet_agent = SpreadsheetAgent()

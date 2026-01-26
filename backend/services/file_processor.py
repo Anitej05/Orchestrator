@@ -180,7 +180,7 @@ class FileProcessor:
         return None
     
     async def process_spreadsheet(self, file_obj: FileObject) -> Dict:
-        """Process spreadsheet file (upload to agent)"""
+        """Process spreadsheet file (upload to v2 agent)"""
         start_time = datetime.now()
         
         # Check if already has file_id (skip re-upload)
@@ -206,20 +206,28 @@ class FileProcessor:
                 lambda: open(file_path, 'rb').read()
             )
             
+            # Use v2 agent /execute endpoint on port 9000
             async with httpx.AsyncClient(timeout=60.0) as client:
                 files = {"file": (file_obj.file_name, file_content, mime_type)}
                 response = await client.post(
-                    "http://localhost:8041/upload",
+                    "http://localhost:9000/execute",
                     files=files
                 )
                 
                 if response.status_code == 200:
-                    upload_result = response.json()
-                    result_data = upload_result.get('result', {})
+                    execute_result = response.json()
+                    
+                    # v2 returns result in top-level or in 'result' field
+                    # Handle case where 'result' key exists but is None
+                    nested_result = execute_result.get('result')
+                    if nested_result is None:
+                        nested_result = {}
+                    file_id = execute_result.get('file_id') or nested_result.get('file_id')
+                    canvas_display = execute_result.get('canvas_display')
                     
                     result = {
-                        'file_id': result_data.get('file_id'),
-                        'canvas_display': result_data.get('canvas_display'),
+                        'file_id': file_id,
+                        'canvas_display': canvas_display,
                         'cached': False,
                         'processing_time': (datetime.now() - start_time).total_seconds()
                     }

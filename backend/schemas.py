@@ -182,6 +182,97 @@ class AgentResponseStatus(str, Enum):
     NEEDS_INPUT = "needs_input"
     PARTIAL = "partial"
 
+# --- Canvas Display Schemas ---
+
+class CanvasDisplay(BaseModel):
+    """
+    Standardized schema for agents to send visual content to the canvas.
+    
+    Two modes:
+    1. Structured data (preferred): Send canvas_data, frontend templates it
+    2. Custom HTML (when needed): Send canvas_content with raw HTML
+    """
+    canvas_type: Literal['email_preview', 'spreadsheet', 'document', 'pdf', 'image', 'json', 'html', 'markdown'] = Field(
+        ...,
+        description="Type of content being displayed in canvas"
+    )
+    canvas_data: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Structured data for the canvas (frontend will template it) - PREFERRED"
+    )
+    canvas_content: Optional[str] = Field(
+        None,
+        description="Raw HTML/markdown content (use when custom rendering needed)"
+    )
+    canvas_title: Optional[str] = Field(
+        None,
+        description="Optional title for the canvas display"
+    )
+    requires_confirmation: bool = Field(
+        False,
+        description="If True, user must confirm before agent proceeds (for critical actions)"
+    )
+    confirmation_message: Optional[str] = Field(
+        None,
+        description="Message to show when confirmation is required"
+    )
+    
+    class Config:
+        json_schema_extra = {
+            "examples": [
+                {
+                    "canvas_type": "email_preview",
+                    "canvas_data": {
+                        "to": ["user@example.com"],
+                        "cc": [],
+                        "bcc": [],
+                        "subject": "Meeting Reminder",
+                        "body": "Don't forget our meeting tomorrow",
+                        "is_html": False,
+                        "attachments": []
+                    },
+                    "requires_confirmation": True,
+                    "confirmation_message": "Review and confirm to send this email"
+                },
+                {
+                    "canvas_type": "spreadsheet",
+                    "canvas_data": {
+                        "headers": ["Name", "Age", "City"],
+                        "rows": [
+                            ["Alice", 30, "NYC"],
+                            ["Bob", 25, "LA"]
+                        ],
+                        "filename": "data.csv"
+                    }
+                }
+            ]
+        }
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "canvas_type": "email_preview",
+                "canvas_content": "<html><body><h1>Email Preview</h1>...</body></html>",
+                "canvas_title": "Email to be sent",
+                "requires_confirmation": True,
+                "confirmation_message": "Please review the email before sending"
+            }
+        }
+
+
+class StandardAgentResponse(BaseModel):
+    """
+    New Standardized Schema for Agent Responses (v2).
+    Explicitly separates context for the Orchestrator (LLM) from data for the Client.
+    """
+    status: Literal["success", "error", "partial"] = Field(..., description="High-level status")
+    summary: str = Field(..., description="Concise natural language summary for the Orchestrator LLM (e.g. 'Found 50 rows')")
+    data: Optional[Dict[str, Any]] = Field(None, description="Heavy data payload for Client/Canvas (NOT for Orchestrator LLM)")
+    canvas_display: Optional[CanvasDisplay] = Field(None, description="Visual configuration for the frontend")
+    error_message: Optional[str] = Field(None, description="Details if status is error")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Tracing, timing, or debug info")
+
+
 class AgentResponse(BaseModel):
     """
     Standardized response from an agent to the orchestrator.
@@ -189,6 +280,9 @@ class AgentResponse(BaseModel):
     """
     status: AgentResponseStatus = Field(..., description="Execution status")
     result: Optional[Any] = Field(None, description="Final result (if complete)")
+    # Optional - populate if migrating to v2
+    standard_response: Optional[StandardAgentResponse] = Field(None, description="v2 response structure")
+    
     error: Optional[str] = Field(None, description="Error message (if error)")
     
     # For needs_input status
@@ -237,6 +331,7 @@ class ProcessResponse(BaseModel):
     has_canvas: bool = False
     canvas_content: Optional[str] = None
     canvas_type: Optional[str] = None
+    canvas_data: Optional[Dict[str, Any]] = None # Added V2 structured data support
     browser_view: Optional[str] = None
     plan_view: Optional[str] = None
     current_view: Optional[str] = None
@@ -345,6 +440,8 @@ class AnalysisResult(BaseModel):
     needs_complex_processing: bool = Field(..., description="Whether the request requires complex orchestration or can be handled with a simple response")
     reasoning: str = Field(..., description="The reasoning behind the analysis decision")
     response: Optional[str] = Field(None, description="Direct response if needs_complex_processing is False")
+    canvas_confirmation_action: Optional[Literal["confirm", "cancel", "modify"]] = Field(None, description="Action if user is responding to a confirmation request")
+    canvas_confirmation_task: Optional[str] = Field(None, description="Task name being confirmed/cancelled")
 
 class PlanValidationResult(BaseModel):
     """Schema for the advanced validation node's output."""
@@ -399,82 +496,6 @@ class PlanState(BaseModel):
     last_modification: Optional[str] = Field(None, description="ISO timestamp of last modification")
 
 
-# --- Canvas Display Schemas ---
-
-class CanvasDisplay(BaseModel):
-    """
-    Standardized schema for agents to send visual content to the canvas.
-    
-    Two modes:
-    1. Structured data (preferred): Send canvas_data, frontend templates it
-    2. Custom HTML (when needed): Send canvas_content with raw HTML
-    """
-    canvas_type: Literal['email_preview', 'spreadsheet', 'document', 'pdf', 'image', 'json', 'html', 'markdown'] = Field(
-        ...,
-        description="Type of content being displayed in canvas"
-    )
-    canvas_data: Optional[Dict[str, Any]] = Field(
-        None,
-        description="Structured data for the canvas (frontend will template it) - PREFERRED"
-    )
-    canvas_content: Optional[str] = Field(
-        None,
-        description="Raw HTML/markdown content (use when custom rendering needed)"
-    )
-    canvas_title: Optional[str] = Field(
-        None,
-        description="Optional title for the canvas display"
-    )
-    requires_confirmation: bool = Field(
-        False,
-        description="If True, user must confirm before agent proceeds (for critical actions)"
-    )
-    confirmation_message: Optional[str] = Field(
-        None,
-        description="Message to show when confirmation is required"
-    )
-    
-    class Config:
-        json_schema_extra = {
-            "examples": [
-                {
-                    "canvas_type": "email_preview",
-                    "canvas_data": {
-                        "to": ["user@example.com"],
-                        "cc": [],
-                        "bcc": [],
-                        "subject": "Meeting Reminder",
-                        "body": "Don't forget our meeting tomorrow",
-                        "is_html": False,
-                        "attachments": []
-                    },
-                    "requires_confirmation": True,
-                    "confirmation_message": "Review and confirm to send this email"
-                },
-                {
-                    "canvas_type": "spreadsheet",
-                    "canvas_data": {
-                        "headers": ["Name", "Age", "City"],
-                        "rows": [
-                            ["Alice", 30, "NYC"],
-                            ["Bob", 25, "LA"]
-                        ],
-                        "filename": "data.csv"
-                    }
-                }
-            ]
-        }
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "canvas_type": "email_preview",
-                "canvas_content": "<html><body><h1>Email Preview</h1>...</body></html>",
-                "canvas_title": "Email to be sent",
-                "requires_confirmation": True,
-                "confirmation_message": "Please review the email before sending"
-            }
-        }
 
 
 class AgentResponseWithCanvas(BaseModel):

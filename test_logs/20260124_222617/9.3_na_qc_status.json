@@ -1,0 +1,27 @@
+{
+  "test_id": "9.3_na_qc_status",
+  "file": "DENISCO_CHEMICALS_PRIVATE_LIMITEDMaterial_Received_Note__MRN__677045.xlsx",
+  "query": "How many items have N.A or null QC status?",
+  "success": true,
+  "response": {
+    "status": "needs_input",
+    "success": true,
+    "result": null,
+    "error": null,
+    "question": "Which column in the current dataset represents the QC status you want to check for 'N.A' or null values?",
+    "question_type": "text",
+    "options": null,
+    "context": {
+      "task_id": "task-6"
+    },
+    "canvas_display": null,
+    "standard_response": null,
+    "metrics": null
+  },
+  "error": null,
+  "execution_time": 3.469668,
+  "status_code": 200,
+  "description": "Filter by N.A or null QCStatus",
+  "expected_column": "QCStatus",
+  "file_key": "MRN"
+}

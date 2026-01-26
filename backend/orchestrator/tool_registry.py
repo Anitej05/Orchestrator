@@ -165,75 +165,8 @@ def get_tools_by_category(category: str) -> List[str]:
     return _tool_categories.get(category, [])
 
 
-def is_tool_capable(capability: str) -> bool:
-    """
-    Check if a capability can be handled by a direct tool.
-    Uses smart matching: exact match, then keyword matching.
-    Lazy-loads tools on first call.
-    """
-    _ensure_tools_initialized()
-    
-    capability_lower = capability.lower()
-    
-    # 1. EXACT MATCH (fastest)
-    if capability_lower in _tool_registry:
-        return True
-    
-    # 2. KEYWORD MATCHING (semantic similarity)
-    # Split the task name into words and check for matches
-    task_words = set(capability_lower.split())
-    
-    for registered_capability in _tool_registry.keys():
-        registered_words = set(registered_capability.split())
-        
-        # If task contains multiple key words from registered capability, it's a match
-        # E.g., "get stock price" matches "Fetch Tesla stock price"
-        overlap = task_words & registered_words
-        
-        # Require at least 2 key words or 50% overlap for a match
-        if len(overlap) >= 2 or (registered_words and len(overlap) / len(registered_words) >= 0.5):
-            logger.debug(f"✅ Tool match for '{capability}' -> '{registered_capability}' (overlap: {overlap})")
-            return True
-    
-    return False
-
-
-def get_best_tool_match(capability: str) -> Optional[BaseTool]:
-    """
-    Get the best-matching tool for a capability using smart matching.
-    Used to find the right tool even with different phrasing.
-    """
-    _ensure_tools_initialized()
-    
-    capability_lower = capability.lower()
-    
-    # 1. EXACT MATCH (fastest)
-    if capability_lower in _tool_registry:
-        return _tool_registry[capability_lower]
-    
-    # 2. KEYWORD MATCHING with scoring
-    task_words = set(capability_lower.split())
-    best_match = None
-    best_score = 0
-    
-    for registered_capability, tool in _tool_registry.items():
-        registered_words = set(registered_capability.split())
-        
-        # Calculate overlap score
-        overlap = task_words & registered_words
-        
-        # Score: number of overlapping words
-        score = len(overlap)
-        
-        if score > best_score:
-            best_score = score
-            best_match = tool
-    
-    if best_score >= 2:  # Require at least 2 matching keywords
-        logger.debug(f"✅ Best tool match for '{capability}' -> '{best_match.name}' (score: {best_score})")
-        return best_match
-    
-    return None
+# [REMOVED] Legacy keyword matching logic
+# Superseded by LLM-First Routing (defined below)
 
 
 async def execute_tool(tool_name: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
@@ -493,8 +426,52 @@ def initialize_tools():
         
     except ImportError as e:
         logger.warning(f"Failed to import image tools: {e}")
+
+    try:
+        # Creation tools (LLM-First)
+        from tools.creation_tools import CreateDocumentTool, CreateSpreadsheetTool
+        
+        register_tool(CreateDocumentTool(), [
+            "create document",
+            "write report", 
+            "generate file"
+        ], "creation")
+        
+        register_tool(CreateSpreadsheetTool(), [
+            "create spreadsheet",
+            "generate excel",
+            "make csv"
+        ], "creation")
+        
+        logger.info("✅ Registered creation tools")
+        
+    except ImportError as e:
+        logger.warning(f"Failed to import creation tools: {e}")
     
     logger.info(f"🎉 Tool registry initialized with {len(_tool_registry)} capabilities across {len(_tool_categories)} categories")
+
+# ============================================================================
+# LLM-FIRST ROUTING (Keywords Deprecated)
+# ============================================================================
+
+def is_tool_capable(capability: str) -> bool:
+    """
+    Check if a capability can be handled by a direct tool.
+    STRICT MODE: Only returns True for exact matches.
+    Keyword matching has been removed in favor of LLM routing.
+    """
+    _ensure_tools_initialized()
+    return capability.lower() in _tool_registry
+
+
+def get_best_tool_match(capability: str) -> Optional[BaseTool]:
+    """
+    Get the best-matching tool for a capability.
+    STRICT MODE: Only returns exact matches.
+    Keyword matching has been removed in favor of LLM routing.
+    """
+    _ensure_tools_initialized()
+    return _tool_registry.get(capability.lower())
 
 
 def get_tool_descriptions() -> str:

@@ -1,0 +1,27 @@
+{
+  "test_id": "7.2_count_by_status",
+  "file": "DENISCO_CHEMICALS_PRIVATE_LIMITEDMaterial_Received_Note__MRN__677045.xlsx",
+  "query": "How many items are in each QC status?",
+  "success": true,
+  "response": {
+    "status": "needs_input",
+    "success": true,
+    "result": null,
+    "error": null,
+    "question": "Which column in the dataset represents the QC status you want to analyze (e.g., 'suspended', 'authstatus', or another column)?",
+    "question_type": "text",
+    "options": null,
+    "context": {
+      "task_id": "task-4"
+    },
+    "canvas_display": null,
+    "standard_response": null,
+    "metrics": null
+  },
+  "error": null,
+  "execution_time": 2.428949,
+  "status_code": 200,
+  "description": "Count by QCStatus",
+  "expected_column": "QCStatus",
+  "file_key": "MRN"
+}

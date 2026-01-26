@@ -613,6 +613,51 @@ JSON:"""
             return {"is_critical": True, "reason": "Keyword fallback detection"}
         return {"is_critical": False, "reason": "Analysis failed, assuming non-critical"}
 
+    async def check_ambiguity(self, query: str) -> Dict[str, Any]:
+        """
+        Check if a user query is ambiguous and requires clarification.
+        Returns JSON with 'is_ambiguous', 'question', 'options'.
+        """
+        if not query or len(query) < 4:
+            return {"is_ambiguous": False} # Too short to judge
+
+        prompt = f"""Analyze this user query for ambiguity in an email context.
+Query: "{query}"
+
+Examples of Ambiguity:
+- "Find John" -> Ambiguous (Which John?)
+- "Send email" -> Ambiguous (To whom?)
+- "Summarize" -> Ambiguous (Summarize what?)
+
+Examples of Specificity:
+- "Find emails from John Smith" -> Specific
+- "Send email to john.doe@example.com" -> Specific
+- "Summarize the last 5 emails" -> Specific
+
+Return JSON:
+{{
+  "is_ambiguous": boolean,
+  "question": "Clarifying question...",
+  "options": ["Option 1", "Option 2"] (optional),
+  "reasoning": "Why it is ambiguous"
+}}
+JSON:"""
+
+        for provider in self.clients:
+            try:
+                response = await provider['client'].chat.completions.create(
+                    model=provider['model'],
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.1,
+                    response_format={"type": "json_object"}
+                )
+                content = response.choices[0].message.content
+                return json.loads(strip_think_tags(content))
+            except Exception:
+                continue
+        
+        return {"is_ambiguous": False}
+
     async def decompose_complex_request(self, prompt: str, error_context: Optional[str] = None) -> Dict[str, Any]:
         """
         Decompose a complex natural language request into executable steps.

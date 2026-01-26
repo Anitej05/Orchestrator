@@ -1,1 +1,3 @@
-2026-01-18 17:15:59,084 - __main__ - ERROR - Port 8070 is already in use. Please free the port or use a different one.
+2026-01-26 16:03:44,517 - document_agent.agent - DEBUG - Loaded schemas from: D:\Internship\Orbimesh\backend\schemas.py
+2026-01-26 16:03:44,517 - document_agent.agent - DEBUG - Has AgentResponseStatus: True
+2026-01-26 16:03:44,675 - __main__ - ERROR - Port 8070 is already in use. Please free the port or use a different one.

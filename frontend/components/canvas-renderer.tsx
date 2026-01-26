@@ -37,10 +37,24 @@ export function CanvasRenderer({
 }: CanvasRendererProps) {
   const [imageError, setImageError] = useState(false)
 
+  // NEW: Support for parsing JSON content into structured data (useful for historical messages)
+  let effectiveData = canvasData
+  if (!effectiveData && canvasContent && typeof canvasContent === 'string' &&
+    (canvasContent.trim().startsWith('{') || canvasContent.trim().startsWith('['))) {
+    try {
+      const parsed = JSON.parse(canvasContent)
+      if (parsed && typeof parsed === 'object') {
+        effectiveData = parsed
+      }
+    } catch (e) {
+      // Not valid JSON, fall back to standard content rendering
+    }
+  }
+
   // Check if undo/redo is available from canvas data
-  const canUndo = canvasData?.can_undo || false
-  const canRedo = canvasData?.can_redo || false
-  const isDocumentEdit = canvasData?.original_type === 'docx' || canvasData?.file_path?.endsWith('.docx')
+  const canUndo = effectiveData?.can_undo || false
+  const canRedo = effectiveData?.can_redo || false
+  const isDocumentEdit = effectiveData?.original_type === 'docx' || effectiveData?.file_path?.endsWith('.docx')
 
   // Debug logging for confirmation props
   console.log('🔘 CanvasRenderer confirmation props:', {
@@ -173,21 +187,28 @@ export function CanvasRenderer({
       hasCanvasData: !!canvasData,
       hasCanvasContent: !!canvasContent,
       canvasDataKeys: canvasData ? Object.keys(canvasData) : [],
-      canvasContentPreview: canvasContent ? canvasContent.substring(0, 100) : null
     })
 
-    // If we have structured data, use it (preferred)
-    if (canvasData) {
-      switch (canvasType) {
-        case 'email_preview':
-          return renderEmailPreview(canvasData)
+    // DEBUG: Explicit string logging for effectiveData
+    try {
+      if (effectiveData) {
+        // console.log('🔴 RENDERER_EFFECTIVE_DATA_RAW:', JSON.stringify(effectiveData));
+      } else {
+        // console.log('🔴 RENDERER_EFFECTIVE_DATA_RAW: null/undefined');
+      }
+    } catch (e) { console.error('Error logging effective data', e); }
 
-        case 'spreadsheet_plan':
+    // If we have structured data, use it (preferred)
+    if (effectiveData) {
+      switch (canvasType) {
+        case 'spreadsheet':
+        case 'spreadsheet_plan': // Fallback or explicit handling
+          console.log('🚀 ENTERING SPREADSHEET RENDER BLOCK');
           // Render spreadsheet execution plan for approval
-          const planActions = canvasData.rows || []
-          const planHeaders = canvasData.headers || ['Step', 'Action', 'Description']
-          const planSummary = canvasData.plan_summary || ''
-          const estimatedSteps = canvasData.estimated_steps || planActions.length
+          const planActions = effectiveData.rows || []
+          const planHeaders = effectiveData.headers || ['Step', 'Action', 'Description']
+          const planSummary = effectiveData.plan_summary || ''
+          const estimatedSteps = effectiveData.estimated_steps || planActions.length
 
           return (
             <div className="flex flex-col h-full bg-white dark:bg-gray-900">
@@ -300,12 +321,12 @@ export function CanvasRenderer({
 
         case 'spreadsheet':
           // Render spreadsheet from structured data - Excel-like styling
-          const spreadsheetData = canvasData.data || []
-          const spreadsheetHeaders = spreadsheetData.length > 0 ? spreadsheetData[0] : (canvasData.headers || [])
-          const spreadsheetRows = spreadsheetData.length > 1 ? spreadsheetData.slice(1) : (canvasData.rows || [])
-          const spreadsheetFilename = canvasData.filename || 'Spreadsheet'
-          const spreadsheetMetadata = canvasData.metadata || {}
-          const fileId = canvasData.file_id
+          const spreadsheetData = effectiveData.data || []
+          const spreadsheetHeaders = spreadsheetData.length > 0 ? spreadsheetData[0] : (effectiveData.headers || [])
+          const spreadsheetRows = spreadsheetData.length > 1 ? spreadsheetData.slice(1) : (effectiveData.rows || [])
+          const spreadsheetFilename = effectiveData.filename || 'Spreadsheet'
+          const spreadsheetMetadata = effectiveData.metadata || {}
+          const fileId = effectiveData.file_id
 
           // Generate Excel-style column letters (A, B, C, ... Z, AA, AB, etc.)
           const getColumnLetter = (index: number): string => {
@@ -443,12 +464,12 @@ export function CanvasRenderer({
 
         case 'document':
           // Render document from structured data
-          const docTitle = canvasData.title || 'Document'
-          const docContent = canvasData.content || ''
-          const docStatus = canvasData.status // 'preview', 'created', 'edited'
-          const docFilePath = canvasData.file_path
-          const docFileType = canvasData.file_type
-          const docMetadata = canvasData.metadata || {}
+          const docTitle = effectiveData.title || 'Document'
+          const docContent = effectiveData.content || ''
+          const docStatus = effectiveData.status // 'preview', 'created', 'edited'
+          const docFilePath = effectiveData.file_path
+          const docFileType = effectiveData.file_type
+          const docMetadata = effectiveData.metadata || {}
 
           return (
             <div className="p-6">
@@ -500,7 +521,7 @@ export function CanvasRenderer({
 
         case 'pdf':
           // Render PDF from structured data (with base64 or URL)
-          const pdfData = canvasData.pdf_data || canvasData.content
+          const pdfData = effectiveData.pdf_data || effectiveData.content
           if (pdfData) {
             // Add zoom parameter to PDF URL for better quality
             const pdfSrcFromData = pdfData.startsWith('data:') || pdfData.startsWith('http')
@@ -517,14 +538,14 @@ export function CanvasRenderer({
                     <div className="flex-1">
                       <h3 className="text-lg font-semibold flex items-center gap-2 text-gray-900 dark:text-gray-100">
                         <FileText className="w-5 h-5" />
-                        {canvasData.title || 'PDF Document'}
+                        {effectiveData.title || 'PDF Document'}
                       </h3>
-                      {canvasData.file_path && (
+                      {effectiveData.file_path && (
                         <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                          {canvasData.file_path}
+                          {effectiveData.file_path}
                         </p>
                       )}
-                      {canvasData.status === 'edited' && (
+                      {effectiveData.status === 'edited' && (
                         <p className="text-xs text-green-600 dark:text-green-400 mt-1 font-medium">
                           ✓ Document edited successfully
                         </p>
@@ -580,7 +601,7 @@ export function CanvasRenderer({
                   <iframe
                     src={pdfSrcWithZoom}
                     className="w-full h-full min-h-[700px] border-0 rounded-lg"
-                    title={canvasData.title || "PDF Document"}
+                    title={effectiveData.title || "PDF Document"}
                     key={pdfSrcFromData.substring(0, 100)} // Force re-render on content change
                   />
                 </div>
@@ -593,7 +614,7 @@ export function CanvasRenderer({
           return (
             <div className="p-6">
               <pre className="text-sm bg-gray-50 dark:bg-gray-900 p-4 rounded overflow-auto">
-                {JSON.stringify(canvasData, null, 2)}
+                {JSON.stringify(effectiveData, null, 2)}
               </pre>
             </div>
           )

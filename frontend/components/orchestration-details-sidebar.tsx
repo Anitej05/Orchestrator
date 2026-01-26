@@ -459,7 +459,7 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                             </div>
                         )}
                     </TabsContent>
-                    <TabsContent value="canvas" className="flex-1 overflow-y-auto mt-4">
+                    <TabsContent value="canvas" className="flex-1 overflow-hidden mt-4 flex flex-col">
                         {/* Canvas now only shows non-browser content (HTML/Markdown from LLM responses) */}
                         {/* Browser live stream is shown in the chat interface instead */}
                         {(hasCanvas || viewedCanvasContent) && displayCanvasContent && !browserView ? (
@@ -489,22 +489,38 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                                 <div className="flex-1 overflow-auto">
                                     {(() => {
                                         // Check if canvas_data has status='preview' which indicates confirmation is needed
-                                        const canvasData = (conversationState as any).canvas_data;
                                         const isPreview = canvasData && canvasData.status === 'preview';
                                         const requiresConf = isPreview || ((conversationState as any).canvas_requires_confirmation && (conversationState as any).pending_confirmation);
-                                        console.log('🔘 Sidebar confirmation check:', {
-                                            canvas_requires_confirmation: (conversationState as any).canvas_requires_confirmation,
-                                            pending_confirmation: (conversationState as any).pending_confirmation,
-                                            canvasDataStatus: canvasData?.status,
-                                            isPreview,
-                                            requiresConfirmation: requiresConf,
-                                            pending_confirmation_task: (conversationState as any).pending_confirmation_task
-                                        });
+
+                                        // DEBUG: Reduced Sidebar logging
+                                        try {
+                                            if (canvasData) {
+                                                console.log('🔴 SIDEBAR_CANVAS_DATA_EXISTS:', {
+                                                    type: canvasData.type,
+                                                    keys: Object.keys(canvasData)
+                                                });
+                                            }
+                                        } catch (e) { }
+
+                                        const data = (conversationState as any).canvas_data;
+
+                                        // Auto-switch to plan logic moved here for visibility
+                                        if (data?.status === 'planning' && activeTab !== 'plan') {
+                                            console.log('🔄 Auto-switching to plan tab - planning started');
+                                            setActiveTab('plan');
+                                        }
+                                        // Define resolvedCanvasType before return
+                                        const resolvedCanvasType = viewedCanvasType || canvasData?.type || 'spreadsheet';
+                                        console.log('🎯 RESOLVED_CANVAS_TYPE_PASSED_TO_RENDERER:', resolvedCanvasType);
+
+                                        const effectiveData = typeof displayCanvasContent === 'object' ? displayCanvasContent : (conversationState as any).canvas_data;
+
                                         return (
                                             <CanvasRenderer
-                                                canvasType={displayCanvasType as any}
+                                                key={effectiveData ? JSON.stringify(effectiveData).substring(0, 100) : 'empty'}
+                                                canvasType={resolvedCanvasType as any}
                                                 canvasContent={typeof displayCanvasContent === 'string' ? displayCanvasContent : undefined}
-                                                canvasData={typeof displayCanvasContent === 'object' ? displayCanvasContent : (conversationState as any).canvas_data}
+                                                canvasData={effectiveData}
                                                 canvasTitle={conversationState.canvas_title}
                                                 canvasMetadata={conversationState.canvas_metadata}
                                                 requiresConfirmation={requiresConf}
@@ -529,8 +545,8 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                                                     const filePath = canvasData?.file_path;
                                                     if (filePath) {
                                                         console.log('User requested undo for document:', filePath);
-                                                        const { sendMessage } = useConversationStore.getState().actions;
-                                                        await sendMessage(`Undo the last edit to ${filePath}`, []);
+                                                        const { continueConversation } = useConversationStore.getState().actions;
+                                                        await continueConversation(`Undo the last edit to ${filePath}`, []);
                                                     }
                                                 }}
                                                 onRedo={async () => {
@@ -539,8 +555,8 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                                                     const filePath = canvasData?.file_path;
                                                     if (filePath) {
                                                         console.log('User requested redo for document:', filePath);
-                                                        const { sendMessage } = useConversationStore.getState().actions;
-                                                        await sendMessage(`Redo the last undone edit to ${filePath}`, []);
+                                                        const { continueConversation } = useConversationStore.getState().actions;
+                                                        await continueConversation(`Redo the last undone edit to ${filePath}`, []);
                                                     }
                                                 }}
                                                 onShowHistory={async () => {
@@ -549,8 +565,8 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                                                     const filePath = canvasData?.file_path;
                                                     if (filePath) {
                                                         console.log('User requested version history for document:', filePath);
-                                                        const { sendMessage } = useConversationStore.getState().actions;
-                                                        await sendMessage(`Show version history for ${filePath}`, []);
+                                                        const { continueConversation } = useConversationStore.getState().actions;
+                                                        await continueConversation(`Show version history for ${filePath}`, []);
                                                     }
                                                 }}
                                             />

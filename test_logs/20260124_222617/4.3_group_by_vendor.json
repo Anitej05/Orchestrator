@@ -1,0 +1,27 @@
+{
+  "test_id": "4.3_group_by_vendor",
+  "file": "DENISCO_CHEMICALS_PRIVATE_LIMITEDMaterial_Received_Note__MRN__677045.xlsx",
+  "query": "Show total quantity received from each vendor.",
+  "success": true,
+  "response": {
+    "status": "needs_input",
+    "success": true,
+    "result": null,
+    "error": null,
+    "question": "Which column in the current dataset should be used to identify the vendor (e.g., is it encoded in 'voucher_no', 'cost_center_name', or another column)?",
+    "question_type": "text",
+    "options": null,
+    "context": {
+      "task_id": "task-1"
+    },
+    "canvas_display": null,
+    "standard_response": null,
+    "metrics": null
+  },
+  "error": null,
+  "execution_time": 3.384956,
+  "status_code": 200,
+  "description": "Group by Vendor Account Name, sum Quantity",
+  "expected_column": "Vendor Account Name",
+  "file_key": "MRN"
+}

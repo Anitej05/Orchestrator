@@ -223,36 +223,11 @@ If should_replan is false, new_subtasks can be empty.
         
         Returns True if the failure pattern suggests replanning would help.
         """
-        # Count consecutive failures on similar actions
-        recent_failures = 0
-        for entry in reversed(memory.history[-5:]):
-            result = entry.get('result', {})
-            if not result.get('success', True):
-                recent_failures += 1
-            else:
-                break
+        # [REFACTORED] LLM-First Replanning Trigger
+        # Removed hardcoded keywords ("timeout", "not found") and heuristic counts.
+        # We now delegate the decision strictly to the LLM in update_plan().
         
-        # Trigger replan if:
-        # 1. Multiple consecutive failures (3+)
-        # 2. Navigation or click failures (likely need different approach)
-        if recent_failures >= 3:
-            logger.info(f"📋 Triggering replan: {recent_failures} consecutive failures")
-            return True
-        
-        # Check for specific failure patterns that benefit from replanning
-        replan_triggers = [
-            "not found",
-            "timeout",
-            "element not visible",
-            "cannot scroll",
-            "navigation failed"
-        ]
-        
-        error_lower = error_msg.lower()
-        for trigger in replan_triggers:
-            if trigger in error_lower:
-                logger.info(f"📋 Triggering replan: failure pattern '{trigger}'")
-                return True
-        
-        return False
+        # If the last action failed, we ALWAYS ask the LLM if we should replan.
+        # This ensures we catch subtle failures without relying on fragile string matching.
+        return True
 

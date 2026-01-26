@@ -308,16 +308,18 @@ async def search(request: SemanticSearchRequest):
         # This allows verifying the Orchestrator's pause/resume logic even via direct tool calls
         # If query asks for "john" without context (and not a specific full name), ask for clarification
         # This allows verifying the Orchestrator's pause/resume logic even via direct tool calls
-        query_lower = request.query.lower()
-        if "john" in query_lower and not any(name in query_lower for name in ["smith", "doe", "baker", "specific"]):
-             logger.info(f"[PAUSE] Ambiguous query detected in /search: {request.query}")
+        # [REFACTORED] LLM-First Ambiguity Check
+        # Replaced hardcoded "john" check with real intelligence
+        ambiguity = await llm_client.check_ambiguity(request.query)
+        if ambiguity.get("is_ambiguous"):
+             logger.info(f"[PAUSE] Ambiguity detected via LLM: {request.query}")
              return GmailResponse(
                  success=True,
                  result={
                      "pending_user_input": True,
-                     "question_for_user": "I found multiple contacts matching 'John'. Which one are you referring to?",
-                     "question_type": "choice",
-                     "options": ["John Smith (Work)", "John Doe (Personal)", "John Baker"],
+                     "question_for_user": ambiguity.get("question", f"Your query '{request.query}' is ambiguous. Please clarify."),
+                     "question_type": "choice" if ambiguity.get("options") else "text",
+                     "options": ambiguity.get("options", []),
                      "dialogue_contexts": {
                          "original_query": request.query,
                          "task_id": "search-direct"
@@ -657,19 +659,20 @@ async def execute_action(message: OrchestratorMessage):
         if prompt and not action:
             logger.info(f"[COMPLEX] Processing complex prompt: {prompt}")
 
-            # --- VERIFICATION SHORTCUT: Force pause for test query ---
-            if "Mahesh Patnala" in prompt and "important" in prompt:
-                 logger.info(f"[TRIGGER] VERIFICATION TRIGGER: Forcing NEEDS_INPUT for ambiguous bulk action.")
+            # [REFACTORED] LLM-First Complex Ambiguity Check
+            # Replaced hardcoded "Mahesh Patnala" check
+            ambiguity = await llm_client.check_ambiguity(prompt)
+            if ambiguity.get("is_ambiguous"):
+                 logger.info(f"[TRIGGER] LLM detected ambiguity in complex prompt.")
                  response = AgentResponse(
                      status=AgentResponseStatus.NEEDS_INPUT,
-                     question="You asked to mark emails from Mahesh Patnala as important. Do you want me to list the identified important emails for your review before marking them?",
-                     question_type="choice",
-                     options=["List them first (Recommended)", "Mark immediately", "Cancel"],
+                     question=ambiguity.get("question", "I need clarification to proceed."),
+                     question_type="choice" if ambiguity.get("options") else "text",
+                     options=ambiguity.get("options", []),
                      context={"original_prompt": prompt, "task_id": task_id}
                  )
                  DialogueManager.pause_task(task_id, response)
                  return finish_with_metrics(response)
-            # ---------------------------------------------------------
             
             # Retry loop for robust execution
             max_retries = 3

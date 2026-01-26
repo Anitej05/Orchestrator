@@ -606,7 +606,13 @@ async def create_spreadsheet_unified(request: CreateSpreadsheetRequest, req: Req
             raise HTTPException(status_code=500, detail=f"Failed to create file: {str(e)}")
         
         # ===== GENERATE PREVIEW =====
-        relative_path = str(file_path.relative_to("storage"))
+        storage_root = (PathlibPath(__file__).parent.parent / "storage").resolve()
+        try:
+             relative_path = str(file_path.resolve().relative_to(storage_root))
+        except ValueError:
+             # Fallback if path resolution fails (should not happen with correct setup)
+             relative_path = str(file_path.name)
+             logger.warning(f"Could not resolve relative path for {file_path}")
         preview_url = f"/files/{relative_path}"
         
         # Canvas display with data preview
@@ -1403,6 +1409,7 @@ def process_node_data(node_name: str, node_output, progress: float, node_count: 
 
     if isinstance(node_output, dict):
         for key, value in node_output.items():
+            logger.debug(f"Processing key '{key}' from node '{node_name}'")
             serializable_data[key] = serialize_complex_object(value)
 
             # Extract node-specific meaningful data
@@ -1530,9 +1537,10 @@ async def find_agents(request: ProcessRequest):
             final_response=final_response_str,
             pending_user_input=False,
             question_for_user=None,
-            has_canvas=canvas_data.get('has_canvas', False),
-            canvas_content=canvas_data.get('canvas_content'),
-            canvas_type=canvas_data.get('canvas_type'),
+            has_canvas=canvas_data.get('has_canvas') or final_state.get('has_canvas', False),
+            canvas_content=canvas_data.get('canvas_content') or final_state.get('canvas_content'),
+            canvas_type=canvas_data.get('canvas_type') or final_state.get('canvas_type'),
+            canvas_data=canvas_data.get('canvas_data') or final_state.get('canvas_data'), # Support V2 data from state
             browser_view=canvas_data.get('browser_view'),
             plan_view=canvas_data.get('plan_view'),
             current_view=canvas_data.get('current_view', 'browser')
