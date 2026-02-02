@@ -23,7 +23,7 @@
           "name": "prompt",
           "param_type": "string",
           "required": false,
-          "description": "Natural language instruction. Examples: 'What is the total revenue?', 'Add a profit margin column'. If omitted but a file is loaded, defaults to a summary."
+          "description": "Natural language instruction. REQUIRED if operating on an existing file. If omitted during file upload, defaults to summary."
         },
         {
           "name": "action",
@@ -67,7 +67,7 @@
           "name": "prompt",
           "param_type": "string",
           "required": false,
-          "description": "Natural language instruction."
+          "description": "Natural language instruction. REQUIRED if operating on an existing file."
         },
         {
           "name": "action",
@@ -110,6 +110,12 @@
           "param_type": "string",
           "required": false,
           "description": "File ID for referencing an already-uploaded spreadsheet file."
+        },
+        {
+          "name": "task_id",
+          "param_type": "string",
+          "required": false,
+          "description": "Task ID for resuming paused operations."
         }
       ]
     },

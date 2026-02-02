@@ -66,6 +66,16 @@ except ImportError:
     display_execution_metrics = metrics_module.display_execution_metrics
     display_session_metrics = metrics_module.display_session_metrics
 
+# Import Content Management Service
+from services.content_management_service import (
+    ContentManagementService,
+    ContentType,
+    ContentSource,
+    ProcessingStrategy,
+    ContentPriority,
+    ProcessingTaskType
+)
+
 logger = logging.getLogger(__name__)
 
 # Get workspace root (3 levels up from this file: agent.py → document_agent → agents → backend → root)
@@ -90,6 +100,7 @@ class DocumentAgent:
         self.session_manager = DocumentSessionManager()
         self.version_manager = DocumentVersionManager()
         self.llm_client = DocumentLLMClient()
+        self.service = ContentManagementService() # Inject Service
         ensure_directory(str(DEFAULT_STORAGE_DIR))
         self._analysis_cache = {}  # Simple in-memory cache
         self._cache_lock = Lock()
@@ -340,7 +351,7 @@ class DocumentAgent:
 
     # ========== ANALYSIS OPERATIONS ==========
 
-    def analyze_document(self, request: AnalyzeDocumentRequest) -> Dict[str, Any]:
+    async def analyze_document(self, request: AnalyzeDocumentRequest) -> Dict[str, Any]:
         """Analyze document(s) with RAG and answer queries. Supports multi-file batch processing."""
         phase_trace = ["understand", "retrieve", "generate", "validate", "report"]
         request_start = time.time()
@@ -391,27 +402,34 @@ class DocumentAgent:
             if len(file_paths) > 1:
                 self._batch_operations += 1
                 logger.info(f"📚 [ANALYZE] Batch mode: processing {len(file_paths)} files together")
-                result = self._analyze_multiple_files(request, file_paths)
+                # TODO: Implement unified batch analysis via service if needed
+                # For now, fallback to separate processing or focused single processing
+                # Simply picking the first validation for now implies single file RAG focus.
+                # To support multi-file correctly with the new service, we'd register all of them.
+                # Let's iterate and register all.
+                
+                context_results = []
+                for fp in file_paths:
+                    res = await self._analyze_single_file(request, fp)
+                    context_results.append(res)
+                
+                # Synthesis of multiple results
+                combined_answer = "\n\n".join([f"[{r['sources'][0]}]: {r['answer']}" for r in context_results if r.get('success')])
+                result = {
+                    'success': True,
+                    'answer': combined_answer,
+                    'sources': file_paths,
+                    'status': AgentResponseStatus.COMPLETE.value
+                }
+
             else:
                 # Single file processing (optimized path)
                 self._files_processed += 1
                 file_path = file_paths[0] if file_paths else None
                 logger.info(f"📄 [ANALYZE] Single file mode: processing {file_path}")
                 
-                # Check if we should use RAG (vector store provided) or Direct Analysis
-                if request.vector_store_path or request.vector_store_paths:
-                    result = self._analyze_single_file(request, file_path)
-                else:
-                    logger.info("ℹ️ [ANALYZE] No vector store provided, using direct content analysis")
-                    if file_path:
-                        result = self._process_single_file_safe(file_path, request.query)
-                        # Ensure result format compatibility
-                        if 'metrics' not in result:
-                            result['metrics'] = {}
-                        if 'sources' not in result:
-                            result['sources'] = [file_path]
-                    else:
-                        result = {'success': False, 'answer': 'No file path provided'}
+                # USE NEW SERVICE FOR RAG
+                result = await self._analyze_single_file(request, file_path)
             
             # Track performance metrics
             request_latency = (time.time() - request_start) * 1000
@@ -420,58 +438,12 @@ class DocumentAgent:
             
             logger.info(f"⏱️  [ANALYZE] Request latency: {request_latency:.1f}ms")
             
-            # Update RAG metrics if present in result
+            # Metric mapping (simplified/adapted)
             if 'metrics' in result:
                 req_metrics = result['metrics']
-                chunks = req_metrics.get('chunks_retrieved', 0)
-                if chunks > 0:
-                    self.metrics["rag"]["chunks_retrieved_total"] += chunks
-                    logger.info(f"📚 [RAG] Retrieved {chunks} chunks from vector store")
-                if req_metrics.get('cache_hit', False):
-                    self.metrics["cache"]["hits"] += 1
-                    logger.info(f"💾 [CACHE] HIT for query")
-                else:
-                    self.metrics["cache"]["misses"] += 1
-                    logger.info(f"💾 [CACHE] MISS - reprocessing query")
+                if req_metrics.get('chunks_retrieved', 0) > 0:
+                    self.metrics["rag"]["chunks_retrieved_total"] += req_metrics['chunks_retrieved']
             
-            # Track errors
-            if not result.get('success', False):
-                self.metrics["errors"]["total"] += 1
-                error_msg = result.get('answer') or result.get('error') or 'Unknown error'
-                if 'RAG' in str(error_msg):
-                    self.metrics["errors"]["rag_errors"] += 1
-                    logger.error(f"❌ [ANALYZE] RAG error: {error_msg[:200]}")
-                elif 'LLM' in str(error_msg):
-                    self.metrics["errors"]["llm_errors"] += 1
-                    logger.error(f"❌ [ANALYZE] LLM error: {error_msg[:200]}")
-                else:
-                    logger.error(f"❌ [ANALYZE] Analysis failed: {error_msg[:200]}")
-            else:
-                logger.info(f"✅ [ANALYZE] Analysis completed successfully")
-            
-            # Add execution summary to result
-            result['execution_metrics'] = {
-                'latency_ms': round(request_latency, 2),
-                'llm_calls': self.metrics["llm_calls"]["analyze"],
-                'cache_hit_rate': round(
-                    self.metrics["cache"]["hits"] / (self.metrics["cache"]["hits"] + self.metrics["cache"]["misses"]) * 100, 1
-                ) if (self.metrics["cache"]["hits"] + self.metrics["cache"]["misses"]) > 0 else 0,
-                'chunks_retrieved': result.get('metrics', {}).get('chunks_retrieved', 0),
-                'rag_retrieval_ms': round(result.get('metrics', {}).get('rag_retrieval_ms', 0), 2),
-                'llm_call_ms': round(result.get('metrics', {}).get('llm_call_ms', 0), 2)
-            }
-            
-            # Log detailed execution metrics
-            self._log_execution_metrics(result['execution_metrics'], result.get('success', False))
-            
-            # Display unified metrics for debugging
-            display_execution_metrics(
-                metrics=result['execution_metrics'],
-                agent_name="Document",
-                operation_name="analyze",
-                success=result.get('success', False)
-            )
-
             result.setdefault(
                 'status',
                 AgentResponseStatus.COMPLETE.value if result.get('success') else AgentResponseStatus.ERROR.value
@@ -529,178 +501,61 @@ class DocumentAgent:
         logger.info(f"  📊 Total LLM Calls:      {self.metrics['llm_calls']['total']}")
         logger.info("=" * 80)
 
-    def _analyze_single_file(self, request: AnalyzeDocumentRequest, file_path: Optional[str]) -> Dict[str, Any]:
-        """Analyze a single document using proven LCEL RAG chain."""
-        start_time = time.time()
-        phase_trace = ["understand", "retrieve", "generate", "validate", "report"]
-        metrics = {
-            'rag_retrieval_ms': 0,
-            'llm_call_ms': 0,
-            'cache_hit': False,
-            'chunks_retrieved': 0,
-            'tokens_used': 0
-        }
+    async def _analyze_single_file(self, request: AnalyzeDocumentRequest, file_path: Optional[str]) -> Dict[str, Any]:
+        """Analyze a single document using ContentManagementService (Unified RAG)."""
+        metrics = {'chunks_retrieved': 0}
         
         try:
-            # Check cache
-            cache_key = None
-            if file_path:
-                cache_key = f"{file_path}:{request.query}"
-                cached_result = self._get_cached_result(cache_key)
-                if cached_result:
-                    logger.info(f"✅ Cache hit for {file_path}")
-                    metrics['cache_hit'] = True
-                    cached_result['metrics'] = metrics
-                    cached_result.setdefault('phase_trace', phase_trace)
-                    cached_result.setdefault('status', LocalAgentResponseStatus.COMPLETE.value if cached_result.get('success') else LocalAgentResponseStatus.ERROR.value)
-                    return cached_result
+            if not file_path:
+                return {'success': False, 'answer': 'No file path provided', 'metrics': metrics}
 
-            # Collect vector store paths
-            paths = request.vector_store_paths or ([request.vector_store_path] if request.vector_store_path else [])
+            # 1. Register Content (creates chunks if needed, handles embeddings)
+            # Check if likely already registered to avoid re-reading file?
+            # For now, we rely on the service to handle checks or updates if we implemented content hash dedup.
+            # But here we just re-register to ensure we get a fresh ID for the request scope.
             
-            if not paths or not paths[0]:
-                return {
-                    'success': False,
-                    'answer': 'Error: No vector store path provided',
-                    'errors': ['Missing vector store path'],
-                    'metrics': metrics
-                }
+            # Read file content
+            content, _ = extract_document_content(file_path)
             
-            # Validate all vector stores exist
-            for vsp in paths:
-                if not os.path.exists(vsp):
-                    logger.error(f"Vector store not found: {vsp}")
-                    return {
-                        'success': False,
-                        'answer': f'Error: Vector store not found at {vsp}',
-                        'errors': [f'Vector store missing: {vsp}'],
-                        'metrics': metrics
-                    }
+            meta = await self.service.register_content(
+                content=content, 
+                name=Path(file_path).name,
+                source=ContentSource.USER_UPLOAD,
+                content_type=ContentType.DOCUMENT,
+                thread_id=request.thread_id,
+                tags=["active_analysis"]
+            )
             
-            # RAG retrieval using proven LCEL approach
-            rag_start = time.time()
-            try:
-                from langchain_community.vectorstores import FAISS
-                from langchain_core.prompts import ChatPromptTemplate
-                from langchain_core.output_parsers import StrOutputParser
-                from langchain_core.runnables import RunnablePassthrough
-                from langchain_huggingface import HuggingFaceEmbeddings
-                
-                # Use same embeddings as orchestrator (all-mpnet-base-v2)
-                embeddings = HuggingFaceEmbeddings(model_name='all-mpnet-base-v2')
-                
-                # Load and merge all vector stores
-                logger.info(f"🔍 Loading {len(paths)} vector store(s) for RAG")
-                combined_vector_store = None
-                
-                for idx, vsp in enumerate(paths):
-                    logger.info(f"📂 Loading vector store {idx+1}/{len(paths)}: {os.path.basename(vsp)}")
-                    vs = FAISS.load_local(
-                        vsp,
-                        embeddings,
-                        allow_dangerous_deserialization=True
-                    )
-                    
-                    if combined_vector_store is None:
-                        combined_vector_store = vs
-                    else:
-                        combined_vector_store.merge_from(vs)
-                        logger.info(f"✅ Merged vector store {idx+1}")
-                
-                # Create retriever
-                retriever = combined_vector_store.as_retriever(search_kwargs={"k": 5})
-                metrics['rag_retrieval_ms'] = (time.time() - rag_start) * 1000
-                
-                # Build RAG chain using LCEL
-                template = """Answer the question based only on the following context:
-
-{context}
-
-Question: {question}
-
-Answer:"""
-                
-                prompt = ChatPromptTemplate.from_template(template)
-                
-                # Retrieve docs explicitly so we can return grounding metadata
-                docs = []
-                try:
-                    docs = retriever.get_relevant_documents(request.query)
-                except Exception:
-                    # Some LCEL retrievers implement invoke()
-                    if hasattr(retriever, "invoke"):
-                        docs = retriever.invoke(request.query)
-
-                metrics['chunks_retrieved'] = len(docs)
-
-                def format_docs(docs_to_format):
-                    return "\n\n".join(d.page_content for d in docs_to_format)
-                
-                formatted_context = format_docs(docs)
-
-                rag_chain = (
-                    prompt
-                    | self.llm_client.llm
-                    | StrOutputParser()
-                )
-                
-                # Execute RAG chain
-                logger.info(f"🤖 Processing query: {request.query[:50]}...")
-                llm_start = time.time()
-                self.metrics["llm_calls"]["analyze"] += 1
-                self.metrics["llm_calls"]["total"] += 1
-                
-                answer = rag_chain.invoke({"context": formatted_context, "question": request.query})
-                metrics['llm_call_ms'] = (time.time() - llm_start) * 1000
-                logger.info(f"✅ RAG analysis complete ({metrics['chunks_retrieved']} chunks, {metrics['llm_call_ms']:.0f}ms)")
-
-                validation = self._validate_answer_confidence(answer, formatted_context, request.query)
-                grounding = {
-                    "chunks_used": [d.metadata.get("chunk_id") for d in docs],
-                    "sources": [d.metadata.get("source") for d in docs],
-                    "validation_issues": validation.get("issues", []),
-                }
-                confidence = validation.get("confidence_score")
-                review_required = True if confidence is None else (confidence < 0.5)
-                
-            except Exception as e:
-                logger.error(f"RAG retrieval failed: {e}", exc_info=True)
-                return {
-                    'success': False,
-                    'answer': f'RAG error: {str(e)}',
-                    'errors': [f'RAG failure: {str(e)}'],
-                    'metrics': metrics
-                }
-
-            result = {
+            # 2. Process Content (Summarize & Chunk for Retrieval)
+            # This runs the 'Context Optimization' strategy
+            # strategy=CONTEXT_OPTIMIZATION ensures chunks are searchable
+            proc_result = await self.service.process_large_content(
+                content_id=meta.id,
+                task_type=ProcessingTaskType.SUMMARIZE, # Using SUMMARIZE to drive the context optimization flow
+                strategy=ProcessingStrategy.CONTEXT_OPTIMIZATION,
+                query=request.query
+            )
+            
+            # 3. Retrieve & Answer
+            # The service now has a unified retrieval method
+            answer = await self.service.retrieve_relevant_context(request.query, request.thread_id)
+            
+            return {
                 'success': True,
                 'answer': answer,
-                'sources': [file_path] if file_path else paths,
+                'sources': [file_path],
                 'metrics': metrics,
-                'grounding': grounding,
-                'confidence': confidence,
-                'review_required': review_required,
-                'phase_trace': phase_trace,
-                'status': LocalAgentResponseStatus.COMPLETE.value
+                'phase_trace': ['register', 'process', 'retrieve', 'answer'],
+                'status': AgentResponseStatus.COMPLETE.value
             }
 
-            # Cache result
-            if cache_key:
-                self._cache_result(cache_key, result)
-
-            return result
-
         except Exception as e:
-            logger.error(f"Document analysis failed: {e}", exc_info=True)
+            logger.error(f"Unified analysis failed: {e}", exc_info=True)
             return {
                 'success': False,
                 'answer': f'Error: {str(e)}',
-                'errors': [str(e)],
-                'metrics': metrics,
-                'phase_trace': phase_trace,
-                'status': LocalAgentResponseStatus.ERROR.value
+                'status': AgentResponseStatus.ERROR.value
             }
-
     def _analyze_multiple_files(self, request: AnalyzeDocumentRequest, file_paths: List[str]) -> Dict[str, Any]:
         """Analyze multiple files concurrently with robust error handling."""
         logger.info(f"Starting batch analysis of {len(file_paths)} files with {request.max_workers} workers")
@@ -769,8 +624,9 @@ Answer:"""
 
         return response
 
-    def _process_single_file_safe(self, file_path: str, query: str) -> Dict[str, Any]:
-        """Thread-safe processing of a single file with timing and error isolation."""
+    async def _process_single_file_safe(self, file_path: str, query: str) -> Dict[str, Any]:
+        """Thread-safe processing of a single file (Async Wrapper)."""
+        return await self._analyze_single_file(AnalyzeDocumentRequest(query=query), file_path)
         start_time = time.time()
         result = {
             'file_path': file_path,
@@ -1198,8 +1054,10 @@ Answer:"""
 
     # ========== DATA EXTRACTION ==========
 
-    def extract_data(self, request: ExtractDataRequest) -> Dict[str, Any]:
-        """Extract structured data from document."""
+    # ========== DATA EXTRACTION ==========
+
+    async def extract_data(self, request: ExtractDataRequest) -> Dict[str, Any]:
+        """Extract structured data from document using ContentManagementService."""
         try:
             self.metrics["api_calls"]["extract"] += 1
             if not Path(request.file_path).exists():
@@ -1208,46 +1066,56 @@ Answer:"""
                     'message': f'File not found: {request.file_path}'
                 }
 
-            phase_trace = ["understand", "extract", "validate", "report"]
+            phase_trace = ["register", "extract", "save_artifact", "report"]
+            
+            # 1. Register Content
             content, _ = extract_document_content(request.file_path)
-
-            self.metrics["llm_calls"]["extract"] += 1
-            self.metrics["llm_calls"]["total"] += 1
-            result = self.llm_client.extract_structured_data(
-                content,
-                request.extraction_type
+            meta = await self.service.register_content(
+                content=content,
+                name=Path(request.file_path).name,
+                source=ContentSource.USER_UPLOAD,
+                content_type=ContentType.DOCUMENT,
+                thread_id=request.thread_id
             )
-
-            confidence = 0.8 if result.get('success') else 0.0
-            if not result.get('data') and not result.get('content'):
-                confidence = 0.2
+            
+            # 2. Extract Data (Using Strategy)
+            proc_result = await self.service.process_large_content(
+                content_id=meta.id,
+                task_type=ProcessingTaskType.EXTRACT,
+                strategy=ProcessingStrategy.DATA_EXTRACTION
+            )
+            
+            # 3. Prepare Response
+            # The service returns the extracted artifact ID in metadata
+            extracted_data_id = proc_result.metadata.get("extracted_artifact_id")
+            extracted_content = proc_result.final_output
+            
             grounding = {
                 'source_file': request.file_path,
-                'notes': 'LLM-only extraction; validate downstream',
+                'artifact_id': extracted_data_id
             }
 
             return {
-                'success': result.get('success', False),
-                'message': 'Data extracted' if result.get('success') else 'Extraction failed',
-                'extracted_data': result.get('data', result.get('content', '')),
+                'success': True,
+                'message': 'Data extracted successfully',
+                'extracted_data': extracted_content,
                 'data_format': request.extraction_type,
-                'status': AgentResponseStatus.COMPLETE.value if result.get('success') else AgentResponseStatus.ERROR.value,
+                'status': AgentResponseStatus.COMPLETE.value,
                 'phase_trace': phase_trace,
-                'confidence': confidence,
+                'confidence': 1.0 if extracted_data_id else 0.5,
                 'grounding': grounding,
             }
 
         except Exception as e:
-            logger.error(f"Data extraction failed: {e}")
+            logger.error(f"Data extraction failed: {e}", exc_info=True)
             return {
                 'success': False,
                 'message': f'Error: {str(e)}',
                 'extracted_data': {},
                 'data_format': request.extraction_type,
                 'status': AgentResponseStatus.ERROR.value,
-                'phase_trace': ["understand", "extract", "validate", "report"],
-                'confidence': 0.0,
-                'grounding': {'source_file': request.file_path, 'notes': 'exception raised'},
+                'phase_trace': ["extract", "error"],
+                'confidence': 0.0
             }
 
     # ========== CLEANUP ==========

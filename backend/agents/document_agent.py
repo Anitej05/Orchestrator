@@ -1,5 +1,5 @@
-# agents/document_analysis_agent.py
-# SOTA WRAPPER - Delegates to agents/document_agent/ modularized components
+# agents/document_agent.py
+# SOTA WRAPPER - Delegates to agents/document_agent_lib/ modularized components
 
 from fastapi import FastAPI, HTTPException
 import logging
@@ -8,13 +8,29 @@ import sys
 from pathlib import Path
 from dotenv import load_dotenv
 
+import io
+
 log_file_path = Path(__file__).parent / "document_agent.log"
+
+# Fix Unicode issues on Windows consoles
+if sys.platform == "win32":
+    # Reconfigure sys.stdout and sys.stderr to use utf-8 compatible wrapper
+    # This prevents UnicodeEncodeError when printing emojis to console
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
+# Configure logging
+# We clear existing handlers to avoid duplicates if this is re-imported
+root_logger = logging.getLogger()
+for handler in root_logger.handlers[:]:
+    root_logger.removeHandler(handler)
+
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(log_file_path, mode='w')
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(log_file_path, mode='w', encoding='utf-8')
     ]
 )
 logger = logging.getLogger(__name__)
@@ -40,7 +56,7 @@ logger.info(f"🔧 sys.path includes: backend/, agents/")
 app = None
 try:
     logger.info("📦 Attempting to import document_agent module...")
-    from document_agent import app as document_app
+    from document_agent_lib import app as document_app
     app = document_app
     logger.info("✅ Successfully imported document_agent from local path")
 except ImportError as e:
@@ -74,4 +90,4 @@ if __name__ == "__main__":
     except OSError:
         logger.error(f"Port {port} is already in use. Please free the port or use a different one.")
         sys.exit(1)
-    uvicorn.run("document_analysis_agent:app", host="0.0.0.0", port=port, reload=False)
+    uvicorn.run("document_agent:app", host="0.0.0.0", port=port, reload=False)

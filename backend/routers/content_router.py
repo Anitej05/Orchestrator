@@ -18,16 +18,24 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from datetime import datetime
 
-from services.unified_content_service import (
-    UnifiedContentService,
+from services.content_management_service import (
+    ContentManagementService,
     UnifiedContentMetadata,
     ContentType,
     ContentSource,
     ContentPriority,
     RetentionPolicy,
     ContentReference,
-    get_content_service
 )
+
+# Helper to get service instance
+_content_service = None
+
+def get_content_service():
+    global _content_service
+    if _content_service is None:
+        _content_service = ContentManagementService()
+    return _content_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/content", tags=["Content"])

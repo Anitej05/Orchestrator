@@ -50,3 +50,14 @@ backend/tests/agents/spreadsheet_agent/edge_case_datasets
 DENISCO_CHEMICALS_PRIVATE_LIMITED*.xlsx
 
 
+
+# Runtime Data - Agents
+backend/agent_plans/
+backend/conversation_history/
+
+# Temporary / Generated
+tmp_*/
+__pycache__/
+
+# Specific standalone test scripts (user requested cleanup)
+backend/test_*.py

@@ -10,6 +10,15 @@ import os
 from typing import Dict, List, Any, Optional
 import json
 import re
+from pathlib import Path
+import sys
+
+# Ensure Orbimesh root is in path for fully qualified imports
+orbimesh_root = Path(__file__).resolve().parents[3]
+if str(orbimesh_root) not in sys.path:
+    sys.path.insert(0, str(orbimesh_root))
+
+from backend.utils.key_manager import get_cerebras_key, report_rate_limit, key_manager
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +69,9 @@ class DocumentLLMClient:
             try:
                 if provider == 'cerebras' and os.getenv('CEREBRAS_API_KEY'):
                     from langchain_cerebras import ChatCerebras
-                    self.llm = ChatCerebras(model=self.PROVIDERS['cerebras']['model'])
-                    logger.info("Initialized Cerebras LLM")
+                    # Use KeyManager to get an active key
+                    self.llm = ChatCerebras(model=self.PROVIDERS['cerebras']['model'], api_key=get_cerebras_key())
+                    logger.info("Initialized Cerebras LLM with rotated key")
                     return
 
                 if provider == 'groq' and os.getenv('GROQ_API_KEY'):
@@ -87,6 +97,58 @@ class DocumentLLMClient:
 
         logger.warning("No LLM provider available")
 
+    def _invoke_with_retry(self, prompt: str, max_retries: int = 3) -> Any:
+        """
+        Invoke LLM with specific handling for Cerebras rate limits (429).
+        Rotates keys and retries immediately if limited.
+        """
+        for attempt in range(max_retries):
+            try:
+                if not self.llm:
+                    raise ValueError("LLM not initialized")
+                    
+                response = self.llm.invoke(prompt)
+                return response
+                
+            except Exception as e:
+                error_str = str(e).lower()
+                is_rate_limit = any(k in error_str for k in ['429', '413', 'rate_limit', 'too many requests'])
+                
+                # Check for HTTP status code in exception attributes
+                if hasattr(e, 'response') and hasattr(e.response, 'status_code'):
+                     if e.response.status_code == 429:
+                         is_rate_limit = True
+
+                # Specific handling for Cerebras rotation
+                if "cerebras" in str(type(self.llm)).lower() and is_rate_limit:
+                    logger.warning(f"⚡ Cerebras Rate Limit (Attempt {attempt+1}/{max_retries}). Rotating key...")
+                    
+                    # Report current key (best effort to guess which one failed)
+                    # For simplicty, just report logical limit to manager
+                    # The manager is robust to reporting unknown keys or already-reported keys
+                    try:
+                        if hasattr(self.llm, 'api_key'):
+                            report_rate_limit(self.llm.api_key)
+                    except:
+                        pass
+                        
+                    # Get new key (waits if all exhausted)
+                    new_key = get_cerebras_key()
+                    
+                    # Re-init LLM
+                    from langchain_cerebras import ChatCerebras
+                    self.llm = ChatCerebras(model=self.PROVIDERS['cerebras']['model'], api_key=new_key)
+                    logger.info(f"🔄 Switched to new Cerebras key. Retrying...")
+                    continue
+                
+                # If valid non-rate-limit error or retries exhausted
+                if attempt == max_retries - 1:
+                    raise
+                
+                logger.warning(f"LLM Invoke failed: {e}. Retrying...")
+        
+        raise ValueError("Max retries exceeded")
+
     def interpret_edit_instruction(
         self,
         instruction: str,
@@ -110,7 +172,7 @@ class DocumentLLMClient:
                 document_structure
             )
 
-            response = self.llm.invoke(prompt)
+            response = self._invoke_with_retry(prompt)
             return self._parse_edit_response(response.content)
 
         except Exception as e:
@@ -177,7 +239,7 @@ You are a precise document analysis expert. Answer strictly from the provided do
 Respond with a concise, grounded answer. If listing products, return a bullet list of product names only.
 """
 
-            response = self.llm.invoke(prompt)
+            response = self._invoke_with_retry(prompt)
             return response.content
 
         except Exception as e:
@@ -214,14 +276,14 @@ Return JSON with keys: 'title', 'sections', 'key_points', 'data'."""
 
 Provide 3-5 sentence summary."""
 
-                response = self.llm.invoke(prompt)
+                response = self._invoke_with_retry(prompt)
                 return {
                     'success': True,
                     'content': response.content,
                     'type': 'text'
                 }
 
-            response = self.llm.invoke(prompt)
+            response = self._invoke_with_retry(prompt)
             
             try:
                 data = json.loads(response.content)

@@ -15,15 +15,23 @@ import asyncio
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass
 
-from services.unified_content_service import (
-    UnifiedContentService,
+from services.content_management_service import (
+    ContentManagementService,
     UnifiedContentMetadata,
     ContentType,
     ContentSource,
     ContentPriority,
-    ContentReference,
-    get_content_service
+    ContentReference
 )
+
+# Helper to get service instance
+_content_service = None
+
+def get_content_service():
+    global _content_service
+    if _content_service is None:
+        _content_service = ContentManagementService()
+    return _content_service
 
 logger = logging.getLogger("ContentOrchestrator")
 

@@ -439,6 +439,8 @@ class AnalysisResult(BaseModel):
     """Schema for the analysis node's output."""
     needs_complex_processing: bool = Field(..., description="Whether the request requires complex orchestration or can be handled with a simple response")
     reasoning: str = Field(..., description="The reasoning behind the analysis decision")
+    needs_canvas: bool = Field(default=False, description="Whether the user wants to see a visual representation (document, game, chart, etc.)")
+    canvas_target: Optional[str] = Field(None, description="What specific data/file should be shown on canvas (e.g. 'uploaded file', 'finance chart')")
     response: Optional[str] = Field(None, description="Direct response if needs_complex_processing is False")
     canvas_confirmation_action: Optional[Literal["confirm", "cancel", "modify"]] = Field(None, description="Action if user is responding to a confirmation request")
     canvas_confirmation_task: Optional[str] = Field(None, description="Task name being confirmed/cancelled")

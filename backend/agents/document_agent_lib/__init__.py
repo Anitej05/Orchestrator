@@ -235,9 +235,8 @@ async def analyze_document(request: AnalyzeDocumentRequest):
     """
     try:
         agent = get_agent()
-        # Run sync operation in thread executor to avoid blocking
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, agent.analyze_document, request)
+        # Direct async call
+        result = await agent.analyze_document(request)
 
         return AnalyzeDocumentResponse(
             success=bool(result.get('success')),
@@ -301,9 +300,8 @@ async def create_document(request: CreateDocumentRequest):
     """
     try:
         agent = get_agent()
-        # Run sync operation in thread executor to avoid blocking
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, agent.create_document, request)
+        # Direct async call
+        result = await agent.create_document(request)
 
         if not result.get('success'):
             raise HTTPException(
@@ -336,9 +334,8 @@ async def edit_document(request: EditDocumentRequest):
     """
     try:
         agent = get_agent()
-        # Run sync operation in thread executor to avoid blocking
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, agent.edit_document, request)
+        # Direct async call
+        result = await agent.edit_document(request)
 
         return EditDocumentResponse(
             success=bool(result.get('success')),
@@ -400,7 +397,7 @@ async def execute(message: backend_schemas.OrchestratorMessage):
 
         # Execute approved edit
         edit_req = EditDocumentRequest(**{**pending_edit, "auto_approve": True, "approval_response": message.answer})
-        result = agent.edit_document(edit_req)
+        result = await agent.edit_document(edit_req)
         DialogueManager.resume(task_id)
         DialogueManager.complete(task_id)
         return backend_schemas.AgentResponse(
@@ -433,7 +430,7 @@ async def execute(message: backend_schemas.OrchestratorMessage):
     action = message.action
     if action == "/edit":
         edit_req = EditDocumentRequest(**payload)
-        result = agent.edit_document(edit_req)
+        result = await agent.edit_document(edit_req)
         if result.get("status") == backend_schemas.AgentResponseStatus.NEEDS_INPUT.value:
             question = backend_schemas.AgentResponse(
                 status=backend_schemas.AgentResponseStatus.NEEDS_INPUT,
@@ -458,7 +455,7 @@ async def execute(message: backend_schemas.OrchestratorMessage):
 
     if action == "/analyze":
         req = AnalyzeDocumentRequest(**payload)
-        result = agent.analyze_document(req)
+        result = await agent.analyze_document(req)
         return backend_schemas.AgentResponse(
             status=backend_schemas.AgentResponseStatus.COMPLETE if result.get("success") else backend_schemas.AgentResponseStatus.ERROR,
             result=result,
@@ -468,7 +465,7 @@ async def execute(message: backend_schemas.OrchestratorMessage):
 
     if action == "/extract":
         req = ExtractDataRequest(**payload)
-        result = agent.extract_data(req)
+        result = await agent.extract_data(req)
         return backend_schemas.AgentResponse(
             status=backend_schemas.AgentResponseStatus.COMPLETE if result.get("success") else backend_schemas.AgentResponseStatus.ERROR,
             result=result,
@@ -576,7 +573,7 @@ async def extract_data(request: ExtractDataRequest):
             )
 
         agent = get_agent()
-        result = agent.extract_data(request)
+        result = await agent.extract_data(request)
 
         if not result.get('success'):
             raise HTTPException(

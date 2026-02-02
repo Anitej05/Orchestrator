@@ -41,7 +41,9 @@ from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, AI
 from langchain_cerebras import ChatCerebras
 from langchain_nvidia_ai_endpoints import ChatNVIDIA
 from langchain_groq import ChatGroq
+from langchain_groq import ChatGroq
 from typing import Protocol, Any, Dict, List
+from utils.key_manager import get_cerebras_key, report_rate_limit
 
 # Global orchestrator metrics
 ORCHESTRATOR_METRICS = {
@@ -766,38 +768,77 @@ def invoke_llm_with_fallback(primary_llm, fallback_llm, prompt: str, pydantic_sc
     if cerebras_llm:
         available_llms.append(cerebras_llm)
         llm_names.append("Cerebras")
-    
-    if groq_llm:
-        available_llms.append(groq_llm)
-        llm_names.append("Groq")
-    
-    if nvidia_llm:
-        available_llms.append(nvidia_llm)
-        llm_names.append("NVIDIA")
-    
-    if not available_llms:
-        raise ValueError("No LLMs available to process the request.")
-    
-    logger.info(f"Available LLMs: {', '.join(llm_names)}")
-    
-    # Track errors for each provider
-    errors = {}
-    
-    # Prepare prompts based on schema
-    if pydantic_schema is not None:
-        json_prompt = f'''
-        {prompt}
-
-        Please provide your response in a valid JSON format that adheres to the following Pydantic schema:
         
-        ```json
-        {json.dumps(pydantic_schema.model_json_schema(), indent=2)}
-        ```
+    start_time = time.time()
+    
+    # Retry loop across providers
+    for _ in range(max_retries):
+        for i, llm in enumerate(available_llms):
+            provider_name = llm_names[i]
+            
+            try:
+                logger.info(f"🤖 Calling {provider_name}...")
+                
+                # Use invoke_json_method if schema is provided (monkey-patched)
+                if pydantic_schema:
+                     # Access monkey-patched method on instance
+                     response = invoke_json_method(llm, prompt, pydantic_schema, max_retries=1)
+                else:
+                     response = llm.invoke(prompt).content
+                     
+                return response
 
-        IMPORTANT: Only output the JSON object itself, without any extra text, explanations, or markdown formatting.
-        '''
-    else:
-        json_prompt = prompt
+            except Exception as e:
+                # Handle HTTPX errors explicitly if accessible, else general string matching
+                error_str = str(e).lower()
+                is_rate_limit = any(k in error_str for k in ['429', '413', 'rate_limit', 'too many requests'])
+                
+                # Try to catch specific HTTP status code if available in exception
+                if hasattr(e, 'response') and hasattr(e.response, 'status_code'):
+                    if e.response.status_code == 429:
+                        is_rate_limit = True
+
+                if provider_name == "Cerebras" and is_rate_limit:
+                     logger.warning(f"⚡ Cerebras Rate Limit detected! Reporting and rotating...")
+                     
+                     # Extract key if possible, or just report current "active" key logic
+                     # Since we don't have easy access to the exact key string here without digging into client,
+                     # we assume KeyManager's current key was the one used.
+                     # But safer to just rotate.
+                     try:
+                         current_key = llm.api_key if hasattr(llm, 'api_key') else None
+                         if current_key:
+                            report_rate_limit(current_key)
+                     except:
+                        pass
+                     
+                     # Get NEXT best key (waits if needed)
+                     new_key = get_cerebras_key()
+                     
+                     if new_key:
+                         # Re-instantiate Cerebras with new key
+                         new_llm = ChatCerebras(model="gpt-oss-120b", api_key=new_key)
+                         available_llms[i] = new_llm # Update in place
+                         logger.info(f"🔄 Switched to new Cerebras key (ends in ...{new_key[-4:]}). Retrying immediately.")
+                         
+                         try:
+                             logger.info(f"🤖 Retrying Cerebras with NEW key...")
+                             if pydantic_schema:
+                                 response = invoke_json_method(new_llm, prompt, pydantic_schema, max_retries=1)
+                             else:
+                                 response = new_llm.invoke(prompt).content
+                             return response
+                         except Exception as retry_e:
+                             logger.error(f"❌ New key failed too: {retry_e}")
+                             # If even the new, waited-for key fails, we let the outer loop continue to next provider/retry
+                     else:
+                         logger.error("❌ No keys available!")
+                
+                logger.warning(f"⚠️ {provider_name} failed: {e}")
+                errors[provider_name] = str(e)
+                continue
+    
+    raise ValueError(f"All LLMs failed. Errors: {errors}")
 
     # Cycle through providers: Cerebras -> Groq -> NVIDIA -> Cerebras (2 times each)
     total_attempts = max_retries * len(available_llms)  # 2 cycles * 3 providers = 6 total attempts
@@ -1082,43 +1123,93 @@ async def preprocess_files(state: State):
         else:
             # Determine the combined type based on what's uploaded
             file_types = set(pf.file_type for pf in processed_files if pf.file_type in ['document', 'spreadsheet'])
-            combined_type = list(file_types)[0] if len(file_types) == 1 else 'document'
-            canvas_display = {
-                "canvas_type": combined_type,
-                "canvas_data": {
-                    "title": f"{len(canvas_displays)} Files Uploaded",
-                    "content": f"Uploaded {len(canvas_displays)} file(s). They are ready for analysis.",
-                    "items": canvas_displays
+            
+            # --- IMPROVED DOCUMENT VIEWER LOGIC ---
+            if 'document' in file_types:
+                # Use the first document for specific viewer (fallback for multiple)
+                doc_file = next((pf for pf in processed_files if pf.file_type == 'document'), None)
+                if doc_file:
+                    try:
+                        # Dynamic import to avoid top-level circular dependencies
+                        from agents.document_agent_lib.utils import create_pdf_canvas_display, convert_docx_to_pdf
+                        
+                        target_path = doc_file.file_path
+                        if target_path.lower().endswith('.docx'):
+                             # Convert to PDF for viewer
+                             target_path = convert_docx_to_pdf(target_path)
+                        
+                        if target_path.lower().endswith('.pdf'):
+                            # Create rich PDF viewer canvas
+                            canvas_display = create_pdf_canvas_display(
+                                file_path=target_path,
+                                title=doc_file.file_name,
+                                original_type='document'
+                            )
+                            # Override canvas_type to 'html' because create_pdf_canvas_display returns html wrapper
+                            # Wait, create_pdf_canvas_display returns: {canvas_type='pdf', canvas_data={...}}
+                            # The frontend likely handles 'pdf' type or the 'html' wrapper inside.
+                            # Previous grep showed history using 'html' type with iframe content.
+                            # Let's check what create_pdf_canvas_display returns in utils.py...
+                            # It returns canvas_type='pdf'. If frontend supports 'pdf', great.
+                            # If not, we might need to wrap it in HTML.
+                            # The grep history showed: canvas_type='html', canvas_content='<!DOCTYPE html>...iframe...'
+                            
+                            # Let's trust `create_pdf_canvas_display` returns the right structure 
+                            # OR we manually construct the HTML wrapper if the utility assumes a 'pdf' renderer component exists.
+                            # The user said "we have a document viewer".
+                            # Let's use the utility's output.
+                            pass 
+                        else:
+                            # Fallback for non-PDF documents
+                            combined_type = 'markdown'
+                            canvas_display = {
+                                "canvas_type": combined_type,
+                                "canvas_data": {
+                                    "title": f"Document: {doc_file.file_name}",
+                                    "content": f"Uploaded document: {doc_file.file_name}",
+                                    "items": canvas_displays
+                                }
+                            }
+                    except ImportError:
+                         logger.error("Could not import document utils for PDF viewer")
+                         combined_type = 'markdown'
+                         canvas_display = {
+                            "canvas_type": combined_type,
+                            "canvas_data": {
+                                "title": f"Document: {doc_file.file_name}",
+                                "content": "Uploaded document (Viewer unavailable)",
+                                "items": canvas_displays
+                            }
+                        }
+            else:
+                 combined_type = list(file_types)[0] if len(file_types) == 1 else 'markdown'
+                 canvas_display = {
+                    "canvas_type": combined_type,
+                    "canvas_data": {
+                        "title": f"{len(canvas_displays)} Files Uploaded",
+                        "content": f"Uploaded {len(canvas_displays)} file(s).",
+                        "items": canvas_displays
+                    }
                 }
-            }
         
         # Set canvas state fields properly
         result["canvas_content"] = canvas_display.get('canvas_content')
         result["canvas_data"] = canvas_display.get('canvas_data')
         result["canvas_type"] = canvas_display.get('canvas_type')
         result["canvas_title"] = canvas_display.get('canvas_title')
-        result["has_canvas"] = True
+        
+        # LLM-FIRST CHANGE: Do not auto-set has_canvas=True.
+        # We stage the content, but let the LLM decide if it should be displayed.
+        result["has_canvas"] = False
         
         # Store canvas_displays in state for later use
         result["canvas_displays"] = canvas_displays
         
-        # Add a system message to inform user
-        from orchestrator.message_manager import MessageManager
-        existing_messages = state.get("messages", [])
+        # REMOVED: Premature "Displaying uploaded document" message
+        # The canvas will be attached to the final response or the next agent interaction.
+        # This prevents the "detached bubble" issue where the message appears but canvas is linked to a later message.
         
-        doc_names = [pf.file_name for pf in processed_files if pf.file_type == 'document']
-        spreadsheet_names = [pf.file_name for pf in processed_files if pf.file_type == 'spreadsheet']
-        
-        if spreadsheet_names:
-            message_content = f"📊 Displaying uploaded spreadsheet{'s' if len(spreadsheet_names) > 1 else ''}: {', '.join(spreadsheet_names)}"
-        elif doc_names:
-            message_content = f"📄 Displaying uploaded document{'s' if len(doc_names) > 1 else ''}: {', '.join(doc_names)}"
-        else:
-            message_content = f"📁 Uploaded {len(canvas_displays)} file(s)"
-        
-        system_message = AIMessage(content=message_content)
-        updated_messages = MessageManager.add_message(existing_messages, system_message)
-        result["messages"] = updated_messages
+        logger.info(f"📊 Canvas display set for {len(canvas_displays)} uploaded file(s)")
         
         logger.info(f"📊 Canvas display set for {len(canvas_displays)} uploaded file(s)")
     
@@ -1628,7 +1719,7 @@ async def classify_and_route_to_tools(state: State):
         return {"completed_tasks": state.get('completed_tasks', []), "parsed_tasks": parsed_tasks, "tool_routed_count": 0}
     
     # Initialize LLM and parameter validator
-    primary_llm = ChatGroq(model="llama-3.3-70b-versatile") if os.getenv("GROQ_API_KEY") else ChatCerebras(model="gpt-oss-120b")
+    primary_llm = ChatGroq(model="llama-3.3-70b-versatile") if os.getenv("GROQ_API_KEY") else ChatCerebras(model="llama-3.3-70b")
     fallback_llm = ChatNVIDIA(model="meta/llama-3.3-70b-instruct") if os.getenv("NVIDIA_API_KEY") else None
     
     tool_registry = get_tool_registry()
@@ -1850,7 +1941,7 @@ async def agent_directory_search(state: State):
             return {"candidate_agents": {}, "parsing_error_feedback": "No active agents available in the system."}
         
         # Use LLM to select agents for each task
-        primary_llm = ChatGroq(model="llama-3.3-70b-versatile") if os.getenv("GROQ_API_KEY") else ChatCerebras(model="gpt-oss-120b")
+        primary_llm = ChatGroq(model="llama-3.3-70b-versatile") if os.getenv("GROQ_API_KEY") else ChatCerebras(model="llama-3.3-70b")
         fallback_llm = ChatNVIDIA(model="meta/llama-3.3-70b-instruct") if os.getenv("NVIDIA_API_KEY") else None
         
         # Build task list for the prompt
@@ -4256,6 +4347,27 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
                         else:
                             logger.error(f"❌ AUTO-INJECTION FAILED: Found {len(doc_files)} documents but no valid paths. Files: {[f.get('file_name') for f in doc_files]}")
                 
+                    # AUTO-INJECT: file_path/file_paths for /analyze endpoint
+                    # The agent REQUIRES file_path to be present to start processing, even if vector_store_path is provided.
+                    if '/analyze' in endpoint_path:
+                        # Collect valid file paths
+                        valid_file_paths = []
+                        for f in doc_files:
+                            f_path = f.get('file_path')
+                            if f_path and isinstance(f_path, str) and f_path.strip() and os.path.exists(f_path):
+                                valid_file_paths.append(f_path)
+                        
+                        if valid_file_paths:
+                            if len(valid_file_paths) == 1:
+                                if 'file_path' not in payload or not payload.get('file_path'):
+                                    payload['file_path'] = valid_file_paths[0]
+                                    logger.info(f"🔧 AUTO-INJECT: file_path = {valid_file_paths[0]}")
+                            else:
+                                if 'file_paths' not in payload or not payload.get('file_paths'):
+                                    payload['file_paths'] = valid_file_paths
+                                    logger.info(f"🔧 AUTO-INJECT: file_paths = {valid_file_paths}")
+
+                
                 # CRITICAL VALIDATION: Ensure required parameters are present
                 # This prevents NoneType errors when agents expect file paths
                 required_params = [p for p in selected_endpoint.parameters if p.required]
@@ -4451,9 +4563,13 @@ async def run_agent(planned_task: PlannedTask, agent_details: AgentCard, state: 
 
                 # If agent uses ApiResponse wrapper, respect its success flag.
                 # A 200 with success=false should be treated as a failed attempt.
-                if isinstance(result, dict) and result.get('success') is False:
-                    agent_error = result.get('error') or 'Agent returned success=false'
-                    logger.error(f"Agent '{agent_details.name}' returned success=false: {agent_error}")
+                # Enhanced Error Detection: Check for success=False OR status='error'
+                if isinstance(result, dict) and (
+                    result.get('success') is False or 
+                    str(result.get('status')).lower() in ['error', 'failed']
+                ):
+                    agent_error = result.get('error') or result.get('error_message') or 'Agent returned error status'
+                    logger.error(f"Agent '{agent_details.name}' returned error: {agent_error}")
                     failed_attempts.append({"payload": payload, "result": str(agent_error)})
                     continue
 
@@ -7092,7 +7208,7 @@ def generate_final_response(state: State):
        - Use CDN links for external libraries if needed
     
     **CANVAS GUIDELINES:**
-    - Use canvas for: games, charts, interactive demos, data visualizations
+    - Use canvas for: games, charts, interactive demos, data visualizations, and displaying full documents
     - Keep response_text concise if canvas is used (reference the canvas)
     - Make canvas content visually appealing and functional
     
@@ -7127,11 +7243,62 @@ def generate_final_response(state: State):
         existing_messages = state.get("messages", [])
         updated_messages = MessageManager.add_message(existing_messages, ai_message)
         
-        if response.canvas_required and response.canvas_content:
-            logger.info(f"Canvas generated: type={response.canvas_type}, content_length={len(response.canvas_content)}")
+        # LLM-FIRST CANVAS LOGIC:
+        # 1. Check if LLM explicitly requested canvas
+        # 2. If yes, check if LLM provided content OR if we have staged content (e.g. PDF viewer)
+        
+        final_canvas_content = None
+        final_canvas_type = response.canvas_type
+        
+        if response.canvas_required:
+            if response.canvas_content:
+                # LLM provided content - verify/clean it
+                final_canvas_content = response.canvas_content
+                logger.info(f"Using LLM-generated canvas content (len={len(final_canvas_content)})")
+                
+                # AUTO-DETECT cleanup logic for LLM content
+                if isinstance(final_canvas_content, str):
+                    content_stripped = final_canvas_content.strip()
+                    
+                    # Robust extraction logic ...
+                    html_block = re.search(r'```html\s*(.*?)\s*```', content_stripped, re.DOTALL | re.IGNORECASE)
+                    md_block = re.search(r'```(markdown|md)\s*(.*?)\s*```', content_stripped, re.DOTALL | re.IGNORECASE)
+                    generic_block = re.search(r'```\s*(.*?)\s*```', content_stripped, re.DOTALL | re.IGNORECASE)
+                    
+                    if html_block:
+                        logger.info("Auto-detected HTML code block - extracting content & forcing canvas_type='html'")
+                        final_canvas_type = 'html'
+                        final_canvas_content = html_block.group(1).strip()
+                    elif md_block:
+                        logger.info("Auto-detected Markdown code block - extracting content & forcing canvas_type='markdown'")
+                        final_canvas_type = 'markdown'
+                        final_canvas_content = md_block.group(2).strip()
+                    elif generic_block:
+                         inner = generic_block.group(1).strip()
+                         if "<html" in inner.lower() or "<div" in inner.lower() or "<!doctype" in inner.lower():
+                             final_canvas_type = 'html'
+                         else:
+                             final_canvas_type = 'markdown'
+                         final_canvas_content = inner
+                    elif "<html" in content_stripped.lower() or "<!doctype html" in content_stripped.lower():
+                         final_canvas_type = 'html'
+                    else:
+                         # Default to markdown for text
+                         final_canvas_type = 'markdown'
+
+            elif state.get('canvas_content'):
+                # Fallback to staged content (e.g. PDF Viewer from preprocess_files)
+                final_canvas_content = state.get('canvas_content')
+                final_canvas_type = state.get('canvas_type', 'html') # Viewer usually html/pdf
+                logger.info(f"Using STAGED canvas content (from preprocess) type={final_canvas_type}")
+        
+        if final_canvas_content:
+            logger.info(f"Canvas confirmed: type={final_canvas_type}")
             
-            # --- ARTIFACT INTEGRATION: Store canvas as artifact ---
-            canvas_content = response.canvas_content
+            # --- ARTIFACT INTEGRATION ---
+            canvas_content = final_canvas_content
+            response.canvas_type = final_canvas_type # Sync back to response object for downstream use
+
             canvas_artifact_ref = None
             if ARTIFACT_INTEGRATION_ENABLED and artifact_hooks:
                 try:
@@ -7433,7 +7600,8 @@ def get_serializable_state(state: dict | State, thread_id: str) -> dict:
             if serializable_messages[i].get('type') == 'assistant':
                 serializable_messages[i]['canvas_content'] = state.get('canvas_content')
                 serializable_messages[i]['canvas_data'] = state.get('canvas_data')
-                serializable_messages[i]['canvas_type'] = state.get('canvas_type', 'spreadsheet' if state.get('canvas_data') else 'html')
+                # FIX: Default to 'markdown' instead of 'html' for better text rendering safety
+                serializable_messages[i]['canvas_type'] = state.get('canvas_type', 'spreadsheet' if state.get('canvas_data') else 'markdown')
                 serializable_messages[i]['has_canvas'] = True
                 logger.info(f"Attached canvas metadata to message {serializable_messages[i].get('id')}")
                 break
@@ -7714,6 +7882,7 @@ def route_after_validation(state: State):
         logger.info("Plan is valid. Routing to execute_batch.")
         return "execute_batch"
 
+
 def analyze_request(state: State):
     """Sophisticated analysis of user request to determine processing approach."""
     logger.info("Performing sophisticated analysis of user request...")
@@ -7732,7 +7901,8 @@ def analyze_request(state: State):
     pass
     
     # Initialize both primary and fallback LLMs
-    primary_llm = ChatCerebras(model="gpt-oss-120b")
+    # [KEY ROTATION] Use KeyManager to get current key
+    primary_llm = ChatCerebras(model="gpt-oss-120b", api_key=get_cerebras_key())
     fallback_llm = ChatNVIDIA(model="openai/gpt-oss-120b") if os.getenv("NVIDIA_API_KEY") else None
     
     # Build comprehensive context from conversation history
@@ -7780,53 +7950,67 @@ def analyze_request(state: State):
     User's current request: "{state['original_prompt']}"
     
     **YOUR TASK:**
-    Determine if this request requires delegating work to specialized agents (complex processing) or if you can answer it directly (simple response).
-    
-    **SIMPLE REQUESTS** (you can answer directly without agents):
-    - Greetings, thanks, acknowledgments: "hi", "thanks", "ok", "got it"
-    - General knowledge questions: "what is Python?", "explain recursion"
-    - Clarification questions: "what do you mean?", "can you explain?"
-    - Creating interactive content with your built-in Canvas (games, visualizations, demos) that don't need external data
-    - **Display/Visualize requests** for EXISTING data/files: "display this file", "show me the result", "visualize it" (if the data was just created)
-    
-    **COMPLEX REQUESTS** (require specialized agents):
-    - ANY work with uploaded files or documents (editing, analyzing, reading, converting, formatting) that involves NEW processing
-    - Fetching external data (stock prices, news, weather, company info, web searches)
-    - Performing calculations, analysis, or transformations on data
-    - Sending emails, browsing websites, or interacting with external services
-    - Multi-step workflows or tasks that build on previous results
-    
+    Analyze the user's request to determine two things:
+    1. **needs_complex_processing**: Does this request require specialized agents, new data processing, calculations, or external tools?
+    2. **needs_canvas**: Does the user want to SEE a visual representation (document, game, chart, etc.)?
+
+    **GUIDELINES:**
+
+    **SET needs_complex_processing = TRUE if:**
+    - The request involves uploaded files (editing, analyzing, reading, converting).
+    - Fetching external data, performing calculations, or scraping.
+    - Sending emails or interacting with external services.
+    - Multi-step workflows.
+
+    **SET needs_complex_processing = FALSE if:**
+    - It's a simple greeting ("hi", "thanks").
+    - It's a general knowledge question ("what is Python?").
+    - It's a simple clarification ("what do you mean?").
+    - It's PURELY about generating simple internal content (like a confirmation or simple explanation) without external tools.
+
+    **SET needs_canvas = TRUE if:**
+    - The user implicitly or explicitly asks to "show", "display", "visualize", "see", or "view" something.
+    - The user asks for a game, a chart, a document interactive view, or a formatted report.
+    - The output would be significantly better understood visually than as plain text.
+
     **PENDING CONFIRMATION:**
     The user has a pending canvas action waiting for approval: {str((pending_task or {}).get('task_name')) if pending_confirmation else "None"}
     
-    **CRITICAL RULES:**
-    - If PENDING CONFIRMATION is set, determine if the user's request confirms ("yes", "go ahead"), cancels ("no", "stop"), or modifies it.
-    - If confirmed -> set "canvas_confirmation_action": "confirm"
-    - If cancelled -> set "canvas_confirmation_action": "cancel"
-    - If files are uploaded, it definitely needs complex processing.
-    - Action verbs like "edit", "change", "convert", "analyze" indicate complex processing.
+    **CRITICAL RULE:**
+    - If the user confirms a pending action ("yes", "proceed"), set "canvas_confirmation_action": "confirm".
+    - If cancelled, set "cancel".
 
-    Respond with a JSON object:
-    {{
-        "needs_complex_processing": true/false,
-        "reasoning": "Brief explanation",
-        "response": "Direct response if false",
-        "canvas_confirmation_action": "confirm" | "cancel" | "modify" | null,
-        "canvas_confirmation_task": "Name of task" | null
-    }}
+    Respond with a JSON object conforming to the schema (needs_complex_processing, reasoning, needs_canvas, canvas_target, etc.).
     '''
     
     try:
         response = invoke_llm_with_fallback(primary_llm, fallback_llm, prompt, AnalysisResult)
-        logger.info(f"Analysis result: needs_complex_processing={response.needs_complex_processing}")
+        logger.info(f"Analysis result: needs_complex_processing={response.needs_complex_processing}, needs_canvas={response.needs_canvas}")
         
         # Ensure we return a complete state update with all required fields
         result = {
             "needs_complex_processing": response.needs_complex_processing,
             "analysis_reasoning": response.reasoning,
             "canvas_confirmation_action": response.canvas_confirmation_action,
-            "canvas_confirmation_task": response.canvas_confirmation_task
+            "canvas_confirmation_task": response.canvas_confirmation_task,
+            "needs_canvas": response.needs_canvas,
+            "canvas_target": response.canvas_target
         }
+        
+        # DYNAMIC LOGIC FOR CANVAS/FILES
+        # If the user wants to SEE a file (needs_canvas=True, canvas_target='file' or implied),
+        # we MUST ensure this goes through the 'complex' path so that 'preprocess_files' or similar logic runs
+        # to actually GENERATE/PREPARE the canvas content.
+        # Simple 'generate_final_response' can handle GAMES, but documents usually need the PREPROCESS step.
+        
+        has_uploaded_files = len(state.get('uploaded_files', [])) > 0
+        
+        if response.needs_canvas and has_uploaded_files:
+             # Even if the LLM thought it was "simple" (e.g. just "show me"), 
+             # viewing a file is technically "complex" in our graph because it needs the file processor.
+             if not result["needs_complex_processing"]:
+                 logger.info("Request requires canvas for uploaded files - upgrading to complex processing to ensure file preparation.")
+                 result["needs_complex_processing"] = True
         
         # KEY FIX: Only reset canvas state if this is a NEW complex request
         # If it's a simple request (e.g. "display file"), we want to PRESERVE the existing canvas

@@ -136,7 +136,7 @@ app.add_middleware(
 app.include_router(connect_router.router)
 app.include_router(credentials_router.router)
 
-# Import and include unified content router for standardized content management
+# Import and include content management router
 from routers import content_router
 app.include_router(content_router.router)
 
