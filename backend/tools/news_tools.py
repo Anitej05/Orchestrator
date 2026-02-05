@@ -23,9 +23,10 @@ else:
 
 @tool
 def search_news(
-    query: str,
+    query: str = "",
     language: str = "en",
-    page_size: int = 10
+    page_size: int = 10,
+    keyword: str = ""
 ) -> Dict:
     """
     Search for news articles matching a keyword or query.
@@ -34,6 +35,7 @@ def search_news(
         query: The search keyword or phrase (e.g., 'Tesla', 'stock market trends')
         language: The 2-letter ISO-639-1 code of the language (default: 'en')
         page_size: Number of results to return (1-100, default: 10)
+        keyword: Alias for query.
         
     Returns:
         Dictionary with status, totalResults, and articles list
@@ -43,10 +45,14 @@ def search_news(
         logger.error(f"❌ {error_msg}")
         return {"error": error_msg, "status": "error"}
     
-    logger.info(f"🔍 [SEARCH_NEWS] Searching for: '{query}' (language={language}, page_size={page_size})")
+    final_query = query or keyword
+    if not final_query:
+        return {"error": "No search query provided", "status": "error"}
+
+    logger.info(f"🔍 [SEARCH_NEWS] Searching for: '{final_query}' (language={language}, page_size={page_size})")
     
     params = {
-        "q": query,
+        "q": final_query,
         "language": language,
         "pageSize": min(page_size, 100),
         "sortBy": "publishedAt"

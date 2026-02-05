@@ -248,9 +248,12 @@ class InferenceService:
                     structured_llm = llm.with_structured_output(schema)
                     result = await structured_llm.ainvoke(messages)
                     
-                    # Update Metrics (Rough estimate for structured obj)
-                    self._update_metrics(current_provider, input_char_len, 500) 
-                    return result
+                    if result:
+                        # Update Metrics (Rough estimate for structured obj)
+                        self._update_metrics(current_provider, input_char_len, 500) 
+                        return result
+                    else:
+                        logger.warning(f"⚠️ {current_provider} returned None for structured output, trying fallback...")
                 
                 # Fallback implementation
                 formatted_messages = list(messages)
@@ -271,11 +274,48 @@ class InferenceService:
                 # Parse JSON
                 import json
                 try:
-                    data = json.loads(content)
+                    # Clean the content
+                    cleaned_content = self._strip_think_tags(content)
+                    cleaned_content = self._strip_markdown(cleaned_content)
+                    
+                    # More robust JSON extraction using raw_decode
+                    def extract_json(text):
+                        # Find the first possible start of a JSON object or array
+                        start_idx = text.find('{')
+                        array_start = text.find('[')
+                        if start_idx == -1 or (array_start != -1 and array_start < start_idx):
+                            start_idx = array_start
+                            
+                        if start_idx == -1:
+                            return None
+                            
+                        text = text[start_idx:]
+                        decoder = json.JSONDecoder()
+                        try:
+                            # raw_decode returns the object and the index where it ended
+                            obj, idx = decoder.raw_decode(text)
+                            return obj
+                        except Exception as e:
+                            # If it failed, maybe there's garbage at the end that confused it
+                            # We can try to manually find the last closing brace
+                            for i in range(len(text), start_idx, -1):
+                                try:
+                                    return json.loads(text[:i])
+                                except:
+                                    continue
+                        return None
+
+                    data = extract_json(cleaned_content)
+                    if data is not None:
+                        return schema.model_validate(data)
+                        
+                    # Fallback to direct loads
+                    data = json.loads(cleaned_content)
                     return schema.model_validate(data)
                 except Exception as parse_error:
-                    logger.warning(f"JSON Parse Error on {current_provider}: {parse_error}")
-                    raise parse_error
+                    logger.warning(f"JSON Parse Error on {current_provider}: {parse_error}. Content snippet: {content[:200]}...")
+                    last_error = parse_error
+                    continue # Try next provider
 
             except Exception as e:
                 logger.error(f"❌ Structured Inference Failed with {current_provider}: {e}")

@@ -49,15 +49,31 @@ async def manage_todo_list(state: State, config: Optional[Dict] = None) -> Dict:
         todo_list = state.get("todo_list", [])
         memory = state.get("memory", {})
         iteration = state.get("iteration_count", 0)
+        failure_count = state.get("failure_count", 0)
+        last_failure_id = state.get("last_failure_id")
         
         if not todo_list and state.get("original_prompt"):
-            return _initialize_todo_list(state)
+            return {**_initialize_todo_list(state), "failure_count": 0, "last_failure_id": None}
+        
+        # Determine consecutive failures
+        non_pending_tasks = [t for t in todo_list if t['status'] in [TaskStatus.COMPLETED, TaskStatus.FAILED]]
+        
+        if non_pending_tasks:
+            last_processed = non_pending_tasks[-1]
+            if last_processed['status'] == TaskStatus.FAILED:
+                # Only increment if this is a NEW failure
+                if last_processed['id'] != last_failure_id:
+                    failure_count += 1
+                    last_failure_id = last_processed['id']
+            else:
+                failure_count = 0
+                last_failure_id = None
         
         pending_tasks = [t for t in todo_list if t['status'] == TaskStatus.PENDING]
         current_task = next((t for t in todo_list if t['status'] == TaskStatus.IN_PROGRESS), None)
         completed_tasks = [t for t in todo_list if t['status'] == TaskStatus.COMPLETED]
         failed_tasks = [t for t in todo_list if t['status'] == TaskStatus.FAILED]
-        
+
         # Get Available Agents & Tools
         active_agents = agent_registry.list_active_agents()
         agent_list_str = "\n".join([f"- {a['name']}: {a['description']} (Capabilities: {a.get('capabilities')})" for a in active_agents])
@@ -92,10 +108,20 @@ async def manage_todo_list(state: State, config: Optional[Dict] = None) -> Dict:
         FULL TO-DO LIST STATUS:
         {list_preview}
         
+        CONSECUTIVE FAILURES: {failure_count}
+        
         CRITICAL INSTRUCTIONS:
         1. STRATEGY: If a task fails, try a different approach. Store key facts in 'memory_update'.
         2. CONTEXT: Check the 'HISTORY' above for results of previous steps.
         3. FINISHING: If objective is met, set 'is_finished' to True.
+        4. FALLBACK: If 'CONSECUTIVE FAILURES' is > 1, you MUST provide a direct answer based on what you know or explain the limitation clearly. DO NOT keep retrying failing agents or tools.
+        5. MEANINGFUL RESPONSES: When finishing (is_finished=True), your 'thought' MUST BE THE ACTUAL FINAL RESPONSE TO THE USER. 
+           - Good: "The stock price of AAPL is $150."
+           - Good: "You are very welcome! How else can I help?"
+           - Bad: "I have found the price and will now tell the user."
+           - Bad: "The objective is met, I am finishing."
+           DO NOT just describe that you are finishing; actually say the words you want the user to see.
+           IF THE USER IS JUST GREETING OR THANKING YOU, JUST RESPOND POLITELY AND FINISH IMMEDIATELY.
         
         RESOURCES:
         - TERMINAL: Use for file ops and scripts.
@@ -130,10 +156,17 @@ async def manage_todo_list(state: State, config: Optional[Dict] = None) -> Dict:
                 temperature=0.2
             )
             print(f"DEBUG: Brain Inference Complete. Update: {update}")
+            
+            if not update:
+                raise ValueError("Brain returned empty update (None)")
+                
         except Exception as e:
             print(f"DEBUG: Brain Inference Failed: {e}")
             logger.error(f"Brain LLM failed: {e}")
-            return {"error": f"Brain failed: {str(e)}"}
+            return {
+                "error": f"Brain failed: {str(e)}",
+                "final_response": f"I encountered an error while processing your request: {str(e)}"
+            }
         
         # Apply updates
         new_todo_list = list(todo_list)
@@ -173,6 +206,15 @@ async def manage_todo_list(state: State, config: Optional[Dict] = None) -> Dict:
             next_pending = next((t for t in new_todo_list if t['status'] == TaskStatus.PENDING), None)
             next_task_id = next_pending['id'] if next_pending else None
         
+        # SAFETY: If no task selected and not finished, force finish to avoid recursion loop
+        is_finished = update.is_finished
+        final_response_content = update.thought
+        if not next_task_id and not is_finished:
+            logger.warning("Brain provided no next task and is not finished. Force finishing to avoid loop.")
+            is_finished = True
+            if not final_response_content or len(final_response_content) < 10:
+                final_response_content = "I have completed the requested analysis."
+        
         # If Brain suggested a command/agent/tool, attach it
         if next_task_id and update.suggested_command:
             for t in new_todo_list:
@@ -196,7 +238,9 @@ async def manage_todo_list(state: State, config: Optional[Dict] = None) -> Dict:
             "memory": memory,
             "current_task_id": next_task_id,
             "iteration_count": iteration + 1,
-            "final_response": "Done" if update.is_finished else None,
+            "failure_count": failure_count,
+            "last_failure_id": last_failure_id,
+            "final_response": final_response_content if is_finished else None,
             "error": None # Clear previous error if any
         }
 
@@ -205,8 +249,11 @@ async def manage_todo_list(state: State, config: Optional[Dict] = None) -> Dict:
         # Return state to avoid amnesia, plus the error
         return {
             "error": str(e),
+            "final_response": f"An unexpected error occurred in the Brain: {str(e)}",
             "todo_list": state.get("todo_list", []),
-            "memory": state.get("memory", {})
+            "memory": state.get("memory", {}),
+            "failure_count": state.get("failure_count", 0) + 1,
+            "last_failure_id": state.get("last_failure_id")
         }
 
 
@@ -226,7 +273,7 @@ async def execute_next_action(state: State, config: Optional[Dict] = None) -> Di
             
         logger.info(f"Executing: {current_task['description']}")
         
-        snippet = current_task.get("code_snippet", "")
+        snippet = current_task.get("code_snippet") or ""
         result_content = ""
         is_success = False
         
@@ -287,6 +334,14 @@ async def execute_next_action(state: State, config: Optional[Dict] = None) -> Di
                            agent_res = resp.json()
                            result_content = json.dumps(agent_res)
                            is_success = resp.status_code == 200
+                           # Deep validation of agent response
+                           if isinstance(agent_res, dict):
+                               # Some agents return success=False
+                               if agent_res.get("success") is False:
+                                   is_success = False
+                               # Others return an error field
+                               if "error" in agent_res and agent_res["error"]:
+                                   is_success = False
                       except Exception as e:
                            result_content = f"Agent Connection Error: {e}"
                            is_success = False
@@ -311,8 +366,13 @@ async def execute_next_action(state: State, config: Optional[Dict] = None) -> Di
             exec_result = await tool_registry.execute_tool(tool_name, args)
             
             if exec_result["success"]:
-                result_content = str(exec_result["result"])
-                is_success = True
+                result_val = exec_result["result"]
+                result_content = str(result_val)
+                # Check if the result itself indicates an error (common pattern in tools)
+                if isinstance(result_val, dict) and "error" in result_val:
+                    is_success = False
+                else:
+                    is_success = True
             else:
                 result_content = exec_result["error"]
                 is_success = False

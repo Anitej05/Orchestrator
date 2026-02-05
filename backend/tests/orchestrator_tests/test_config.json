@@ -10,8 +10,8 @@
         "memory_persistence": true
     },
     "settings": {
-        "max_iterations": 15,
-        "timeout_seconds": 120,
+        "max_iterations": 25,
+        "timeout_seconds": 180,
         "verbose_logging": true,
         "save_full_state": true
     },

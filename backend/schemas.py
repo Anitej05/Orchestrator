@@ -163,7 +163,7 @@ class TaskItem(BaseModel):
     A single item in the dynamic To-Do list.
     Represents a granular action the agent needs to perform.
     """
-    id: str = Field(default_factory=lambda: str(uuid.uuid4())[:8], description="Unique ID of the task")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4())[:8], description="Unique ID of the task. LLM: LEAVE THIS EMPTY.")
     description: str = Field(..., description="Clear, actionable description of the task")
     status: TaskStatus = Field(default=TaskStatus.PENDING, description="Current status")
     priority: TaskPriority = Field(default=TaskPriority.MEDIUM, description="Priority level")
@@ -177,7 +177,7 @@ class TaskItem(BaseModel):
     result: Optional[Any] = Field(None, description="Result of the task execution")
     error: Optional[str] = Field(None, description="Error message if failed")
     
-    created_at: float = Field(default_factory=time.time)
+    created_at: Optional[float] = Field(default_factory=time.time, description="Timestamp. LLM: LEAVE THIS EMPTY.")
     completed_at: Optional[float] = None
 
 

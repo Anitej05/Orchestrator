@@ -126,3 +126,5 @@ class State(TypedDict):
     
     # Error tracking
     error: Annotated[Optional[str], overwrite_reducer]
+    failure_count: Annotated[int, overwrite_reducer] # Count of consecutive failed tasks
+    last_failure_id: Annotated[Optional[str], overwrite_reducer] # ID of the last failed task

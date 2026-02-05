@@ -23,18 +23,23 @@ def _safe_get(data: Dict, key: str):
 
 
 @tool
-def get_stock_quote(ticker: str) -> Dict:
+def get_stock_quote(ticker: str = "", symbol: str = "") -> Dict:
     """
     Get current stock price and basic quote data.
     
     Args:
         ticker: Stock ticker symbol (e.g., 'AAPL', 'TSLA')
+        symbol: Alias for ticker
         
     Returns:
         Dictionary with current price, day high/low, volume, market cap
     """
     try:
-        stock = yf.Ticker(ticker.upper())
+        query = (ticker or symbol).upper()
+        if not query:
+            return {"error": "No ticker symbol provided"}
+            
+        stock = yf.Ticker(query)
         
         # Try fast_info first
         try:

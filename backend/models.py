@@ -1,10 +1,22 @@
 # In Orbimesh Backend/models.py
 
-from sqlalchemy import Column, String, Float, Text, Enum as SAEnum, ForeignKey, Integer, Boolean, DateTime
+from sqlalchemy import Column, String, Float, Text, Enum as SAEnum, ForeignKey, Integer, Boolean, DateTime, JSON
 from sqlalchemy.orm import relationship
-from sqlalchemy.dialects.postgresql import ARRAY, JSON
-from pgvector.sqlalchemy import Vector
-from database import Base
+# from sqlalchemy.dialects.postgresql import ARRAY, JSON
+from database import Base, engine
+try:
+    from pgvector.sqlalchemy import Vector
+    # Check if we are using SQLite - if so, mock Vector even if pgvector is installed
+    if "sqlite" in engine.url.drivername:
+        raise ImportError("Force mock for SQLite")
+except ImportError:
+    # Fallback for systems without pgvector installed or using SQLite
+    from sqlalchemy.types import UserDefinedType
+    class Vector(UserDefinedType):
+        def __init__(self, dimensions):
+            self.dimensions = dimensions
+        def get_col_spec(self, **kw):
+            return "TEXT" # SQLite doesn't have a vector type, use TEXT as fallback
 from pydantic import BaseModel, Field, model_validator
 from typing import Dict, Any, Optional, Literal, Union
 import enum
