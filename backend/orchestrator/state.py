@@ -113,3 +113,16 @@ class State(TypedDict):
     # Bidirectional Dialogue State
     dialogue_contexts: Annotated[Dict[str, Dict], overwrite_reducer]
     pending_agent_questions: Annotated[List[Dict], overwrite_reducer]
+
+    # --- NEW: Dynamic Orchestrator State ---
+    todo_list: Annotated[List[Dict], overwrite_reducer] # List of TaskItem dicts
+    memory: Annotated[Dict[str, Any], overwrite_reducer] # Shared long-term memory/context
+    code_sandbox_state: Annotated[Dict[str, Any], overwrite_reducer] # Persisted sandbox session
+    
+    # Tracking
+    current_task_id: Annotated[Optional[str], overwrite_reducer]
+    iteration_count: Annotated[int, overwrite_reducer]
+    max_iterations: Annotated[int, overwrite_reducer] # Safety limit
+    
+    # Error tracking
+    error: Annotated[Optional[str], overwrite_reducer]

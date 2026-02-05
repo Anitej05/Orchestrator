@@ -7,14 +7,14 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
 import { DollarSign, Clock, FileIcon, FileText, Image as ImageIcon } from "lucide-react"
 import CollapsibleSection from "@/components/CollapsibleSection"
-import PlanGraph from "@/components/PlanGraph"
+import PlanChecklist from "@/components/PlanChecklist"
 import SaveWorkflowButton from "@/components/save-workflow-button"
 import { useEffect, useState } from "react"
 import { InteractiveStarRating, StarRating } from "@/components/ui/star-rating"
 import { useConversationStore } from "@/lib/conversation-store"
 import Markdown from '@/components/ui/markdown'
 import { CanvasRenderer } from '@/components/canvas-renderer'
-import type { Agent, Message, TaskAgentPair } from "@/lib/types"
+import type { Agent, Message, TaskAgentPair, TaskItem, TaskStatus, TaskStatusType } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
 
@@ -38,9 +38,7 @@ interface OrchestrationDetailsSidebarProps {
 }
 
 interface Plan {
-    // Modified to support parallel execution batches (array of arrays)
-    pendingTasks: { task: string; description: string; agent: string; }[][] | { task: string; description: string; agent: string; }[];
-    completedTasks: { task: string; result: string; }[];
+    todoList: TaskItem[];
 }
 
 import { forwardRef, useImperativeHandle } from 'react';
@@ -52,7 +50,7 @@ export interface OrchestrationDetailsSidebarRef {
 
 const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, OrchestrationDetailsSidebarProps>(
     ({ executionResults, threadId, className, onThreadIdUpdate, onAcceptPlan, onRejectPlan }, ref) => {
-        const [plan, setPlan] = useState<Plan>({ pendingTasks: [], completedTasks: [] });
+        const [plan, setPlan] = useState<Plan>({ todoList: [] });
         const [isLoadingPlan, setIsLoadingPlan] = useState(false);
         const [agents, setAgents] = useState<Agent[]>([]);
         const [activeTab, setActiveTab] = useState<string>("metadata");
@@ -82,58 +80,57 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
 
         // Process plan data from conversation store
         useEffect(() => {
-            // ONLY use planData for the workflow structure
-            // Real-time status comes from task_statuses, NOT from completed_tasks
-            // This prevents duplicates in the graph
-            const pendingTasks: Plan['pendingTasks'] = [];
+            const currentTasks: TaskItem[] = [];
 
-            // Process pending tasks from planData (the original plan structure)
-            // We want to PRESERVE the batch structure (list of lists) for valid parallel visualization
-            if (planData && planData.length > 0) {
-                planData.forEach((batch: any) => {
-                    if (Array.isArray(batch)) {
-                        // It's a batch of tasks
-                        const batchTasks = batch.map((task: any) => ({
-                            task: task.task_name || 'Unknown Task',
-                            description: task.task_description || 'No description',
-                            agent: task.primary?.id || task.primary?.name || 'Unknown Agent'
-                        }));
-                        // @ts-ignore - We are changing the type of pendingTasks to allow nested arrays
-                        pendingTasks.push(batchTasks);
-                    } else if (typeof batch === 'object') {
-                        // Handle edge case where it might not be an array (though it should be)
-                        // @ts-ignore
-                        pendingTasks.push([{
-                            task: batch.task_name || 'Unknown Task',
-                            description: batch.task_description || 'No description',
-                            agent: batch.primary?.id || batch.primary?.name || 'Unknown Agent'
-                        }]);
-                    }
+            // 1. Try to use todo_list from store if available (New Architecture)
+            // @ts-ignore
+            const storeTodoList = conversationState.todo_list;
+
+            if (storeTodoList && Array.isArray(storeTodoList) && storeTodoList.length > 0) {
+                // Clean mapping from backend state
+                storeTodoList.forEach((t: any) => {
+                    currentTasks.push({
+                        id: t.id,
+                        description: t.description,
+                        status: t.status as TaskStatusType,
+                        result: t.result,
+                        code_snippet: t.code_snippet
+                    });
                 });
+            } else {
+                // 2. Fallback to mapping legacy planData (batch structure)
+                if (planData && planData.length > 0) {
+                    planData.forEach((batch: any, batchIdx: number) => {
+                        const tasks = Array.isArray(batch) ? batch : [batch];
+                        tasks.forEach((t: any, idx: number) => {
+                            const description = t.task_name || 'Unknown Task';
+                            // Check status from taskStatuses
+                            const statusObj: any = taskStatuses[description];
+                            currentTasks.push({
+                                id: `legacy-${batchIdx}-${idx}`,
+                                description: description,
+                                status: (statusObj?.status as TaskStatusType) || 'pending',
+                                result: statusObj?.output, // or similar
+                            });
+                        });
+                    });
+                } else if (taskAgentPairs && taskAgentPairs.length > 0) {
+                    // 3. Fallback to taskAgentPairs
+                    taskAgentPairs.forEach((pair: TaskAgentPair, idx: number) => {
+                        currentTasks.push({
+                            id: `pair-${idx}`,
+                            description: pair.task_name || 'Unknown Task',
+                            status: 'pending'
+                        });
+                    });
+                }
             }
 
-            // FALLBACK: If planData is empty but we have task_agent_pairs, use those
-            // This handles older conversations where task_plan wasn't saved
-            if (pendingTasks.length === 0 && taskAgentPairs && taskAgentPairs.length > 0) {
-                console.log('Plan data empty, building from task_agent_pairs for visualization');
-                // task_agent_pairs is flat, so we treat each as a single-item batch
-                taskAgentPairs.forEach((pair: TaskAgentPair) => {
-                    // @ts-ignore
-                    pendingTasks.push([{
-                        task: pair.task_name || 'Unknown Task',
-                        description: pair.task_description || 'No description',
-                        agent: pair.primary?.name || pair.primary?.id || 'Unknown Agent'
-                    }]);
-                });
-            }
-
-            // Don't use completedTasks - status updates come from task_statuses instead
             setPlan({
-                pendingTasks: pendingTasks,
-                completedTasks: [] // Always empty - we use task_statuses for real-time updates
+                todoList: currentTasks
             });
             setIsLoadingPlan(false);
-        }, [planData, taskAgentPairs]);
+        }, [planData, taskAgentPairs, (conversationState as any).todo_list, taskStatuses]);
 
         // Auto-switch to Plan tab when plan is created (validate_plan_for_execution starts)
         useEffect(() => {
@@ -141,12 +138,12 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
 
             // Switch to plan tab when validation starts or execution begins
             if (currentStage === 'validating' || currentStage === 'executing') {
-                if (plan.pendingTasks.flat().length > 0 || plan.completedTasks.length > 0) {
+                if (plan.todoList.length > 0) {
                     console.log('Auto-switching to plan tab - execution started');
                     setActiveTab('plan');
                 }
             }
-        }, [conversationState.metadata?.currentStage, plan.pendingTasks.length, plan.completedTasks.length]);
+        }, [conversationState.metadata?.currentStage, plan.todoList.length]);
 
         // Auto-switch to canvas tab when NEW canvas content is created
         useEffect(() => {
@@ -218,7 +215,13 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
 
         const totalCost = executionResults.reduce((sum, result) => sum + result.cost, 0)
         const totalTime = executionResults.reduce((sum, result) => sum + result.executionTime, 0)
-        const allTasks = [...plan.pendingTasks.flat(), ...plan.completedTasks];
+
+        // Map todoList for display in table
+        const allTasks = plan.todoList.map(t => ({
+            task: t.description,
+            description: t.description, // reusing description
+            status: t.status
+        }));
         // Collect attachments - merge uploadedFiles with message attachments to get content
         const messageAttachments = messages.flatMap((m: Message) => m.attachments || []);
 
@@ -369,9 +372,9 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                             <div className="flex-1">
                                 <div className="flex items-center gap-2">
                                     <h3 className="text-xl font-semibold">Workflow Visualization</h3>
-                                    {plan.pendingTasks.length > 0 && (() => {
-                                        const completedCount = Object.values(taskStatuses).filter((t: any) => t.status === 'completed').length;
-                                        const totalTasks = plan.pendingTasks.flat().length;
+                                    {plan.todoList.length > 0 && (() => {
+                                        const completedCount = plan.todoList.filter(t => t.status === 'completed').length;
+                                        const totalTasks = plan.todoList.length;
                                         return (
                                             <span className="text-xs px-2 py-1 bg-gray-100 text-gray-700 rounded-full font-medium">
                                                 {completedCount} / {totalTasks} tasks
@@ -394,17 +397,17 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                             {conversationState.status === 'completed' && (
                                 <SaveWorkflowButton
                                     threadId={threadId || ''}
-                                    disabled={!threadId || plan.pendingTasks.flat().length === 0}
+                                    disabled={!threadId || plan.todoList.length === 0}
                                 />
                             )}
                         </div>
 
-                        {/* Real-time Graph with Task Statuses */}
-                        <div className="flex-1 flex items-center justify-center">
-                            <PlanGraph
+                        {/* Real-time Checklist with Task Statuses */}
+                        <div className="flex-1 flex flex-col items-stretch overflow-hidden">
+                            <PlanChecklist
                                 key={JSON.stringify(plan)}
-                                planData={plan}
-                                taskStatuses={conversationState.task_statuses || {}}
+                                todoList={plan.todoList}
+                                isExecuting={conversationState.metadata?.currentStage === 'executing'}
                             />
                         </div>
                     </TabsContent>

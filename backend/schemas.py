@@ -3,6 +3,8 @@
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 from typing import List, Literal, Optional, Dict, Any
 from enum import Enum
+import uuid
+import time
 from cryptography.hazmat.primitives import serialization
 
 # --- Core Data Structures ---
@@ -138,6 +140,45 @@ class PlannedTask(BaseModel):
 class ExecutionPlan(BaseModel):
     """The final, structured execution plan with parallel batches."""
     plan: List[List[PlannedTask]]
+
+# --- New Orchestrator Schemas (Dynamic To-Do List) ---
+
+class TaskStatus(str, Enum):
+    """Status of a task in the dynamic To-Do list."""
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    BLOCKED = "blocked"
+
+class TaskPriority(str, Enum):
+    """Priority of a task."""
+    CRITICAL = "critical"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+class TaskItem(BaseModel):
+    """
+    A single item in the dynamic To-Do list.
+    Represents a granular action the agent needs to perform.
+    """
+    id: str = Field(default_factory=lambda: str(uuid.uuid4())[:8], description="Unique ID of the task")
+    description: str = Field(..., description="Clear, actionable description of the task")
+    status: TaskStatus = Field(default=TaskStatus.PENDING, description="Current status")
+    priority: TaskPriority = Field(default=TaskPriority.MEDIUM, description="Priority level")
+    dependencies: List[str] = Field(default_factory=list, description="IDs of tasks that must complete first")
+    
+    # Execution Context
+    assigned_tool: Optional[str] = Field(None, description="Name of tool/agent if already decided")
+    code_snippet: Optional[str] = Field(None, description="Python code if this is a coding task")
+    
+    # Result
+    result: Optional[Any] = Field(None, description="Result of the task execution")
+    error: Optional[str] = Field(None, description="Error message if failed")
+    
+    created_at: float = Field(default_factory=time.time)
+    completed_at: Optional[float] = None
 
 
 # --- Multi-Turn Agent Dialogue Models ---

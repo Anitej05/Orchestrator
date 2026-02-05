@@ -266,7 +266,7 @@ async def display_document(request: DisplayDocumentRequest):
     """
     try:
         agent = get_agent()
-        result = agent.display_document(request.file_path)
+        result = await agent.display_document(request.file_path)
 
         if not result.get('success'):
             raise HTTPException(
@@ -498,7 +498,7 @@ async def undo_redo(request: UndoRedoRequest):
             )
 
         agent = get_agent()
-        result = agent.undo_redo(request)
+        result = await agent.undo_redo(request)
 
         if not result.get('success'):
             raise HTTPException(
@@ -533,7 +533,7 @@ async def get_versions(request: VersionHistoryRequest):
     """
     try:
         agent = get_agent()
-        result = agent.get_version_history(request.file_path)
+        result = await agent.get_version_history(request.file_path)
 
         if not result.get('success'):
             raise HTTPException(

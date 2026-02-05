@@ -9,11 +9,20 @@ logger = logging.getLogger(__name__)
 
 # Keys extracted from browser_agent/llm.py
 # User requested "any 3 api keys except 6th one".
-CEREBRAS_KEYS = [
+# Keys extracted from browser_agent/llm.py
+# User requested "any 3 api keys except 6th one".
+DEFAULT_KEYS = [
     "csk-52m4dv4chcpf9vy9jcmjrevnp5ft22y2vctd68wyr8dewndw",
     "csk-nnj93n833cr4c9rd2vttjeew3nwv494px62jfy45fmwjdch8",
     "csk-c2jjpt5k9kttxd44t9jwyn55vje4m2vmrvdjjkd6h2wphv6m",
 ]
+
+def load_keys_from_env() -> List[str]:
+    """Load keys from CEREBRAS_API_KEYS env var (comma separated), fallback to defaults."""
+    env_keys = os.getenv("CEREBRAS_API_KEYS")
+    if env_keys:
+        return [k.strip() for k in env_keys.split(",") if k.strip()]
+    return DEFAULT_KEYS
 
 class KeyManager:
     """
@@ -21,12 +30,12 @@ class KeyManager:
     Tracks rate limit expiry for each key and prioritizes available keys.
     If all keys are limited, waits for the one with the shortest remaining cooldown.
     """
-    def __init__(self, keys: List[str] = CEREBRAS_KEYS):
-        self._keys = keys
-        self._key_cycle = cycle(keys)
+    def __init__(self, keys: Optional[List[str]] = None):
+        self._keys = keys or load_keys_from_env()
+        self._key_cycle = cycle(self._keys)
         # Map key -> Unix timestamp when it becomes available
-        self._key_cooldowns: Dict[str, float] = {k: 0.0 for k in keys}
-        self._current_key = next(self._key_cycle) if keys else None
+        self._key_cooldowns: Dict[str, float] = {k: 0.0 for k in self._keys}
+        self._current_key = next(self._key_cycle) if self._keys else None
         
     def get_current_key(self) -> Optional[str]:
         """Get the currently active key if available, otherwise find best."""

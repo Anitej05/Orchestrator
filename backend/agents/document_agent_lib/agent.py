@@ -75,6 +75,7 @@ from services.content_management_service import (
     ContentPriority,
     ProcessingTaskType
 )
+from services.canvas_service import CanvasService
 
 logger = logging.getLogger(__name__)
 
@@ -696,7 +697,7 @@ class DocumentAgent:
 
     # ========== DISPLAY OPERATIONS ==========
 
-    def display_document(self, file_path: str) -> Dict[str, Any]:
+    async def display_document(self, file_path: str) -> Dict[str, Any]:
         """Display document with canvas."""
         try:
             self.metrics["api_calls"]["display"] += 1
@@ -746,7 +747,7 @@ class DocumentAgent:
 
     # ========== CREATION OPERATIONS ==========
 
-    def create_document(self, request: CreateDocumentRequest) -> Dict[str, Any]:
+    async def create_document(self, request: CreateDocumentRequest) -> Dict[str, Any]:
         """Create a new document."""
         try:
             self.metrics["api_calls"]["create"] += 1
@@ -771,10 +772,27 @@ class DocumentAgent:
             # Create initial version
             self.version_manager.save_version(str(file_path), "Initial creation")
 
+            # Generate Canvas Display
+            if request.file_type.value in ['pdf', 'docx']:
+                display = CanvasService.build_pdf_view(str(file_path), title=f"Created: {request.file_name}")
+            else:
+                display = CanvasService.build_document_view(
+                    content=request.content[:10000],  # Limit content for init load
+                    title=f"Created: {request.file_name}",
+                    file_path=str(file_path)
+                )
+
+            standard_response = {
+                'status': 'success',
+                'summary': f"Created document {request.file_name}",
+                'canvas_display': display.model_dump()
+            }
+
             return {
                 'success': True,
                 'message': f'Created {request.file_name}',
-                'file_path': str(file_path)
+                'file_path': str(file_path),
+                'standard_response': standard_response
             }
 
         except Exception as e:
@@ -786,7 +804,7 @@ class DocumentAgent:
 
     # ========== EDITING OPERATIONS ==========
 
-    def edit_document(self, request: EditDocumentRequest) -> Dict[str, Any]:
+    async def edit_document(self, request: EditDocumentRequest) -> Dict[str, Any]:
         """Edit document using natural language instruction with safety gating."""
         try:
             self.metrics["api_calls"]["edit"] += 1
@@ -816,7 +834,9 @@ class DocumentAgent:
             # Plan edits using LLM
             self.metrics["llm_calls"]["edit_planning"] += 1
             self.metrics["llm_calls"]["total"] += 1
-            plan = self.llm_client.interpret_edit_instruction(
+            
+            # Now awaited
+            plan = await self.llm_client.interpret_edit_instruction(
                 request.instruction,
                 content,
                 structure
@@ -904,6 +924,25 @@ class DocumentAgent:
             )
             self.session_manager.add_edit_action(session.session_id, edit_action)
 
+            # Generate Canvas Display for Edit Result
+            file_ext = Path(request.file_path).suffix.lower()
+            if file_ext in ['.pdf', '.docx']:
+                 display = CanvasService.build_pdf_view(str(request.file_path), title=f"Edited: {Path(request.file_path).name}")
+            else:
+                # Re-read content for display
+                updated_content, _ = extract_document_content(request.file_path)
+                display = CanvasService.build_document_view(
+                    content=updated_content[:10000],
+                    title=f"Edited: {Path(request.file_path).name}",
+                    file_path=str(request.file_path)
+                )
+            
+            standard_response = {
+                'status': 'success',
+                'summary': f"Applied {len(results)} edits to {Path(request.file_path).name}",
+                'canvas_display': display.model_dump()
+            }
+
             return {
                 'success': True,
                 'message': f"Applied {len(results)} edits",
@@ -913,7 +952,8 @@ class DocumentAgent:
                 'edit_summary': verification,
                 'risk_assessment': risk,
                 'status': LocalAgentResponseStatus.COMPLETE.value,
-                'phase_trace': phase_trace
+                'phase_trace': phase_trace,
+                'standard_response': standard_response
             }
 
         except Exception as e:
@@ -974,7 +1014,7 @@ class DocumentAgent:
 
     # ========== UNDO/REDO OPERATIONS ==========
 
-    def undo_redo(self, request: UndoRedoRequest) -> Dict[str, Any]:
+    async def undo_redo(self, request: UndoRedoRequest) -> Dict[str, Any]:
         """Undo or redo an edit."""
         try:
             self.metrics["api_calls"]["undo_redo"] += 1
@@ -1027,7 +1067,7 @@ class DocumentAgent:
 
     # ========== VERSION OPERATIONS ==========
 
-    def get_version_history(self, file_path: str) -> Dict[str, Any]:
+    async def get_version_history(self, file_path: str) -> Dict[str, Any]:
         """Get document version history."""
         try:
             self.metrics["api_calls"]["versions"] += 1

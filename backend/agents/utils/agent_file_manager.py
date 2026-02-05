@@ -44,6 +44,24 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 from abc import ABC, abstractmethod
 
+# CMS Integration
+import sys
+from pathlib import Path
+# agent_file_manager is in backend/agents/utils
+# root is backend/
+backend_root = Path(__file__).parent.parent.parent.resolve()
+if str(backend_root) not in sys.path:
+    sys.path.insert(0, str(backend_root))
+
+# CMS Integration moved inside methods to avoid circular imports
+# from services.content_management_service import (
+#     ContentManagementService,
+#     ContentSource,
+#     ContentType,
+#     ContentPriority
+# )
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -308,6 +326,15 @@ class AgentFileManager:
         # Start cleanup task if enabled
         if auto_cleanup:
             self._start_cleanup_task()
+            
+        # CMS Integration
+        try:
+            from services.content_management_service import ContentManagementService
+            self.cms = ContentManagementService()
+            logger.info("AgentFileManager connected to ContentManagementService")
+        except Exception as e:
+            logger.warning(f"AgentFileManager failed to connect to CMS: {e}")
+            self.cms = None
         
         logger.info(f"AgentFileManager initialized for {agent_id} at {storage_dir}")
     
@@ -457,6 +484,39 @@ class AgentFileManager:
             self._save_registry()
             logger.info(f"[FILE_MANAGER_DEBUG] Registry saved. Total entries: {len(self._registry)}, New file_id: {file_id}")
             
+            # Register
+            self._registry[file_id] = metadata
+            self._save_registry()
+            logger.info(f"[FILE_MANAGER_DEBUG] Registry saved. Total entries: {len(self._registry)}, New file_id: {file_id}")
+            
+            # CMS Sync
+            if self.cms:
+                try:
+                    from services.content_management_service import ContentType, ContentSource, ContentPriority
+                    # Map metadata to CMS types
+                    cms_type = ContentType.OTHER
+                    if file_type == FileType.IMAGE: cms_type = ContentType.IMAGE
+                    elif file_type == FileType.DOCUMENT: cms_type = ContentType.DOCUMENT
+                    elif file_type == FileType.SPREADSHEET: cms_type = ContentType.SPREADSHEET
+                    elif file_type == FileType.SCREENSHOT: cms_type = ContentType.SCREENSHOT
+                    
+                    cms_meta = await self.cms.register_content(
+                        content=content,
+                        name=filename,
+                        source=ContentSource.AGENT_OUTPUT,
+                        content_type=cms_type,
+                        priority=ContentPriority.MEDIUM,
+                        tags=tags + [self.agent_id, "file_manager"],
+                        thread_id=thread_id,
+                        user_id=user_id,
+                        mime_type=mime_type
+                    )
+                    metadata.orchestrator_content_id = cms_meta.id
+                    self._save_registry() # Save again with CMS ID
+                    logger.info(f"Synced file {filename} to CMS (ID: {cms_meta.id})")
+                except Exception as cms_err:
+                    logger.warning(f"Failed to sync file to CMS: {cms_err}")
+
             # Call hooks
             for hook in self._on_file_registered:
                 try:

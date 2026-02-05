@@ -1,0 +1,22 @@
+{
+    "tests_to_run": {
+        "basic_chat": true,
+        "tool_invocation": true,
+        "terminal_commands": true,
+        "agent_delegation": true,
+        "error_handling": true,
+        "edge_cases": true,
+        "multi_turn": true,
+        "memory_persistence": true
+    },
+    "settings": {
+        "max_iterations": 15,
+        "timeout_seconds": 120,
+        "verbose_logging": true,
+        "save_full_state": true
+    },
+    "test_overrides": {
+        "skip_tests": [],
+        "only_run_tests": []
+    }
+}

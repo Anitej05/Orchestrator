@@ -40,7 +40,9 @@ orbimesh_root = Path(__file__).parent.parent.parent.resolve() # services -> back
 if str(orbimesh_root) not in sys.path:
     sys.path.insert(0, str(orbimesh_root))
 
-from backend.utils.key_manager import get_cerebras_key, report_rate_limit
+from utils.key_manager import get_cerebras_key, report_rate_limit
+from services.inference_service import inference_service, InferencePriority
+from langchain_core.messages import HumanMessage
 
 logger = logging.getLogger("ContentManagementService")
 
@@ -374,72 +376,7 @@ class ContentManagementService:
     # MAP-REDUCE PROCESSING ENGINE
     # =========================================================================
 
-    def _get_llm_client(self, model_name: str):
-        """Get or initialize LLM client for specific model"""
-        try:
-            from langchain_cerebras import ChatCerebras
-            # Use KeyManager (blocking wait if needed)
-            api_key = get_cerebras_key()
-            if not api_key:
-                logger.warning("No Cerebras API key available from manager")
-                return None
-            return ChatCerebras(model=model_name, api_key=api_key)
-        except ImportError:
-            logger.error("langchain_cerebras not installed")
-            return None
-        except Exception as e:
-            logger.error(f"Failed to initialize LLM {model_name}: {e}")
-            return None
 
-    async def _invoke_with_retry(self, llm_client, prompt: str, max_retries: int = 3) -> Any:
-        """
-        Robust invocation wrapper with Key Rotation support.
-        Only rotates if the client is ChatCerebras and hits a rate limit.
-        """
-        current_llm = llm_client
-        for attempt in range(max_retries):
-            try:
-                # Direct ainvoke
-                return await current_llm.ainvoke(prompt)
-            except Exception as e:
-                error_str = str(e).lower()
-                is_rate_limit = any(k in error_str for k in ['429', '413', 'rate_limit', 'too many requests'])
-                if hasattr(e, 'response') and hasattr(e.response, 'status_code') and e.response.status_code == 429:
-                    is_rate_limit = True
-                
-                # Check if it's Cerebras
-                is_cerebras = "cerebras" in str(type(current_llm)).lower()
-                
-                if is_cerebras and is_rate_limit:
-                    logger.warning(f"⚡ MapReduce Rate Limit (Attempt {attempt+1}). Rotating...")
-                    
-                    # Report limit
-                    try:
-                        if hasattr(current_llm, 'api_key'):
-                            report_rate_limit(current_llm.api_key)
-                    except:
-                        pass
-                        
-                    # Get new key & Re-init
-                    new_key = get_cerebras_key()
-                    from langchain_cerebras import ChatCerebras
-                    # Assuming we know the model... tricky. 
-                    # We can try to extract it from the old client or default to helper/generator depending on context?
-                    # Or simpler: just re-ask _get_llm_client for the *same model*?
-                    # But we don't know the model name here easily.
-                    # We'll just instantiate a new client with the same config if possible.
-                    # Hack: access .model_name or .model?
-                    model = getattr(current_llm, 'model_name', getattr(current_llm, 'model', self.MODEL_HELPER))
-                    
-                    current_llm = ChatCerebras(model=model, api_key=new_key)
-                    logger.info(f"🔄 Retrying with new key...")
-                    continue
-                
-                if attempt == max_retries - 1:
-                    raise
-                # Exponential backoff for non-rate-limit temporary errors?
-                await asyncio.sleep(1 * (attempt + 1))
-        raise ValueError("Max retries exceeded")
 
     def _chunk_content(self, content: Any, content_type: ContentType, original_name: str = "content") -> List[str]:
         """
@@ -538,10 +475,7 @@ class ContentManagementService:
 
     async def _process_chunk_map(self, chunk: str, task_type: ProcessingTaskType, query: Optional[str] = None) -> str:
         """Helper Phase (Map): Process a single chunk"""
-        llm = self._get_llm_client(self.MODEL_HELPER)
-        if not llm:
-            return "Error: LLM unavailable"
-
+        
         # Define prompts based on task type
         if task_type == ProcessingTaskType.SUMMARIZE:
             prompt = f"""Summarize the following text chunk concisely. Capture key points/events.
@@ -570,11 +504,12 @@ Chunk:
 Analysis:"""
 
         try:
-            # Use retry wrapper
-            response = await self._invoke_with_retry(llm, prompt)
-            # Strip <think> tags if model is reasoning
-            content = response.content
-            content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
+            content = await inference_service.generate(
+                messages=[HumanMessage(content=prompt)],
+                model_name=self.MODEL_HELPER,
+                priority=InferencePriority.SPEED,
+                strip_markdown=True
+            )
             return content
         except Exception as e:
             logger.error(f"Map phase failed for chunk: {e}")
@@ -582,9 +517,6 @@ Analysis:"""
 
     async def _process_reduce(self, mapped_results: List[str], task_type: ProcessingTaskType, query: Optional[str] = None) -> str:
         """Generator Phase (Reduce): Synthesize final answer from mapped results"""
-        llm = self._get_llm_client(self.MODEL_GENERATOR)
-        if not llm:
-            return "Error: LLM unavailable"
 
         # Filter out empty/irrelevant results
         valid_results = [r for r in mapped_results if r and "None" not in r and "Error" not in r]
@@ -615,11 +547,12 @@ Context:
 Final Report:"""
 
         try:
-            # Use retry wrapper
-            response = await self._invoke_with_retry(llm, prompt)
-            # Strip <think> tags for gpt-oss-120b or other reasoning models
-            content = response.content
-            content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
+            content = await inference_service.generate(
+                messages=[HumanMessage(content=prompt)],
+                model_name=self.MODEL_GENERATOR,
+                priority=InferencePriority.QUALITY,
+                strip_markdown=True
+            )
             return content
         except Exception as e:
             logger.error(f"Reduce phase failed: {e}")
@@ -639,9 +572,10 @@ Final Report:"""
         start_time = time.time()
         
         # 1. Retrieve Content
-        metadata, content = self.get_content(content_id)
-        if not content:
+        res = self.get_content(content_id)
+        if not res:
             raise ValueError(f"Content {content_id} not found")
+        metadata, content = res
 
         # --- OPTIMIZATION: IDEMPOTENCY CHECK ---
         # If we have already optimized this content (created archives), return them immediately.
@@ -692,11 +626,13 @@ Final Report:"""
                     summary_prompt = f"Summarize this conversation segment concisely for context retention:\n{archive_text[:15000]}"
                     
                     archive_summary = "Archived conversation segment."
-                    if self._get_llm_client(self.MODEL_HELPER):
+                    if inference_service:
                         try:
-                            llm_client = self._get_llm_client(self.MODEL_HELPER)
-                            summary_res = await self._invoke_with_retry(llm_client, summary_prompt)
-                            archive_summary = summary_res.content
+                            archive_summary = await inference_service.generate(
+                                messages=[HumanMessage(content=summary_prompt)],
+                                model_name=self.MODEL_HELPER,
+                                priority=InferencePriority.SPEED
+                            )
                         except Exception as e:
                             logger.warn(f"Summary generation failed: {e}")
                             
@@ -884,15 +820,17 @@ Available Conversation Archives:
 Task: Identify which Archive IDs might contain information relevant to the User Query.
 Return ONLY a JSON list of IDs. Example: ["id1", "id2"]. If none seem relevant, return []."""
 
-        llm_helper = self._get_llm_client(self.MODEL_HELPER)
-        if not llm_helper:
-            return "Error: Retrieval Service Unavailable (LLM)"
-            
         selected_ids = []
         try:
-            response = await llm_helper.ainvoke(selector_prompt)
+            response_text = await inference_service.generate(
+                messages=[HumanMessage(content=selector_prompt)],
+                model_name=self.MODEL_HELPER,
+                priority=InferencePriority.SPEED,
+                strip_markdown=True
+            )
+            
             # Rough parsing of list from text
-            text = response.content.strip()
+            text = response_text.strip()
             if "[" in text and "]" in text:
                 start = text.find("[")
                 end = text.rfind("]") + 1
@@ -910,8 +848,9 @@ Return ONLY a JSON list of IDs. Example: ["id1", "id2"]. If none seem relevant, 
         for cid in selected_ids:
             # Verify ID belongs to candidates to prevent hallucinated IDs
             if any(c.id == cid for c in candidates):
-                _, content = self.get_content(cid)
-                if content:
+                res = self.get_content(cid)
+                if res:
+                    _, content = res
                     context_blocks.append(f"--- Archive {cid} ---\n{str(content)}")
         
         full_context = "\n".join(context_blocks)
@@ -925,10 +864,14 @@ Retrieved History:
 
 Task: Answer the user's query using ONLY the retrieved history. If the answer isn't there, say so."""
 
-        llm_gen = self._get_llm_client(self.MODEL_GENERATOR) or llm_helper
         try:
-            final_res = await llm_gen.ainvoke(synthesis_prompt)
-            return final_res.content
+            final_res = await inference_service.generate(
+                messages=[HumanMessage(content=synthesis_prompt)],
+                model_name=self.MODEL_GENERATOR,
+                priority=InferencePriority.QUALITY,
+                strip_markdown=True
+            )
+            return final_res
         except Exception as e:
             logger.error(f"Retrieval synthesis failed: {e}")
             return f"Error retrieving context: {e}"
@@ -1055,8 +998,140 @@ Task: Answer the user's query using ONLY the retrieved history. If the answer is
             logger.info(f"Registered content: {name} -> {content_id}")
             return metadata
 
+    def get_optimized_context(self, thread_id: str, max_tokens: int = 8000) -> Dict[str, Any]:
+        """
+        Build an optimized context string for the LLM by synthesizing 
+        active state and archived summaries.
+        """
+        all_metadata = self.get_by_thread(thread_id)
+        if not all_metadata:
+            return {
+                "context_string": "No historical context available.",
+                "references": [],
+                "tokens_saved": 0
+            }
+        
+        # Sort by creation time
+        all_metadata.sort(key=lambda x: x.created_at)
+        
+        context_parts = []
+        references = []
+        tokens_saved = 0
+        
+        # Logic: 
+        # 1. High priority/Recent artifacts stay as summaries + references.
+        # 2. Archives (stale data) stay as references only.
+        
+        for meta in all_metadata:
+            is_archive = "archive" in meta.tags
+            
+            if is_archive:
+                # Archives are just references
+                ref = meta.to_reference()
+                context_parts.append(f"[ARCHIVE:{meta.id}] {meta.name}: {meta.summary}")
+                references.append(ref.to_dict())
+                tokens_saved += meta.original_size // 4 if meta.original_size else 0
+            else:
+                # Active artifacts/results
+                ref = meta.to_reference()
+                context_parts.append(f"[ARTIFACT:{meta.id}] {meta.name}: {meta.summary}")
+                references.append(ref.to_dict())
+                
+        context_string = "\n".join(context_parts)
+        
+        # Trim if still too long (very simple truncation for now)
+        if len(context_string) > max_tokens * self.CHARS_PER_TOKEN_EST:
+             context_string = context_string[:int(max_tokens * self.CHARS_PER_TOKEN_EST)] + "... (truncated)"
+             
+        return {
+            "context_string": context_string,
+            "references": references,
+            "tokens_saved": tokens_saved
+        }
+
     async def register_user_upload(self, file_content: bytes, filename: str, user_id: str, thread_id: Optional[str] = None, mime_type: Optional[str] = None) -> UnifiedContentMetadata:
         return await self.register_content(content=file_content, name=filename, source=ContentSource.USER_UPLOAD, user_id=user_id, thread_id=thread_id, mime_type=mime_type, priority=ContentPriority.HIGH)
+
+    async def register_agent_output(self, content: Union[bytes, str], name: str, agent_id: str, user_id: str, thread_id: Optional[str] = None) -> UnifiedContentMetadata:
+        return await self.register_content(content=content, name=name, source=ContentSource.AGENT_OUTPUT, user_id=user_id, thread_id=thread_id, priority=ContentPriority.MEDIUM, tags=[f"agent:{agent_id}"])
+
+    async def register_artifact(self, content: Any, name: str, content_type: ContentType, thread_id: str, priority: ContentPriority = ContentPriority.MEDIUM, description: Optional[str] = None) -> UnifiedContentMetadata:
+        return await self.register_content(
+            content=content,
+            name=name,
+            source=ContentSource.SYSTEM_GENERATED,
+            content_type=content_type,
+            thread_id=thread_id,
+            priority=priority,
+            tags=["artifact"],
+            is_artifact=True,
+            summary=description
+        )
+
+    async def upload_to_agent(self, content_id: str, agent_id: str, agent_base_url: str) -> Optional[str]:
+        """Upload content to an agent and cache the mapping"""
+        if not agent_base_url:
+            return None
+            
+        with self._lock:
+            if content_id not in self._registry:
+                return None
+            meta = self._registry[content_id]
+            
+            # Check existing mapping
+            if agent_id in meta.agent_mappings:
+                mapping = meta.agent_mappings[agent_id]
+                if mapping.is_valid:
+                    return mapping.agent_content_id
+        
+        # Get content bytes
+        content_bytes = self.get_content_bytes(content_id)
+        if not content_bytes:
+            return None
+            
+        # Upload using httpx
+        import httpx
+        upload_url = f"{agent_base_url.rstrip('/')}/upload"
+        
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                files = {"file": (meta.name, content_bytes, meta.mime_type)}
+                response = await client.post(upload_url, files=files)
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    # Extract ID
+                    agent_content_id = None
+                    if isinstance(result, dict):
+                        if 'result' in result and isinstance(result['result'], dict):
+                            agent_content_id = result['result'].get('file_id')
+                        elif 'file_id' in result:
+                            agent_content_id = result['file_id']
+                        elif 'id' in result:
+                            agent_content_id = result['id']
+                    
+                    if agent_content_id:
+                        # Save mapping
+                        with self._lock:
+                            meta = self._registry[content_id] # Re-fetch under lock
+                            meta.agent_mappings[agent_id] = AgentContentMapping(
+                                content_id=content_id,
+                                agent_id=agent_id,
+                                agent_content_id=agent_content_id,
+                                agent_endpoint=upload_url
+                            )
+                            self._save_registry()
+                        return agent_content_id
+                    else:
+                        logger.warning(f"Could not extract ID from upload response: {result}")
+                else:
+                    logger.error(f"Agent upload failed: {response.status_code} {response.text}")
+                    
+        except Exception as e:
+            logger.error(f"Exception uploading to agent: {e}")
+            
+        return None
+
 
     def get_content(self, content_id: str, update_access: bool = True) -> Optional[Tuple[UnifiedContentMetadata, Any]]:
         with self._lock:

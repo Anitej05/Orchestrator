@@ -20,33 +20,29 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# CMS Integration
+import sys
+from pathlib import Path
+backend_root = Path(__file__).parent.parent.parent.resolve()
+if str(backend_root) not in sys.path:
+    sys.path.insert(0, str(backend_root))
+
+from services.content_management_service import ContentManagementService
+from services.canvas_service import CanvasService
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Initialize CMS
+cms_service = ContentManagementService()
+
 # ============================================================================
 # LLM CONFIGURATION (for future intelligent features)
 # ============================================================================
-llm = None
-
-def get_llm():
-    """Lazy load LLM on first use - ChatCerebras with Groq fallback."""
-    global llm
-    if llm is None:
-        try:
-            from langchain_cerebras import ChatCerebras
-            llm = ChatCerebras(model="gpt-oss-120b")
-            logger.info("Cerebras LLM initialized for Zoho Books agent")
-        except Exception as e:
-            logger.warning(f"Could not initialize Cerebras LLM: {e}")
-            try:
-                from langchain_groq import ChatGroq
-                llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0)
-                logger.info("Groq LLM initialized as fallback for Zoho Books agent")
-            except Exception as e2:
-                logger.warning(f"Could not initialize Groq LLM: {e2}")
-                llm = None
-    return llm
+# Centralized Inference Service
+from backend.services.inference_service import inference_service, InferencePriority
+from langchain_core.messages import HumanMessage
 
 # Import standardized file manager
 try:
@@ -653,6 +649,13 @@ class CreateInvoiceRequest(BaseModel):
     # Reason (for updates/voids)
     reason: Optional[str] = Field(None, description="Reason for update/void")
 
+class InvoiceFromContentRequest(BaseModel):
+    """Request to create an invoice from a CMS content item (e.g. PDF/Image)."""
+    content_id: str = Field(..., description="CMS Content ID of the source document")
+    customer_id: Optional[str] = Field(None, description="Customer ID to associate (optional)")
+    instruction: Optional[str] = Field(None, description="Additional instructions for extraction")
+    auto_send: bool = Field(False, description="Automatically send after creation if confident")
+
 class UpdateInvoiceRequest(BaseModel):
     """Request to update an invoice."""
     customer_id: Optional[str] = None
@@ -1099,6 +1102,83 @@ def create_invoice(request: CreateInvoiceRequest):
         logger.error(f"Error creating invoice: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to create invoice: {str(e)}")
 
+@app.post("/invoices/from-content")
+async def create_invoice_from_content(request: InvoiceFromContentRequest):
+    """
+    Create an invoice by extracting data from a CMS document (PDF, Image, etc.).
+    """
+    try:
+        logger.info(f"Creating invoice from content: {request.content_id}")
+        
+        # 1. Retrieve Content from CMS
+        try:
+            meta, content = cms_service.get_content(request.content_id)
+            if not content:
+                raise ValueError("Content not found or empty")
+        except Exception as e:
+            raise HTTPException(status_code=404, detail=f"Failed to retrieve content: {e}")
+            
+        # 2. Extract Invoice Data using LLM
+        llm_client = get_llm()
+        if not llm_client:
+             raise HTTPException(status_code=503, detail="LLM service unavailable")
+             
+        # Prepare context for LLM
+        content_preview = str(content)[:20000] # Truncate if massive text
+        if isinstance(content, bytes):
+             content_preview = "<Binary Data - Metadata: " + str(meta) + ">"
+             # In a real scenario, we'd use a multimodal model or proper parser here
+             # For now, assuming text/json content or text extracted by CMS
+             
+        prompt = f"""You are an expert Invoice Data Extractor.
+Extract valid invoice details from the following content to populate a Zoho Books Invoice.
+Content Metadata: {meta.name} ({meta.content_type.value})
+Content:
+{content_preview}
+
+Customer ID Hint: {request.customer_id if request.customer_id else 'None'}
+Instruction: {request.instruction or 'Extract all line items, totals, and dates.'}
+
+Return valid JSON adhering to the CreateInvoiceRequest schema. 
+Ensure 'line_items' has 'name', 'rate', 'quantity'.
+If customer_id is not found, exclude it (or use the hint).
+JSON Output:"""
+
+        # Call LLM
+        try:
+            response = await llm_client.ainvoke(prompt)
+            json_str = response.content.replace("```json", "").replace("```", "").strip()
+            # Simple cleanup for reasoning tags
+            import re
+            json_str = re.sub(r'<think>.*?</think>', '', json_str, flags=re.DOTALL).strip()
+            
+            invoice_data = json.loads(json_str) 
+        except Exception as llm_err:
+             logger.error(f"LLM extraction failed: {llm_err}")
+             raise HTTPException(status_code=500, detail=f"Failed to extract invoice data: {llm_err}")
+             
+        # 3. Validation & Merge
+        if request.customer_id:
+             invoice_data['customer_id'] = request.customer_id
+             
+        # Validate against schema
+        try:
+             validated_request = CreateInvoiceRequest(**invoice_data)
+        except Exception as val_err:
+             raise HTTPException(status_code=422, detail=f"Extracted data invalid: {val_err}")
+             
+        # 4. Create Invoice
+        # reuse the existing function logic or call it directly? 
+        # Calling route function directly is tricky due to dependency injection in FastAPI, 
+        # but here it's a simple function call if we pass the object.
+        return create_invoice(validated_request)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating invoice from content: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to process content invoice: {str(e)}")
+
 @app.get("/invoices")
 def list_invoices(
     page: int = Query(1, ge=1),
@@ -1158,10 +1238,36 @@ def list_invoices(
             params["sort_column"] = sort_column
         
         result = make_zoho_request("GET", "/invoices", params=params)
+        invoices = result.get("invoices", [])
+        
+        # Generate Canvas: Spreadsheet View
+        headers = ["Date", "Invoice#", "Customer", "Total", "Balance", "Status", "Due Date"]
+        rows = []
+        for inv in invoices:
+            rows.append([
+                inv.get("date"),
+                inv.get("invoice_number"),
+                inv.get("customer_name"),
+                inv.get("total"),
+                inv.get("balance"),
+                inv.get("status"),
+                inv.get("due_date")
+            ])
+            
+        canvas = CanvasService.build_spreadsheet_view(
+            filename="invoices_list.csv",
+            headers=headers,
+            rows=rows,
+            title=f"Invoices ({len(invoices)})"
+        )
+
         return {
             "success": True,
-            "invoices": result.get("invoices", []),
-            "page_context": result.get("page_context", {})
+            "invoices": invoices,
+            "page_context": result.get("page_context", {}),
+            "standard_response": {
+                "canvas_display": canvas.model_dump()
+            }
         }
     except HTTPException:
         raise
@@ -1176,9 +1282,40 @@ def get_invoice(invoice_id: str):
     """
     try:
         result = make_zoho_request("GET", f"/invoices/{invoice_id}")
+        inv = result.get("invoice", result)
+        
+        # Generate Canvas: Document View (Markdown Receipt)
+        md_content = f"""# Invoice {inv.get('invoice_number')}
+**Date:** {inv.get('date')} | **Due:** {inv.get('due_date')}
+**Customer:** {inv.get('customer_name')}
+**Status:** {inv.get('status')}
+
+## Line Items
+| Item | Qty | Rate | Total |
+|------|-----|------|-------|
+"""
+        for item in inv.get('line_items', []):
+            md_content += f"| {item.get('name')} | {item.get('quantity')} | {item.get('rate')} | {item.get('item_total')} |\n"
+            
+        md_content += f"""
+---
+**Subtotal:** {inv.get('sub_total')}
+**Tax:** {inv.get('tax_total')}
+**Total:** {inv.get('total')} {inv.get('currency_code')}
+"""
+
+        canvas = CanvasService.build_document_view(
+            content=md_content,
+            title=f"Invoice {inv.get('invoice_number')}",
+            format="markdown"
+        )
+
         return {
             "success": True,
-            "invoice": result.get("invoice", result)
+            "invoice": inv,
+            "standard_response": {
+                "canvas_display": canvas.model_dump()
+            }
         }
     except HTTPException:
         raise
@@ -1551,10 +1688,33 @@ def list_customers(
             params["sort_column"] = sort_column
         
         result = make_zoho_request("GET", "/contacts", params=params)
+        # Generate Canvas: Spreadsheet View
+        customers = result.get("contacts", [])
+        headers = ["Name", "Company", "Email", "Phone", "Type"]
+        rows = []
+        for cust in customers:
+            rows.append([
+                cust.get("contact_name"),
+                cust.get("company_name"),
+                cust.get("email"),
+                cust.get("phone"),
+                cust.get("contact_type")
+            ])
+            
+        canvas = CanvasService.build_spreadsheet_view(
+            filename="customers_list.csv",
+            headers=headers,
+            rows=rows,
+            title=f"Customers ({len(customers)})"
+        )
+
         return {
             "success": True,
-            "customers": result.get("contacts", []),  # Zoho returns "contacts" not "customers"
-            "page_context": result.get("page_context", {})
+            "customers": customers,
+            "page_context": result.get("page_context", {}),
+            "standard_response": {
+                "canvas_display": canvas.model_dump()
+            }
         }
     except HTTPException:
         raise
@@ -1779,10 +1939,33 @@ def list_items(
             params["sort_column"] = sort_column
         
         result = make_zoho_request("GET", "/items", params=params)
+        # Generate Canvas: Spreadsheet View
+        items = result.get("items", [])
+        headers = ["Name", "Rate", "Stock", "SKU", "Status"]
+        rows = []
+        for item in items:
+            rows.append([
+                item.get("name"),
+                item.get("rate"),
+                item.get("stock_on_hand"),
+                item.get("sku"),
+                item.get("status")
+            ])
+            
+        canvas = CanvasService.build_spreadsheet_view(
+            filename="items_list.csv",
+            headers=headers,
+            rows=rows,
+            title=f"Items ({len(items)})"
+        )
+
         return {
             "success": True,
-            "items": result.get("items", []),
-            "page_context": result.get("page_context", {})
+            "items": items,
+            "page_context": result.get("page_context", {}),
+            "standard_response": {
+                "canvas_display": canvas.model_dump()
+            }
         }
     except HTTPException:
         raise

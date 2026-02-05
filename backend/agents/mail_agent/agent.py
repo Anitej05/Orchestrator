@@ -16,6 +16,25 @@ from .memory import agent_memory
 from agents.utils.agent_file_manager import FileStatus
 from schemas import AgentResponse, AgentResponseStatus, OrchestratorMessage, DialogueContext
 
+# CMS Integration
+import sys
+from pathlib import Path
+backend_root = Path(__file__).parent.parent.parent.resolve()
+if str(backend_root) not in sys.path:
+    sys.path.insert(0, str(backend_root))
+
+from services.content_management_service import (
+    ContentManagementService,
+    ProcessingTaskType,
+    ContentType,
+    ContentSource,
+    ContentPriority
+)
+
+content_service = ContentManagementService()
+from services.canvas_service import CanvasService
+
+
 # ==================== DIALOGUE MANAGEMENT ====================
 
 # In-memory store for dialogue contexts
@@ -223,8 +242,39 @@ class CentralAgent:
         if not all_bodies:
             return {"success": True, "data": {"summary": "Could not retrieve content for any emails.", "sources": [], "count": 0}}
 
-        # GLOBAL PROCESSING: One call handles Urgency Pass and Recursive Map-Reduce
-        final_summary = await self.llm.summarize_text_batch(all_bodies)
+        # REGISTER WITH CMS
+        try:
+            content_payload = []
+            for i, body in enumerate(all_bodies):
+                content_payload.append(f"--- EMAIL {i+1} ---\n{body}") # Keep text format for now or switch to list of dicts if CMS supports
+            
+            # Using list of strings for compatibility with current chunking
+            
+            cms_metadata = await content_service.register_content(
+                content=content_payload,
+                name=f"emails_summary_request_{len(target_ids)}_{user_id}",
+                source=ContentSource.SYSTEM_GENERATED,
+                content_type=ContentType.DOCUMENT,
+                priority=ContentPriority.MEDIUM,
+                tags=["email_batch", "summary_request"],
+                user_id=user_id
+            )
+            
+            logger.info(f"[CMS] Registered email batch as {cms_metadata.id}. Starting Map-Reduce...")
+            
+            # DELEGATE TO CMS MAP-REDUCE
+            process_result = await content_service.process_large_content(
+                content_id=cms_metadata.id,
+                task_type=ProcessingTaskType.SUMMARIZE
+            )
+            
+            final_summary = process_result.final_output
+            logger.info(f"[CMS] Summarization complete. Time: {process_result.processing_time_ms}ms")
+            
+        except Exception as e:
+            logger.error(f"[CMS] Summarization failed, falling back to local LLM: {e}")
+            # Fallback
+            final_summary = await self.llm.summarize_text_batch(all_bodies)
         
         self.memory.add_turn(user_id, f"Summarize {len(target_ids)} emails", final_summary[:100], "summarize")
         return {"success": True, "data": {"summary": final_summary, "sources": all_sources}}
@@ -338,9 +388,35 @@ async def search(request: SemanticSearchRequest):
         # Always inform the user if we fetched fewer than the total available
         if count < total:
              result['data']['note'] = f"Fetched {count} of ~{total} emails. To process the rest, request 'all emails' or a specific number."
+
+        # Generate Canvas: Spreadsheet View of Emails
+        msgs = data.get("messages", [])
+        headers = ["From", "Subject", "Date", "Snippet"]
+        rows = []
+        for m in msgs:
+            rows.append([
+                m.get("from"),
+                m.get("subject"),
+                m.get("date"),
+                m.get("snippet", "")[:100]
+            ])
+            
+        canvas = CanvasService.build_spreadsheet_view(
+            filename="email_search_results.csv",
+            headers=headers,
+            rows=rows,
+            title=f"Search Results: {request.query} ({count})"
+        )
              
         logger.info(f"[RESPONSE] [SEARCH] Response: success={result.get('success')}, count={count}/{total}")
-        return GmailResponse(success=result["success"], result=result.get("data"), error=result.get("error"))
+        return GmailResponse(
+            success=result["success"], 
+            result=result.get("data"), 
+            error=result.get("error"),
+            standard_response={
+                "canvas_display": canvas.model_dump()
+            }
+        )
     except Exception as e:
         logger.error(f"[ERROR] [SEARCH] Failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -351,7 +427,22 @@ async def summarize_emails(request: SummarizeRequest):
     try:
         result = await central_agent.summarize_emails(request)
         logger.info(f"[RESPONSE] [SUMMARIZE] Response: success={result.get('success')}, summary_len={len(str(result.get('data', {}).get('summary', '')))}")
-        return GmailResponse(success=result["success"], result=result.get("data"), error=result.get("error"))
+        
+        summary_text = result.get("data", {}).get("summary", "No summary generated.")
+        canvas = CanvasService.build_document_view(
+            content=summary_text,
+            title="Email Summary",
+            format="markdown"
+        )
+        
+        return GmailResponse(
+            success=result["success"], 
+            result=result.get("data"), 
+            error=result.get("error"),
+            standard_response={
+                "canvas_display": canvas.model_dump()
+            }
+        )
     except Exception as e:
         logger.error(f"[ERROR] [SUMMARIZE] Failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -382,26 +473,30 @@ async def send_email(request: SendEmailRequest):
     try:
         # PREVIEW MODE
         if request.show_preview:
-            canvas_display = {
-                "canvas_type": "email_preview",
-                "canvas_data": {
-                    "to": request.to,
-                    "cc": request.cc if request.cc else [],
-                    "bcc": request.bcc if request.bcc else [],
-                    "subject": request.subject,
-                    "body": request.body,
-                    "is_html": request.is_html,
-                    "attachments": {
-                        "file_ids": request.attachment_file_ids if request.attachment_file_ids else [],
-                        "paths": request.attachment_paths if request.attachment_paths else [],
-                        "count": len(request.attachment_file_ids or []) + len(request.attachment_paths or [])
-                    }
-                },
-                "canvas_title": f"Email Preview: {request.subject}",
-                "requires_confirmation": True,
-                "confirmation_message": "Review and confirm to send this email"
-            }
+            canvas = CanvasService.build_email_preview(
+                to=request.to,
+                subject=request.subject,
+                body=request.body,
+                cc=request.cc,
+                is_html=request.is_html,
+                requires_confirmation=True,
+                confirmation_message="Review and confirm to send this email"
+            )
             
+            # Attachments metadata for display (CanvasService email preview needs update to support attachments list if we want it perfect,
+            # but for now we can inject it or the service might just show body. 
+            # Actually, let's keep the manual structure for attachments if CanvasService doesn't support them explicitly yet?
+            # CanvasService build_email_preview only takes to, cc, subject, body.
+            # I should update CanvasService to support attachments or just inject it into canvas_data manually here.)
+            
+            # Inject attachments into canvas_data
+            if request.attachment_file_ids or request.attachment_paths:
+                canvas.canvas_data['attachments'] = {
+                     "file_ids": request.attachment_file_ids if request.attachment_file_ids else [],
+                     "paths": request.attachment_paths if request.attachment_paths else [],
+                     "count": len(request.attachment_file_ids or []) + len(request.attachment_paths or [])
+                }
+
             return GmailResponse(
                 success=True,
                 result={
@@ -413,7 +508,9 @@ async def send_email(request: SendEmailRequest):
                         "body_preview": request.body[:100] + "..." if len(request.body) > 100 else request.body
                     }
                 },
-                canvas_display=canvas_display
+                standard_response={
+                    "canvas_display": canvas.model_dump()
+                }
             )
         
         # SEND MODE
@@ -486,7 +583,23 @@ async def get_message(request: GmailRequest):
                 if analysis.get("is_critical"):
                     data["hint"] = f"[WARNING] [AI ANALYSIS] Attachments are Critical: {analysis.get('reason')}. Call /download_attachments."
             
-            return GmailResponse(success=True, result=data)
+            # Generate Canvas: Email Preview
+            canvas = CanvasService.build_email_preview(
+                to=data.get("to", ""),
+                subject=data.get("subject", ""),
+                body=data.get("body", ""),
+                cc=data.get("cc"),
+                is_html=data.get("is_html", False) if "is_html" in data else True, # Assume true if unknown or check snippet
+                requires_confirmation=False
+            )
+            
+            return GmailResponse(
+                success=True, 
+                result=data,
+                standard_response={
+                    "canvas_display": canvas.model_dump()
+                }
+            )
         else:
             return GmailResponse(success=False, result=None, error=result.get("error"))
             

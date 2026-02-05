@@ -25,6 +25,14 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# CMS Integration for query_page_content
+from services.content_management_service import (
+    ContentManagementService, 
+    ProcessingTaskType,
+    ProcessingStrategy
+)
+content_service = ContentManagementService()
+
 
 class ActionExecutor:
     """Execute browser actions reliably"""
@@ -296,10 +304,58 @@ class ActionExecutor:
             return await self._save_credential(page, action.params)
         elif action.name == "get_credential":
             return await self._get_credential(page, action.params)
-        elif action.name == "save_learning":
-            return await self._save_learning(page, action.params)
-        else:
-            return ActionResult(success=False, action=action.name, message=f"Unknown action: {action.name}")
+
+    async def _query_page_content(self, page: Page, params: Dict[str, Any]) -> ActionResult:
+        """
+        Query large page content offloaded to CMS (RAG-over-Page).
+        Expected params: {'query': 'search term'}
+        """
+        query = params.get('query', '')
+        
+        # We need the active content ID. Since ActionExecutor is stateless regarding agent memory,
+        # we rely on the agent to inject this ID into the params or we need to access the shared memory.
+        # IMPROVEMENT: The planner should inject 'active_content_id' into params if available.
+        # Fallback: Check if we have a way to access agent state.
+        
+        # For this implementation, we will assume the AGENT injects 'content_id' into params
+        # when it sees 'query_page_content' action being planned and it knows it has an active large page.
+        content_id = params.get('content_id')
+        
+        if not query:
+             return ActionResult(success=False, action="query_page_content", message="No query provided")
+             
+        if not content_id:
+             return ActionResult(
+                 success=False, 
+                 action="query_page_content", 
+                 message="No active content ID found. Use this tool only when a 'LARGE PAGE' has been detected and offloaded."
+             )
+             
+        try:
+            logger.info(f"🔍 CMS Query: '{query}' on Content ID: {content_id}")
+            
+            # Execute Map-Reduce Search via CMS
+            result = await content_service.process_large_content(
+                content_id=content_id,
+                task_type=ProcessingTaskType.SEARCH,
+                query=query,
+                strategy=ProcessingStrategy.MAP_REDUCE # Parallel search across chunks
+            )
+            
+            final_answer = result.final_output
+            logger.info(f"✅ CMS Query Result ({len(final_answer)} chars)")
+            
+            return ActionResult(
+                success=True, 
+                action="query_page_content", 
+                message=f"Query successful",
+                data={'result': final_answer, 'structured_info': {'key': f"query_{query}", 'value': final_answer}}
+            )
+            
+        except Exception as e:
+            logger.error(f"CMS Query Failed: {e}")
+            return ActionResult(success=False, action="query_page_content", message=f"CMS Query failed: {e}")
+
 
 
 

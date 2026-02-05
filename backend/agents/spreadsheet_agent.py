@@ -18,9 +18,23 @@ BACKEND_DIR = SCRIPT_DIR.parent  # backend/ directory
 PACKAGE_DIR = SCRIPT_DIR / "spreadsheet_agent"  # agents/spreadsheet_agent/
 
 # Ensure paths are in sys.path for imports
-for path in [str(BACKEND_DIR), str(SCRIPT_DIR), str(PACKAGE_DIR)]:
-    if path not in sys.path:
-        sys.path.insert(0, path)
+# Order matters: PROJECT_ROOT > BACKEND_DIR > SCRIPT_DIR > PACKAGE_DIR
+# We insert in reverse order.
+
+if str(PACKAGE_DIR) not in sys.path:
+    sys.path.insert(0, str(PACKAGE_DIR))
+
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+# BACKEND_DIR (allows 'import services', 'import agents')
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
+# PROJECT_ROOT (allows 'import backend.services')
+PROJECT_ROOT = BACKEND_DIR.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

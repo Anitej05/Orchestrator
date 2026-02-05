@@ -196,7 +196,7 @@ class ExtractDataResponse(BaseModel):
     """Response with extracted data."""
     success: bool
     message: str
-    extracted_data: Dict[str, Any]
+    extracted_data: Any
     data_format: str
     status: Optional[str] = Field(
         None,

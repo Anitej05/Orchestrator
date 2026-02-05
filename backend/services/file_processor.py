@@ -21,6 +21,26 @@ import httpx
 
 from schemas import FileObject
 
+# CMS Integration
+import sys
+from pathlib import Path
+backend_root = Path(__file__).parent.parent.resolve() # services -> backend -> Orbimesh (wait, services is in backend)
+# file_processor is in backend/services. __file__ is backend/services/file_processor.py
+# parent -> backend/services
+# parent.parent -> backend
+# parent.parent.parent -> Orbimesh
+backend_root = Path(__file__).parent.parent.parent.resolve()
+
+if str(backend_root) not in sys.path:
+    sys.path.insert(0, str(backend_root))
+
+from services.content_management_service import (
+    ContentManagementService,
+    ContentSource,
+    ContentType,
+    ContentPriority
+)
+
 logger = logging.getLogger(__name__)
 
 # In-memory cache for processed files (use Redis in production)
@@ -33,6 +53,7 @@ class FileProcessor:
     def __init__(self, cache_enabled: bool = True):
         self.cache_enabled = cache_enabled
         self.processing_tasks: Dict[str, asyncio.Task] = {}
+        self.cms = ContentManagementService()
         
     def _compute_file_hash(self, file_path: str) -> str:
         """Compute SHA256 hash of file for cache key"""
@@ -98,7 +119,7 @@ class FileProcessor:
         
         # Create vector store (runs in thread pool)
         # Import here to avoid circular dependency
-        from orchestrator.graph import get_hf_embeddings
+        from orchestrator.nodes.utils import get_hf_embeddings
         
         vector_store = await asyncio.to_thread(
             FAISS.from_documents,
@@ -141,6 +162,28 @@ class FileProcessor:
         result['processing_time'] = (datetime.now() - start_time).total_seconds()
         logger.info(f"✅ Processed {file_obj.file_name} in {result['processing_time']:.2f}s")
         
+        # CMS Integration: Sync with Central Registry
+        if self.cms:
+             try:
+                 # Re-read file content (or pass path if we modified register_content/register_file)
+                 # register_content takes content (bytes/str/list)
+                 with open(file_path, 'rb') as f:
+                     content_bytes = f.read()
+                 
+                 meta = await self.cms.register_content(
+                     content=content_bytes,
+                     name=file_obj.file_name,
+                     source=ContentSource.USER_UPLOAD,
+                     content_type=ContentType.DOCUMENT,
+                     priority=ContentPriority.MEDIUM,
+                     tags=["file_processor", "vectorized"],
+                     mime_type=file_obj.mime_type or "application/octet-stream"
+                 )
+                 result['content_id'] = meta.id # Return the CMS ID!
+                 logger.info(f"Synced {file_obj.file_name} with CMS (ID: {meta.id})")
+             except Exception as cms_err:
+                 logger.warning(f"CMS sync failed for {file_obj.file_name}: {cms_err}")
+
         return result
     
     def _load_document(self, file_path: str):

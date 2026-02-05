@@ -60,6 +60,8 @@ The system analyzes the page to find **Robust Extraction Hooks**:
 - `go_back` → Previous page: `{}`
 - `scroll` → Scroll page: `{"direction": "down", "amount": 500}`
 - `wait` → Wait for load: `{"seconds": 2}`
+- `query_page_content` → **NEW!** Search massive text offloaded to CMS:
+  - `{"query": "return policy details"}` - Use this when page says "LARGE PAGE DETECTED"
 
 ### Clicking Elements
 - `click` → Click using index, xpath, or text:

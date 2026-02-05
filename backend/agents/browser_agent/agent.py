@@ -41,6 +41,20 @@ from .state import AgentMemory
 from .planner import Planner
 from .persistent_memory import get_persistent_memory
 
+# CMS Integration
+import sys
+from services.content_management_service import (
+    ContentManagementService, 
+    ProcessingTaskType, 
+    ContentType, 
+    ContentSource, 
+    ContentPriority,
+    ProcessingStrategy
+)
+
+# Initialize CMS
+content_service = ContentManagementService()
+
 # Configure logger for this module and children (agents.browser_agent.*)
 class IndentedFormatter(logging.Formatter):
     def format(self, record):
@@ -213,6 +227,125 @@ class BrowserAgent:
             if key:
                 memory[key] = el
         
+    async def _process_page_content_via_cms(self, page_content: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Check if page content is massive. If so, offload to CMS (RAG-over-Page).
+        Returns updated page_content with 'body_text' replaced by a summary + CMS metadata.
+        """
+        text = page_content.get('body_text', '')
+        # Threshold: 50k chars (approx 12k tokens) - safe limit for context window
+        if len(text) > 50000:
+            logger.info(f"📚 Large Page Detected ({len(text)} chars). Offloading to CMS...")
+            
+            # Register with CMS for Map-Reduce processing
+            # Use CONTEXT_OPTIMIZATION strategy to create retrievable chunks
+            try:
+                # 1. Register & Process
+                # We use the URL as a unique key for caching if needed (via name)
+                safe_name = f"page_content_{self.task_id}_{int(time.time())}.txt"
+                content_meta = await content_service.register_content(
+                    content=text,
+                    name=safe_name,
+                    source=ContentSource.BROWSER_CAPTURE,
+                    content_type=ContentType.DOCUMENT,
+                    priority=ContentPriority.ephemeral, # Session scope mostly
+                    tags=["browser_page", f"url:{page_content.get('url')}", f"task:{self.task_id}"],
+                    thread_id=self.thread_id
+                )
+                
+                # 2. Trigger Map-Reduce for Summary
+                process_result = await content_service.process_large_content(
+                    content_id=content_meta.id,
+                    task_type=ProcessingTaskType.SUMMARIZE,
+                    strategy=ProcessingStrategy.CONTEXT_OPTIMIZATION
+                )
+                
+                # 3. Update State
+                self.memory.active_content_id = content_meta.id
+                self.memory.active_content_summary = process_result.final_output
+                
+                # 4. Modify Page Content for LLM
+                # Replace massive text with summary + instructions
+                page_content['body_text'] = (
+                    f"--- LARGE PAGE DETECTED ({len(text)} chars) ---\n"
+                    f"Content has been offloaded to CMS (ID: {content_meta.id}).\n"
+                    f"Showing Summary:\n{process_result.final_output}\n\n"
+                    f"[INSTRUCTION]: To read specific details, use the 'query_page_content' tool."
+                )
+                logger.info(f"✅ CMS Processing Complete. Summary len: {len(process_result.final_output)}")
+                
+            except Exception as e:
+                logger.error(f"CMS Offloading Failed: {e}")
+                # Fallback: Truncate locally
+                page_content['body_text'] = text[:50000] + "\n...[TRUNCATED FALLBACK]..."
+                
+        return page_content
+
+    async def _check_memory_pressure(self):
+        """
+        Check if agent memory is getting too full for the context window.
+        If so, offload older actions to CMS Archival Memory.
+        """
+        HISTORY_LIMIT = 20 # Keep last 20 actions in active memory
+        
+        if len(self.memory.action_history) > HISTORY_LIMIT + 5: # Buffer of 5
+            logger.info(f"💾 Memory Pressure: History has {len(self.memory.action_history)} items. Archiving...")
+            
+            # 1. Slice history
+            # Keep the last 'HISTORY_LIMIT' items
+            to_archive = self.memory.action_history[:-HISTORY_LIMIT]
+            keep_history = self.memory.action_history[-HISTORY_LIMIT:]
+            
+            if not to_archive: 
+                return
+
+            # 2. Prepare content for CMS
+            # Convert list of dicts to a readable text block
+            archive_text = "Previously executed actions (Archived):\n"
+            for act in to_archive:
+                archive_text += f"- Step {act.get('step')}: {act.get('action_type')} -> {act.get('result')}\n"
+                
+            # 3. Offload to CMS
+            try:
+                # Register content
+                safe_name = f"history_archive_{self.task_id}_{int(time.time())}.txt"
+                content_meta = await content_service.register_content(
+                    content=archive_text,
+                    name=safe_name,
+                    source=ContentSource.AGENT_MEMORY,
+                    content_type=ContentType.LOG,
+                    priority=ContentPriority.long_term,
+                    tags=["agent_history", f"task:{self.task_id}"],
+                    thread_id=self.thread_id
+                )
+                
+                # Process for Archival (Summary generation)
+                process_result = await content_service.process_large_content(
+                    content_id=content_meta.id,
+                    task_type=ProcessingTaskType.SUMMARIZE,
+                    strategy=ProcessingStrategy.ARCHIVAL_MEMORY
+                )
+                
+                # 4. Update Memory State
+                self.memory.archived_blocks.append(content_meta.id)
+                self.memory.action_history = keep_history
+                
+                # Add a synthetic "Archived" marker at the start of history
+                # This ensures the LLM knows there is history before this point
+                summary = process_result.final_output
+                self.memory.action_history.insert(0, {
+                    "step": "ARCHIVE",
+                    "action_type": "ARCHIVED_HISTORY",
+                    "target": f"{len(to_archive)} steps",
+                    "result": f"SUMMARY: {summary}",
+                    "reasoning": "Older actions archived to reduce context usage."
+                })
+                
+                logger.info(f"✅ Archived {len(to_archive)} steps to CMS (ID: {content_meta.id})")
+                
+            except Exception as e:
+                logger.error(f"Archival failed: {e}")
+
     def _merge_known_elements(self, url: str, current_elements: List[Dict]) -> List[Dict]:
         """Merge current viewport elements with off-screen memory"""
         if not url or url not in self.known_elements:
@@ -530,6 +663,9 @@ class BrowserAgent:
                     except Exception as tree_err:
                         logger.warning(f"Unified tree build failed: {tree_err}")
                         page_content['unified_page_tree'] = ""
+                
+                # Process via CMS if content is massive (RAG-over-Page)
+                page_content = await self._process_page_content_via_cms(page_content)
                 
                 # Get URL early for blank page detection
                 current_url = page_content.get('url', '')
@@ -1129,8 +1265,13 @@ class BrowserAgent:
                             # Reset stuck counter since we have a new approach
                             self.stuck_count = 0
                     
+                    
                     # NOTE: Stuck detection is now LLM-based via _check_progress_and_stuck earlier in the loop
                     # No legacy stuck check needed here
+                    
+                    # 5. Check Memory Pressure (Archival)
+                    # Archive old history if it gets too long
+                    await self._check_memory_pressure()
                 
             self.is_running = False
             

@@ -18,14 +18,22 @@ SCRIPT_DIR = Path(__file__).parent.absolute()
 BACKEND_DIR = SCRIPT_DIR.parent
 
 # Ensure agents and backend are in sys.path
-for path in [str(SCRIPT_DIR), str(BACKEND_DIR)]:
-    if path not in sys.path:
-        sys.path.insert(0, path)
+# Ensure agents, backend, and project root are in sys.path
+# Order matters: PROJECT_ROOT > BACKEND_DIR > SCRIPT_DIR
+
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
+PROJECT_ROOT = BACKEND_DIR.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 logger.info(f"🔧 Path setup: script_dir={SCRIPT_DIR}, backend_dir={BACKEND_DIR}")
 
 # Import modularized Mail Agent from the package
-# We use absolute import from agents to avoid circularity if the file is named mail_agent.py
 app = None
 try:
     logger.info("📦 Attempting to import mail_agent package logic...")
@@ -33,7 +41,7 @@ try:
     from agents.mail_agent.agent import app as mail_app
     app = mail_app
     logger.info("✅ Successfully imported mail_agent from package")
-except ImportError as e:
+except Exception as e:
     logger.error(f"❌ Failed to import mail_agent package: {e}", exc_info=True)
     # Create fallback minimal app
     app = FastAPI(title="Mail Agent (Fallback)")
@@ -42,7 +50,9 @@ except ImportError as e:
     async def fallback_health():
         return {"status": "error", "message": f"Import failed: {e}"}
     
-    raise RuntimeError(f"Failed to import mail_agent package: {e}")
+    # Re-raise to crash if standalone
+    if __name__ == "__main__":
+        sys.exit(1)
 
 # Add CORS middleware
 if not any(middleware.cls.__name__ == "CORSMiddleware" for middleware in app.user_middleware):

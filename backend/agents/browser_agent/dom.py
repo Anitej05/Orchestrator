@@ -29,10 +29,10 @@ class DOMExtractor:
             url = page.url
             title = await page.title()
             
-            # Get visible text (with null check)
+            # Get visible text (FULL TEXT - No 200k limit for CMS RAG)
             body_text = await page.evaluate('''() => {
                 if (!document.body) return '';
-                return document.body.innerText.substring(0, 200000);
+                return document.body.innerText; 
             }''')
             
             # Get scroll position info

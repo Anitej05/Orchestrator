@@ -5,6 +5,7 @@ Handles documents, images, and other file types.
 
 import os
 import json
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 import logging
@@ -120,25 +121,18 @@ def get_file_info(file_path: str) -> Optional[Dict]:
         return None
 
 
-def build_file_context(loaded_files: Dict[str, Optional[str]], max_chars: int = 1000) -> str:
+
+async def build_file_context(loaded_files: Dict[str, Optional[str]], max_chars: int = 1000, cms_service=None) -> str:
     """
     Build a text context from loaded files for inclusion in LLM prompts.
     
     Args:
         loaded_files: Dictionary of file path -> content
-        max_chars: Maximum characters to include per file
+        max_chars: Maximum characters to include per file (local fallback)
+        cms_service: Optional ContentManagementService instance for offloading large files
     
     Returns:
         Formatted text context of all files
-    
-    Example:
-        context = build_file_context(loaded_files)
-        # Output:
-        # FILE: documents/doc1.txt
-        # Content preview...
-        # ---
-        # FILE: documents/doc2.pdf
-        # Content preview...
     """
     if not loaded_files:
         return ""
@@ -150,7 +144,50 @@ def build_file_context(loaded_files: Dict[str, Optional[str]], max_chars: int = 
             context_parts.append(f"FILE: {file_path}\n[File not found or could not be read]\n---")
             continue
         
-        # Truncate content if too long
+        # Check for massive content
+        if cms_service and len(content) > 5000:
+            try:
+                # Offload to CMS
+                # We use a standard naming convention
+                safe_name = f"file_{os.path.basename(file_path)}_{int(time.time())}.txt"
+                
+                # Dynamic import for enums to avoid top-level circular deps
+                from services.content_management_service import ContentSource, ContentType, ContentPriority, ProcessingTaskType, ProcessingStrategy
+
+                # 1. Register
+                content_meta = await cms_service.register_content(
+                    content=content,
+                    name=safe_name,
+                    source=ContentSource.UPLOAD,
+                    content_type=ContentType.DOCUMENT,
+                    priority=ContentPriority.ephemeral,
+                    tags=["uploaded_file", f"path:{file_path}"],
+                    thread_id="global" # Files are often shared or global for now
+                )
+                
+                # 2. Summarize
+                process_result = await cms_service.process_large_content(
+                    content_id=content_meta.id,
+                    task_type=ProcessingTaskType.SUMMARIZE,
+                    strategy=ProcessingStrategy.FAST # Fast summary for context
+                )
+                
+                summary = process_result.final_output
+                context_parts.append(
+                    f"FILE: {file_path}\n"
+                    f"[LARGE CONTENT OFFLOADED TO CMS - ID: {content_meta.id}]\n"
+                    f"Summary: {summary}\n"
+                    f"Instructions: Use 'query_file_content' tool (if available) or specific CMS actions to read details."
+                    f"\n---"
+                )
+                logger.info(f"📚 Offloaded large file {file_path} to CMS ({len(content)} chars)")
+                continue
+                
+            except Exception as e:
+                logger.warning(f"Failed to offload file {file_path} to CMS: {e}")
+                # Fallback to local truncation
+        
+        # Truncate content if too long (Fallback or if no CMS)
         truncated_content = content[:max_chars]
         if len(content) > max_chars:
             truncated_content += f"\n... (truncated, {len(content) - max_chars} more characters)"
@@ -158,6 +195,7 @@ def build_file_context(loaded_files: Dict[str, Optional[str]], max_chars: int = 
         context_parts.append(f"FILE: {file_path}\n{truncated_content}\n---")
     
     return "\n".join(context_parts)
+
 
 
 def get_conversation_files(thread_id: str) -> List[str]:

@@ -3,11 +3,10 @@
 import { useState, useRef, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { CheckCircle, XCircle, Loader2, Play, Edit, MessageSquare } from 'lucide-react';
-import PlanGraph from '@/components/PlanGraph';
-import type { TaskStatus } from '@/lib/types';
+import { CheckCircle, Loader2, Edit, MessageSquare, Play } from 'lucide-react';
+import PlanChecklist from '@/components/PlanChecklist';
+import type { TaskItem } from '@/lib/types';
 import { authFetch } from '@/lib/auth-fetch';
 import { toast } from 'sonner';
 
@@ -30,32 +29,45 @@ interface Message {
   type: 'system' | 'user' | 'assistant' | 'plan_approval';
   content: string;
   timestamp: number;
-  planData?: any;
-  taskStatuses?: Record<string, TaskStatus>;
+  // New: Store full todo list snapshot if available
+  todoList?: TaskItem[];
 }
 
 export default function WorkflowExecutionChat({ workflowId, workflow, onCancel }: WorkflowExecutionChatProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [planApproved, setPlanApproved] = useState(false);
   const [isExecuting, setIsExecuting] = useState(false);
-  const [taskStatuses, setTaskStatuses] = useState<Record<string, TaskStatus>>({});
-  const [executionThreadId, setExecutionThreadId] = useState<string | null>(null);
+
+  // New State for To-Do List
+  const [todoList, setTodoList] = useState<TaskItem[]>([]);
+  const [currentTaskId, setCurrentTaskId] = useState<string | undefined>(undefined);
+
   const wsRef = useRef<WebSocket | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Build plan data from task_plan
-  const planData = {
-    pendingTasks: workflow.blueprint.task_plan?.flatMap((batch: any[]) => 
-      batch.map((task: any) => ({
-        task: task.task_name || task.name,
-        description: task.task_description || task.description || '',
-        agent: task.primary?.name || task.agent?.name || 'N/A',
-      }))
-    ) || [],
-    completedTasks: []
-  };
-
+  // Initialize generic plan from legacy blueprint if available
   useEffect(() => {
+    const initialTasks: TaskItem[] = (workflow.blueprint.task_plan || []).flatMap((batch: any) => {
+      const tasks = Array.isArray(batch) ? batch : [batch];
+      return tasks.map((t: any, idx: number) => ({
+        id: t.id || `init-${idx}-${Date.now()}`,
+        description: t.description || t.task_description || t.task || "Unknown Task",
+        status: 'pending',
+        priority: 'medium'
+      }));
+    });
+
+    // If no initial plan (new dynamic architecture), start empty or with placeholder
+    if (initialTasks.length === 0) {
+      initialTasks.push({
+        id: 'planning',
+        description: "Analyze user request and create a detailed plan",
+        status: 'pending'
+      });
+    }
+
+    setTodoList(initialTasks);
+
     // Show initial plan approval message
     setMessages([
       {
@@ -69,8 +81,7 @@ export default function WorkflowExecutionChat({ workflowId, workflow, onCancel }
         type: 'plan_approval',
         content: 'Please review the execution plan below. Click "Approve & Execute" to run the workflow, or "Modify Plan" to make changes.',
         timestamp: Date.now(),
-        planData,
-        taskStatuses: {}
+        todoList: initialTasks
       }
     ]);
 
@@ -90,7 +101,7 @@ export default function WorkflowExecutionChat({ workflowId, workflow, onCancel }
 
   const connectWebSocket = (threadId: string) => {
     const ws = new WebSocket(`ws://localhost:8000/ws/chat?thread_id=${threadId}`);
-    
+
     ws.onopen = () => {
       console.log('WebSocket connected for workflow execution');
       addMessage('system', 'Connected to execution server. Starting workflow...');
@@ -99,45 +110,35 @@ export default function WorkflowExecutionChat({ workflowId, workflow, onCancel }
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        
+
+        // Handle To-Do List Updates (Full Snapshot)
+        if (data.type === 'todo_list_update' && data.todo_list) {
+          setTodoList(data.todo_list);
+        }
+
+        // Handle Legacy/Granular Events to update local state if full snapshot missing
         if (data.type === 'task_started') {
-          setTaskStatuses(prev => ({
-            ...prev,
-            [data.task_name]: {
-              status: 'running',
-              agentName: data.agent_name,
-              startTime: Date.now()
-            }
-          }));
-          addMessage('assistant', `🚀 Starting task: ${data.task_name} with ${data.agent_name}`);
+          setCurrentTaskId(data.task_id); // Assuming backend sends task_id
+          setTodoList(prev => prev.map(t =>
+            t.description === data.task_name ? { ...t, status: 'in_progress' } : t
+          ));
+          addMessage('assistant', `🚀 Starting: ${data.task_name}`);
         }
-        
+
         if (data.type === 'task_completed') {
-          const executionTime = data.execution_time || 0;
-          setTaskStatuses(prev => ({
-            ...prev,
-            [data.task_name]: {
-              status: 'completed',
-              agentName: data.agent_name,
-              executionTime,
-              startTime: prev[data.task_name]?.startTime || Date.now()
-            }
-          }));
-          addMessage('assistant', `✅ Completed: ${data.task_name} (${executionTime}ms)`);
+          setTodoList(prev => prev.map(t =>
+            t.description === data.task_name ? { ...t, status: 'completed', result: data.result } : t
+          ));
+          addMessage('assistant', `✅ Completed: ${data.task_name}`);
         }
-        
+
         if (data.type === 'task_failed') {
-          setTaskStatuses(prev => ({
-            ...prev,
-            [data.task_name]: {
-              status: 'failed',
-              agentName: data.agent_name,
-              error: data.error
-            }
-          }));
+          setTodoList(prev => prev.map(t =>
+            t.description === data.task_name ? { ...t, status: 'failed', result: data.error } : t
+          ));
           addMessage('assistant', `❌ Failed: ${data.task_name} - ${data.error}`);
         }
-        
+
         if (data.type === 'final_response') {
           setIsExecuting(false);
           addMessage('system', '🎉 Workflow execution completed successfully!');
@@ -145,7 +146,7 @@ export default function WorkflowExecutionChat({ workflowId, workflow, onCancel }
             addMessage('assistant', data.content);
           }
         }
-        
+
         if (data.type === 'error') {
           setIsExecuting(false);
           addMessage('system', `⚠️ Error: ${data.message || 'Execution error'}`);
@@ -181,26 +182,25 @@ export default function WorkflowExecutionChat({ workflowId, workflow, onCancel }
     setPlanApproved(true);
     setIsExecuting(true);
     addMessage('user', '✓ Plan approved. Starting execution...');
-    
+
     try {
-      // Execute workflow using the saved task_plan directly
+      // Execute workflow
       const response = await authFetch(`http://localhost:8000/api/workflows/${workflowId}/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({})
       });
-      
+
       if (!response.ok) {
         throw new Error('Failed to start execution');
       }
-      
+
       const data = await response.json();
       const threadId = data.thread_id;
-      setExecutionThreadId(threadId);
-      
+
       // Connect WebSocket for real-time updates
       connectWebSocket(threadId);
-      
+
       // Send execution command
       setTimeout(() => {
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -210,7 +210,7 @@ export default function WorkflowExecutionChat({ workflowId, workflow, onCancel }
           }));
         }
       }, 500);
-      
+
     } catch (err) {
       console.error('Failed to execute workflow:', err);
       toast.error('Failed to start workflow execution');
@@ -221,8 +221,14 @@ export default function WorkflowExecutionChat({ workflowId, workflow, onCancel }
 
   const handleModify = () => {
     addMessage('user', 'Requested plan modification');
-    addMessage('system', '🔧 Plan modification feature coming soon! For now, you can create a new conversation and re-plan the workflow.');
-    // TODO: Implement modification flow - send to orchestrator for re-planning
+    const instruction = prompt("Enter instructions to modify the plan:");
+    if (instruction) {
+      // In a real scenario, this would send a message to the Orchestrator (Planning Mode)
+      // For now, we simulate user feedback
+      addMessage('user', instruction);
+      addMessage('system', 'Feedback received. Re-planning...');
+      // Ideally we POST to backend to update state.priority/tasks
+    }
   };
 
   return (
@@ -233,53 +239,39 @@ export default function WorkflowExecutionChat({ workflowId, workflow, onCancel }
           {messages.map((msg) => (
             <div key={msg.id} className={`flex ${msg.type === 'user' ? 'justify-end' : 'justify-start'}`}>
               {msg.type === 'plan_approval' ? (
-                <Card className="w-full">
-                  <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                      <MessageSquare className="w-5 h-5" />
+                <Card className="w-full max-w-2xl bg-white dark:bg-gray-900 border-2 border-blue-100 dark:border-blue-900">
+                  <CardHeader className="pb-3 border-b bg-blue-50/30 dark:bg-blue-900/10">
+                    <CardTitle className="flex items-center gap-2 text-lg">
+                      <MessageSquare className="w-5 h-5 text-blue-600" />
                       Execution Plan Review
                     </CardTitle>
                     <CardDescription>{msg.content}</CardDescription>
                   </CardHeader>
-                  <CardContent>
-                    {/* Plan Graph */}
-                    <div className="h-[400px] mb-4 border rounded-lg overflow-hidden">
-                      <PlanGraph planData={msg.planData} taskStatuses={msg.taskStatuses || taskStatuses} />
+                  <CardContent className="pt-4">
+                    {/* Plan Checklist (Preview State) */}
+                    <div className="h-[300px] mb-4 border rounded-lg bg-gray-50 dark:bg-gray-950 overflow-hidden">
+                      <PlanChecklist
+                        todoList={msg.todoList || todoList}
+                        isExecuting={false}
+                      />
                     </div>
-                    
-                    {/* Plan Details */}
-                    <div className="mb-4">
-                      <h4 className="font-semibold mb-2">Tasks ({msg.planData?.pendingTasks?.length || 0})</h4>
-                      <div className="space-y-2 max-h-48 overflow-y-auto">
-                        {msg.planData?.pendingTasks?.map((task: any, idx: number) => (
-                          <div key={idx} className="flex items-start gap-2 text-sm p-2 bg-gray-50 dark:bg-gray-800 rounded">
-                            <span className="font-semibold min-w-6">{idx + 1}.</span>
-                            <div className="flex-1">
-                              <p className="font-medium">{task.task}</p>
-                              <p className="text-gray-600 dark:text-gray-400 text-xs">{task.description}</p>
-                              <Badge variant="secondary" className="mt-1 text-xs">{task.agent}</Badge>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                    
+
                     {/* Action Buttons */}
                     {!planApproved && (
-                      <div className="flex gap-3">
-                        <Button 
-                          onClick={handleApprove} 
+                      <div className="flex gap-3 mt-4">
+                        <Button
+                          onClick={handleApprove}
                           disabled={isExecuting}
-                          className="flex-1"
+                          className="flex-1 bg-green-600 hover:bg-green-700 text-white"
                         >
                           {isExecuting ? (
-                            <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Executing...</>
+                            <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Starting...</>
                           ) : (
-                            <><CheckCircle className="w-4 h-4 mr-2" /> Approve & Execute</>
+                            <><CheckCircle className="w-4 h-4 mr-2" /> Can confirm, proceed</>
                           )}
                         </Button>
-                        <Button 
-                          onClick={handleModify} 
+                        <Button
+                          onClick={handleModify}
                           variant="outline"
                           disabled={isExecuting}
                           className="flex-1"
@@ -289,69 +281,77 @@ export default function WorkflowExecutionChat({ workflowId, workflow, onCancel }
                         </Button>
                       </div>
                     )}
-                    
+
                     {planApproved && (
-                      <div className="flex items-center gap-2 text-sm text-green-600 dark:text-green-400">
+                      <div className="flex items-center gap-2 text-sm text-green-600 dark:text-green-400 mt-2 font-medium bg-green-50 dark:bg-green-900/20 p-2 rounded">
                         <CheckCircle className="w-4 h-4" />
-                        Plan approved and executing...
+                        Plan approved.
                       </div>
                     )}
                   </CardContent>
                 </Card>
               ) : (
-                <div className={`max-w-[80%] ${
-                  msg.type === 'user' 
-                    ? 'bg-blue-500 text-white' 
-                    : msg.type === 'system'
-                    ? 'bg-gray-200 dark:bg-gray-700 text-gray-900 dark:text-gray-100'
-                    : 'bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700'
-                } rounded-lg p-3 shadow-sm`}>
-                  <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
-                  <p className="text-xs opacity-70 mt-1">
-                    {new Date(msg.timestamp).toLocaleTimeString()}
+                <div className={`max-w-[80%] ${msg.type === 'user'
+                  ? 'bg-blue-600 text-white shadow-md'
+                  : msg.type === 'system'
+                    ? 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-700'
+                    : 'bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 shadow-sm'
+                  } rounded-xl p-4`}>
+                  <p className="text-sm whitespace-pre-wrap leading-relaxed">{msg.content}</p>
+                  <p className="text-[10px] opacity-70 mt-2 text-right">
+                    {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                   </p>
                 </div>
               )}
             </div>
           ))}
-          
-          {/* Live Plan Graph Update (when executing) */}
+
+          {/* Live Execution Plan (Sticky at bottom or appended) */}
           {isExecuting && planApproved && (
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                  Live Execution Progress
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="h-[400px]">
-                  <PlanGraph planData={planData} taskStatuses={taskStatuses} />
-                </div>
-              </CardContent>
-            </Card>
+            <div className="mt-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
+              <Card className="border-blue-200 dark:border-blue-800 shadow-lg">
+                <CardHeader className="bg-gradient-to-r from-blue-50 to-white dark:from-blue-900/20 dark:to-gray-900 border-b pb-3">
+                  <CardTitle className="flex items-center gap-2 text-base text-blue-700 dark:text-blue-300">
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Live Execution Progress
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="p-0">
+                  <div className="h-[400px]">
+                    <PlanChecklist
+                      todoList={todoList}
+                      currentTaskId={currentTaskId}
+                      isExecuting={true}
+                    />
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
           )}
         </div>
       </ScrollArea>
-      
-      {/* Footer Actions */}
-      <div className="border-t p-4 bg-gray-50 dark:bg-gray-900">
+
+      {/* Footer Status Bar */}
+      <div className="border-t p-3 bg-white dark:bg-gray-950 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)] z-10">
         <div className="max-w-4xl mx-auto flex justify-between items-center">
-          <div className="text-sm text-gray-600 dark:text-gray-400">
+          <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
             {isExecuting ? (
-              <span className="flex items-center gap-2">
-                <Loader2 className="w-4 h-4 animate-spin" />
-                Executing workflow...
-              </span>
+              <>
+                <Loader2 className="w-3 h-3 animate-spin text-blue-500" />
+                <span className="font-medium text-blue-600 dark:text-blue-400">Orchestrator Active</span>
+                <span className="text-xs">• Processing step {todoList.filter(t => t.status === 'completed').length + 1} of {todoList.length}</span>
+              </>
             ) : planApproved ? (
-              'Execution complete'
+              <span className="text-green-600 dark:text-green-400 flex items-center gap-1">
+                <CheckCircle className="w-3 h-3" /> Execution Finished
+              </span>
             ) : (
-              'Awaiting plan approval'
+              'Waiting for plan approval...'
             )}
           </div>
           {onCancel && (
-            <Button variant="outline" onClick={onCancel} disabled={isExecuting}>
-              {isExecuting ? 'Cancel Execution' : 'Close'}
+            <Button variant="ghost" size="sm" onClick={onCancel} disabled={isExecuting} className="text-gray-500 hover:text-red-600">
+              {isExecuting ? 'Cancel' : 'Close'}
             </Button>
           )}
         </div>

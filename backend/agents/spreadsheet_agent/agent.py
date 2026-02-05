@@ -22,6 +22,21 @@ from .state import session_state, Session
 from .client import df_client, SmartDataResolver
 from .llm import llm_client
 
+# CMS Integration
+import sys
+from pathlib import Path
+backend_root = Path(__file__).parent.parent.parent.resolve()
+if str(backend_root) not in sys.path:
+    sys.path.insert(0, str(backend_root))
+
+from services.content_management_service import (
+    ContentManagementService,
+    ContentSource,
+    ContentType,
+    ContentPriority
+)
+from services.canvas_service import CanvasService
+
 logger = logging.getLogger("spreadsheet_agent.agent")
 
 
@@ -41,6 +56,7 @@ class SpreadsheetAgent:
         self.client = df_client
         self.llm = llm_client
         self.resolver = SmartDataResolver(self.client, self.state)
+        self.cms = ContentManagementService()
         
         logger.info("SpreadsheetAgent initialized")
         
@@ -180,7 +196,12 @@ class SpreadsheetAgent:
                     self.state.store_dataframe(thread_id, file_id, df, str(file_path))
                     logger.info(f"Successfully auto-loaded file: {file_id}, shape: {df.shape}")
                 except Exception as e:
-                    logger.warning(f"Failed to auto-load file from path {file_path}: {e}")
+                    logger.error(f"Failed to auto-load file from path {file_path}: {e}")
+                    return ExecuteResponse(
+                        status=TaskStatus.ERROR,
+                        success=False,
+                        error=f"Failed to load required file: {e}"
+                    )
             else:
                 if not file_path:
                     logger.warning(f"[DEBUG] No file_path found in params or prompt")
@@ -543,7 +564,24 @@ class SpreadsheetAgent:
             # Fallback: If no file_path but we have a filename/id, try storage dir
             if not file_path and not content:
                 candidate = params.get('filename') or params.get('file_id')
-                if candidate:
+                
+                # CMS Integration: Try fetching from CMS first
+                if candidate and self.cms:
+                    try:
+                        # Try to get content from CMS
+                        logger.info(f"Attempting to fetch {candidate} from CMS...")
+                        # get_content returns (metadata, content)
+                        meta, cms_content = self.cms.get_content(candidate) # candidate as ID
+                        if cms_content:
+                            logger.info(f"✅ Fetched content {candidate} from CMS (Size: {len(cms_content)} bytes)")
+                            content = cms_content
+                            # Update filename if available from metadata
+                            if meta and meta.name:
+                                params['filename'] = meta.name
+                    except Exception as cms_err:
+                        logger.warning(f"CMS fetch failed for {candidate}: {cms_err}") # Not fatal, continue to local check
+
+                if not content and candidate:
                     # Clean filename (remove potential path components)
                     candidate_name = os.path.basename(candidate)
                     potential_path = self.client.storage_dir / candidate_name
@@ -621,9 +659,9 @@ class SpreadsheetAgent:
             result_data = None
             computed_answer = None
             df_modified = False
+            code = answer.get('code')
             
-            if answer.get('code'):
-                code = answer['code']
+            if code:
                 logger.info(f"[_step_process] Executing code: {code}")
             # Track created files to return the ID for canvas
             created_files = []
@@ -682,7 +720,8 @@ class SpreadsheetAgent:
             }
                 
             try:
-                exec(code, exec_globals)
+                if code:
+                    exec(code, exec_globals)
                 
                 # Check for explicit result or modified df
                 result_data = exec_globals.get('result')
@@ -788,11 +827,37 @@ class SpreadsheetAgent:
                 'confidence': answer.get('confidence', 0.8)
             }
             
-            # CRITICAL: Return the created file_id so _build_response can show it on Canvas
             if created_files:
-                 result_payload['file_id'] = created_files[-1]
-                 result_payload['generated_files'] = created_files # Inform orchestrator state management
-                 logger.info(f"[_step_process] Returning result with file_id: {created_files[-1]} and {len(created_files)} generated files")
+                result_payload['file_id'] = created_files[-1]
+                result_payload['generated_files'] = created_files # Inform orchestrator state management
+                logger.info(f"[_step_process] Returning result with file_id: {created_files[-1]} and {len(created_files)} generated files")
+            
+            # CMS Registration: Register generated files
+            if created_files and self.cms:
+                for cf in created_files:
+                    try:
+                        # cf has file_path, file_name, file_id
+                        f_path = cf.get('file_path')
+                        f_name = cf.get('file_name')
+                        if f_path and os.path.exists(f_path):
+                            # Read content to register
+                            with open(f_path, 'rb') as f:
+                                f_bytes = f.read()
+                            
+                            # Register with CMS (async but inside sync loop - problematic? 
+                            # No, _step_process is async, so we can await!)
+                            await self.cms.register_content(
+                                content=f_bytes,
+                                name=f_name,
+                                source=ContentSource.AGENT_OUTPUT,
+                                content_type=ContentType.SPREADSHEET,
+                                priority=ContentPriority.MEDIUM,
+                                tags=["spreadsheet_agent", "generated"],
+                                thread_id=thread_id
+                            )
+                            logger.info(f"✅ Registered generated file {f_name} with CMS")
+                    except Exception as cms_reg_err:
+                         logger.error(f"Failed to register {cf.get('file_name')} with CMS: {cms_reg_err}")
             
             return StepResult(
                 action='process',
@@ -1684,23 +1749,21 @@ class SpreadsheetAgent:
         title: str,
         file_id: str = None
     ) -> Dict[str, Any]:
-        """Build canvas display for frontend."""
-        # Limit rows for display - optimize payload size
-        display_df = df.head(50)
+        """Build canvas display for frontend using Central Canvas Service."""
+        # Use factory method to ensure V2 compliance
+        display = CanvasService.build_spreadsheet_view(
+            filename=file_id or "spreadsheet",
+            dataframe=df,
+            title=title
+        )
         
-        return {
-            'canvas_type': 'spreadsheet',
-            'canvas_title': title,
-            'canvas_data': {
-                'headers': df.columns.tolist(),
-                'rows': display_df.values.tolist(),
-                'dtypes': {k: str(v) for k, v in df.dtypes.items()},
-                'total_rows': len(df),
-                'total_columns': len(df.columns),
-                'showing_rows': len(display_df)
-            },
-            'file_id': file_id
-        }
+        # Extract the dict representation
+        canvas_dict = display.model_dump()
+        
+        # Inject file_id as extra metadata (legacy support)
+        canvas_dict['file_id'] = file_id
+        
+        return canvas_dict
 
 
 # ========================================================================

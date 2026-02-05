@@ -44,31 +44,45 @@ BACKEND_DIR = SCRIPT_DIR.parent  # backend/ directory
 
 # Ensure paths are in sys.path for imports
 # IMPORTANT: Add BACKEND_DIR first so backend/schemas.py is found before document_agent/schemas.py
-# DO NOT add DOCUMENT_AGENT_DIR as it causes import conflicts with schemas module
-for path in [str(BACKEND_DIR), str(SCRIPT_DIR)]:
-    if path not in sys.path:
-        sys.path.insert(0, path)
+# Ensure paths are in sys.path for imports
+# Order matters: PROJECT_ROOT > BACKEND_DIR > SCRIPT_DIR
+# We insert in reverse order.
+
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+# BACKEND_DIR (allows 'import services', 'import agents')
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
+# PROJECT_ROOT (allows 'import backend.services')
+PROJECT_ROOT = BACKEND_DIR.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 logger.info(f"🔧 Path setup: script_dir={SCRIPT_DIR}, backend_dir={BACKEND_DIR}")
 logger.info(f"🔧 sys.path includes: backend/, agents/")
 
-# Import new modularized Document Agent with proper error handling
+# Import modularized Document Agent from the library
 app = None
 try:
-    logger.info("📦 Attempting to import document_agent module...")
+    logger.info("📦 Attempting to import document_agent_lib...")
     from document_agent_lib import app as document_app
     app = document_app
-    logger.info("✅ Successfully imported document_agent from local path")
-except ImportError as e:
-    logger.error(f"❌ Failed to import document_agent: {e}", exc_info=True)
-    # Create fallback minimal app to prevent complete startup failure
-    logger.warning("⚠️ Creating minimal fallback app")
+    logger.info("✅ Successfully imported document_agent_lib")
+except Exception as e:
+    logger.error(f"❌ Failed to import document_agent_lib: {e}", exc_info=True)
+    # Create fallback minimal app
+    from fastapi import FastAPI
     app = FastAPI(title="Document Agent (Fallback)")
     
     @app.get("/health")
     async def fallback_health():
-        return {"status": "error", "message": "Import failed, check logs"}
+        return {"status": "error", "message": f"Import failed: {e}"}
     
+    # Re-raise to crash if standalone
+    if __name__ == "__main__":
+        sys.exit(1)
     raise RuntimeError(
         f"Failed to import document_agent module. Check logs for details. Error: {e}"
     )

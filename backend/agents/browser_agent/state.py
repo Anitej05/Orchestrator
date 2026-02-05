@@ -26,6 +26,11 @@ class AgentMemory(BaseModel):
     extracted_items: List[Dict[str, Any]] = Field(default_factory=list)  # Accumulate multiple extractions
     action_history: List[Dict[str, Any]] = Field(default_factory=list)  # Complete history of all actions taken
     
+    # CMS Integration
+    archived_blocks: List[str] = Field(default_factory=list) # IDs of archived history blocks
+    active_content_id: Optional[str] = None # ID of the currently loaded large page in CMS
+    active_content_summary: Optional[str] = None # Summary of the current large page
+    
     def get_active_subtask(self) -> Optional[Subtask]:
         """Get the current active subtask"""
         for task in self.plan:

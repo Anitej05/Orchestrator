@@ -2,18 +2,10 @@
 Orchestrator Nodes Package
 
 This package contains the individual node implementations for the LangGraph orchestrator.
-Each module groups related nodes by purpose:
-- parsing.py: Request analysis and task parsing
-- searching.py: Agent discovery and ranking
-- planning.py: Execution plan creation and validation
-- execution.py: Agent execution logic
-- evaluation.py: Response evaluation and user interaction
-- response.py: Final response generation and history management
-- routing.py: Conditional routing functions
-- utils.py: Shared utilities
+New Module: brain_nodes.py
+Legacy modules have been removed.
 
 All nodes should be imported from this package or directly from graph.py.
-The modules here provide organizational structure and documentation.
 """
 
 # Utility functions (fully implemented here)
@@ -23,36 +15,10 @@ from .utils import (
     transform_payload_types,
     save_plan_to_file,
     get_hf_embeddings,
-    invoke_llm_with_fallback,
+    get_hf_embeddings,
     CustomJSONEncoder,
 )
-
-# Routing functions (removed - module does not exist)
-# from .routing import (
-#     route_after_search,
-#     route_after_approval,
-#     route_after_validation,
-#     route_after_load_history,
-#     route_after_analysis,
-#     route_after_parse,
-#     should_continue_or_finish,
-#     route_after_plan_creation,
-#     route_after_execute_batch,
-#     route_after_ask_user,
-# )
-
-# Pydantic schemas from modules
-from .planning import PlanValidation, PlanValidationResult
-from .evaluation import AgentResponseEvaluation
-
-# Searching utilities
-from .searching import get_all_capabilities, cached_capabilities, CACHE_DURATION_SECONDS
-
-# Execution cache
-from .execution import get_request_cache, GET_CACHE_DURATION_SECONDS, clear_get_cache
-
-# Response directory
-from .response import CONVERSATION_HISTORY_DIR
+from .brain_nodes import manage_todo_list, execute_next_action
 
 __all__ = [
     # Utils
@@ -61,37 +27,10 @@ __all__ = [
     'transform_payload_types',
     'save_plan_to_file',
     'get_hf_embeddings',
-    'invoke_llm_with_fallback',
+    'get_hf_embeddings',
     'CustomJSONEncoder',
     
-    # Routing (removed)
-    # 'route_after_search',
-    # 'route_after_approval',
-    # 'route_after_validation',
-    # 'route_after_load_history',
-    # 'route_after_analysis',
-    # 'route_after_parse',
-    # 'should_continue_or_finish',
-    # 'route_after_plan_creation',
-    # 'route_after_execute_batch',
-    # 'route_after_ask_user',
-    
-    # Schemas
-    'PlanValidation',
-    'PlanValidationResult',
-    'AgentResponseEvaluation',
-    
-    # Searching
-    'get_all_capabilities',
-    'cached_capabilities',
-    'CACHE_DURATION_SECONDS',
-    
-    # Execution
-    'get_request_cache',
-    'GET_CACHE_DURATION_SECONDS',
-    'clear_get_cache',
-    
-    # Response
-    'CONVERSATION_HISTORY_DIR',
+    # New Nodes
+    'manage_todo_list',
+    'execute_next_action'
 ]
-

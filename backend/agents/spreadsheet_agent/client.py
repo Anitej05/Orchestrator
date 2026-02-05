@@ -71,16 +71,16 @@ class DataFrameClient:
         # Determine file type
         ext = Path(filename or file_path or "").suffix.lower()
         
-        if ext in ['.xlsx', '.xls']:
-            try:
-                # Try loading as Excel first
-                return await self._load_excel(file_path, content, **kwargs)
-            except Exception as e:
-                logger.warning(f"Excel load failed for {file_path}, likely format mismatch. Exception: {e}")
-                logger.info("Encouraging fallback to CSV/Text loader...")
-                # Fallback to CSV loader which handles robust detection
-                return await self._load_csv(file_path, content, **kwargs)
+        if ext in ['.xlsx', '.xls', '.xlsm']:
+            return await self._load_excel(file_path, content, **kwargs)
+        elif ext in ['.csv', '.tsv', '.txt']:
+            return await self._load_csv(file_path, content, **kwargs)
+        elif ext == '.json':
+            # Handle JSON specifically if needed, otherwise default to CSV loader for now
+            return await self._load_csv(file_path, content, **kwargs)
         else:
+            # If extension is unknown, try to guess from content or default to CSV
+            logger.info(f"Unknown extension '{ext}', attempting CSV load with auto-detection")
             return await self._load_csv(file_path, content, **kwargs)
     
     async def save_file(
@@ -328,6 +328,9 @@ class DataFrameClient:
                 # Simple file - use standard pandas
                 return await self._simple_load_excel(file_path, detection_info, **kwargs)
                 
+        except Exception as e:
+            logger.error(f"Excel load failed: {e}")
+            raise ValueError(f"Failed to load Excel file: {e}. Ensure it is a valid .xlsx or .xls file.")
         finally:
             # Cleanup temp file
             if temp_file:

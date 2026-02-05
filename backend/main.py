@@ -734,70 +734,98 @@ def start_agent_servers():
     started_agents = []
     failed_agents = []
 
-    for agent_file in agent_files:
+    # Optimized Startup: Read from JSON definitions first (Source of Truth)
+    json_dir = os.path.join(project_root, "agent_entries")
+    
+    # Map agent_id -> {port, script_name}
+    agent_configs = {}
+    
+    # 1. Load from JSONs
+    if os.path.isdir(json_dir):
+        for json_file in os.listdir(json_dir):
+            if not json_file.endswith(".json"): continue
+            try:
+                with open(os.path.join(json_dir, json_file), 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    agent_id = data.get("id")
+                    # Try to find corresponding python file
+                    # Convention: agent_id.json -> agent_id.py OR agent_id_agent.py
+                    script_name = f"{agent_id}.py"
+                    if not os.path.exists(os.path.join(agents_dir, script_name)):
+                        script_name = f"{agent_id}_agent.py"
+                        if not os.path.exists(os.path.join(agents_dir, script_name)):
+                             continue # Script not found
+                    
+                    # Extract port from connection_config
+                    port = None
+                    cc = data.get("connection_config", {})
+                    base_url = cc.get("base_url", "")
+                    if base_url:
+                        # Parse port from http://localhost:8090
+                        match = re.search(r':(\d+)', base_url)
+                        if match:
+                            port = int(match.group(1))
+                    
+                    if port:
+                        agent_configs[script_name] = port
+            except Exception as e:
+                logger.warning(f"Failed to parse {json_file}: {e}")
+
+    # 2. Scan Python files for any that weren't in JSON (Backward Compatibility)
+    for agent_file in os.listdir(agents_dir):
+        if agent_file.endswith("_agent.py") and agent_file not in agent_configs:
+            # Regex Fallback
+            agent_path = os.path.join(agents_dir, agent_file)
+            try:
+                with open(agent_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    match = re.search(r'port\s*=\s*int\(os\.getenv\([^,]+,\s*(\d+)\)', content)
+                    if not match:
+                        match = re.search(r"port\s*=\s*(\d+)", content)
+                    if match:
+                        agent_configs[agent_file] = int(match.group(1))
+            except:
+                pass
+
+    logger.info(f"Target Agent Configurations: {agent_configs}")
+
+    for agent_file, port in agent_configs.items():
         agent_path = os.path.join(agents_dir, agent_file)
-        port = None
-        process = None
         
-        try:
-            with open(agent_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-                # Look for port definition in the agent file
-                match = re.search(r'port\s*=\s*int\(os\.getenv\([^,]+,\s*(\d+)\)', content)
-                if not match:
-                    # Fallback to direct assignment like: port = 8010
-                    match = re.search(r"port\s*=\s*(\d+)", content)
-                if match:
-                    port = int(match.group(1))
+        if is_port_in_use(port):
+            logger.info(f"Agent '{agent_file}' is already running on port {port}.")
+            started_agents.append({
+                'agent': agent_file,
+                'port': port,
+                'status': 'already_running'
+            })
+            continue
 
-            if port is None:
-                logger.error(f"Could not find port in {agent_file}. Skipping.")
-                failed_agents.append({
-                    'agent': agent_file,
-                    'reason': 'Port not found in agent file'
-                })
-                continue
+        logger.info(f"Attempting to start '{agent_file}' on port {port}...")
+        log_path = os.path.join(logs_dir, f"{agent_file}.log")
 
-            if is_port_in_use(port):
-                logger.info(f"Agent '{agent_file}' is already running on port {port}.")
-                started_agents.append({
-                    'agent': agent_file,
-                    'port': port,
-                    'status': 'already_running'
-                })
-                continue
-
-            logger.info(f"Attempting to start '{agent_file}' on port {port}...")
-            
-            log_path = os.path.join(logs_dir, f"{agent_file}.log")
-
-            # Create the subprocess differently based on the OS
-            process = None
-            if platform.system() == "Windows":
-                # For Windows, use subprocess.Popen with proper parameters to run in background
-                try:
-                    with open(log_path, 'w') as log_file:
-                        process = subprocess.Popen(
-                            [sys.executable, agent_path],
-                            stdout=log_file,
-                            stderr=log_file,
-                            creationflags=subprocess.CREATE_NO_WINDOW  # Run without console window
-                        )
-                        # Track the process globally
-                        agent_processes.append(process)
-                except Exception as e:
-                    logger.error(f"Failed to start {agent_file} using Popen: {e}")
-                    # Fallback to the start command
-                    command = f'start /B "Agent: {agent_file}" /D "{os.getcwd()}" {sys.executable} {agent_path} > "{log_path}" 2>&1'
-                    subprocess.run(command, shell=True, check=True)
-            else:
-                # For Unix-like systems
+        # Create the subprocess
+        process = None
+        if platform.system() == "Windows":
+             try:
                 with open(log_path, 'w') as log_file:
                     process = subprocess.Popen(
                         [sys.executable, agent_path],
                         stdout=log_file,
-                        stderr=log_file
+                        stderr=log_file,
+                        creationflags=subprocess.CREATE_NO_WINDOW
                     )
+                    agent_processes.append(process)
+             except Exception as e:
+                logger.error(f"Failed to start {agent_file}: {e}")
+        else:
+            with open(log_path, 'w') as log_file:
+                process = subprocess.Popen(
+                    [sys.executable, agent_path],
+                    stdout=log_file,
+                    stderr=log_file
+                )
+                agent_processes.append(process)
                     # Track the process globally
                     agent_processes.append(process)
 

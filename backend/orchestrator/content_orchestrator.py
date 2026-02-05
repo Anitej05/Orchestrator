@@ -237,10 +237,14 @@ async def prepare_content_for_agent(
     if not uploaded_files:
         return content_id_mapping, enhanced_context, uploaded_files
     
-    # Check if agent requires file upload
-    requires_upload = agent_requires_file_upload(agent_details, endpoint_path)
+    # Check if agent accepts file/content ID (generic check)
+    file_param = get_file_parameter_name(next((ep for ep in agent_details.endpoints if ep.endpoint == endpoint_path), None))
+    requires_file_id = file_param is not None
     
-    if not requires_upload:
+    # Check if agent requires actual file upload (legacy)
+    requires_upload_endpoint = agent_requires_file_upload(agent_details, endpoint_path)
+    
+    if not requires_file_id and not requires_upload_endpoint:
         # Just provide file context
         enhanced_context = f'''
 **Available Files:**
@@ -251,18 +255,13 @@ The user has uploaded files. Use the file information below:
 '''
         return content_id_mapping, enhanced_context, uploaded_files
     
-    # Agent requires file upload - upload files first
-    logger.info(f"[CONTENT_PREP] Agent {agent_details.id} requires file upload")
+    logger.info(f"[CONTENT_PREP] Agent {agent_details.id} requires content ID (Legacy upload: {requires_upload_endpoint})")
     
     user_id = orchestrator_config.get("configurable", {}).get("user_id", "system")
     connection_config = getattr(agent_details, 'connection_config', None) or {}
     base_url = connection_config.get('base_url', '')
     
-    if not base_url:
-        logger.warning(f"[CONTENT_PREP] No base_url for agent {agent_details.id}")
-        return content_id_mapping, enhanced_context, uploaded_files
-    
-    # Upload each file and track updates
+    # Process files
     file_info = []
     updated_uploaded_files = []
     
@@ -274,128 +273,74 @@ The user has uploaded files. Use the file information below:
         # Create a copy to update
         updated_file_obj = file_obj.copy()
         
-        logger.info(f"[CONTENT_PREP] Processing file: name={file_name}, path={file_path}, content_id={content_id}")
+        # 1. Ensure file is registered with CMS
+        if not content_id and file_path and os.path.exists(file_path):
+            try:
+                with open(file_path, 'rb') as f:
+                    content = f.read()
+                metadata = await content_service.register_user_upload(
+                    file_content=content,
+                    filename=file_name,
+                    user_id=user_id,
+                    thread_id=state.get('thread_id')
+                )
+                content_id = metadata.id
+                logger.info(f"[CONTENT_PREP] Registered file {file_name} -> {content_id}")
+            except Exception as e:
+                logger.error(f"[CONTENT_PREP] Failed to register file {file_name}: {e}")
+
+        # 2. Handle Agent Specifics
+        final_id_for_agent = content_id # Default to CMS ID
         
-        # OPTIMIZATION: If file already has a content_id from preprocessing (direct agent upload),
-        # use it directly without re-uploading
-        if content_id:
-            # Check if this looks like a UUID (agent file_id format)
-            if isinstance(content_id, str) and len(content_id) == 36 and content_id.count('-') == 4:
-                logger.info(f"[CONTENT_PREP] File {file_name} already uploaded to agent with file_id={content_id}, skipping re-upload")
-                content_id_mapping[content_id] = content_id  # Map to itself
-                content_id_mapping[file_name] = content_id  # Also map by filename
-                file_info.append({
-                    "file_name": file_name,
-                    "file_id": content_id,
-                    "file_type": file_obj.get('file_type', 'document')
-                })
-                # Ensure file_id is set in updated object
-                updated_file_obj['file_id'] = content_id
-                updated_uploaded_files.append(updated_file_obj)
-                continue
+        if requires_upload_endpoint and base_url and content_id:
+            # CMS -> Agent Upload
+            try:
+                agent_content_id = await content_service.upload_to_agent(
+                    content_id=content_id,
+                    agent_id=agent_details.id,
+                    agent_base_url=base_url
+                )
+                if agent_content_id:
+                    final_id_for_agent = agent_content_id
+            except Exception as e:
+                logger.error(f"[CONTENT_PREP] Failed upload to agent: {e}")
         
-        # If we have a content_id, use it; otherwise register the file
-        if not content_id and file_path:
-            if os.path.exists(file_path):
-                logger.info(f"[CONTENT_PREP] Reading file from path: {file_path}")
-                try:
-                    with open(file_path, 'rb') as f:
-                        content = f.read()
-                    
-                    metadata = await content_service.register_user_upload(
-                        file_content=content,
-                        filename=file_name,
-                        user_id=user_id,
-                        thread_id=state.get('thread_id')
-                    )
-                    content_id = metadata.id
-                    logger.info(f"[CONTENT_PREP] Registered file, got content_id: {content_id}")
-                except Exception as e:
-                    logger.error(f"[CONTENT_PREP] Failed to register file {file_name}: {e}")
-            else:
-                logger.error(f"[CONTENT_PREP] File path does not exist: {file_path}")
+        elif requires_upload_endpoint and not content_id and file_path:
+             # Legacy Direct Upload (Fallback)
+             try:
+                 final_id_for_agent = await _direct_upload_to_agent(file_path, file_name, base_url)
+             except Exception:
+                 pass
         
-        if not content_id:
-            logger.warning(f"[CONTENT_PREP] Could not get content_id for {file_name}, attempting direct upload")
-            # FALLBACK: Try direct upload if file_path exists
-            if file_path and os.path.exists(file_path):
-                try:
-                    agent_content_id = await _direct_upload_to_agent(
-                        file_path=file_path,
-                        file_name=file_name,
-                        agent_base_url=base_url
-                    )
-                    if agent_content_id:
-                        content_id_mapping[file_name] = agent_content_id
-                        file_info.append({
-                            "file_name": file_name,
-                            "file_id": agent_content_id,
-                            "file_type": file_obj.get('file_type', 'document')
-                        })
-                        # Update file_id in state
-                        updated_file_obj['file_id'] = agent_content_id
-                        updated_uploaded_files.append(updated_file_obj)
-                        logger.info(f"[CONTENT_PREP] Direct upload succeeded: {file_name} -> {agent_content_id}")
-                        continue
-                except Exception as e:
-                    logger.error(f"[CONTENT_PREP] Direct upload failed for {file_name}: {e}")
-            # File not uploaded, add original object
-            updated_uploaded_files.append(updated_file_obj)
-            continue
-        
-        # Upload to agent via content service
-        try:
-            agent_content_id = await content_service.upload_to_agent(
-                content_id=content_id,
-                agent_id=agent_details.id,
-                agent_base_url=base_url
-            )
-        except Exception as e:
-            logger.error(f"[CONTENT_PREP] upload_to_agent failed for {file_name}: {e}")
-            agent_content_id = None
-        
-        if agent_content_id:
-            content_id_mapping[content_id] = agent_content_id
-            content_id_mapping[file_name] = agent_content_id
+        if final_id_for_agent:
+            # Map CMS ID (or filename) to Final Agent ID
+            if content_id:
+                content_id_mapping[content_id] = final_id_for_agent
+            content_id_mapping[file_name] = final_id_for_agent
             
+            updated_file_obj['file_id'] = final_id_for_agent
             file_info.append({
                 "file_name": file_name,
-                "file_id": agent_content_id,
-                "file_type": file_obj.get('file_type', 'document')
+                "file_id": final_id_for_agent,
+                "cms_id": content_id
             })
-            
-            # Update file_id in state
-            updated_file_obj['file_id'] = agent_content_id
             updated_uploaded_files.append(updated_file_obj)
-            logger.info(f"[CONTENT_PREP] Mapped {file_name} -> {agent_content_id}")
         else:
-            logger.error(f"[CONTENT_PREP] Failed to upload {file_name} to agent {agent_details.id}")
-            # Still add to list but without file_id update
             updated_uploaded_files.append(updated_file_obj)
-    
+
+    # Build Context
     if file_info:
         enhanced_context = f'''
-**CRITICAL - File IDs for this Agent:**
-The following files have been uploaded to this agent. You MUST use the provided file_id values.
+**CRITICAL - Content Access:**
+The following files are available for this task. 
+Start your work by loading these files using the provided IDs.
 
 ```json
 {json.dumps(file_info, indent=2)}
 ```
 
-**IMPORTANT:** Use the "file_id" value from above when the endpoint requires a file_id parameter.
-Do NOT use file paths or file names - use the exact file_id string provided.
+**IMPORTANT:** Use the "file_id" (or "agent_file_id" if distinct) when calling tool endpoints.
 '''
-    else:
-        enhanced_context = f'''
-**Available Files (upload failed):**
-Files could not be uploaded to the agent. The following files are available:
-```json
-{json.dumps(uploaded_files, indent=2)}
-```
-'''
-    
-    logger.info(f"[CONTENT_PREP] Final mapping: {content_id_mapping}")
-    logger.info(f"[CONTENT_PREP] Updated {len(updated_uploaded_files)} file entries with agent file_ids")
     return content_id_mapping, enhanced_context, updated_uploaded_files
 
 

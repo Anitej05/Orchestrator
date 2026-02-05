@@ -45,8 +45,19 @@ export interface ConversationStatus {
   task_agent_pairs: TaskAgentPair[];
 }
 
+export type TaskStatusType = 'pending' | 'in_progress' | 'completed' | 'failed';
+
+export interface TaskItem {
+  id: string;
+  description: string;
+  status: TaskStatusType;
+  result?: string;
+  code_snippet?: string;
+  priority?: string;
+}
+
 export interface TaskStatus {
-  status: 'pending' | 'running' | 'completed' | 'failed';
+  status: TaskStatusType;
   taskName: string;
   taskDescription?: string;
   agentName?: string;
@@ -71,6 +82,9 @@ export interface ConversationState {
   metadata?: any;
   uploaded_files?: FileObject[];
   plan?: any[];
+  // NEW: Dynamic To-Do List
+  todo_list?: TaskItem[];
+
   // Original prompt for pre-seeded workflows
   original_prompt?: string;
   // Real-time task execution tracking
