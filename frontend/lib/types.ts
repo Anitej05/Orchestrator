@@ -114,6 +114,36 @@ export interface ConversationState {
     agent_name: string;
     canvas_display: any;
   };
+
+  // --- OMNI-DISPATCHER FIELDS ---
+  // Human-in-the-Loop (Action Approval)
+  pending_action_approval?: boolean;
+  pending_action?: {
+    action_type: string;
+    resource_id: string;
+    approval_reason: string;
+    payload: any;
+  };
+
+  // Execution Plan (Phases)
+  execution_plan?: Array<{
+    phase_id: string;
+    name: string;
+    goal: string;
+    status: 'pending' | 'in_progress' | 'completed' | 'skipped';
+    goal_verified?: string;
+  }>;
+  current_phase_id?: string;
+
+  // Action History & Insights
+  action_history?: Array<{
+    action_type: string;
+    resource_id: string;
+    success: boolean;
+    result_summary: string;
+    timestamp?: number;
+  }>;
+  insights?: Record<string, string>;
 }
 
 export interface Attachment {

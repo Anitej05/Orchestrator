@@ -1427,9 +1427,17 @@ async def execute_orchestration(
                 await stream_callback("workflow_complete", {"status": "completed"}, 100, node_count, thread_id)
             
             # After streaming, get the actual state if not available
-            if not final_state:
-                # If no state from streaming, invoke to get final state
-                final_state = await selected_graph.ainvoke(graph_input, config=config)
+            # After streaming, we MUST fetch the full authoritative state from the graph
+            # The 'final_state' accumulated above only contains deltas (updates from the last node)
+            # which means 'messages' would be incomplete (only new messages).
+            try:
+                state_snapshot = await selected_graph.aget_state(config)
+                final_state = state_snapshot.values
+                logger.info(f"✅ Retrieved full authoritative state from graph. Messages count: {len(final_state.get('messages', []))}")
+            except Exception as e:
+                logger.warning(f"Failed to get full state snapshot, falling back to accumulated state: {e}")
+                if not final_state:
+                    final_state = await selected_graph.ainvoke(graph_input, config=config)
         else:
             # Single response mode for HTTP
             final_state = await selected_graph.ainvoke(graph_input, config=config)

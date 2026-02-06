@@ -32,6 +32,7 @@ async def omni_dispatch(
     Main entry point for the OMNI-DISPATCHER system.
 
     Executes one iteration of the Brain-Hands cycle.
+    Supports human-in-the-loop: pauses when approval is required.
 
     Args:
         state: Current orchestrator state
@@ -41,6 +42,12 @@ async def omni_dispatch(
         Updated state after one Brain-Hands cycle
     """
     logger.info("Starting OMNI-DISPATCHER cycle")
+    
+    # === Check for pending approval (human-in-the-loop) ===
+    if state.get("pending_approval"):
+        logger.info("⏸️ PAUSED: Waiting for user approval")
+        # Don't execute anything - return current state and wait for approval
+        return state
 
     # Phase 1: Brain thinks and decides
     logger.debug("Phase 1: Brain thinking...")
@@ -55,6 +62,11 @@ async def omni_dispatch(
     if decision.get("action_type") == "skip":
         logger.info("Brain decided to skip. Continuing cycle.")
         return updated_state
+    
+    # === Check if this decision requires approval ===
+    if updated_state.get("pending_approval"):
+        logger.info("⏸️ ACTION REQUIRES APPROVAL: Pausing execution")
+        return updated_state  # Don't execute, wait for approval
 
     # Phase 2: Hands executes the decision
     logger.debug("Phase 2: Hands executing...")
@@ -75,12 +87,17 @@ async def omni_dispatch(
 
 def should_continue(state: Dict[str, Any]) -> str:
     """
-    Route decision: continue cycle or finish?
+    Route decision: continue cycle, pause for approval, or finish?
 
     Returns:
         "continue" for another cycle
+        "approval" when waiting for user approval
         "finish" to end
     """
+    # Check for pending approval first
+    if state.get("pending_approval"):
+        return "approval"
+    
     decision = state.get("decision") or {}
 
     if decision.get("action_type") == "finish":
@@ -117,8 +134,12 @@ async def omni_hands_node(
 def omni_route_condition(state: Dict[str, Any]) -> str:
     """
     Conditional routing for the OMNI-DISPATCHER graph.
-    Routes: "hands" | "finish"
+    Routes: "hands" | "approval" | "finish"
     """
+    # Check for pending approval first
+    if state.get("pending_approval"):
+        return "approval"
+    
     decision = state.get("decision") or {}
     action_type = decision.get("action_type", "")
     final_res = state.get("final_response")
@@ -129,6 +150,53 @@ def omni_route_condition(state: Dict[str, Any]) -> str:
     return "hands"
 
 
+def approve_pending_action(state: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Approve a pending action - clears approval flags and prepares for execution.
+    
+    Call this when user approves the pending_decision.
+    Returns state updates to apply.
+    """
+    if not state.get("pending_approval"):
+        return {}
+    
+    pending_decision = state.get("pending_decision", {})
+    logger.info(f"✅ User APPROVED action: {pending_decision.get('approval_reason', 'Unknown')}")
+    
+    return {
+        "pending_approval": False,
+        "pending_decision": None,
+        # Re-apply decision but without requires_approval so it executes
+        "decision": {
+            **pending_decision,
+            "requires_approval": False,
+        }
+    }
+
+
+def reject_pending_action(state: Dict[str, Any], reason: str = "User rejected") -> Dict[str, Any]:
+    """
+    Reject a pending action - clears approval flags and sets skip decision.
+    
+    Call this when user rejects the pending_decision.
+    Returns state updates to apply.
+    """
+    if not state.get("pending_approval"):
+        return {}
+    
+    pending_decision = state.get("pending_decision", {})
+    logger.info(f"❌ User REJECTED action: {pending_decision.get('approval_reason', 'Unknown')} - {reason}")
+    
+    return {
+        "pending_approval": False,
+        "pending_decision": None,
+        "decision": {
+            "action_type": "skip",
+            "reasoning": f"User rejected: {reason}",
+        }
+    }
+
+
 __all__ = [
     "brain",
     "hands",
@@ -137,4 +205,6 @@ __all__ = [
     "omni_hands_node",
     "omni_route_condition",
     "should_continue",
+    "approve_pending_action",
+    "reject_pending_action",
 ]

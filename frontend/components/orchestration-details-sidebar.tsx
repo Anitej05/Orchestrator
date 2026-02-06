@@ -1,22 +1,22 @@
-// components/orchestration-details-sidebar.tsx
 "use client"
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Badge } from "@/components/ui/badge"
+import { ScrollArea } from "@/components/ui/scroll-area"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { Button } from "@/components/ui/button"
-import { DollarSign, Clock, FileIcon, FileText, Image as ImageIcon } from "lucide-react"
+import { Brain, FileText, CheckCircle, Clock, AlertCircle, PlayCircle, Loader2, FileIcon, DollarSign, Image as ImageIcon } from "lucide-react"
 import CollapsibleSection from "@/components/CollapsibleSection"
-import PlanChecklist from "@/components/PlanChecklist"
-import SaveWorkflowButton from "@/components/save-workflow-button"
-import { useEffect, useState } from "react"
-import { InteractiveStarRating, StarRating } from "@/components/ui/star-rating"
-import { useConversationStore } from "@/lib/conversation-store"
+import React, { useState, useEffect, useRef, forwardRef, useImperativeHandle } from 'react'
+import PlanChecklist from './PlanChecklist'
+import { ActionApprovalBanner } from './action-approval-banner'
 import Markdown from '@/components/ui/markdown'
 import { CanvasRenderer } from '@/components/canvas-renderer'
 import type { Agent, Message, TaskAgentPair, TaskItem, TaskStatus, TaskStatusType } from "@/lib/types"
 import { cn } from "@/lib/utils"
-
+import { useConversationStore } from "@/lib/conversation-store"
+import { InteractiveStarRating, StarRating } from "@/components/ui/star-rating"
+import SaveWorkflowButton from "@/components/save-workflow-button"
 
 interface ExecutionResult {
     taskId: string
@@ -28,20 +28,18 @@ interface ExecutionResult {
     executionTime: number
 }
 
-interface OrchestrationDetailsSidebarProps {
-    executionResults: ExecutionResult[],
-    threadId: string | null;
-    className?: string;
-    onThreadIdUpdate?: (threadId: string) => void;
-    onAcceptPlan?: (modifiedPrompt?: string) => Promise<void>;
-    onRejectPlan?: () => void;
+export interface OrchestrationDetailsSidebarProps {
+    executionResults: ExecutionResult[]
+    threadId: string | null
+    className?: string
+    onThreadIdUpdate?: (threadId: string) => void
+    onAcceptPlan?: (modifiedPrompt?: string) => Promise<void>
+    onRejectPlan?: () => void
 }
 
 interface Plan {
     todoList: TaskItem[];
 }
-
-import { forwardRef, useImperativeHandle } from 'react';
 
 export interface OrchestrationDetailsSidebarRef {
     refreshPlan: () => void;
@@ -53,13 +51,12 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
         const [plan, setPlan] = useState<Plan>({ todoList: [] });
         const [isLoadingPlan, setIsLoadingPlan] = useState(false);
         const [agents, setAgents] = useState<Agent[]>([]);
-        const [activeTab, setActiveTab] = useState<string>("metadata");
+        const [activeTab, setActiveTab] = useState<string>("plan");
         const [lastCanvasContent, setLastCanvasContent] = useState<string | undefined>(undefined);
         // State for viewing specific canvas content from messages
         const [viewedCanvasContent, setViewedCanvasContent] = useState<string | undefined>(undefined);
         const [viewedCanvasType, setViewedCanvasType] = useState<'html' | 'markdown' | undefined>(undefined);
 
-        // Get conversation state from Zustand store
         const conversationState = useConversationStore();
         const taskAgentPairs = conversationState.task_agent_pairs || [];
         const messages = conversationState.messages || [];
@@ -72,11 +69,23 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
         const browserView = (conversationState as any).browser_view;
         const taskStatuses = conversationState.task_statuses || {};
 
+        // OMNI fields
+        const execution_plan = conversationState.execution_plan;
+        const current_phase_id = conversationState.current_phase_id;
+        const pending_action_approval = conversationState.pending_action_approval;
+
         // Determine which canvas to display - viewed canvas takes precedence
         // Browser view is now shown in chat interface, not in canvas
         // Support both canvas_content (string) and canvas_data (structured object)
         const displayCanvasContent = viewedCanvasContent || canvasContent || canvasData;
         const displayCanvasType = viewedCanvasType || canvasType;
+
+        // Auto-switch to Phases tab if execution plan exists
+        useEffect(() => {
+            if (execution_plan && execution_plan.length > 0 && activeTab === 'plan') {
+                setActiveTab('phases');
+            }
+        }, [execution_plan, activeTab]);
 
         // Process plan data from conversation store
         useEffect(() => {
@@ -139,11 +148,14 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
             // Switch to plan tab when validation starts or execution begins
             if (currentStage === 'validating' || currentStage === 'executing') {
                 if (plan.todoList.length > 0) {
-                    console.log('Auto-switching to plan tab - execution started');
-                    setActiveTab('plan');
+                    // Only auto-switch if we're not already on the phases tab (which is preferred for new architecture)
+                    if (activeTab !== 'phases') {
+                        console.log('Auto-switching to plan tab - execution started');
+                        setActiveTab('plan');
+                    }
                 }
             }
-        }, [conversationState.metadata?.currentStage, plan.todoList.length]);
+        }, [conversationState.metadata?.currentStage, plan.todoList.length, activeTab]);
 
         // Auto-switch to canvas tab when NEW canvas content is created
         useEffect(() => {
@@ -159,7 +171,7 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
             const hasCanvasData = canvasContent || canvasData;
 
             // Create a unique identifier for the current canvas state
-            // This handles both canvas_content (string) and canvas_data (object) changes
+            // This handles both canvas_content (string) and canvas_data (structured object) changes
             const currentCanvasIdentifier = canvasContent || (canvasData ? JSON.stringify(canvasData) : undefined);
 
             if (hasCanvas && hasCanvasData && currentCanvasIdentifier !== lastCanvasContent && !isExecuting) {
@@ -260,22 +272,100 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
         const hasResults = executionResults.length > 0 || allTasks.length > 0
 
         return (
-            <aside className={cn("border-l border-gray-200 dark:border-gray-800/30 bg-white dark:bg-gray-900 p-4 flex flex-col h-full", className)}>
+            <aside className={cn("border-l border-gray-200 dark:border-gray-800/30 bg-white dark:bg-gray-900 p-4 flex flex-col h-full relative", className)}>
+                {/* Action Approval Banner Integration */}
+                <ActionApprovalBanner />
+
                 <Tabs value={activeTab} onValueChange={setActiveTab} className="h-full flex flex-col">
-                    <TabsList className="grid w-full grid-cols-4 bg-gray-100/80 dark:bg-gray-800/50 backdrop-blur-xl border border-gray-200/50 dark:border-gray-700/50 shadow-lg">
-                        <TabsTrigger value="metadata">Metadata</TabsTrigger>
-                        <TabsTrigger value="plan" className="relative">
-                            Plan
-                            {(conversationState.metadata?.currentStage === 'executing' ||
-                                conversationState.metadata?.currentStage === 'validating') && (
-                                    <span className="ml-1 px-1.5 py-0.5 text-[10px] font-semibold bg-blue-500 dark:bg-blue-600 text-white rounded-full animate-pulse">
-                                        Running
-                                    </span>
-                                )}
-                        </TabsTrigger>
-                        <TabsTrigger value="attachments">Attachments</TabsTrigger>
+                    <TabsList className="grid w-full grid-cols-5 bg-gray-100/80 dark:bg-gray-800/50 backdrop-blur-xl border border-gray-200/50 dark:border-gray-700/50 shadow-lg">
+                        <TabsTrigger value="plan">Tasks</TabsTrigger>
+                        <TabsTrigger value="phases">Phases</TabsTrigger>
+                        <TabsTrigger value="metadata">Stats</TabsTrigger>
+                        <TabsTrigger value="attachments">Files</TabsTrigger>
                         <TabsTrigger value="canvas">Canvas</TabsTrigger>
                     </TabsList>
+
+                    {/* PHASES TAB (OMNI-DISPATCHER) */}
+                    <TabsContent value="phases" className="flex-1 overflow-hidden flex flex-col mt-4">
+                        <Card className="flex-1 flex flex-col border-none shadow-none">
+                            <CardHeader className="px-0 pt-0 pb-4">
+                                <CardTitle className="text-sm font-medium flex items-center gap-2">
+                                    <Brain className="w-4 h-4 text-purple-500" />
+                                    Execution Phases
+                                </CardTitle>
+                                <CardDescription>
+                                    High-level execution plan managed by the Brain.
+                                </CardDescription>
+                            </CardHeader>
+                            <CardContent className="flex-1 p-0 min-h-0">
+                                {!execution_plan || execution_plan.length === 0 ? (
+                                    <div className="flex flex-col items-center justify-center h-40 text-gray-400 text-sm">
+                                        <p>No execution plan yet.</p>
+                                        <p className="text-xs">The Brain creates phases for complex tasks.</p>
+                                    </div>
+                                ) : (
+                                    <ScrollArea className="h-full pr-4">
+                                        <div className="space-y-4">
+                                            {execution_plan.map((phase: any, index: number) => {
+                                                const isCurrent = phase.phase_id === current_phase_id;
+                                                const isCompleted = phase.status === 'completed';
+
+                                                return (
+                                                    <div
+                                                        key={phase.phase_id}
+                                                        className={cn(
+                                                            "p-4 rounded-lg border transition-all",
+                                                            isCurrent ? "bg-purple-50 dark:bg-purple-900/10 border-purple-200 dark:border-purple-800/30 ring-1 ring-purple-500/20" :
+                                                                isCompleted ? "bg-gray-50 dark:bg-gray-800/50 border-gray-100 dark:border-gray-800" :
+                                                                    "bg-white dark:bg-gray-900 border-gray-100 dark:border-gray-800 opacity-70"
+                                                        )}
+                                                    >
+                                                        <div className="flex items-start gap-3">
+                                                            <div className="mt-0.5">
+                                                                {isCompleted ? <CheckCircle className="w-5 h-5 text-green-500" /> :
+                                                                    isCurrent ? <Loader2 className="w-5 h-5 text-purple-500 animate-spin" /> :
+                                                                        <Clock className="w-5 h-5 text-gray-300" />}
+                                                            </div>
+                                                            <div className="flex-1 min-w-0">
+                                                                <div className="flex items-center justify-between mb-1">
+                                                                    <h4 className={cn("font-medium text-sm", isCompleted && "text-gray-500")}>
+                                                                        {phase.name}
+                                                                    </h4>
+                                                                    <Badge variant={isCurrent ? "default" : "outline"} className={cn("text-[10px]", isCurrent && "bg-purple-500")}>
+                                                                        {phase.status.toUpperCase()}
+                                                                    </Badge>
+                                                                </div>
+                                                                <p className="text-xs text-gray-500 dark:text-gray-400 leading-relaxed mb-2">
+                                                                    {phase.goal}
+                                                                </p>
+                                                                {phase.goal_verified && (
+                                                                    <div className="mt-2 text-xs bg-green-50 dark:bg-green-900/10 text-green-700 dark:text-green-300 p-2 rounded border border-green-100 dark:border-green-900/30 flex items-start gap-2">
+                                                                        <CheckCircle className="w-3 h-3 mt-0.5 shrink-0" />
+                                                                        <span>{phase.goal_verified}</span>
+                                                                    </div>
+                                                                )}
+                                                                {/* Dependencies */}
+                                                                {phase.depends_on && phase.depends_on.length > 0 && (
+                                                                    <div className="mt-2 flex flex-wrap gap-1">
+                                                                        {phase.depends_on.map((dep: string) => (
+                                                                            <span key={dep} className="text-[10px] px-1.5 py-0.5 bg-gray-100 dark:bg-gray-800 text-gray-500 rounded">
+                                                                                Dep: {execution_plan.find((p: any) => p.phase_id === dep)?.name || dep}
+                                                                            </span>
+                                                                        ))}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    </ScrollArea>
+                                )}
+                            </CardContent>
+                        </Card>
+                    </TabsContent>
+
                     <TabsContent value="metadata" className="flex-1 overflow-y-auto mt-4 space-y-4">
                         <Card>
                             <CardHeader>
@@ -391,8 +481,6 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                                 </p>
                             </div>
 
-                            {/* Approval buttons have been moved to the interactive chat interface */}
-
                             {/* Show save button after execution completes */}
                             {conversationState.status === 'completed' && (
                                 <SaveWorkflowButton
@@ -407,6 +495,7 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                             <PlanChecklist
                                 key={JSON.stringify(plan)}
                                 todoList={plan.todoList}
+                                currentTaskId={conversationState.current_executing_task || undefined}
                                 isExecuting={conversationState.metadata?.currentStage === 'executing'}
                             />
                         </div>
@@ -589,5 +678,7 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
             </aside>
         )
     });
+
+OrchestrationDetailsSidebar.displayName = "OrchestrationDetailsSidebar";
 
 export default OrchestrationDetailsSidebar;

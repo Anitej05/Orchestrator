@@ -443,6 +443,87 @@ export function useWebSocketManager({
               }
             });
           }
+          // === OMNI-DISPATCHER HANDLERS ===
+          else if (eventData.node === 'omni_brain') {
+            _setConversationState({
+              messages: currentMessages,
+              execution_plan: eventData.data?.execution_plan,
+              current_phase_id: eventData.data?.current_phase_id,
+              action_history: eventData.data?.action_history,
+              insights: eventData.data?.insights,
+              metadata: {
+                ...currentState.metadata,
+                currentStage: 'planning',
+                stageMessage: 'Brain is thinking...',
+                progress: backendProgress || 40
+              }
+            });
+          }
+          else if (eventData.node === 'omni_hands') {
+            const decision = eventData.data?.decision;
+            const actionType = decision?.action_type || 'executing';
+            const resourceId = decision?.resource_id || '';
+
+            // --- TASK TRACKING INTEGRATION ---
+            // Map BrainDecision to task_statuses so the UI updates
+            const currentState = useConversationStore.getState();
+            let updatedTaskStatuses = currentState.task_statuses || {};
+            let currentExecutingTask = currentState.current_executing_task;
+
+            if (actionType === 'agent' || actionType === 'tool') {
+              // Use resource_id + timestamp as unique task key if no ID provided
+              const taskId = decision.resource_id || `task_${Date.now()}`;
+              currentExecutingTask = taskId;
+
+              updatedTaskStatuses = {
+                ...updatedTaskStatuses,
+                [taskId]: {
+                  status: 'running',
+                  taskName: `Execute ${resourceId}`,
+                  taskDescription: decision.payload?.instruction || `Action: ${actionType} ${resourceId}`,
+                  agentName: resourceId,
+                  startedAt: new Date(),
+                }
+              };
+            }
+
+            _setConversationState({
+              messages: currentMessages,
+              task_statuses: updatedTaskStatuses,
+              current_executing_task: currentExecutingTask,
+              // Update tracking fields
+              execution_plan: eventData.data?.execution_plan || currentState.execution_plan,
+              current_phase_id: eventData.data?.current_phase_id || currentState.current_phase_id,
+              action_history: eventData.data?.action_history || currentState.action_history,
+              insights: eventData.data?.insights || currentState.insights,
+              metadata: {
+                ...currentState.metadata,
+                currentStage: 'executing',
+                stageMessage: `Hands executing ${actionType} ${resourceId ? `(${resourceId})` : ''}...`,
+                progress: backendProgress || 60
+              }
+            });
+          }
+          else if (eventData.node === 'action_approval_required') {
+            // Human-in-the-Loop: Pause for action approval
+            const pendingDecision = eventData.data?.pending_decision;
+            console.log('⏸️ ACTION APPROVAL REQUIRED:', pendingDecision);
+
+            _setConversationState({
+              messages: currentMessages,
+              isWaitingForUser: true,
+              pending_action_approval: true,
+              pending_action: pendingDecision,
+              metadata: {
+                ...currentState.metadata,
+                currentStage: 'approval_required',
+                stageMessage: 'Waiting for action approval...',
+                progress: 50
+              }
+            });
+            // Stop loading state so UI controls become active
+            useConversationStore.setState({ isLoading: false });
+          }
           else if (eventData.node === '__live_canvas__') {
             // Live canvas update during browser execution
             // NOTE: browser_view can be large (1-3MB), limit storage
@@ -495,7 +576,20 @@ export function useWebSocketManager({
 
               // Use backend messages as the single source of truth
               // The backend has the complete, authoritative message history
-              const backendMessages = (finalState.messages || []).filter(msg => {
+              // Use backend messages as the single source of truth
+              // The backend has the complete, authoritative message history
+              const backendMessages = (finalState.messages || []).map(msg => {
+                // Normalize message types from backend (AIMessage -> 'ai', HumanMessage -> 'human')
+                // to frontend expected types ('assistant', 'user')
+                // Cast to any to bypass TS strict type checking since backend returns 'ai'/'human'
+                const rawType = (msg as any).type;
+                let normalizedType = rawType;
+
+                if (rawType === 'ai') normalizedType = 'assistant';
+                if (rawType === 'human') normalizedType = 'user';
+
+                return { ...msg, type: normalizedType };
+              }).filter(msg => {
                 // Keep all non-assistant messages
                 if (msg.type !== 'assistant') return true;
                 // Keep assistant messages that have content
@@ -517,19 +611,35 @@ export function useWebSocketManager({
               // Check if the final response contains HTML that should be in canvas
               const isHtmlContent = finalState.final_response && (
                 finalState.final_response.includes('<!DOCTYPE html>') ||
-                finalState.final_response.includes('<html') ||
-                finalState.final_response.includes('<button') ||
-                finalState.final_response.includes('<script>')
+                finalState.final_response.includes('<html')
               );
 
-              console.debug('CANVAS DEBUG: Frontend canvas detection:', {
-                hasCanvas: finalState.has_canvas,
-                canvasType: finalState.canvas_type,
-                canvasContentLength: finalState.canvas_content?.length,
-                finalResponseLength: finalState.final_response?.length,
-                isHtmlContent: isHtmlContent
-              });
 
+              // Update state with backend truth
+              const stateBeforeEnd = useConversationStore.getState(); // Get state before updating
+              _setConversationState({
+                messages: finalMessages,
+                status: 'completed',
+                isLoading: false,
+                isWaitingForUser: false,
+                // Make sure we update tracking fields one last time
+                execution_plan: finalState.execution_plan,
+                action_history: finalState.action_history,
+                insights: finalState.insights,
+
+                // Canvas updates 
+                browser_view: finalState.browser_view,
+                has_canvas: finalState.has_canvas,
+                canvas_type: finalState.canvas_type,
+                canvas_content: isHtmlContent ? finalState.final_response : undefined,
+
+                metadata: {
+                  ...stateBeforeEnd.metadata,
+                  currentStage: 'completed',
+                  stageMessage: 'Orchestration completed.',
+                  progress: 100
+                }
+              });
               // Filter out HTML content from messages (it should be in canvas, not chat)
               finalMessages = finalMessages.filter(msg => {
                 if (msg.type === 'assistant' && msg.content) {

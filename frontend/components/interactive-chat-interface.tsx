@@ -303,7 +303,7 @@ export function InteractiveChatInterface({
     <div className="flex flex-col h-full bg-gradient-to-br from-gray-50 via-white to-gray-50/50 dark:from-gray-950 dark:via-gray-900/95 dark:to-gray-950">
       {/* Chat Messages */}
       <div className="flex-1 space-y-6 overflow-y-auto p-6">
-        {state.messages.length === 0 && !isBrowserRunning && (
+        {state.messages.length === 0 && !isBrowserRunning && !state.final_response && (
           <div className="text-center text-gray-400 dark:text-gray-500 py-8 h-full flex flex-col justify-center items-center">
             <div className="p-6 rounded-full bg-white/40 dark:bg-gray-800/40 backdrop-blur-sm mb-6 border border-gray-200/50 dark:border-gray-700/50">
               <MessageCircle className="w-16 h-16 text-gray-300 dark:text-gray-600" />
@@ -407,7 +407,7 @@ export function InteractiveChatInterface({
                         variant="outline"
                         size="sm"
                         className="mt-2 text-xs"
-                        onClick={() => onViewCanvas?.(message.canvas_content || JSON.stringify((message as any).canvas_data || {}), message.canvas_type!)}
+                        onClick={() => onViewCanvas?.(message.canvas_content || JSON.stringify((message as any).canvas_data || {}), message.canvas_type as any)}
                       >
                         <FileText className="w-3 h-3 mr-1" />
                         View in Canvas
@@ -474,6 +474,8 @@ export function InteractiveChatInterface({
               </div>
             );
           })}
+
+
 
         {/* Live Browser Stream - shown AFTER messages while browser is running */}
         {isBrowserRunning && (

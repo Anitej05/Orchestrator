@@ -689,13 +689,20 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
               let isDuplicate = existingMessagesMap.has(backendMsg.id);
 
               // If not found by ID, check for content-based duplicates
-              // (in case hash algorithms don't match between frontend and backend)
+              // BUT only if the message type is the same and content matches
               if (!isDuplicate) {
-                isDuplicate = updatedMessages.some((existingMsg: any) =>
+                // Check if we have a message with same content and type
+                const contentMatch = updatedMessages.find((existingMsg: any) =>
                   existingMsg.type === backendMsg.type &&
                   existingMsg.content === backendMsg.content
-                  // Don't check timestamp - same content + type = duplicate regardless of time
                 );
+
+                if (contentMatch) {
+                  // Stricter deduplication: if content matches and type matches, it's likely a duplicate
+                  // especially for assistant messages which shouldn't be repeated identically
+                  isDuplicate = true;
+                  console.log(`Deduplicated by content match:`, backendMsg.content?.substring(0, 30));
+                }
               }
 
               if (!isDuplicate) {
@@ -703,16 +710,19 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
                 console.log(`Adding new message from backend: id=${backendMsg.id}, type=${backendMsg.type}, content=${backendMsg.content?.substring(0, 50)}`);
                 updatedMessages.push(backendMsg);
               } else {
-                // Message exists - skip or update
-                console.log(`Skipping duplicate message: id=${backendMsg.id}, type=${backendMsg.type}, content=${backendMsg.content?.substring(0, 50)}`);
-                // Optionally update the existing message with backend data
+                // Message exists - update specifically if it's an assistant message to ensure we get the latest content
                 const existingMsg = existingMessagesMap.get(backendMsg.id) ||
                   updatedMessages.find((msg: any) =>
                     msg.type === backendMsg.type &&
                     msg.content === backendMsg.content
                   );
+
                 if (existingMsg) {
-                  Object.assign(existingMsg, backendMsg);
+                  // Always update content for assistant messages to capture streaming/final updates
+                  if (backendMsg.type === 'assistant') {
+                    console.log(`Updating existing assistant message: id=${existingMsg.id}`);
+                    Object.assign(existingMsg, backendMsg);
+                  }
                 }
               }
             });

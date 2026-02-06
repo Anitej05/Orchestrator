@@ -97,24 +97,45 @@ def serialize_complex_object(obj):
                 pass
         elif isinstance(obj, (list, tuple)):
             try:
-                if obj and all(hasattr(item, '_type') for item in obj if item is not None):
-                    return messages_to_dict(obj)
-                else:
-                    result = []
-                    for item in obj:
-                        try:
-                            serialized = serialize_complex_object(item)
-                            result.append(serialized)
-                        except Exception as e:
-                            logger.warning(f"Failed to serialize list item: {e}")
-                            result.append(str(item))
-                    return result
+                # Check for LangChain messages (have .type or ._type)
+                is_message_list = obj and all(
+                    (hasattr(item, 'type') or hasattr(item, '_type')) 
+                    for item in obj if item is not None
+                )
+                
+                if is_message_list:
+                    try:
+                        return messages_to_dict(obj)
+                    except:
+                        # Fallback if messages_to_dict fails (mixed types?)
+                        pass
+                
+                # Standard list serialization
+                result = []
+                for item in obj:
+                    try:
+                        serialized = serialize_complex_object(item)
+                        result.append(serialized)
+                    except Exception as e:
+                        logger.warning(f"Failed to serialize list item: {e}")
+                        result.append(str(item))
+                return result
             except Exception as e:
                 logger.warning(f"Failed to serialize list: {e}")
                 return [str(item) for item in obj]
-        elif hasattr(obj, '_type'):
+        
+        # Check for single LangChain message
+        elif hasattr(obj, 'type') or hasattr(obj, '_type'):
             try:
-                return messages_to_dict([obj])[0] if messages_to_dict([obj]) else str(obj)
+                serialized_list = messages_to_dict([obj])
+                if serialized_list:
+                    d = serialized_list[0]
+                    # FLATTEN: Unwrap 'data' if present to match frontend/loading expectations
+                    if 'data' in d and isinstance(d['data'], dict):
+                        data_content = d.pop('data')
+                        d.update(data_content)
+                    return d
+                return str(obj)
             except:
                 pass
         
@@ -154,8 +175,8 @@ def transform_payload_types(payload: Dict[str, Any], parameters: List[Any]) -> D
     return transformed
 
 
-def save_plan_to_file(state: dict):
-    """Saves the current plan and completed tasks to a Markdown file."""
+def save_plan_to_file(state: dict, *args, **kwargs):
+    """Saves the current plan and completed tasks to a Markdown file. Accepts extra args for compatibility."""
     thread_id = state.get("thread_id")
     if not thread_id:
         logger.warning("No thread_id found in state, skipping plan save")
@@ -242,3 +263,47 @@ def get_hf_embeddings():
 
 
 
+
+def save_conversation_history(state: dict, *args, **kwargs):
+    """Saves the conversation history to a JSON file. Accepts extra args for compatibility."""
+    thread_id = state.get("thread_id")
+    if not thread_id:
+        logger.warning("No thread_id found in state, skipping history save")
+        return
+
+    history_dir = os.path.join(BACKEND_DIR, "agent_conversations")
+    os.makedirs(history_dir, exist_ok=True)
+    history_path = os.path.join(history_dir, f"{thread_id}.json")
+    
+    try:
+        # Extract messages using LangChain utility
+        messages = state.get("messages", [])
+        # Handle case where messages are already serialized or not a list
+        if not isinstance(messages, list):
+             messages = []
+        
+        # Serialize messages if they are objects
+        try:
+            serialized_messages = messages_to_dict(messages)
+        except:
+            # Fallback for already serialized or mixed content
+            serialized_messages = [serialize_complex_object(m) for m in messages]
+        
+        data = {
+            "thread_id": thread_id,
+            "original_prompt": state.get("original_prompt"),
+            "messages": serialized_messages,
+            "insights": state.get("insights", {})
+        }
+        
+        with open(history_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, cls=CustomJSONEncoder)
+            
+        logger.info(f"Conversation history saved to {history_path}")
+    except Exception as e:
+        logger.error(f"Failed to save conversation history: {e}")
+
+
+def get_serializable_state(state: dict, *args, **kwargs) -> dict:
+    """Returns a JSON-serializable version of the state. Accepts extra args for compatibility."""
+    return serialize_complex_object(state)
