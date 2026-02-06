@@ -112,7 +112,17 @@ export default function PlanChecklist({ todoList, currentTaskId, isExecuting }: 
 
                                             {expandedResults[task.id] && (
                                                 <div className="mt-2 p-2 bg-black/5 dark:bg-black/30 rounded text-xs font-mono overflow-x-auto whitespace-pre-wrap max-h-40">
-                                                    {task.result}
+                                                    {(() => {
+                                                        const r = task.result as any;
+                                                        if (!r) return "";
+                                                        if (typeof r === "string") return r;
+                                                        if (typeof r === "object") {
+                                                            // Handle common pattern: {"result": "...", "status": ...}
+                                                            if ('result' in r && typeof r.result === 'string') return r.result;
+                                                            return JSON.stringify(r, null, 2);
+                                                        }
+                                                        return String(r);
+                                                    })()}
                                                 </div>
                                             )}
                                         </div>

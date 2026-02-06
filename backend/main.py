@@ -4,7 +4,7 @@ import logging
 import json
 import asyncio
 import time
-import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
@@ -13,12 +13,9 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 import shutil
 from fastapi import UploadFile, File
 from aiofiles import open as aio_open
-from typing import List
-from pydantic import BaseModel
 from typing import Literal
 
-# # --- Add parent directory to path ---
-# sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 import os
 import subprocess
 import sys
@@ -53,11 +50,94 @@ from langgraph.checkpoint.memory import MemorySaver
 from routers import connect_router
 from routers import credentials_router
 
+# --- Lifespan Event Handler (replaces deprecated @app.on_event) ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Async context manager for FastAPI lifespan events.
+    Startup logic runs before yield, shutdown logic runs after.
+    """
+    # === STARTUP ===
+    # Run database migrations automatically
+    try:
+        logger.info("🔧 Running database migrations...")
+        import subprocess
+        result = subprocess.run(
+            ["alembic", "upgrade", "head"],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0:
+            logger.info("✅ Database migrations applied")
+        else:
+            logger.warning(f"⚠️ Migration warnings: {result.stderr}")
+    except Exception as e:
+        logger.error(f"❌ Failed to run migrations: {str(e)}", exc_info=True)
+    
+    # Create database tables if they don't exist
+    try:
+        logger.info("🔧 Ensuring database tables exist...")
+        from manage import create_tables
+        create_tables()
+        logger.info("✅ Database tables ready")
+    except Exception as e:
+        logger.error(f"❌ Failed to create tables: {str(e)}", exc_info=True)
+    
+    # Sync agent definitions from agent_entries/*.json to database
+    try:
+        from manage import sync_agent_entries
+        logger.info("Syncing agent definitions to database...")
+        result = sync_agent_entries(verbose=True)
+        if result.get('errors'):
+            logger.warning(f"Agent sync completed with {len(result['errors'])} error(s)")
+        else:
+            logger.info("✅ Agent sync completed successfully")
+    except Exception as e:
+        logger.error(f"Failed to sync agent entries: {str(e)}", exc_info=True)
+    
+    # Start agents in background
+    start_agents_async()
+    logger.info("✓ Agents started in background")
+    
+    # Start background health checker
+    asyncio.create_task(check_agent_health_background())
+    logger.info("✓ Health checker started")
+    
+    # Initialize workflow scheduler and load active schedules
+    try:
+        logger.info("Initializing workflow scheduler...")
+        from services.workflow_scheduler import init_scheduler
+        from database import SessionLocal
+        db = SessionLocal()
+        try:
+            scheduler = init_scheduler(db)
+            jobs = scheduler.scheduler.get_jobs()
+            logger.info(f"✓ Workflow scheduler initialized with {len(jobs)} jobs loaded")
+            for job in jobs:
+                logger.info(f"  - Job: {job.id} | Next run: {job.next_run_time}")
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error(f"✗ Failed to initialize workflow scheduler: {str(e)}", exc_info=True)
+    
+    logger.info("=" * 60)
+    logger.info("APPLICATION STARTUP COMPLETED")
+    logger.info("=" * 60)
+    
+    yield  # App is running
+    
+    # === SHUTDOWN ===
+    logger.info("=" * 60)
+    logger.info("APPLICATION SHUTTING DOWN")
+    logger.info("=" * 60)
+
 # --- App Initialization and Configuration ---
 app = FastAPI(
     title="Unified Agent Service API",
     version="1.0",
-    description="An API for both finding/managing agents and orchestrating tasks."
+    description="An API for both finding/managing agents and orchestrating tasks.",
+    lifespan=lifespan
 )
 
 # Configure logging
@@ -187,8 +267,6 @@ logger.info(f"Mounted /storage for serving screenshot files from {storage_path}"
 # - Auto MIME type detection with inline preview support
 # - Newest version selection when file exists in multiple folders
 # ============================================================================
-
-from fastapi.responses import FileResponse
 
 @app.get("/files/{file_path:path}", tags=["Files"])
 async def serve_file(file_path: str, request: Request):
@@ -826,8 +904,6 @@ def start_agent_servers():
                     stderr=log_file
                 )
                 agent_processes.append(process)
-                    # Track the process globally
-                    agent_processes.append(process)
 
             # Wait for the port to be in use with a timeout
             # With lazy imports and reload=False, agents should start quickly
@@ -855,19 +931,7 @@ def start_agent_servers():
                     except subprocess.TimeoutExpired:
                         process.kill()
 
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to start agent {agent_file} using shell command: {e}")
-            failed_agents.append({
-                'agent': agent_file,
-                'reason': f'Shell command failed: {str(e)}'
-            })
-        except Exception as e:
-            logger.error(f"Unexpected error while starting agent {agent_file}: {e}")
-            logger.exception("Full traceback:")  # Log the full traceback
-            failed_agents.append({
-                'agent': agent_file,
-                'reason': f'Unexpected error: {str(e)}'
-            })
+
 
     # Log summary of agent startup results
     logger.info(f"Agent startup completed. Started: {len(started_agents)}, Failed: {len(failed_agents)}")
@@ -1413,6 +1477,8 @@ def process_node_data(node_name: str, node_output, progress: float, node_count: 
     
     # Map node names to user-friendly stage names and descriptions
     stage_mapping = {
+        "manage_todo_list": {"stage": "planning", "message": "Brain is analyzing tasks..."},
+        "execute_next_action": {"stage": "executing", "message": "Executing task..."},
         "analyze_request": {"stage": "analyzing", "message": "Analyzing your request..."},
         "parse_prompt": {"stage": "parsing", "message": "Breaking down your request into tasks..."},
         "agent_directory_search": {"stage": "searching", "message": "Searching for capable agents (REST & MCP)..."},
@@ -1441,7 +1507,48 @@ def process_node_data(node_name: str, node_output, progress: float, node_count: 
             serializable_data[key] = serialize_complex_object(value)
 
             # Extract node-specific meaningful data
-            if node_name == "parse_prompt" and key == "parsed_tasks":
+            
+            # --- NEW ORCHESTRATOR NODES ---
+            if node_name == "manage_todo_list" and key == "todo_list":
+                 if value:
+                    # 'value' is a list of TaskItem dicts
+                    task_names = []
+                    tasks_completed = 0
+                    tasks_total = len(value)
+                    
+                    for task in value:
+                        if isinstance(task, dict):
+                            t_desc = task.get("description", "Unknown Task")
+                            t_status = task.get("status")
+                            task_names.append(t_desc)
+                            if t_status == "completed":
+                                tasks_completed += 1
+                        
+                    node_specific_data["tasks_identified"] = tasks_total
+                    node_specific_data["tasks_completed_count"] = tasks_completed
+                    node_specific_data["task_names"] = task_names
+                    node_specific_data["description"] = f"Brain managing {tasks_total} tasks ({tasks_completed} done)"
+                    
+            elif node_name == "execute_next_action":
+                # Handle task execution updates
+                if key == "executed_task_id":
+                    node_specific_data["executed_task_id"] = value
+                    
+                    # Try to find task description from todo_list if available in same output
+                    todo_list = node_output.get("todo_list", [])
+                    task_desc = "Unknown Task"
+                    for t in todo_list:
+                        if t.get("id") == value:
+                            task_desc = t.get("description", "Unknown Task")
+                            break
+                    node_specific_data["task_description"] = task_desc
+                    node_specific_data["description"] = f"Executed: {task_desc}"
+
+                elif key == "task_status":
+                     node_specific_data["task_status"] = value
+
+            # --- LEGACY NODES (Keep for backward compatibility) ---
+            elif node_name == "parse_prompt" and key == "parsed_tasks":
                 if value:
                     # Handle both Task objects and dictionaries
                     task_names = []
@@ -4008,80 +4115,11 @@ def start_agents_async():
     
     logger.info(f"Agent servers started. Ready for requests.")
 
-@app.on_event("startup")
-async def startup_event():
-    """Start agents, background health checker, and workflow scheduler on app startup"""
-    # Note: Tools are lazy-loaded only when orchestrator needs them (not at startup)
-    
-    # Run database migrations automatically
-    try:
-        logger.info("🔧 Running database migrations...")
-        import subprocess
-        result = subprocess.run(
-            ["alembic", "upgrade", "head"],
-            cwd=os.path.dirname(os.path.abspath(__file__)),
-            capture_output=True,
-            text=True
-        )
-        if result.returncode == 0:
-            logger.info("✅ Database migrations applied")
-        else:
-            logger.warning(f"⚠️ Migration warnings: {result.stderr}")
-    except Exception as e:
-        logger.error(f"❌ Failed to run migrations: {str(e)}", exc_info=True)
-    
-    # Create database tables if they don't exist
-    try:
-        logger.info("🔧 Ensuring database tables exist...")
-        from manage import create_tables
-        create_tables()
-        logger.info("✅ Database tables ready")
-    except Exception as e:
-        logger.error(f"❌ Failed to create tables: {str(e)}", exc_info=True)
-    
-    # Sync agent definitions from agent_entries/*.json to database
-    try:
-        from manage import sync_agent_entries
-        logger.info("Syncing agent definitions to database...")
-        result = sync_agent_entries(verbose=True)
-        if result.get('errors'):
-            logger.warning(f"Agent sync completed with {len(result['errors'])} error(s)")
-        else:
-            logger.info("✅ Agent sync completed successfully")
-    except Exception as e:
-        logger.error(f"Failed to sync agent entries: {str(e)}", exc_info=True)
-    
-    # Start agents in background
-    start_agents_async()
-    logger.info("✓ Agents started in background")
-    
-    # Start background health checker
-    asyncio.create_task(check_agent_health_background())
-    logger.info("✓ Health checker started")
-    
-    # Initialize workflow scheduler and load active schedules
-    try:
-        logger.info("Initializing workflow scheduler...")
-        from services.workflow_scheduler import init_scheduler
-        from database import SessionLocal
-        db = SessionLocal()
-        try:
-            scheduler = init_scheduler(db)
-            jobs = scheduler.scheduler.get_jobs()
-            logger.info(f"✓ Workflow scheduler initialized with {len(jobs)} jobs loaded")
-            for job in jobs:
-                logger.info(f"  - Job: {job.id} | Next run: {job.next_run_time}")
-        finally:
-            db.close()
-    except Exception as e:
-        logger.error(f"✗ Failed to initialize workflow scheduler: {str(e)}", exc_info=True)
-    
-    logger.info("=" * 60)
-    logger.info("APPLICATION STARTUP COMPLETED")
-    logger.info("=" * 60)
+# Note: Startup logic has been moved to the lifespan context manager above.
+# The @app.on_event("startup") decorator is deprecated in favor of lifespan.
 
 if __name__ == "__main__":
-    # Agents will be started automatically via @app.on_event("startup")
+    # Agents will be started automatically via the lifespan context manager
     # Run the main FastAPI app
     import uvicorn
     # Use 0.0.0.0 to bind to all interfaces (fixes IPv4/IPv6 issues)

@@ -7,22 +7,28 @@ from itertools import cycle
 
 logger = logging.getLogger(__name__)
 
-# Keys extracted from browser_agent/llm.py
-# User requested "any 3 api keys except 6th one".
-# Keys extracted from browser_agent/llm.py
-# User requested "any 3 api keys except 6th one".
-DEFAULT_KEYS = [
-    "csk-52m4dv4chcpf9vy9jcmjrevnp5ft22y2vctd68wyr8dewndw",
-    "csk-nnj93n833cr4c9rd2vttjeew3nwv494px62jfy45fmwjdch8",
-    "csk-c2jjpt5k9kttxd44t9jwyn55vje4m2vmrvdjjkd6h2wphv6m",
-]
 
 def load_keys_from_env() -> List[str]:
-    """Load keys from CEREBRAS_API_KEYS env var (comma separated), fallback to defaults."""
+    """
+    Load Cerebras API keys from CEREBRAS_API_KEYS env var (comma separated).
+    Falls back to CEREBRAS_API_KEY (singular) if plural not set.
+    Returns empty list if not configured - caller should handle appropriately.
+    """
     env_keys = os.getenv("CEREBRAS_API_KEYS")
     if env_keys:
-        return [k.strip() for k in env_keys.split(",") if k.strip()]
-    return DEFAULT_KEYS
+        keys = [k.strip() for k in env_keys.split(",") if k.strip()]
+        if keys:
+            logger.info(f"Loaded {len(keys)} Cerebras API keys from environment")
+            return keys
+    
+    # Fallback to singular key name
+    single_key = os.getenv("CEREBRAS_API_KEY")
+    if single_key:
+        logger.info("Loaded 1 Cerebras API key from environment (CEREBRAS_API_KEY)")
+        return [single_key.strip()]
+    
+    logger.warning("CEREBRAS_API_KEY(S) not configured in environment - LLM calls may fail")
+    return []
 
 class KeyManager:
     """

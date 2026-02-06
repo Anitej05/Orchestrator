@@ -1,6 +1,6 @@
 # In Orbimesh Backend/schemas.py
 
-from pydantic import BaseModel, Field, HttpUrl, field_validator
+from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 from typing import List, Literal, Optional, Dict, Any
 from enum import Enum
 import uuid
@@ -150,6 +150,7 @@ class TaskStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     BLOCKED = "blocked"
+    SKIPPED = "skipped"
 
 class TaskPriority(str, Enum):
     """Priority of a task."""
@@ -179,6 +180,22 @@ class TaskItem(BaseModel):
     
     created_at: Optional[float] = Field(default_factory=time.time, description="Timestamp. LLM: LEAVE THIS EMPTY.")
     completed_at: Optional[float] = None
+    
+    @model_validator(mode='before')
+    @classmethod
+    def ensure_id_and_timestamp(cls, values):
+        """
+        Auto-generate id and created_at if they are missing or empty.
+        This handles the case where LLM explicitly provides empty strings.
+        """
+        if isinstance(values, dict):
+            # Handle empty or missing id
+            if not values.get('id'):
+                values['id'] = str(uuid.uuid4())[:8]
+            # Handle empty or missing created_at
+            if not values.get('created_at'):
+                values['created_at'] = time.time()
+        return values
 
 
 # --- Multi-Turn Agent Dialogue Models ---

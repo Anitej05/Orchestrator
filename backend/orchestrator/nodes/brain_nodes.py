@@ -2,8 +2,11 @@
 import logging
 import json
 import traceback
+import uuid
+import time
 from typing import Dict, Any, List, Optional, Union
 from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.runnables import RunnableConfig
 
 from pydantic import BaseModel, Field
 
@@ -28,20 +31,18 @@ logger = logging.getLogger(__name__)
 # Update Schema to include file path awareness
 class TaskUpdate(BaseModel):
     """Structure for the Brain's decision to update the To-Do list."""
-    thought: str = Field(..., description="Reasoning for the changes")
+    user_response: Optional[str] = Field(None, description="Actual response to display to the user (REQUIRED when finished).")
     new_tasks: List[TaskItem] = Field(default_factory=list, description="New tasks to add")
     completed_task_id: Optional[str] = Field(None, description="ID of the task to mark as completed")
     failed_task_id: Optional[str] = Field(None, description="ID of the task to mark as failed")
     error_note: Optional[str] = Field(None, description="Note on why a task failed")
     reorder_tasks: Optional[List[str]] = Field(None, description="List of task IDs in new execution order")
     next_task_id: Optional[str] = Field(None, description="Explicitly select the next task ID to run")
-    is_finished: bool = Field(False, description="True if the entire workflow is done")
-    # New: Persistent memory update
-    memory_update: Optional[Dict[str, Any]] = Field(None, description="Key-value pairs to store in persistent memory")
-    # New: Suggest a command, agent, or tool
-    suggested_command: Optional[str] = Field(None, description="Shell command, or 'AGENT: <name> <task>', or 'TOOL: <name> <args>'")
+    is_finished: bool = Field(False, description="Set to True ONLY when the objective is fully achieved")
+    memory_update: Optional[Dict[str, Any]] = Field(None, description="Updates to persistent memory")
+    suggested_command: Optional[str] = Field(None, description="Suggest next command/tool (TERM:, AGENT:, TOOL:)")
 
-async def manage_todo_list(state: State, config: Optional[Dict] = None) -> Dict:
+async def manage_todo_list(state: State, config: Optional[RunnableConfig] = None) -> Dict:
     """
     The Brain Node.
     """
@@ -89,9 +90,17 @@ async def manage_todo_list(state: State, config: Optional[Dict] = None) -> Dict:
         history_str = optimized_res.get("context", "No historical context available.")
         
         # Build list preview (just status and description, no results)
+        # Build list preview (with results/errors for context)
         list_preview = ""
         for t in todo_list:
             list_preview += f"- [{t['status'].upper()}] {t['description']} (ID: {t['id']})\n"
+            if t['status'] == TaskStatus.FAILED and (t.get('error') or t.get('result')):
+                list_preview += f"   ERROR: {t.get('error') or t.get('result')}\n"
+            elif t['status'] == TaskStatus.COMPLETED and t.get('result'):
+                # concise result preview
+                res = str(t.get('result'))
+                preview = (res[:200] + '...') if len(res) > 200 else res
+                list_preview += f"   RESULT: {preview}\n"
 
         prompt = f"""
         You are the Brain of an autonomous agent. 
@@ -113,15 +122,28 @@ async def manage_todo_list(state: State, config: Optional[Dict] = None) -> Dict:
         CRITICAL INSTRUCTIONS:
         1. STRATEGY: If a task fails, try a different approach. Store key facts in 'memory_update'.
         2. CONTEXT: Check the 'HISTORY' above for results of previous steps.
-        3. FINISHING: If objective is met, set 'is_finished' to True.
+        3. ITERATIVE PLANNING: Only add the IMMEDIATE next task(s) required. Do not plan 5 steps ahead. It is better to add one task, execute it, see the result, and *then* decide the next step.
         4. FALLBACK: If 'CONSECUTIVE FAILURES' is > 1, you MUST provide a direct answer based on what you know or explain the limitation clearly. DO NOT keep retrying failing agents or tools.
-        5. MEANINGFUL RESPONSES: When finishing (is_finished=True), your 'thought' MUST BE THE ACTUAL FINAL RESPONSE TO THE USER. 
-           - Good: "The stock price of AAPL is $150."
-           - Good: "You are very welcome! How else can I help?"
-           - Bad: "I have found the price and will now tell the user."
-           - Bad: "The objective is met, I am finishing."
-           DO NOT just describe that you are finishing; actually say the words you want the user to see.
-           IF THE USER IS JUST GREETING OR THANKING YOU, JUST RESPOND POLITELY AND FINISH IMMEDIATELY.
+        5. DIRECT RESPONSE:
+           - 'user_response': The actual message for the user. REQUIRED when finishing.
+           - NO INTERNAL THOUGHTS: Do not include "I will now..." or "My plan is...". Just do it.
+
+
+           WHEN FINISHING (is_finished=True):
+           - You MUST populate 'user_response'.
+           - 'user_response' should be the direct answer/greeting without meta-commentary.
+
+           EXAMPLES:
+           - User: "Hi"
+             user_response: "Hello! How can I assist you today?"
+             
+           - User: "Calc primes"
+             user_response: None (because not finished yet)
+             
+           - User: "Calc primes" (Task Done)
+             user_response: "Here are the first 10 prime numbers: 2, 3, 5, 7..."
+             
+           IF THE USER IS JUST GREETING OR THANKING YOU, RESPOND POLITELY IN 'user_response' AND FINISH.
         
         RESOURCES:
         - TERMINAL: Use for file ops and scripts.
@@ -186,6 +208,15 @@ async def manage_todo_list(state: State, config: Optional[Dict] = None) -> Dict:
         for task in update.new_tasks:
             t_dict = task.dict() if hasattr(task, 'dict') else task
             
+            # Auto-generate ID if empty (Brain sometimes returns empty IDs)
+            if not t_dict.get('id'):
+                t_dict['id'] = str(uuid.uuid4())[:8]
+                logger.info(f"Auto-generated task ID: {t_dict['id']} for task: {t_dict['description'][:50]}")
+            
+            # Ensure created_at is set
+            if not t_dict.get('created_at'):
+                t_dict['created_at'] = time.time()
+            
             # Check if this task already exists (description match)
             is_dup = any(
                 t['description'].strip().lower() == t_dict['description'].strip().lower() 
@@ -208,24 +239,61 @@ async def manage_todo_list(state: State, config: Optional[Dict] = None) -> Dict:
         
         # SAFETY: If no task selected and not finished, force finish to avoid recursion loop
         is_finished = update.is_finished
-        final_response_content = update.thought
+        
+        # Determine strict final response (Separating THOUGHT from USER RESPONSE)
+        # Priority:
+        # SAFETY: If no task selected and not finished, force finish to avoid recursion loop
+        is_finished = update.is_finished
+        
+        # Determine strict final response (Separating THOUGHT from USER RESPONSE)
+        # ONLY set final_response if we are actually finished.
+        # If tasks are pending/executing, we should NOT send a final response yet.
+        final_response_content = None
+        
+        if is_finished:
+            final_response_content = update.user_response
+            # If finished but no response provided, create a generic one
+            if not final_response_content:
+                 final_response_content = "Process completed successfully."
+        
         if not next_task_id and not is_finished:
             logger.warning("Brain provided no next task and is not finished. Force finishing to avoid loop.")
             is_finished = True
-            if not final_response_content or len(final_response_content) < 10:
-                final_response_content = "I have completed the requested analysis."
-        
+            if not final_response_content:
+                final_response_content = "Process completed successfully."
+
+        # ZOMBIE TASK CLEANUP:
+        # If we are finished, mark all remaining PENDING tasks as SKIPPED.
+        # This prevents the UI from showing "Pending" tasks forever after success.
+        if is_finished:
+            for t in new_todo_list:
+                if t['status'] == TaskStatus.PENDING:
+                    logger.info(f"Skipping zombie task {t['id']} because process is finished")
+                    t['status'] = TaskStatus.SKIPPED
+                    t['result'] = "Skipped because the objective was completed."
+
         # If Brain suggested a command/agent/tool, attach it
         if next_task_id and update.suggested_command:
             for t in new_todo_list:
                 if t['id'] == next_task_id:
-                    # Determine prefix if not present (Brain might forget 'TERM:')
-                    cmd = update.suggested_command
-                    # Simple heuristic normalization
-                    if not (cmd.startswith("TERM:") or cmd.startswith("AGENT:") or cmd.startswith("TOOL:")):
-                         # Default to TERM if it looks like shell, else just pass it
-                         cmd = f"TERM:{cmd}" 
-                    t['code_snippet'] = cmd
+                    # Logic: 
+                    # 1. If code_snippet is already populated (likely raw Python code), KEEP IT.
+                    # 2. If code_snippet is empty, use suggested_command.
+                    
+                    existing_code = t.get('code_snippet')
+                    if existing_code and str(existing_code).strip():
+                        # We have code! Do NOT overwrite with a potentially hallucinated command like "python script.py"
+                        logger.info(f"Preserving existing code snippet for task {t['id']}")
+                        
+                        # Ensure it DOESN'T have a TERM: prefix if it's raw code
+                        # (The execution node defaults to Sandbox if no prefix)
+                    else:
+                        # No code provided, use the suggested command
+                        cmd = update.suggested_command
+                        # Simple heuristic normalization
+                        if not (cmd.startswith("TERM:") or cmd.startswith("AGENT:") or cmd.startswith("TOOL:")):
+                             cmd = f"TERM:{cmd}"
+                        t['code_snippet'] = cmd
         
         # Activate task
         if next_task_id:
@@ -257,7 +325,7 @@ async def manage_todo_list(state: State, config: Optional[Dict] = None) -> Dict:
         }
 
 
-async def execute_next_action(state: State, config: Optional[Dict] = None) -> Dict:
+async def execute_next_action(state: State, config: Optional[RunnableConfig] = None) -> Dict:
     """
     The Hands Node.
     Executes Python Code, Terminal, Agents, or Tools.
@@ -326,11 +394,12 @@ async def execute_next_action(state: State, config: Optional[Dict] = None) -> Di
                       port = port_map.get(agent['name'], 8000)
                       base_url = f"http://localhost:{port}"
 
-                 url = f"{base_url}/process" 
+                 url = f"{base_url}/execute" 
                  
                  async with httpx.AsyncClient(timeout=60.0) as client:
                       try:
-                           resp = await client.post(url, json={"request": instruction})
+                           # Use 'prompt' field which agents expect
+                           resp = await client.post(url, json={"prompt": instruction})
                            agent_res = resp.json()
                            result_content = json.dumps(agent_res)
                            is_success = resp.status_code == 200
@@ -378,13 +447,20 @@ async def execute_next_action(state: State, config: Optional[Dict] = None) -> Di
                 is_success = False
                 
         else:
-            # Default to Code Sandbox
-            res = code_sandbox.execute_code(
-                f"# Execution for: {current_task['description']}\nprint('Executed {current_task['description']}')",
-                session_id="orchestrator_main"
-            )
-            result_content = res['stdout']
-            is_success = res['success']
+            # Default to Code Sandbox - execute actual Python code if present
+            # Use the snippet (without prefix) or fallback to task description
+            code_to_run = snippet if snippet and not snippet.startswith(("TERM:", "AGENT:", "TOOL:")) else None
+            
+            if code_to_run:
+                # Actually execute the Python code provided by Brain
+                logger.info(f"Executing Python code in sandbox: {len(code_to_run)} chars")
+                res = code_sandbox.execute_code(code_to_run, session_id="orchestrator_main")
+                result_content = res.get('stdout', '') or res.get('error', 'No output')
+                is_success = res.get('success', False)
+            else:
+                # No code to run - just mark as completed with a note
+                result_content = f"Task '{current_task['description']}' marked as complete (no executable code provided)."
+                is_success = True
 
         # Process result through CMS hooks
         thread_id = (config or {}).get("configurable", {}).get("thread_id", "default")
@@ -403,7 +479,9 @@ async def execute_next_action(state: State, config: Optional[Dict] = None) -> Di
         return {
             "todo_list": todo_list,
             "memory": memory,
-            "error": None
+            "error": None,
+            "executed_task_id": current_task_id,
+            "task_status": "completed" if is_success else "failed"
         }
 
     except Exception as e:

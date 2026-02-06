@@ -80,6 +80,92 @@ def create_execution_subgraph(checkpointer):
     In the new architecture, the main graph handles this dynamically."""
     return create_graph_with_checkpointer(checkpointer)
 
+
+# ==================================================================================
+# CONVERSATION HISTORY AND STATE SERIALIZATION
+# ==================================================================================
+
+def save_conversation_history(state: Dict[str, Any], config: Dict[str, Any]) -> None:
+    """
+    Save conversation history to a JSON file for persistence.
+    Called after orchestration completes to preserve conversation state.
+    """
+    try:
+        thread_id = config.get("configurable", {}).get("thread_id", "unknown")
+        history_dir = os.path.join(os.path.dirname(__file__), "..", "conversation_history")
+        os.makedirs(history_dir, exist_ok=True)
+        
+        # Extract messages and serialize
+        messages = state.get("messages", [])
+        serialized_messages = messages_to_dict(messages) if messages else []
+        
+        history_data = {
+            "thread_id": thread_id,
+            "messages": serialized_messages,
+            "todo_list": state.get("todo_list", []),
+            "memory": state.get("memory", {}),
+            "final_response": state.get("final_response"),
+        }
+        
+        filepath = os.path.join(history_dir, f"{thread_id}.json")
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(history_data, f, cls=CustomJSONEncoder, indent=2)
+        
+        logger.debug(f"Saved conversation history for thread {thread_id}")
+    except Exception as e:
+        logger.warning(f"Failed to save conversation history: {e}")
+
+
+def save_plan_to_file(state: Dict[str, Any]) -> None:
+    """
+    Save the task plan/todo list to a file for debugging/persistence.
+    """
+    try:
+        thread_id = state.get("thread_id", "unknown")
+        plans_dir = os.path.join(os.path.dirname(__file__), "..", "plans")
+        os.makedirs(plans_dir, exist_ok=True)
+        
+        plan_data = {
+            "thread_id": thread_id,
+            "todo_list": state.get("todo_list", []),
+            "completed_tasks": state.get("completed_tasks", []),
+            "memory": state.get("memory", {}),
+        }
+        
+        filepath = os.path.join(plans_dir, f"{thread_id}_plan.json")
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(plan_data, f, cls=CustomJSONEncoder, indent=2)
+        
+        logger.debug(f"Saved plan for thread {thread_id}")
+    except Exception as e:
+        logger.warning(f"Failed to save plan: {e}")
+
+
+def get_serializable_state(state: Dict[str, Any], thread_id: str) -> Dict[str, Any]:
+    """
+    Convert the orchestrator state to a JSON-serializable dictionary.
+    Handles special types like messages, timestamps, etc.
+    """
+    try:
+        messages = state.get("messages", [])
+        serialized_messages = messages_to_dict(messages) if messages else []
+        
+        return {
+            "thread_id": thread_id,
+            "messages": serialized_messages,
+            "todo_list": state.get("todo_list", []),
+            "memory": state.get("memory", {}),
+            "final_response": state.get("final_response"),
+            "completed_tasks": state.get("completed_tasks", []),
+            "canvas_data": state.get("canvas_data"),
+            "canvas_content": state.get("canvas_content"),
+            "canvas_type": state.get("canvas_type"),
+            "has_canvas": state.get("has_canvas", False),
+        }
+    except Exception as e:
+        logger.warning(f"Failed to serialize state: {e}")
+        return {"thread_id": thread_id, "error": str(e)}
+
 # ==================================================================================
 # DEFAULT INSTANCE (Backward compatibility)
 # ==================================================================================
@@ -97,5 +183,8 @@ __all__ = [
     'ForceJsonSerializer',
     'messages_to_dict',
     'messages_from_dict',
-    'serialize_complex_object'
+    'serialize_complex_object',
+    'save_conversation_history',
+    'save_plan_to_file',
+    'get_serializable_state'
 ]

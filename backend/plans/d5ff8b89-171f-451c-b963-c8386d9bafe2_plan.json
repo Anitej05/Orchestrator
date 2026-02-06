@@ -1,0 +1,51 @@
+{
+  "thread_id": "d5ff8b89-171f-451c-b963-c8386d9bafe2",
+  "todo_list": [
+    {
+      "id": "df95282a",
+      "description": "Analyze user request and create a detailed plan",
+      "status": "completed",
+      "priority": "medium",
+      "dependencies": [],
+      "assigned_tool": null,
+      "code_snippet": null,
+      "result": null,
+      "error": null,
+      "created_at": 1770309693.814722,
+      "completed_at": 1770309712.0871472
+    },
+    {
+      "id": "2a41ca0f",
+      "description": "Provide a list of available tools and agents",
+      "status": "failed",
+      "priority": "medium",
+      "dependencies": [],
+      "assigned_tool": null,
+      "code_snippet": "AGENT: Orbimesh Groq Compound Agent List available tools and agents",
+      "result": {
+        "result": "{\"detail\": \"Not Found\"}",
+        "status": "failed"
+      },
+      "error": null,
+      "created_at": 1770309730.8017337,
+      "completed_at": null
+    },
+    {
+      "id": "",
+      "description": "List available tools and agents",
+      "status": "pending",
+      "priority": "medium",
+      "dependencies": [],
+      "assigned_tool": null,
+      "code_snippet": null,
+      "result": null,
+      "error": null,
+      "created_at": 1770309733.5875232,
+      "completed_at": null
+    }
+  ],
+  "completed_tasks": [],
+  "memory": {
+    "key": "value"
+  }
+}
