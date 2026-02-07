@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 class BrainDecision(BaseModel):
     """
     The Brain's output - what resource to activate and with what parameters.
-    
+
     Supports:
     - Direct execution: agent, tool, python, terminal
     - Planning: action_type='plan' with execution_plan
@@ -60,37 +60,37 @@ class BrainDecision(BaseModel):
         None, description="Key-value pairs to store in persistent memory"
     )
     is_finished: bool = Field(False, description="True if the objective is fully met")
-    
+
     # --- ADAPTIVE PLANNING ---
     execution_plan: Optional[List[Dict[str, Any]]] = Field(
         None,
-        description="For action_type='plan'/'replan': List of phases with phase_id, name, goal, depends_on"
+        description="For action_type='plan'/'replan': List of phases with phase_id, name, goal, depends_on",
     )
-    
+
     # --- LLM-DRIVEN PHASE COMPLETION ---
     phase_complete: bool = Field(
         False,
-        description="Set to True when the current phase's goal is FULLY achieved. LLM must explicitly decide this."
+        description="Set to True when the current phase's goal is FULLY achieved. LLM must explicitly decide this.",
     )
     phase_goal_verified: Optional[str] = Field(
         None,
-        description="Brief explanation of how the phase goal was met (required when phase_complete=True)"
+        description="Brief explanation of how the phase goal was met (required when phase_complete=True)",
     )
-    
+
     # --- PARALLEL EXECUTION ---
     parallel_actions: Optional[List[Dict[str, Any]]] = Field(
         None,
-        description="For action_type='parallel': List of actions to execute concurrently"
+        description="For action_type='parallel': List of actions to execute concurrently",
     )
-    
+
     # --- HUMAN-IN-THE-LOOP ---
     requires_approval: bool = Field(
         False,
-        description="Set True for sensitive/destructive operations: sending emails, deleting files, financial transactions, external API calls with side effects"
+        description="Set True for sensitive/destructive operations: sending emails, deleting files, financial transactions, external API calls with side effects",
     )
     approval_reason: Optional[str] = Field(
         None,
-        description="When requires_approval=True: Clear explanation of what will happen and why approval is needed"
+        description="When requires_approval=True: Clear explanation of what will happen and why approval is needed",
     )
     fallback_mode: bool = Field(
         False, description="True if entering fallback due to consecutive failures"
@@ -120,26 +120,30 @@ class Brain:
         iteration_count = state.get("iteration_count", 0)
         failure_count = state.get("failure_count", 0)
 
-        if not todo_list and state.get("original_prompt"):
-            return self._initialize_initial_state(state)
-
+        # Check error conditions FIRST - these override normal execution
         if iteration_count > self.max_iterations:
             return self._force_finish_with_error(state, "Maximum iterations reached")
 
         if failure_count >= self.max_failures:
             return self._enter_fallback_mode(state, memory, insights)
 
+        # Initialize state if this is a new conversation with no tasks
+        if not todo_list and state.get("original_prompt"):
+            return self._initialize_initial_state(state)
+
         # Extract insights from last execution if significant
         updated_insights = self._extract_insights_from_last_action(state, insights)
-        
-        decision = await self._make_decision(state, config, memory, updated_insights, action_history)
+
+        decision = await self._make_decision(
+            state, config, memory, updated_insights, action_history
+        )
 
         updates = self._apply_decision_to_state(state, decision)
-        
+
         # Include updated insights if any new ones were extracted
         if updated_insights != insights:
             updates["insights"] = updated_insights
-        
+
         return updates
 
     async def _make_decision(
@@ -171,13 +175,13 @@ class Brain:
         history_str = optimized_context.get("context", "No history available.")
 
         todo_preview = self._build_todo_preview(state.get("todo_list", []))
-        
+
         # Build FULL action history view (never compressed)
         action_history_str = self._build_action_history_view(action_history)
-        
+
         # Build insights view (key learnings, never compressed)
         insights_str = self._build_insights_view(insights)
-        
+
         # Build execution plan view if exists
         plan_str = self._build_execution_plan_view(state)
 
@@ -341,13 +345,13 @@ Return JSON with:
                 f"- [{status}] {t.get('description')} (ID: {t.get('task_id')})"
             )
         return "\n".join(preview)
-    
+
     def _build_action_history_view(
         self, action_history: List[Dict], model_context_window: int = 32000
     ) -> str:
         """
         Build a view of actions taken, with DYNAMIC token budget management.
-        
+
         LLM-DRIVEN: Token budget adapts based on model context window.
         - Large context (32k+): Allow ~6000 tokens for history
         - Medium context (16k): Allow ~3000 tokens for history
@@ -355,7 +359,7 @@ Return JSON with:
         """
         if not action_history:
             return "No actions taken yet."
-        
+
         # Dynamic token allocation based on model context (15-20% of context for history)
         if model_context_window >= 32000:
             max_tokens = 6000
@@ -363,11 +367,11 @@ Return JSON with:
             max_tokens = 3000
         else:
             max_tokens = 1500
-        
+
         # Estimate tokens per entry (~50 tokens per entry on average)
         TOKENS_PER_ENTRY = 50
         max_entries = max_tokens // TOKENS_PER_ENTRY
-        
+
         # If within budget, show all
         if len(action_history) <= max_entries:
             entries_to_show = action_history
@@ -376,51 +380,53 @@ Return JSON with:
             # Keep most recent entries (SOTA: recency bias)
             entries_to_show = action_history[-max_entries:]
             truncated = True
-        
+
         lines = []
         if truncated:
             archived = len(action_history) - max_entries
-            lines.append(f"[{archived} earlier actions archived | budget: {max_tokens} tokens]")
-        
+            lines.append(
+                f"[{archived} earlier actions archived | budget: {max_tokens} tokens]"
+            )
+
         for entry in entries_to_show:
             status = "✅" if entry.get("success") else "❌"
             action_type = entry.get("action_type", "?")
             resource = entry.get("resource_id", "")
             result = entry.get("result_summary", "No result")
             iteration = entry.get("iteration", 0)
-            
+
             lines.append(f"[Step {iteration}] {status} {action_type}:{resource}")
             # Limit result length for token budget
             lines.append(f"   Result: {result[:200]}")
-        
+
         return "\n".join(lines)
-    
+
     def _estimate_prompt_tokens(self, prompt: str) -> int:
         """Estimate token count for a prompt (rough: 4 chars ~ 1 token)."""
         return len(prompt) // 4
-    
+
     def _build_insights_view(self, insights: Dict[str, str]) -> str:
         """Build a view of key insights (never compressed)."""
         if not insights:
             return "No insights yet."
-        
+
         return "\n".join([f"• {key}: {value}" for key, value in insights.items()])
-    
+
     def _build_execution_plan_view(self, state: Dict[str, Any]) -> str:
         """Build a view of the execution plan for complex tasks."""
         execution_plan = state.get("execution_plan")
         current_phase_id = state.get("current_phase_id")
-        
+
         if not execution_plan:
             return "No plan created yet. For complex multi-phase objectives, use action_type='plan'."
-        
+
         lines = ["## Plan Phases:"]
         for phase in execution_plan:
             phase_id = phase.get("phase_id", "?")
             name = phase.get("name", "Unnamed")
             goal = phase.get("goal", "")
             status = phase.get("status", "pending")
-            
+
             # Determine status icon
             if status == "completed":
                 icon = "✅"
@@ -429,20 +435,22 @@ Return JSON with:
                 status = "IN PROGRESS"
             else:
                 icon = "○"
-            
+
             deps = phase.get("depends_on", [])
             deps_str = f" (after: {', '.join(deps)})" if deps else ""
-            
+
             lines.append(f"[{icon}] Phase {phase_id}: {name}{deps_str}")
             lines.append(f"    Goal: {goal}")
             if phase.get("result_summary"):
                 lines.append(f"    Result: {phase.get('result_summary')[:100]}")
-        
+
         if current_phase_id:
-            lines.append(f"\n**Current Phase: {current_phase_id}** - Focus on this phase's goal.")
-        
+            lines.append(
+                f"\n**Current Phase: {current_phase_id}** - Focus on this phase's goal."
+            )
+
         return "\n".join(lines)
-    
+
     def _extract_insights_from_last_action(
         self, state: Dict[str, Any], current_insights: Dict[str, str]
     ) -> Dict[str, str]:
@@ -453,19 +461,19 @@ Return JSON with:
         execution_result = state.get("execution_result", {})
         if not execution_result or not execution_result.get("success"):
             return current_insights
-        
+
         iteration = state.get("iteration_count", 0)
         output = execution_result.get("output")
-        
+
         if not output:
             return current_insights
-        
+
         # Create a copy to avoid mutating
         updated_insights = dict(current_insights)
-        
+
         # Extract insight from significant results
         insight_key = f"step_{iteration}"
-        
+
         # Extract meaningful data from common result patterns
         if isinstance(output, dict):
             # Look for data/result/message fields
@@ -477,7 +485,7 @@ Return JSON with:
                         break
         elif isinstance(output, str) and len(output) > 20:
             updated_insights[insight_key] = output[:200]
-        
+
         return updated_insights
 
     def _initialize_initial_state(self, state: Dict[str, Any]) -> Dict[str, Any]:
@@ -491,7 +499,7 @@ Return JSON with:
 
         # Return a decision to trigger analysis immediately
         return {
-            "todo_list": [initial_task.dict()],
+            "todo_list": [initial_task.model_dump()],
             "memory": {},
             "insights": {},
             "action_history": [],
@@ -504,7 +512,7 @@ Return JSON with:
             "decision": BrainDecision(
                 action_type="skip",
                 reasoning="Initializing system state",
-            ).dict(),
+            ).model_dump(),
         }
 
     def _apply_decision_to_state(
@@ -518,55 +526,64 @@ Return JSON with:
         current_phase_id = state.get("current_phase_id")
 
         updates = {
-            "decision": decision.dict(),
+            "decision": decision.model_dump(),
             "iteration_count": state.get("iteration_count", 0) + 1,
         }
-        
+
         # === HUMAN-IN-THE-LOOP: Check if approval is required ===
         if decision.requires_approval:
             updates["pending_approval"] = True
-            updates["pending_decision"] = decision.dict()
-            logger.info(f"⏸️ ACTION REQUIRES APPROVAL: {decision.approval_reason or 'Sensitive operation'}")
+            updates["pending_decision"] = decision.model_dump()
+            logger.info(
+                f"⏸️ ACTION REQUIRES APPROVAL: {decision.approval_reason or 'Sensitive operation'}"
+            )
             # Return early - don't execute, wait for approval
             return updates
-        
+
         # Handle PLAN action - store NEW execution plan
         if decision.action_type == "plan" and decision.execution_plan:
             updates["execution_plan"] = decision.execution_plan
             # Set first phase as current
             if decision.execution_plan:
                 updates["current_phase_id"] = decision.execution_plan[0].get("phase_id")
-            logger.info(f"📋 Created execution plan with {len(decision.execution_plan)} phases")
-        
+            logger.info(
+                f"📋 Created execution plan with {len(decision.execution_plan)} phases"
+            )
+
         # Handle REPLAN action - preserve completed phases, replace pending ones
         if decision.action_type == "replan" and decision.execution_plan:
             # === REPLAN VALIDATION ===
-            validated_plan, validation_errors = self._validate_execution_plan(decision.execution_plan)
+            validated_plan, validation_errors = self._validate_execution_plan(
+                decision.execution_plan
+            )
             if validation_errors:
                 logger.warning(f"⚠️ Replan validation issues: {validation_errors}")
-            
+
             # Preserve completed phases from old plan
             completed_phases = []
             if execution_plan:
-                completed_phases = [p for p in execution_plan if p.get("status") == "completed"]
-            
+                completed_phases = [
+                    p for p in execution_plan if p.get("status") == "completed"
+                ]
+
             # Merge: completed phases + validated new plan
             new_plan = completed_phases + validated_plan
             updates["execution_plan"] = new_plan
-            
+
             # Set current phase to first pending in new plan
             first_pending = next(
-                (p for p in new_plan if p.get("status") != "completed"), 
-                None
+                (p for p in new_plan if p.get("status") != "completed"), None
             )
             if first_pending:
                 updates["current_phase_id"] = first_pending.get("phase_id")
-            
-            logger.info(f"🔄 Re-planned: kept {len(completed_phases)} completed, added {len(validated_plan)} new phases")
-        
+
+            logger.info(
+                f"🔄 Re-planned: kept {len(completed_phases)} completed, added {len(validated_plan)} new phases"
+            )
+
         # Handle PARALLEL action - just pass through, Hands will execute
         # No special state handling needed here
-        
+
         # Handle direct execution actions
         if decision.action_type not in ("finish", "skip", "plan", "replan", "parallel"):
             # If no task is active, pick the first pending one
@@ -575,21 +592,21 @@ Return JSON with:
                     (t for t in todo_list if t["status"] == TaskStatus.PENDING), None
                 )
                 current_task_id = next_pending["task_id"] if next_pending else None
-            
+
             # Mark the current task as in-progress
             if current_task_id:
                 for task in todo_list:
                     if task["task_id"] == current_task_id:
                         task["status"] = TaskStatus.IN_PROGRESS
                         break
-            
+
             updates["current_task_id"] = current_task_id
             updates["todo_list"] = todo_list
 
         if decision.memory_updates:
             memory.update(decision.memory_updates)
             updates["memory"] = memory
-        
+
         # === LLM-DRIVEN PHASE COMPLETION ===
         # Only advance phase when LLM explicitly sets phase_complete=True
         if decision.phase_complete and current_phase_id and execution_plan:
@@ -600,51 +617,58 @@ Return JSON with:
                     updated_plan[idx] = {
                         **phase,
                         "status": "completed",
-                        "goal_verified": decision.phase_goal_verified or "LLM verified goal met",
+                        "goal_verified": decision.phase_goal_verified
+                        or "LLM verified goal met",
                     }
                     break
-            
+
             # Find next phase whose dependencies are all satisfied
             completed_phase_ids = {
-                p.get("phase_id") for p in updated_plan if p.get("status") == "completed"
+                p.get("phase_id")
+                for p in updated_plan
+                if p.get("status") == "completed"
             }
-            
+
             next_phase_id = None
             for phase in updated_plan:
                 if phase.get("status") in ("completed", "skipped"):
                     continue
-                
+
                 deps = phase.get("depends_on", [])
                 if all(dep in completed_phase_ids for dep in deps):
                     next_phase_id = phase.get("phase_id")
                     break
-            
+
             updates["execution_plan"] = updated_plan
             updates["current_phase_id"] = next_phase_id  # None if all done
-            
-            logger.info(f"✅ Phase '{current_phase_id}' verified complete by LLM → Next: {next_phase_id or 'ALL DONE'}")
+
+            logger.info(
+                f"✅ Phase '{current_phase_id}' verified complete by LLM → Next: {next_phase_id or 'ALL DONE'}"
+            )
 
         # Handle finish
         is_finished = decision.is_finished or decision.action_type == "finish"
         if is_finished:
             updates["final_response"] = decision.user_response or "Task complete."
-            
+
             # CRITICAL: Append the final response to the message history so it appears in the chat
             # The 'messages' key in State triggers add_messages reducer which appends to the list
             from langchain_core.messages import AIMessage
             import uuid
             import time
-            
+
             # Create a fully-formed message with ID and timestamp to ensure frontend acceptance
             final_msg_id = str(uuid.uuid4())
             timestamp = time.time()
-            
-            updates["messages"] = [AIMessage(
-                content=updates["final_response"],
-                id=final_msg_id,
-                additional_kwargs={"timestamp": timestamp, "id": final_msg_id}
-            )]
-            
+
+            updates["messages"] = [
+                AIMessage(
+                    content=updates["final_response"],
+                    id=final_msg_id,
+                    additional_kwargs={"timestamp": timestamp, "id": final_msg_id},
+                )
+            ]
+
             updates["current_task_id"] = None
 
             for task in todo_list:
@@ -653,53 +677,58 @@ Return JSON with:
             updates["todo_list"] = todo_list
 
         return updates
-    
+
     def _validate_execution_plan(
         self, execution_plan: List[Dict[str, Any]]
     ) -> tuple[List[Dict[str, Any]], List[str]]:
         """
         Validate execution plan phases are well-formed.
-        
+
         Returns:
             (validated_plan, errors) - validated plan and list of any validation errors
         """
         errors = []
         validated = []
         phase_ids = set()
-        
+
         for i, phase in enumerate(execution_plan):
             # Validate required fields
             if not phase.get("phase_id"):
-                phase["phase_id"] = f"phase_{i+1}"
-                errors.append(f"Phase {i+1}: Missing phase_id, auto-assigned")
-            
+                phase["phase_id"] = f"phase_{i + 1}"
+                errors.append(f"Phase {i + 1}: Missing phase_id, auto-assigned")
+
             if not phase.get("name"):
-                phase["name"] = f"Phase {i+1}"
-                errors.append(f"Phase {i+1}: Missing name, auto-assigned")
-            
+                phase["name"] = f"Phase {i + 1}"
+                errors.append(f"Phase {i + 1}: Missing name, auto-assigned")
+
             if not phase.get("goal"):
                 errors.append(f"Phase {phase.get('phase_id')}: Missing goal")
-            
+
             # Track phase IDs for dependency validation
             phase_ids.add(phase.get("phase_id"))
-            
+
             # Ensure status is set to pending for new phases
             if not phase.get("status"):
                 phase["status"] = "pending"
-            
+
             validated.append(phase)
-        
+
         # Validate dependencies reference existing phase IDs
         for phase in validated:
             deps = phase.get("depends_on", [])
             for dep in deps:
                 if dep not in phase_ids:
-                    errors.append(f"Phase {phase.get('phase_id')}: Invalid dependency '{dep}'")
-        
+                    errors.append(
+                        f"Phase {phase.get('phase_id')}: Invalid dependency '{dep}'"
+                    )
+
         return validated, errors
 
     def _enter_fallback_mode(
-        self, state: Dict[str, Any], memory: Dict[str, Any], insights: Dict[str, str] = None
+        self,
+        state: Dict[str, Any],
+        memory: Dict[str, Any],
+        insights: Dict[str, str] = None,
     ) -> Dict[str, Any]:
         """Fallback mode: provide best answer from available context."""
         context_summary = {
@@ -707,6 +736,11 @@ Return JSON with:
             "insights": insights or {},
         }
         return {
+            "decision": BrainDecision(
+                action_type="finish",
+                user_response=f"I've encountered multiple issues, but here is what I know: {json.dumps(context_summary, default=str)}",
+                is_finished=True,
+            ).model_dump(),
             "final_response": f"I've encountered multiple issues, but here is what I know: {json.dumps(context_summary, default=str)}",
             "current_task_id": None,
         }
