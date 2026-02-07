@@ -78,6 +78,60 @@ class AgentRegistryService:
         # In the future, this could use vector search against AgentCapability
         return True
 
+    def get_agent_url(self, agent_id: str, agent_name: str = None, db: Session = None) -> Optional[str]:
+        """
+        Get the base URL for an agent from connection_config or agent_entries file.
+        
+        Args:
+            agent_id: The agent's unique ID
+            agent_name: Optional agent name for fallback lookup
+            db: Optional database session
+            
+        Returns:
+            Base URL string or None if not found
+        """
+        should_close_db = False
+        if db is None:
+            db = SessionLocal()
+            should_close_db = True
+            
+        try:
+            # 1. Try DB lookup first
+            agent = db.query(Agent).filter(Agent.id == agent_id).first()
+            if agent and agent.connection_config:
+                config = agent.connection_config
+                if isinstance(config, dict):
+                    base_url = config.get('base_url') or config.get('url')
+                    if base_url:
+                        return base_url
+            
+            # 2. Fallback to agent_entries file
+            backend_dir = Path(__file__).resolve().parents[1]
+            entry_path = backend_dir / 'agent_entries' / f'{agent_id}.json'
+            
+            if entry_path.exists():
+                data = json.loads(entry_path.read_text(encoding='utf-8'))
+                if isinstance(data, dict):
+                    # Check connection_config in file
+                    conn_config = data.get('connection_config', {})
+                    if conn_config:
+                        base_url = conn_config.get('base_url') or conn_config.get('url')
+                        if base_url:
+                            return base_url
+                    # Check direct base_url field
+                    if data.get('base_url'):
+                        return data.get('base_url')
+            
+            logger.warning(f"No base URL found for agent {agent_id}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error getting agent URL for {agent_id}: {e}")
+            return None
+        finally:
+            if should_close_db:
+                db.close()
+
     def get_request_format(self, agent_id: str, endpoint_path: str) -> Optional[str]:
         """
         Get the request format (json/form) for a specific agent endpoint.

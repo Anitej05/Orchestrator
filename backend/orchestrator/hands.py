@@ -282,6 +282,16 @@ class Hands:
         finally:
             db.close()
 
+        if not base_url:
+            logger.error(f"No base URL configured for agent '{agent['name']}' (ID: {agent_id}). Check connection_config or agent_entries file.")
+            return ActionResult(
+                action_type="agent",
+                resource_id=agent_id,
+                success=False,
+                error_message=f"Agent '{agent['name']}' has no configured base URL. Cannot execute.",
+                execution_time_ms=(time.time() - start_time) * 1000,
+            )
+
         url = f"{base_url.rstrip('/')}/process"
 
         async def _call_agent():

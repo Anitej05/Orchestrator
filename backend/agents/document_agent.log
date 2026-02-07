@@ -1,9 +1,9 @@
-2026-02-06 23:33:47,333 - __main__ - INFO - 🔧 Path setup: script_dir=D:\Internship\Orbimesh\backend\agents, backend_dir=D:\Internship\Orbimesh\backend
-2026-02-06 23:33:47,333 - __main__ - INFO - 🔧 sys.path includes: backend/, agents/
-2026-02-06 23:33:47,333 - __main__ - INFO - 📦 Attempting to import document_agent_lib...
-2026-02-06 23:33:47,398 - document_agent_lib.agent - DEBUG - Loaded schemas from: D:\Internship\Orbimesh\backend\schemas.py
-2026-02-06 23:33:47,398 - document_agent_lib.agent - DEBUG - Has AgentResponseStatus: True
-2026-02-06 23:33:47,480 - backend.utils.key_manager - INFO - Loaded 1 Cerebras API key from environment (CEREBRAS_API_KEY)
-2026-02-06 23:33:54,033 - utils.key_manager - INFO - Loaded 1 Cerebras API key from environment (CEREBRAS_API_KEY)
-2026-02-06 23:33:54,582 - __main__ - INFO - ✅ Successfully imported document_agent_lib
-2026-02-06 23:33:54,612 - __main__ - ERROR - Port 8070 is already in use. Please free the port or use a different one.
+2026-02-07 08:06:36,878 - __main__ - INFO - 🔧 Path setup: script_dir=D:\Internship\Orbimesh\backend\agents, backend_dir=D:\Internship\Orbimesh\backend
+2026-02-07 08:06:36,878 - __main__ - INFO - 🔧 sys.path includes: backend/, agents/
+2026-02-07 08:06:36,878 - __main__ - INFO - 📦 Attempting to import document_agent_lib...
+2026-02-07 08:06:36,993 - document_agent_lib.agent - DEBUG - Loaded schemas from: D:\Internship\Orbimesh\backend\schemas.py
+2026-02-07 08:06:36,994 - document_agent_lib.agent - DEBUG - Has AgentResponseStatus: True
+2026-02-07 08:06:37,175 - backend.utils.key_manager - INFO - Loaded 1 Cerebras API key from environment (CEREBRAS_API_KEY)
+2026-02-07 08:06:47,418 - utils.key_manager - INFO - Loaded 1 Cerebras API key from environment (CEREBRAS_API_KEY)
+2026-02-07 08:06:48,190 - __main__ - INFO - ✅ Successfully imported document_agent_lib
+2026-02-07 08:06:48,223 - __main__ - ERROR - Port 8070 is already in use. Please free the port or use a different one.

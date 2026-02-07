@@ -43,7 +43,7 @@ import httpx
 CONVERSATION_HISTORY_DIR = "conversation_history"
 from database import SessionLocal
 from models import Agent, StatusEnum, AgentCapability, AgentEndpoint, EndpointParameter, Workflow, WorkflowExecution, UserThread, WorkflowSchedule, WorkflowWebhook, AgentType
-from schemas import AgentCard, ProcessRequest, ProcessResponse, PlanResponse, FileObject
+from schemas import AgentCard, ProcessRequest, ProcessResponse, PlanResponse, FileObject, ActionApprovalRequest, ActionRejectRequest
 from orchestrator.graph import ForceJsonSerializer, create_graph_with_checkpointer, create_execution_subgraph, messages_from_dict, messages_to_dict, serialize_complex_object
 from orchestrator.state import State
 from langgraph.checkpoint.memory import MemorySaver

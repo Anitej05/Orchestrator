@@ -61,7 +61,7 @@ export default function PlanChecklist({ todoList, currentTaskId, isExecuting }: 
 
                     return (
                         <Card
-                            key={task.id}
+                            key={task.id || `task-${index}`}
                             ref={isActive ? activeRef : null}
                             className={cn(
                                 "p-3 transition-all duration-300 border-l-4",

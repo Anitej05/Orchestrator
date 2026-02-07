@@ -332,7 +332,7 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                                                                         {phase.name}
                                                                     </h4>
                                                                     <Badge variant={isCurrent ? "default" : "outline"} className={cn("text-[10px]", isCurrent && "bg-purple-500")}>
-                                                                        {phase.status.toUpperCase()}
+                                                                        {(phase.status || 'pending').toUpperCase()}
                                                                     </Badge>
                                                                 </div>
                                                                 <p className="text-xs text-gray-500 dark:text-gray-400 leading-relaxed mb-2">

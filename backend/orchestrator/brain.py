@@ -214,7 +214,13 @@ TOOLS (fast, direct functions - PREFER over agents when both qualify):
 {tool_list or "None"}
 
 PYTHON: Execute Python code directly in sandbox.
-TERMINAL: Shell commands (ls, cat, grep).
+  - Use action_type='python' when user asks to: run code, calculate, compute, process data, parse, convert, generate.
+  - Provide: payload.code (the Python code to execute)
+  - Example: {{"action_type": "python", "payload": {{"code": "print(2 + 2)"}}}}
+  - The sandbox has access to: pandas, numpy, json, datetime, re, math, statistics.
+  - PREFER PYTHON over agents for quick calculations and data processing.
+
+TERMINAL: Shell commands (ls, cat, grep, etc.).
 
 ## ADVANCED ACTION TYPES
 
