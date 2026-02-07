@@ -78,6 +78,13 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
   // Real-time task tracking
   task_statuses: {},
   current_executing_task: null,
+  // Omni-Dispatcher fields
+  execution_plan: [],
+  current_phase_id: undefined,
+  action_history: [],
+  insights: {},
+  pending_action_approval: false,
+  pending_action: undefined,
   isLoading: false,
   canvas_data: undefined,
 

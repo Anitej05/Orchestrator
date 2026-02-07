@@ -25,20 +25,15 @@ PLAN_DIR = os.path.join(BACKEND_DIR, "agent_plans")
 os.makedirs(PLAN_DIR, exist_ok=True)
 
 
+from datetime import datetime
+
 class CustomJSONEncoder(json.JSONEncoder):
-    """Custom JSON encoder for HttpUrl and other special types."""
+    """Custom JSON encoder for HttpUrl, datetime, and other special types."""
     def default(self, o):
         if isinstance(o, HttpUrl):
             return str(o)
-        return json.JSONEncoder.default(self, o)
-
-
-
-class CustomJSONEncoder(json.JSONEncoder):
-    """Custom JSON encoder for HttpUrl and other special types."""
-    def default(self, o):
-        if isinstance(o, HttpUrl):
-            return str(o)
+        if isinstance(o, datetime):
+            return o.isoformat()
         return json.JSONEncoder.default(self, o)
 
 
@@ -74,71 +69,68 @@ def extract_json_from_response(text: str) -> str | None:
 
 def serialize_complex_object(obj):
     """Helper function to serialize complex objects consistently."""
-    try:
-        json.dumps(obj)
+    # First, handle common complex types directly
+    if obj is None:
+        return None
+    if isinstance(obj, (int, float, bool, str)):
         return obj
-    except (TypeError, ValueError):
-        if type(obj).__name__ == 'HttpUrl' or (hasattr(obj, '__class__') and 'HttpUrl' in str(type(obj))):
-            return str(obj)
-        elif hasattr(obj, 'model_dump'):
-            try:
-                return obj.model_dump(mode='json')
-            except:
-                pass
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if type(obj).__name__ == 'HttpUrl' or (hasattr(obj, '__class__') and 'HttpUrl' in str(type(obj))):
+        return str(obj)
+
+    try:
+        # For Pydantic models, use model_dump or dict
+        if hasattr(obj, 'model_dump'):
+            data = obj.model_dump(mode='json')
+            return serialize_complex_object(data) # Recurse to normalize contents
         elif hasattr(obj, 'dict'):
-            try:
-                return obj.dict()
-            except:
-                pass
-        elif hasattr(obj, '__dict__'):
-            try:
-                return obj.__dict__
-            except:
-                pass
-        elif isinstance(obj, (list, tuple)):
-            try:
-                # Check for LangChain messages (have .type or ._type)
-                is_message_list = obj and all(
-                    (hasattr(item, 'type') or hasattr(item, '_type')) 
-                    for item in obj if item is not None
-                )
-                
-                if is_message_list:
-                    try:
-                        return messages_to_dict(obj)
-                    except:
-                        # Fallback if messages_to_dict fails (mixed types?)
-                        pass
-                
-                # Standard list serialization
-                result = []
-                for item in obj:
-                    try:
-                        serialized = serialize_complex_object(item)
-                        result.append(serialized)
-                    except Exception as e:
-                        logger.warning(f"Failed to serialize list item: {e}")
-                        result.append(str(item))
-                return result
-            except Exception as e:
-                logger.warning(f"Failed to serialize list: {e}")
-                return [str(item) for item in obj]
-        
-        # Check for single LangChain message
-        elif hasattr(obj, 'type') or hasattr(obj, '_type'):
+            data = obj.dict()
+            return serialize_complex_object(data)
+            
+        # For LangChain messages
+        if hasattr(obj, 'type') or hasattr(obj, '_type'):
             try:
                 serialized_list = messages_to_dict([obj])
                 if serialized_list:
                     d = serialized_list[0]
-                    # FLATTEN: Unwrap 'data' if present to match frontend/loading expectations
+                    # NORMALIZE: Map 'ai' -> 'assistant' and 'human' -> 'user' for frontend
+                    if d.get('type') == 'ai':
+                        d['type'] = 'assistant'
+                    elif d.get('type') == 'human':
+                        d['type'] = 'user'
+                    # FLATTEN: Unwrap 'data' if present
                     if 'data' in d and isinstance(d['data'], dict):
                         data_content = d.pop('data')
                         d.update(data_content)
                     return d
-                return str(obj)
             except:
                 pass
-        
+
+        # For collections, recurse
+        if isinstance(obj, (list, tuple)):
+            # Check for message list
+            is_message_list = obj and all(
+                (hasattr(item, 'type') or hasattr(item, '_type')) 
+                for item in obj if item is not None
+            )
+            if is_message_list:
+                msgs = messages_to_dict(obj)
+                for m in msgs:
+                    if m.get('type') == 'ai':
+                        m['type'] = 'assistant'
+                    elif m.get('type') == 'human':
+                        m['type'] = 'user'
+                return msgs
+            return [serialize_complex_object(item) for item in obj]
+            
+        if isinstance(obj, dict):
+            return {str(k): serialize_complex_object(v) for k, v in obj.items()}
+
+        # Final fallback: try standard JSON path via encoder
+        return json.loads(json.dumps(obj, cls=CustomJSONEncoder))
+    except Exception as e:
+        logger.warning(f"Complex serialization fallback for {type(obj)}: {e}")
         return str(obj)
 
 
@@ -293,7 +285,11 @@ def save_conversation_history(state: dict, *args, **kwargs):
             "thread_id": thread_id,
             "original_prompt": state.get("original_prompt"),
             "messages": serialized_messages,
-            "insights": state.get("insights", {})
+            "todo_list": serialize_complex_object(state.get("todo_list", [])),
+            "execution_plan": serialize_complex_object(state.get("execution_plan")),
+            "action_history": serialize_complex_object(state.get("action_history", [])),
+            "insights": serialize_complex_object(state.get("insights", {})),
+            "memory": serialize_complex_object(state.get("memory", {}))
         }
         
         with open(history_path, "w", encoding="utf-8") as f:

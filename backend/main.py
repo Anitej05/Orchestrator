@@ -44,7 +44,7 @@ CONVERSATION_HISTORY_DIR = "conversation_history"
 from database import SessionLocal
 from models import Agent, StatusEnum, AgentCapability, AgentEndpoint, EndpointParameter, Workflow, WorkflowExecution, UserThread, WorkflowSchedule, WorkflowWebhook, AgentType
 from schemas import AgentCard, ProcessRequest, ProcessResponse, PlanResponse, FileObject
-from orchestrator.graph import ForceJsonSerializer, graph, create_graph_with_checkpointer, create_execution_subgraph, messages_from_dict, messages_to_dict, serialize_complex_object
+from orchestrator.graph import ForceJsonSerializer, create_graph_with_checkpointer, create_execution_subgraph, messages_from_dict, messages_to_dict, serialize_complex_object
 from orchestrator.state import State
 from langgraph.checkpoint.memory import MemorySaver
 from routers import connect_router
@@ -1295,6 +1295,19 @@ async def execute_orchestration(
             "canvas_content": current_conversation.get("canvas_content"),
             "canvas_data": current_conversation.get("canvas_data"),
             "canvas_title": current_conversation.get("canvas_title"),
+
+            # --- NEW ORCHESTRATOR FIELDS ---
+            "todo_list": current_conversation.get("todo_list", []),
+            "memory": current_conversation.get("memory", {}),
+            "iteration_count": current_conversation.get("iteration_count", 0),
+            "failure_count": current_conversation.get("failure_count", 0),
+            "max_iterations": 25,
+            "action_history": current_conversation.get("action_history", []),
+            "insights": current_conversation.get("insights", {}),
+            "execution_plan": current_conversation.get("execution_plan"),
+            "current_phase_id": current_conversation.get("current_phase_id"),
+            "pending_approval": current_conversation.get("pending_approval", False),
+            "pending_decision": current_conversation.get("pending_decision"),
         }
     
     elif current_conversation:
@@ -1340,6 +1353,19 @@ async def execute_orchestration(
             "needs_complex_processing": None,  # Let analyze_request determine this
             "analysis_reasoning": None,
             "planning_mode": planning_mode,  # Set planning mode from parameter
+            
+            # --- NEW ORCHESTRATOR FIELDS ---
+            "todo_list": [],
+            "memory": {},
+            "iteration_count": 0,
+            "failure_count": 0,
+            "max_iterations": 25,
+            "action_history": [],
+            "insights": {},
+            "execution_plan": None,
+            "current_phase_id": None,
+            "pending_approval": False,
+            "pending_decision": None,
         }
 
     # --- File Merging Logic ---
@@ -1485,6 +1511,9 @@ def process_node_data(node_name: str, node_output, progress: float, node_count: 
     
     # Map node names to user-friendly stage names and descriptions
     stage_mapping = {
+        "omni_brain": {"stage": "planning", "message": "Brain is analyzing state..."},
+        "omni_hands": {"stage": "executing", "message": "Hands executing action..."},
+        "action_approval_required": {"stage": "approval_required", "message": "Waiting for action approval..."},
         "manage_todo_list": {"stage": "planning", "message": "Brain is analyzing tasks..."},
         "execute_next_action": {"stage": "executing", "message": "Executing task..."},
         "analyze_request": {"stage": "analyzing", "message": "Analyzing your request..."},
@@ -1517,7 +1546,7 @@ def process_node_data(node_name: str, node_output, progress: float, node_count: 
             # Extract node-specific meaningful data
             
             # --- NEW ORCHESTRATOR NODES ---
-            if node_name == "manage_todo_list" and key == "todo_list":
+            if node_name in ["omni_brain", "manage_todo_list"] and key == "todo_list":
                  if value:
                     # 'value' is a list of TaskItem dicts
                     task_names = []
@@ -1536,8 +1565,14 @@ def process_node_data(node_name: str, node_output, progress: float, node_count: 
                     node_specific_data["tasks_completed_count"] = tasks_completed
                     node_specific_data["task_names"] = task_names
                     node_specific_data["description"] = f"Brain managing {tasks_total} tasks ({tasks_completed} done)"
+            
+            # Extract adaptive planning fields for real-time UI updates
+            elif node_name == "omni_brain" and key in ["execution_plan", "action_history", "insights"]:
+                node_specific_data[key] = serialize_complex_object(value)
+                if key == "execution_plan" and value:
+                     node_specific_data["description"] = f"Brain created/updated plan with {len(value)} phases"
                     
-            elif node_name == "execute_next_action":
+            elif node_name in ["omni_hands", "execute_next_action"]:
                 # Handle task execution updates
                 if key == "executed_task_id":
                     node_specific_data["executed_task_id"] = value
@@ -1546,7 +1581,7 @@ def process_node_data(node_name: str, node_output, progress: float, node_count: 
                     todo_list = node_output.get("todo_list", [])
                     task_desc = "Unknown Task"
                     for t in todo_list:
-                        if t.get("id") == value:
+                        if t.get("id") == value or t.get("task_id") == value:
                             task_desc = t.get("description", "Unknown Task")
                             break
                     node_specific_data["task_description"] = task_desc
@@ -1554,6 +1589,14 @@ def process_node_data(node_name: str, node_output, progress: float, node_count: 
 
                 elif key == "task_status":
                      node_specific_data["task_status"] = value
+                
+                # Forward execution result to frontend
+                elif key == "execution_result":
+                     node_specific_data["execution_result"] = serialize_complex_object(value)
+                     if isinstance(value, dict) and value.get("success"):
+                          node_specific_data["description"] = "Action executed successfully"
+                     elif isinstance(value, dict):
+                          node_specific_data["description"] = f"Action failed: {value.get('error_message')}"
 
             # --- LEGACY NODES (Keep for backward compatibility) ---
             elif node_name == "parse_prompt" and key == "parsed_tasks":
@@ -1622,6 +1665,72 @@ def process_node_data(node_name: str, node_output, progress: float, node_count: 
     return {**serializable_data, **node_specific_data}
 
 # --- API Endpoints ---
+@app.post("/api/orchestrator/action/approve")
+async def approve_action_endpoint(request: ActionApprovalRequest):
+    """Approve a pending action and resume orchestration."""
+    thread_id = request.thread_id
+    logger.info(f"👍 APPROVING action for thread {thread_id}")
+
+    try:
+        from orchestrator.omni_dispatcher import approve_pending_action
+        
+        # Get current state
+        with store_lock:
+            state = conversation_store.get(thread_id)
+            
+        if not state:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+            
+        if not state.get("pending_approval"):
+            return {"status": "no_action_pending", "message": "No action is currently awaiting approval"}
+
+        # Apply approval updates
+        updates = approve_pending_action(state)
+        new_state = {**state, **updates}
+        
+        # Update store
+        with store_lock:
+            conversation_store[thread_id] = new_state
+            
+        # Resume orchestration in background
+        # Note: In a real implementation, we would trigger the graph again
+        # For now, we update the state so the next 'continue' call works
+        return {"status": "approved", "message": "Action approved. Please click 'Continue' to resume."}
+
+    except Exception as e:
+        logger.error(f"Failed to approve action: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/orchestrator/action/reject")
+async def reject_action_endpoint(request: ActionRejectRequest):
+    """Reject a pending action."""
+    thread_id = request.thread_id
+    logger.info(f"👎 REJECTING action for thread {thread_id}: {request.reason}")
+
+    try:
+        from orchestrator.omni_dispatcher import reject_pending_action
+        
+        # Get current state
+        with store_lock:
+            state = conversation_store.get(thread_id)
+            
+        if not state:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+            
+        # Apply rejection updates
+        updates = reject_pending_action(state, request.reason)
+        new_state = {**state, **updates}
+        
+        # Update store
+        with store_lock:
+            conversation_store[thread_id] = new_state
+            
+        return {"status": "rejected", "message": "Action rejected and skipped."}
+
+    except Exception as e:
+        logger.error(f"Failed to reject action: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/api/chat", response_model=ProcessResponse)
 async def find_agents(request: ProcessRequest):
     """
@@ -1686,7 +1795,13 @@ async def find_agents(request: ProcessRequest):
             canvas_data=canvas_data.get('canvas_data') or final_state.get('canvas_data'), # Support V2 data from state
             browser_view=canvas_data.get('browser_view'),
             plan_view=canvas_data.get('plan_view'),
-            current_view=canvas_data.get('current_view', 'browser')
+            current_view=canvas_data.get('current_view', 'browser'),
+            # Omni-Dispatcher fields
+            execution_plan=final_state.get('execution_plan'),
+            action_history=final_state.get('action_history'),
+            insights=final_state.get('insights'),
+            pending_approval=final_state.get('pending_approval', False),
+            pending_decision=final_state.get('pending_decision')
         )
 
     except HTTPException as http_exc:
@@ -3357,8 +3472,12 @@ async def websocket_chat(websocket: WebSocket):
 
             # Check if workflow is paused for user input
             if final_state.get("pending_user_input"):
+                # Check for Omni-Dispatcher approval
+                pending_approval = final_state.get("pending_approval", False)
+                pending_decision = final_state.get("pending_decision")
+                
                 # Check if this is an approval request
-                needs_approval = final_state.get("needs_approval", False)
+                needs_approval = final_state.get("needs_approval", False) or pending_approval
                 
                 # Calculate cost if approval is needed
                 estimated_cost = 0.0
@@ -3374,22 +3493,31 @@ async def websocket_chat(websocket: WebSocket):
                                 if cost:
                                     estimated_cost += cost
                 
+                # Send appropriate node event for frontend
+                node_event = "action_approval_required" if pending_approval else "__user_input_required__"
+                
                 await websocket.send_json({
-                    "node": "__user_input_required__",
+                    "node": node_event,
                     "thread_id": thread_id,
                     "data": {
                         "question_for_user": final_state.get("question_for_user"),
                         "approval_required": needs_approval,
+                        "pending_approval": pending_approval,
+                        "pending_decision": pending_decision,
                         "estimated_cost": estimated_cost,
                         "task_count": task_count,
                         "task_plan": final_state.get("task_plan", []),
-                        "task_agent_pairs": final_state.get("task_agent_pairs", [])
+                        "task_agent_pairs": final_state.get("task_agent_pairs", []),
+                        # Forward Omni-Dispatcher fields
+                        "execution_plan": final_state.get("execution_plan"),
+                        "action_history": final_state.get("action_history"),
+                        "insights": final_state.get("insights")
                     },
                     "message": "Additional information required to complete your request.",
                     "status": "pending_user_input",
                     "timestamp": time.time()
                 })
-                logger.info(f"WebSocket workflow paused for user input in thread_id {thread_id}, needs_approval: {needs_approval}")
+                logger.info(f"WebSocket workflow paused for user input in thread_id {thread_id}, needs_approval: {needs_approval}, pending_approval: {pending_approval}")
                 continue  # Continue waiting for user response message
 
             # Save conversation history with owner enforcement and error handling

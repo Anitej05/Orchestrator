@@ -92,6 +92,9 @@ class BrainDecision(BaseModel):
         None,
         description="When requires_approval=True: Clear explanation of what will happen and why approval is needed"
     )
+    fallback_mode: bool = Field(
+        False, description="True if entering fallback due to consecutive failures"
+    )
 
 
 class Brain:

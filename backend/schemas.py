@@ -393,6 +393,12 @@ class ProcessResponse(BaseModel):
     browser_view: Optional[str] = None
     plan_view: Optional[str] = None
     current_view: Optional[str] = None
+    # Omni-Dispatcher fields
+    execution_plan: Optional[List[Dict[str, Any]]] = None
+    action_history: Optional[List[Dict[str, Any]]] = None
+    insights: Optional[Dict[str, str]] = None
+    pending_approval: bool = False
+    pending_decision: Optional[Dict[str, Any]] = None
     
 class PlanResponse(BaseModel):
     """The schema for the GET /api/plan/{thread_id} endpoint response."""
@@ -486,6 +492,15 @@ class ConversationTurn(BaseModel):
     content: str
     timestamp: str
     attached_files: List[str] = Field(default_factory=list, description="File names referenced in this turn")
+
+class ActionApprovalRequest(BaseModel):
+    """Request to approve a pending action."""
+    thread_id: str
+
+class ActionRejectRequest(BaseModel):
+    """Request to reject a pending action."""
+    thread_id: str
+    reason: Optional[str] = "User rejected"
 
 class ProcessRequest(BaseModel):
     prompt: str

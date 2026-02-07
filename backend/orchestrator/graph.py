@@ -36,23 +36,37 @@ def create_graph_with_checkpointer(checkpointer):
     workflow = StateGraph(State)
     
     # Define Nodes using the new modular OMNI-DISPATCHER logic
-    workflow.add_node("brain", brain.think)
-    workflow.add_node("hands", hands.execute)
+    workflow.add_node("omni_brain", brain.think)
+    workflow.add_node("omni_hands", hands.execute)
+    
+    # Human-in-the-Loop Node: Just a placeholder that signals we are waiting
+    def action_approval_node(state):
+        return {
+            "pending_user_input": True,
+            "pending_approval": state.get("pending_approval"),
+            "pending_decision": state.get("pending_decision")
+        }
+    
+    workflow.add_node("action_approval_required", action_approval_node)
     
     # Define Core Logic Cycle
-    workflow.add_edge(START, "brain")
+    workflow.add_edge(START, "omni_brain")
     
     workflow.add_conditional_edges(
-        "brain",
+        "omni_brain",
         omni_route_condition,
         {
-            "hands": "hands",
+            "hands": "omni_hands",
+            "approval": "action_approval_required",
             "finish": END
         }
     )
     
     # Hands always loop back to Brain for the next decision
-    workflow.add_edge("hands", "brain")
+    workflow.add_edge("omni_hands", "omni_brain")
+    
+    # After approval, we end (the UI will send a new message to continue)
+    workflow.add_edge("action_approval_required", END)
     
     return workflow.compile(checkpointer=checkpointer)
 
