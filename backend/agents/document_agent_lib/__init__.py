@@ -38,6 +38,7 @@ from .schemas import (
 )
 from . import agent as agent
 from .agent import DocumentAgent
+from .planner import DocumentPlanner
 
 __all__ = ["DocumentAgent", "app"]
 from .state import DialogueStateManager
@@ -79,6 +80,17 @@ def get_agent() -> DocumentAgent:
         logger.info("Initializing DocumentAgent...")
         _agent = DocumentAgent()
     return _agent
+
+# Initialize planner (lazy loaded)
+_planner = None
+
+def get_planner() -> DocumentPlanner:
+    """Get or create planner instance."""
+    global _planner
+    if _planner is None:
+        logger.info("Initializing DocumentPlanner...")
+        _planner = DocumentPlanner()
+    return _planner
 
 
 # ============================================================================
@@ -134,8 +146,19 @@ class DialogueManager:
 
 
 # ============================================================================
-# HEALTH CHECK
+# HEALTH CHECK & ROOT
 # ============================================================================
+
+@app.get("/")
+async def root():
+    """Root endpoint for protocol compliance."""
+    return {
+        "status": "active",
+        "agent": "document-agent",
+        "version": "2.0.0",
+        "endpoints": ["/execute", "/health", "/analyze", "/create", "/edit"]
+    }
+
 
 @app.get("/health")
 async def health_check():
@@ -366,6 +389,8 @@ async def edit_document(request: EditDocumentRequest):
 @app.post("/execute", response_model=backend_schemas.AgentResponse)
 async def execute(message: backend_schemas.OrchestratorMessage):
     """Unified orchestrator endpoint supporting execute/continue/cancel/context_update."""
+    logger.info(f"📥 DocAgent Received: Type={message.type}, Action={message.action}, Payload keys={list(message.payload.keys()) if message.payload else []}")
+    
     agent = get_agent()
     payload = message.payload or {}
     task_id = payload.get("task_id") or f"doc-{int(asyncio.get_event_loop().time()*1000)}"
@@ -400,9 +425,19 @@ async def execute(message: backend_schemas.OrchestratorMessage):
         result = await agent.edit_document(edit_req)
         DialogueManager.resume(task_id)
         DialogueManager.complete(task_id)
+        
+        std_response = backend_schemas.StandardAgentResponse(
+            status="success" if result.get("success") else "error",
+            summary=result.get("message", "Edit completed."),
+            data=result,
+            canvas_display=result.get("canvas_display"),
+            error_message=None if result.get("success") else result.get("message")
+        )
+        
         return backend_schemas.AgentResponse(
             status=backend_schemas.AgentResponseStatus.COMPLETE if result.get("success") else backend_schemas.AgentResponseStatus.ERROR,
             result=result,
+            standard_response=std_response,
             error=None if result.get("success") else result.get("message"),
             context={"task_id": task_id},
         )
@@ -428,6 +463,66 @@ async def execute(message: backend_schemas.OrchestratorMessage):
 
     # EXECUTE
     action = message.action
+
+    # Robustness: Use Planner if action is missing or generic
+    if not action or action == "/agent":
+        logger.info(f"🧠 Autonomously planning action for prompt: {message.prompt[:50] if message.prompt else 'None'}")
+        if not message.prompt:
+             return backend_schemas.AgentResponse(
+                status=backend_schemas.AgentResponseStatus.ERROR,
+                error="Missing prompt for autonomous execution",
+                context={"task_id": task_id}
+            )
+        
+        plan = await get_planner().plan(message.prompt)
+        action = plan.action
+        # Merge planned params into payload (payload takes precedence if conflicts, but usually empty)
+        for k, v in plan.params.items():
+            if k not in payload:
+                payload[k] = v
+        
+        logger.info(f"📍 Planned Action: {action}, Params: {payload.keys()}")
+
+    if action == "/create":
+        req = CreateDocumentRequest(**payload)
+        result = await agent.create_document(req)
+        
+        std_response = backend_schemas.StandardAgentResponse(
+            status="success" if result.get("success") else "error",
+            summary=result.get("message", "Document created."),
+            data=result,
+            canvas_display=result.get("standard_response", {}).get("canvas_display"),
+            error_message=None if result.get("success") else result.get("message")
+        )
+
+        return backend_schemas.AgentResponse(
+            status=backend_schemas.AgentResponseStatus.COMPLETE,
+            result=result,
+            standard_response=std_response,
+            error=None if result.get("success") else result.get("message"),
+            context={"task_id": task_id},
+        )
+
+    if action == "/display":
+        req = DisplayDocumentRequest(**payload)
+        result = await agent.display_document(req.file_path)
+        
+        std_response = backend_schemas.StandardAgentResponse(
+            status="success" if result.get("success") else "error",
+            summary=result.get("message", "Document displayed."),
+            data=result,
+            canvas_display=result.get("canvas_display"),
+            error_message=None if result.get("success") else result.get("message")
+        )
+
+        return backend_schemas.AgentResponse(
+            status=backend_schemas.AgentResponseStatus.COMPLETE,
+            result=result,
+            standard_response=std_response,
+            error=None if result.get("success") else result.get("message"),
+            context={"task_id": task_id},
+        )
+
     if action == "/edit":
         edit_req = EditDocumentRequest(**payload)
         result = await agent.edit_document(edit_req)
@@ -446,19 +541,43 @@ async def execute(message: backend_schemas.OrchestratorMessage):
             DialogueManager.pause(task_id, question)
             return question
 
+        std_response = backend_schemas.StandardAgentResponse(
+            status="success" if result.get("success") else "error",
+            summary=result.get("message", "Edit applied."),
+            data=result,
+            canvas_display=result.get("canvas_display"),
+            error_message=None if result.get("success") else result.get("message")
+        )
+
         return backend_schemas.AgentResponse(
             status=backend_schemas.AgentResponseStatus.COMPLETE if result.get("success") else backend_schemas.AgentResponseStatus.ERROR,
             result=result,
+            standard_response=std_response,
             error=None if result.get("success") else result.get("message"),
             context={"task_id": task_id},
         )
 
     if action == "/analyze":
+        # Map generic 'instruction' to 'query' if needed (Brain uses 'instruction')
+        if "instruction" in payload and "query" not in payload:
+            logger.info("Mapping payload 'instruction' to 'query'")
+            payload["query"] = payload["instruction"]
+
         req = AnalyzeDocumentRequest(**payload)
         result = await agent.analyze_document(req)
+        
+        std_response = backend_schemas.StandardAgentResponse(
+            status="success" if result.get("success") else "error",
+            summary=result.get("answer", "Analysis complete.")[:200] + "...",
+            data=result,
+            canvas_display=result.get("canvas_display"),
+            error_message=None if result.get("success") else result.get("answer")
+        )
+
         return backend_schemas.AgentResponse(
             status=backend_schemas.AgentResponseStatus.COMPLETE if result.get("success") else backend_schemas.AgentResponseStatus.ERROR,
             result=result,
+            standard_response=std_response,
             error=None if result.get("success") else result.get("answer"),
             context={"task_id": task_id},
         )
@@ -466,13 +585,24 @@ async def execute(message: backend_schemas.OrchestratorMessage):
     if action == "/extract":
         req = ExtractDataRequest(**payload)
         result = await agent.extract_data(req)
+        
+        std_response = backend_schemas.StandardAgentResponse(
+            status="success" if result.get("success") else "error",
+            summary=result.get("message", "Extraction complete."),
+            data=result,
+            canvas_display=None, # Extract usually returns data, not canvas
+            error_message=None if result.get("success") else result.get("message")
+        )
+
         return backend_schemas.AgentResponse(
             status=backend_schemas.AgentResponseStatus.COMPLETE if result.get("success") else backend_schemas.AgentResponseStatus.ERROR,
             result=result,
+            standard_response=std_response,
             error=None if result.get("success") else result.get("message"),
             context={"task_id": task_id},
         )
 
+    logger.error(f"❌ DocAgent Error: Unsupported action '{action}'")
     return backend_schemas.AgentResponse(
         status=backend_schemas.AgentResponseStatus.ERROR,
         error=f"Unsupported action: {action}",

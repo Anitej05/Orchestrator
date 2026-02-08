@@ -476,6 +476,13 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
         has_canvas: false,
         canvas_type: undefined,
         canvas_data: undefined,
+        // Omni-Dispatcher fields
+        execution_plan: [],
+        current_phase_id: undefined,
+        action_history: [],
+        insights: {},
+        pending_action_approval: false,
+        pending_action: undefined,
       });
       // Also clear from localStorage
       if (typeof window !== 'undefined') {

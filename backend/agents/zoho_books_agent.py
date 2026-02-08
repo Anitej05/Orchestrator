@@ -67,4 +67,4 @@ if __name__ == "__main__":
     # For production, run using your process manager / container and don't use reload=True.
     # Use 0.0.0.0 to bind to all interfaces for better compatibility
     port = int(os.getenv('ZOHO_BOOKS_AGENT_PORT', 8050))
-    uvicorn.run("zoho_books_agent_agent:app", host="0.0.0.0", port=port, reload=False)
+    uvicorn.run("zoho_books_agent:app", host="0.0.0.0", port=port, reload=False)

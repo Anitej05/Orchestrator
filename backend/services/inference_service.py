@@ -344,7 +344,7 @@ class InferenceService:
                 if not api_key: return None
                 
                 # Model validation: Cerebras only supports their specific models
-                model_to_use = model if model and ("gpt-oss" in model or "llama" in model.lower()) else "llama-3.3-70b" 
+                model_to_use = model if model and ("gpt-oss" in model or "llama" in model.lower()) else "gpt-oss-120b" 
                 return ChatCerebras(model=model_to_use, api_key=api_key, temperature=temp, max_tokens=max_tokens)
                 
             elif provider == ProviderType.GROQ:
@@ -352,7 +352,7 @@ class InferenceService:
                 if not api_key: return None
                 
                 # Model validation: Groq models typically start with llama, mixtral, or gemma
-                model_to_use = model if model and any(x in model.lower() for x in ["llama", "mixtral", "gemma"]) else "llama-3.3-70b-versatile"
+                model_to_use = model if model and any(x in model.lower() for x in ["llama", "mixtral", "gemma", "gpt"]) else "openai/gpt-oss-120b"
                 return ChatGroq(model=model_to_use, api_key=api_key, temperature=temp, max_tokens=max_tokens)
                 
             elif provider == ProviderType.NVIDIA:
@@ -360,7 +360,7 @@ class InferenceService:
                 if not api_key: return None
                 
                 # Model validation: NVIDIA models usually have a prefix or are llama
-                model_to_use = model if model and ("meta/" in model or "nvidia/" in model or "llama" in model.lower()) else "meta/llama-3.1-405b-instruct"
+                model_to_use = model if model and ("meta/" in model or "nvidia/" in model or "llama" in model.lower() or "minimax" in model.lower()) else "minimaxai/minimax-m2.1"
                 
                 # Handling for JSON mode if supported or using model_kwargs
                 from langchain_nvidia_ai_endpoints import ChatNVIDIA

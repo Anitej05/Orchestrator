@@ -9,12 +9,13 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Literal, Union
+from enum import Enum
 from datetime import datetime, timedelta
 from threading import Lock
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query, Body
+from fastapi import FastAPI, HTTPException, Query, Body, Form, UploadFile, File
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
@@ -43,12 +44,26 @@ cms_service = ContentManagementService()
 # Centralized Inference Service
 from backend.services.inference_service import inference_service, InferencePriority
 from langchain_core.messages import HumanMessage
+from backend.schemas import AgentResponse, StandardAgentResponse, AgentResponseStatus
 
 # Import standardized file manager
 try:
     from agents.utils.agent_file_manager import AgentFileManager, FileType, FileStatus
 except ImportError:
     from agent_file_manager import AgentFileManager, FileType, FileStatus
+
+from .planner import ZohoPlanner
+
+# Initialize planner (lazy loaded)
+_planner = None
+
+def get_planner() -> ZohoPlanner:
+    """Get or create planner instance."""
+    global _planner
+    if _planner is None:
+        logger.info("Initializing ZohoPlanner...")
+        _planner = ZohoPlanner()
+    return _planner
 
 # ============================================================================
 # CONFIGURATION & CREDENTIALS
@@ -797,6 +812,39 @@ class ItemRequest(BaseModel):
     hazard_class: Optional[str] = None
     controlled_substance: bool = False
     prescription_required: bool = False
+
+
+# ============================================================================
+# ORCHESTRATOR UNIFIED INTERFACE MODELS (v2)
+# ============================================================================
+
+class AgentResponseStatus(str, Enum):
+    SUCCESS = "success"
+    COMPLETE = "complete"
+    FAILED = "failed"
+    ERROR = "error"
+    NEEDS_INPUT = "needs_input"
+    IN_PROGRESS = "in_progress"
+    PAUSED = "paused"
+
+class OrchestratorMessage(BaseModel):
+    """Standardized message from orchestrator to agent."""
+    type: Literal["execute", "continue", "cancel", "context_update"] = "execute"
+    action: Optional[str] = None
+    prompt: Optional[str] = None
+    payload: Optional[Dict[str, Any]] = None
+    answer: Optional[str] = None
+    additional_context: Optional[Dict[str, Any]] = None
+
+class AgentResponse(BaseModel):
+    """Standardized response from agent to orchestrator."""
+    status: AgentResponseStatus
+    result: Optional[Any] = None
+    message: Optional[str] = None
+    error: Optional[str] = None
+    question: Optional[str] = None
+    question_type: Optional[Literal["choice", "text", "confirmation"]] = None
+    context: Optional[Dict[str, Any]] = None
 
 class PaymentInvoiceItem(BaseModel):
     """Invoice item in payment request."""
@@ -2286,6 +2334,166 @@ def convert_estimate_to_invoice(estimate_id: str):
     except Exception as e:
         logger.error(f"Error converting estimate to invoice: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to convert estimate to invoice: {str(e)}")
+
+# ============================================================================
+# UNIFIED ORCHESTRATOR INTERFACE (v2)
+# ============================================================================
+
+@app.post("/execute", response_model=AgentResponse)
+async def execute(message: OrchestratorMessage):
+    """
+    Unified entry point for the Orchestrator.
+    Handles routing to granular endpoints and natural language processing.
+    """
+    logger.info(f"🚀 Unified Execute: type={message.type}, action={message.action}, prompt={message.prompt[:50] if message.prompt else None}")
+    
+    try:
+        # 1. Route based on type
+        if message.type == "cancel":
+            return AgentResponse(status=AgentResponseStatus.COMPLETE, message="Task cancelled")
+            
+        if message.type == "context_update":
+            return AgentResponse(status=AgentResponseStatus.COMPLETE, message="Context updated")
+            
+        if message.type == "continue":
+            return await continue_task(message)
+
+        # 2. Extract Action and Payload
+        action = message.action or ""
+        payload = message.payload or {}
+        prompt = message.prompt or ""
+
+        method = "POST"
+        
+        # 3. Autonomous Planning (if prompt provided and no explicit action)
+        if not action and prompt:
+            try:
+                plan = await get_planner().plan(prompt)
+                action = plan.action
+                payload = plan.payload
+                method = plan.method
+                logger.info(f"📍 Planned Action: {action}, Method: {method}, Params: {payload.keys()}")
+            except Exception as e:
+                logger.error(f"Planning error: {e}")
+                # Fallback handled by individual checks or return error
+
+
+        # 4. Delegate to existing endpoints
+        # Note: In a production scenario, we'd use an LLM (InferenceService) to map prompt -> function call
+        # For now, we manually map common actions.
+        
+        if action == "/invoices":
+            if method == "GET" or (message.type == "execute" and not payload):
+                # GET/List
+                res = list_invoices()
+                return AgentResponse(
+                    status=AgentResponseStatus.COMPLETE,
+                    result=res,
+                    standard_response=StandardAgentResponse(
+                        status="success",
+                        summary=f"Found {len(res.get('invoices', []))} invoices",
+                        data=res,
+                        canvas_display=res.get("standard_response", {}).get("canvas_display")
+                    )
+                )
+            else:
+                # POST/Create
+                req = CreateInvoiceRequest(**payload)
+                res = create_invoice(req)
+                return AgentResponse(
+                    status=AgentResponseStatus.COMPLETE,
+                    result=res,
+                    standard_response=StandardAgentResponse(
+                        status="success",
+                        summary="Invoice created",
+                        data=res
+                    )
+                )
+                
+        if action == "/customers":
+            if method == "GET" or (message.type == "execute" and not payload):
+                res = list_customers()
+                return AgentResponse(
+                    status=AgentResponseStatus.COMPLETE,
+                    result=res,
+                    standard_response=StandardAgentResponse(
+                        status="success",
+                        summary=f"Found {len(res.get('contacts', []))} customers",
+                        data=res
+                    )
+                )
+            else:
+                req = CustomerRequest(**payload)
+                res = create_customer(req)
+                return AgentResponse(
+                     status=AgentResponseStatus.COMPLETE,
+                     result=res,
+                     standard_response=StandardAgentResponse(
+                        status="success",
+                        summary="Customer created",
+                        data=res
+                    )
+                )
+
+        if action == "/items":
+            if method == "GET" or (message.type == "execute" and not payload):
+                res = list_items()
+                return AgentResponse(
+                    status=AgentResponseStatus.COMPLETE,
+                    result=res,
+                    standard_response=StandardAgentResponse(
+                        status="success",
+                        summary=f"Found {len(res.get('items', []))} items",
+                        data=res,
+                        canvas_display=res.get("standard_response", {}).get("canvas_display")
+                    )
+                )
+            else:
+                req = ItemRequest(**payload)
+                res = create_item(req)
+                return AgentResponse(
+                    status=AgentResponseStatus.COMPLETE,
+                    result=res,
+                    standard_response=StandardAgentResponse(
+                        status="success",
+                        summary="Item created",
+                        data=res
+                    )
+                )
+
+        if action == "/payments":
+            # Basic implementation for payments if not already there
+             if method == "GET" or (message.type == "execute" and not payload):
+                 # Assuming a list_payments function exists or returning placeholder
+                 return AgentResponse(status=AgentResponseStatus.COMPLETE, result={"message": "Payment listing not implemented yet"})
+             else:
+                 return AgentResponse(status=AgentResponseStatus.COMPLETE, result={"message": "Payment creation not implemented yet"})
+
+        # Fallback error
+        return AgentResponse(
+            status=AgentResponseStatus.ERROR, 
+            error=f"Unsupported action: {action}. Please specify /invoices, /customers, /items, or /payments."
+        )
+
+    except Exception as e:
+        logger.error(f"Error in unified execute: {e}", exc_info=True)
+        return AgentResponse(
+            status=AgentResponseStatus.ERROR, 
+            error=str(e),
+            standard_response=StandardAgentResponse(
+                status="error",
+                summary="Zoho Agent Execution Failed",
+                error_message=str(e)
+            )
+        )
+
+@app.post("/continue", response_model=AgentResponse)
+async def continue_task(message: OrchestratorMessage):
+    """Handle multi-turn interactions for unified protocol."""
+    return AgentResponse(
+        status=AgentResponseStatus.ERROR, 
+        error="Multi-turn conversation not yet implemented for ZohoBooksAgent. Please use direct actions."
+    )
 
 # ============================================================================
 # MAIN ENTRY POINT

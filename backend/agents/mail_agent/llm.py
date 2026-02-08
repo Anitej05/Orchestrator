@@ -347,7 +347,13 @@ Current Time: {current_time}
 User Request: "{prompt}"
 {f'PREVIOUS ERROR: {error_context}' if error_context else ''}
 
-[Schema omitted for brevity - Standard Decompose Schema]
+AVAILABLE ACTIONS:
+- search: Search for emails (params: query, max_results)
+- summarize: Summarize specific emails (params: message_ids, use_history=True)
+- draft_reply: Draft a reply (params: message_id, intent)
+- send_email: Send an email (params: to, subject, body)
+- manage: Organize emails (params: action="archive"|"delete"|"mark_read"|"star", message_ids, use_history=True)
+- extract_actions: Find to-dos in emails (params: use_history=True)
 Return JSON with "steps" and "reasoning".
 JSON:"""
         

@@ -5,7 +5,7 @@
  * to test the store's logic in isolation.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { useConversationStore } from '../conversation-store';
+import { useConversationStore } from '../../lib/conversation-store';
 
 // Mock external dependencies
 const mockSend = vi.fn();
@@ -32,7 +32,7 @@ Object.defineProperty(window, '__websocket', {
 });
 
 // Mock apiClient
-vi.mock('../api-client', () => ({
+vi.mock('../../lib/api-client', () => ({
   uploadFiles: vi.fn(() => Promise.resolve([
     {
       file_name: 'test.txt',
@@ -43,13 +43,15 @@ vi.mock('../api-client', () => ({
 }));
 
 // Mock auth-fetch
-vi.mock('../auth-fetch', () => ({
+vi.mock('../../lib/auth-fetch', () => ({
   authFetch: vi.fn((url, options) => {
     if (url.includes('/api/conversations/')) {
+      const threadIdMatch = url.match(/\/api\/conversations\/([^/]+)/);
+      const threadId = threadIdMatch ? threadIdMatch[1] : 'test-thread-id';
       return Promise.resolve({
         ok: true,
         json: () => Promise.resolve({
-          thread_id: 'test-thread-id',
+          thread_id: threadId,
           status: 'completed',
           messages: [
             {
@@ -100,7 +102,7 @@ Object.defineProperty(window, 'localStorage', {
 describe('Conversation Store', () => {
   beforeEach(() => {
     // Reset store state before each test
-    useConversationStore.getState().resetConversation();
+    useConversationStore.getState().actions.resetConversation();
     // Reset mocks
     mockSend.mockClear();
     mockClose.mockClear();
@@ -122,10 +124,10 @@ describe('Conversation Store', () => {
       expect(state.messages).toEqual([]);
       expect(state.isWaitingForUser).toBe(false);
       expect(state.isLoading).toBe(false);
-      expect state.task_agent_pairs).toEqual([]);
+      expect(state.task_agent_pairs).toEqual([]);
       expect(state.plan).toEqual([]);
       expect(state.execution_plan).toEqual([]);
-      expect state.action_history).toEqual([]);
+      expect(state.action_history).toEqual([]);
     });
 
     it('should have current_view set to browser', () => {
@@ -148,7 +150,7 @@ describe('Conversation Store', () => {
 
       expect(state.execution_plan).toEqual([]);
       expect(state.current_phase_id).toBeUndefined();
-      expect state.action_history).toEqual([]);
+      expect(state.action_history).toEqual([]);
       expect(state.insights).toEqual({});
       expect(state.pending_action_approval).toBe(false);
       expect(state.pending_action).toBeUndefined();
@@ -160,7 +162,7 @@ describe('Conversation Store', () => {
       const store = useConversationStore.getState();
 
       // Set some previous state
-      store._setConversationState({
+      store.actions._setConversationState({
         thread_id: 'prev-thread',
         messages: [{ id: 'prev', type: 'assistant', content: 'Prev', timestamp: new Date() }],
         final_response: 'Previous response',
@@ -239,7 +241,7 @@ describe('Conversation Store', () => {
   describe('continueConversation', () => {
     beforeEach(() => {
       // Start a conversation first
-      useConversationStore.getState()._setConversationState({
+      useConversationStore.getState().actions._setConversationState({
         thread_id: 'test-thread-id',
         messages: [{ id: 'msg-1', type: 'user', content: 'First message', timestamp: new Date() }],
       });
@@ -273,7 +275,7 @@ describe('Conversation Store', () => {
       const store = useConversationStore.getState();
 
       // Set up as waiting for user
-      store._setConversationState({ isWaitingForUser: true });
+      store.actions._setConversationState({ isWaitingForUser: true });
 
       await store.actions.continueConversation('Option A');
 
@@ -286,7 +288,7 @@ describe('Conversation Store', () => {
     it('should clear isWaitingForUser on continue', async () => {
       const store = useConversationStore.getState();
 
-      store._setConversationState({ isWaitingForUser: true });
+      store.actions._setConversationState({ isWaitingForUser: true });
 
       await store.actions.continueConversation('Response');
 
@@ -298,7 +300,7 @@ describe('Conversation Store', () => {
       const store = useConversationStore.getState();
 
       // Clear thread_id
-      store._setConversationState({ thread_id: undefined });
+      store.actions._setConversationState({ thread_id: undefined });
 
       // Should not throw but should log error
       await expect(store.actions.continueConversation('Test')).resolves.not.toThrow();
@@ -344,7 +346,7 @@ describe('Conversation Store', () => {
     });
 
     it('should handle 404 errors gracefully', async () => {
-      const { authFetch } = await import('../auth-fetch');
+      const { authFetch } = await import('../../lib/auth-fetch');
       (authFetch as any).mockResolvedValueOnce({
         ok: false,
         status: 404,
@@ -367,7 +369,7 @@ describe('Conversation Store', () => {
       const store = useConversationStore.getState();
 
       // Set current state
-      store._setConversationState({
+      store.actions._setConversationState({
         thread_id: 'current-thread',
         messages: [{ id: 'current', type: 'user', content: 'Current', timestamp: new Date() }],
         metadata: { existing_key: 'existing_value' },
@@ -390,7 +392,7 @@ describe('Conversation Store', () => {
       const store = useConversationStore.getState();
 
       // Fill state
-      store._setConversationState({
+      store.actions._setConversationState({
         thread_id: 'test-thread',
         messages: [{ id: 'msg-1', type: 'user', content: 'Test', timestamp: new Date() }],
         task_agent_pairs: [{ task_name: 'Test task' }],
@@ -410,10 +412,10 @@ describe('Conversation Store', () => {
 
       expect(state.thread_id).toBeUndefined();
       expect(state.messages).toEqual([]);
-      expect state.task_agent_pairs).toEqual([]);
+      expect(state.task_agent_pairs).toEqual([]);
       expect(state.plan).toEqual([]);
       expect(state.execution_plan).toEqual([]);
-      expect state.action_history).toEqual([]);
+      expect(state.action_history).toEqual([]);
       expect(state.insights).toEqual({});
       expect(state.metadata).toEqual({});
       expect(state.has_canvas).toBe(false);
@@ -432,7 +434,7 @@ describe('Conversation Store', () => {
     it('should clear Omni-Dispatcher fields', () => {
       const store = useConversationStore.getState();
 
-      store._setConversationState({
+      store.actions._setConversationState({
         execution_plan: [{ phase_id: '1' }],
         current_phase_id: 'phase-1',
         action_history: [{ iteration: 1 }],
@@ -445,7 +447,7 @@ describe('Conversation Store', () => {
       const state = useConversationStore.getState();
       expect(state.execution_plan).toEqual([]);
       expect(state.current_phase_id).toBeUndefined();
-      expect state.action_history).toEqual([]);
+      expect(state.action_history).toEqual([]);
       expect(state.insights).toEqual({});
       expect(state.pending_action_approval).toBe(false);
     });
@@ -455,7 +457,7 @@ describe('Conversation Store', () => {
     it('should update partial state', () => {
       const store = useConversationStore.getState();
 
-      store._setConversationState({
+      store.actions._setConversationState({
         final_response: 'Task complete',
         status: 'completed',
       });
@@ -469,12 +471,12 @@ describe('Conversation Store', () => {
     it('should append messages for same conversation', () => {
       const store = useConversationStore.getState();
 
-      store._setConversationState({
+      store.actions._setConversationState({
         thread_id: 'thread-1',
         messages: [{ id: 'msg-1', type: 'assistant', content: 'Response 1', timestamp: new Date() }],
       });
 
-      store._setConversationState({
+      store.actions._setConversationState({
         thread_id: 'thread-1',
         messages: [{ id: 'msg-2', type: 'assistant', content: 'Response 2', timestamp: new Date() }],
       });
@@ -489,12 +491,12 @@ describe('Conversation Store', () => {
     it('should replace messages for different conversation', () => {
       const store = useConversationStore.getState();
 
-      store._setConversationState({
+      store.actions._setConversationState({
         thread_id: 'thread-1',
         messages: [{ id: 'msg-1', type: 'assistant', content: 'Response 1', timestamp: new Date() }],
       });
 
-      store._setConversationState({
+      store.actions._setConversationState({
         thread_id: 'thread-2',
         messages: [{ id: 'msg-2', type: 'assistant', content: 'Response 2', timestamp: new Date() }],
       });
@@ -508,11 +510,11 @@ describe('Conversation Store', () => {
     it('should merge uploaded files', () => {
       const store = useConversationStore.getState();
 
-      store._setConversationState({
+      store.actions._setConversationState({
         uploaded_files: [{ file_name: 'file1.txt', file_path: '/uploads/file1.txt', file_type: 'document' }],
       });
 
-      store._setConversationState({
+      store.actions._setConversationState({
         uploaded_files: [{ file_name: 'file2.txt', file_path: '/uploads/file2.txt', file_type: 'document' }],
       });
 
@@ -526,11 +528,11 @@ describe('Conversation Store', () => {
     it('should deduplicate uploaded files', () => {
       const store = useConversationStore.getState();
 
-      store._setConversationState({
+      store.actions._setConversationState({
         uploaded_files: [{ file_name: 'file1.txt', file_path: '/uploads/file1.txt', file_type: 'document' }],
       });
 
-      store._setConversationState({
+      store.actions._setConversationState({
         uploaded_files: [{ file_name: 'file1.txt', file_path: '/uploads/file1.txt', file_type: 'document' }],
       });
 
@@ -547,12 +549,12 @@ describe('Conversation Store', () => {
         task_name: `Task ${i}`,
       }));
 
-      store._setConversationState({
+      store.actions._setConversationState({
         metadata: { completed_tasks: initialTasks },
       });
 
       // Add 5 more
-      store._setConversationState({
+      store.actions._setConversationState({
         metadata: {
           completed_tasks: Array.from({ length: 5 }, (_, i) => ({
             task_name: `New Task ${i}`,
@@ -569,11 +571,11 @@ describe('Conversation Store', () => {
     it('should preserve plan when updating', () => {
       const store = useConversationStore.getState();
 
-      store._setConversationState({
+      store.actions._setConversationState({
         plan: [{ task_name: 'Step 1' }],
       });
 
-      store._setConversationState({
+      store.actions._setConversationState({
         status: 'processing',
       });
 
@@ -585,12 +587,12 @@ describe('Conversation Store', () => {
     it('should update plan fields', () => {
       const store = useConversationStore.getState();
 
-      store._setConversationState({
+      store.actions._setConversationState({
         plan: [{ task_name: 'Step 1' }],
         metadata: { original_prompt: 'Original' },
       });
 
-      store._setConversationState({
+      store.actions._setConversationState({
         plan: [{ task_name: 'Step 2' }],
         metadata: { original_prompt: 'Updated' },
       });
@@ -604,12 +606,12 @@ describe('Conversation Store', () => {
     it('should deduplicate messages by content and type', () => {
       const store = useConversationStore.getState();
 
-      store._setConversationState({
+      store.actions._setConversationState({
         thread_id: 'thread-1',
         messages: [{ id: 'msg-1', type: 'assistant', content: 'Same content', timestamp: new Date() }],
       });
 
-      store._setConversationState({
+      store.actions._setConversationState({
         thread_id: 'thread-1',
         messages: [{ id: 'msg-2', type: 'assistant', content: 'Same content', timestamp: new Date() }],
       });
@@ -623,7 +625,7 @@ describe('Conversation Store', () => {
     it('should update Omni-Dispatcher fields', () => {
       const store = useConversationStore.getState();
 
-      store._setConversationState({
+      store.actions._setConversationState({
         execution_plan: [{ phase_id: 'phase-1', name: 'Phase 1' }],
         current_phase_id: 'phase-1',
         action_history: [{ iteration: 1, action_type: 'tool', success: true }],
@@ -636,13 +638,13 @@ describe('Conversation Store', () => {
       expect(state.execution_plan[0].phase_id).toBe('phase-1');
       expect(state.current_phase_id).toBe('phase-1');
       expect(state.action_history).toHaveLength(1);
-      expect state.insights).toEqual({ key: 'value' });
+      expect(state.insights).toEqual({ key: 'value' });
     });
 
     it('should handle canvas state updates', () => {
       const store = useConversationStore.getState();
 
-      store._setConversationState({
+      store.actions._setConversationState({
         canvas_content: '<div>Canvas content</div>',
         canvas_type: 'html',
         canvas_data: { key: 'value' },
@@ -660,12 +662,12 @@ describe('Conversation Store', () => {
     it('should clear canvas when has_canvas is false', () => {
       const store = useConversationStore.getState();
 
-      store._setConversationState({
+      store.actions._setConversationState({
         canvas_content: '<div>Canvas</div>',
         has_canvas: true,
       });
 
-      store._setConversationState({ has_canvas: false });
+      store.actions._setConversationState({ has_canvas: false });
 
       const state = useConversationStore.getState();
 
@@ -677,7 +679,7 @@ describe('Conversation Store', () => {
   describe('sendCanvasConfirmation', () => {
     beforeEach(() => {
       // Set up state with pending confirmation
-      useConversationStore.getState()._setConversationState({
+      useConversationStore.getState().actions._setConversationState({
         thread_id: 'test-thread',
         pending_confirmation: true,
         pending_confirmation_task: { task_name: 'Apply changes' },
@@ -733,7 +735,7 @@ describe('Conversation Store', () => {
     it('should require thread_id', async () => {
       const store = useConversationStore.getState();
 
-      store._setConversationState({ thread_id: undefined });
+      store.actions._setConversationState({ thread_id: undefined });
 
       await expect(store.actions.sendCanvasConfirmation('confirm')).resolves.not.toThrow();
 
@@ -760,7 +762,7 @@ describe('Conversation Store', () => {
     it('should save thread_id to localStorage on state update', () => {
       const store = useConversationStore.getState();
 
-      store._setConversationState({ thread_id: 'persist-thread' });
+      store.actions._setConversationState({ thread_id: 'persist-thread' });
 
       expect(mockLocalStorage.getItem('thread_id')).toBe('persist-thread');
     });
@@ -768,7 +770,7 @@ describe('Conversation Store', () => {
     it('should remove thread_id from localStorage on reset', () => {
       const store = useConversationStore.getState();
 
-      store._setConversationState({ thread_id: 'test' });
+      store.actions._setConversationState({ thread_id: 'test' });
       store.actions.resetConversation();
 
       expect(mockLocalStorage.getItem('thread_id')).toBeNull();
@@ -779,7 +781,7 @@ describe('Conversation Store', () => {
     it('should track task statuses', () => {
       const store = useConversationStore.getState();
 
-      store._setConversationState({
+      store.actions._setConversationState({
         task_statuses: {
           'task-1': 'in_progress',
           'task-2': 'completed',
@@ -789,7 +791,7 @@ describe('Conversation Store', () => {
 
       const state = useConversationStore.getState();
 
-      expect state.task_statuses).toEqual({
+      expect(state.task_statuses).toEqual({
         'task-1': 'in_progress',
         'task-2': 'completed',
       });
@@ -799,7 +801,7 @@ describe('Conversation Store', () => {
     it('should clear task statuses on continue', async () => {
       const store = useConversationStore.getState();
 
-      store._setConversationState({
+      store.actions._setConversationState({
         thread_id: 'test-thread',
         task_statuses: { 'task-1': 'in_progress' },
         current_executing_task: 'task-1',
@@ -809,7 +811,7 @@ describe('Conversation Store', () => {
 
       const state = useConversationStore.getState();
 
-      expect state.task_statuses).toEqual({});
+      expect(state.task_statuses).toEqual({});
       expect(state.current_executing_task).toBeNull();
     });
   });
@@ -818,7 +820,7 @@ describe('Conversation Store', () => {
     it('should handle browser_view updates', () => {
       const store = useConversationStore.getState();
 
-      store._setConversationState({
+      store.actions._setConversationState({
         browser_view: '<div>Browser content</div>',
         plan_view: '<div>Plan content</div>',
         current_view: 'plan',
@@ -853,7 +855,7 @@ describe('Conversation Store', () => {
     it('should track approval state', () => {
       const store = useConversationStore.getState();
 
-      store._setConversationState({
+      store.actions._setConversationState({
         approval_required: true,
         estimated_cost: 0.05,
         task_count: 3,
@@ -869,7 +871,7 @@ describe('Conversation Store', () => {
     it('should set pending action approval fields', () => {
       const store = useConversationStore.getState();
 
-      store._setConversationState({
+      store.actions._setConversationState({
         pending_action_approval: true,
         pending_action: {
           action_type: 'agent',

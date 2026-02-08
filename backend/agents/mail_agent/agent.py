@@ -10,11 +10,12 @@ from .schemas import (
     SummarizeRequest, DraftReplyRequest, ExtractActionItemsRequest,
     ManageEmailsRequest, EmailAction
 )
+from backend.schemas import AgentResponse, StandardAgentResponse, AgentResponseStatus
 from .client import gmail_client
 from .llm import llm_client
 from .memory import agent_memory
 from agents.utils.agent_file_manager import FileStatus
-from schemas import AgentResponse, AgentResponseStatus, OrchestratorMessage, DialogueContext
+from schemas import OrchestratorMessage # Keep OrchestratorMessage for now if it's still used elsewhere, but it's not in the new /execute
 
 # CMS Integration
 import sys
@@ -34,41 +35,6 @@ from services.content_management_service import (
 content_service = ContentManagementService()
 from services.canvas_service import CanvasService
 
-
-# ==================== DIALOGUE MANAGEMENT ====================
-
-# In-memory store for dialogue contexts
-# Key: task_id, Value: DialogueContext
-dialogue_store: Dict[str, DialogueContext] = {}
-
-class DialogueManager:
-    """Manages the state of bidirectional dialogues."""
-    
-    @staticmethod
-    def get_context(task_id: str) -> Optional[DialogueContext]:
-        return dialogue_store.get(task_id)
-    
-    @staticmethod
-    def create_context(task_id: str, agent_id: str) -> DialogueContext:
-        context = DialogueContext(
-            task_id=task_id,
-            agent_id=agent_id,
-            status="active"
-        )
-        dialogue_store[task_id] = context
-        return context
-    
-    @staticmethod
-    def pause_task(task_id: str, question: AgentResponse):
-        if task_id in dialogue_store:
-            dialogue_store[task_id].status = "paused"
-            dialogue_store[task_id].current_question = question
-            
-    @staticmethod
-    def resume_task(task_id: str):
-        if task_id in dialogue_store:
-            dialogue_store[task_id].status = "active"
-            dialogue_store[task_id].current_question = None
 
 # ==================== SMART DATA RESOLVER ====================
 
@@ -336,6 +302,245 @@ class CentralAgent:
         self.memory.add_turn(user_id, "Extract actions", f"Found {len(actions)} items", "extract_actions")
         return {"success": True, "data": {"actions": actions, "count": len(actions)}}
 
+    async def execute_plan(self, steps: list) -> Dict[str, Any]:
+        """Executes a list of decomposed steps."""
+        # Initialize smart resolver if not already done
+        global smart_resolver
+        if smart_resolver is None:
+            init_smart_resolver()
+        
+        results = []
+        step_failed = False
+        last_error = None
+
+        for i, step in enumerate(steps):
+            step_action = step.get("action", "").lower()
+            step_params = step.get("params", {})
+            
+            logger.info(f"[STEP] [STEP {i+1}/{len(steps)}] Executing: {step_action}")
+            
+            result = None
+            execution_error = None
+            
+            try:
+                if "search" in step_action:
+                    req = SemanticSearchRequest(
+                        query=step_params.get("query", ""),
+                        max_results=step_params.get("max_results", 10),
+                        user_id=step_params.get("user_id", "me")
+                    )
+                    op_res = await self.search(req.query, req.max_results, req.user_id)
+                    if op_res.get("success"): result = op_res.get("data")
+                    else: execution_error = op_res.get("error")
+
+                elif "summarize" in step_action or "summary" in step_action:
+                    message_ids = await smart_resolver.resolve_message_ids(
+                        step_params,
+                        user_id="me",
+                        single_id=False
+                    )
+                    
+                    if message_ids:
+                        logger.info(f"[SMART] Resolved {len(message_ids)} emails for summarize")
+                    
+                    req = SummarizeRequest(
+                        message_ids=message_ids if message_ids else None,
+                        use_history=True if not message_ids else False,
+                        user_id=step_params.get("user_id", "me")
+                    )
+                    op_res = await self.summarize_emails(req)
+                    if op_res.get("success"): result = op_res.get("data")
+                    else: execution_error = op_res.get("error")
+                    
+                elif "archive" in step_action:
+                    message_ids = await smart_resolver.resolve_message_ids(
+                        step_params,
+                        user_id="me",
+                        single_id=False
+                    )
+                    
+                    req = ManageEmailsRequest(
+                        message_ids=message_ids if message_ids else None,
+                        action=EmailAction.ARCHIVE,
+                        use_history=True if not message_ids else False,
+                        user_id=step_params.get("user_id", "me")
+                    )
+                    op_res = await manage_emails(req) # manage_emails is a FastAPI endpoint, not a CentralAgent method
+                    if op_res.success: result = op_res.result
+                    else: execution_error = op_res.error
+
+                elif "mark" in step_action or "label" in step_action or "important" in step_action:
+                    message_ids = await smart_resolver.resolve_message_ids(
+                        step_params,
+                        user_id="me",
+                        single_id=False
+                    )
+                    
+                    labels = step_params.get("labels", [])
+                    if isinstance(labels, list) and any(l.lower() == "archive" for l in labels):
+                        email_action = EmailAction.ARCHIVE
+                        labels = None
+                    elif isinstance(labels, list) and any(l.lower() == "read" for l in labels):
+                        email_action = EmailAction.MARK_READ
+                        labels = None
+                    elif "important" in step_action or "star" in step_action:
+                        email_action = EmailAction.STAR
+                        labels = None
+                    else:
+                        email_action = EmailAction.ADD_LABELS
+                        if not labels: labels = ["IMPORTANT"]
+                    
+                    req = ManageEmailsRequest(
+                        message_ids=message_ids if message_ids else None,
+                        action=email_action,
+                        labels=labels,
+                        use_history=True if not message_ids else False,
+                        user_id=step_params.get("user_id", "me")
+                    )
+                    op_res = await manage_emails(req) # manage_emails is a FastAPI endpoint
+                    if op_res.success: result = op_res.result
+                    else: execution_error = op_res.error
+
+                elif "draft" in step_action:
+                    message_id = await smart_resolver.resolve_message_ids(
+                        step_params, 
+                        user_id="me", 
+                        single_id=True
+                    )
+                    
+                    if not message_id:
+                        execution_error = "Could not resolve message_id. Please specify which email to reply to."
+                        step_failed = True
+                        break
+                    
+                    logger.info(f"[SMART] Resolved message_id: {message_id}")
+                    
+                    req = DraftReplyRequest(
+                        message_id=message_id, 
+                        intent=step_params.get("intent", "Reply politely"),
+                        user_id=step_params.get("user_id", "me")
+                    )
+
+                    op_res = await self.draft_reply(req)
+                    if op_res.get("success"): result = op_res.get("data")
+                    else: execution_error = op_res.get("error")
+
+                elif "download" in step_action:
+                    all_downloaded_files = []
+                    total_size_bytes = 0
+                    
+                    message_ids = await smart_resolver.resolve_message_ids(
+                        step_params,
+                        user_id="me",
+                        single_id=False
+                    )
+                    
+                    if not message_ids:
+                        execution_error = "Could not resolve message_ids for download. Please specify which emails."
+                        step_failed = True
+                        break
+                    else:
+                        logger.info(f"[SMART] Resolved {len(message_ids)} emails for download")
+                        logger.info(f"[BATCH] Downloading attachments from {len(message_ids)} emails...")
+                        for msg_id in message_ids:
+                            try:
+                                dl_res = await gmail_client.download_email_attachments(
+                                    message_id=msg_id,
+                                    thread_id=step_params.get("thread_id"),
+                                    user_id=step_params.get("user_id", "me")
+                                )
+                                if dl_res.get("success") and dl_res.get("files"):
+                                    for f in dl_res["files"]:
+                                        all_downloaded_files.append(f)
+                                        total_size_bytes += f.get("size", 0)
+                            except Exception as e:
+                                logger.warning(f"Failed to download from {msg_id}: {e}")
+                        
+                        result = {
+                            "files": all_downloaded_files,
+                            "total_files": len(all_downloaded_files),
+                            "total_size_mb": round(total_size_bytes / (1024 * 1024), 2)
+                        }
+
+                elif "extract" in step_action or "action" in step_action:
+                    message_ids = await smart_resolver.resolve_message_ids(
+                        step_params,
+                        user_id="me",
+                        single_id=False
+                    )
+                    
+                    if message_ids:
+                        logger.info(f"[SMART] Resolved {len(message_ids)} emails for extract_actions")
+                    
+                    req = ExtractActionItemsRequest(
+                        message_ids=message_ids if message_ids else None,
+                        use_history=True if not message_ids else False,
+                        user_id=step_params.get("user_id", "me")
+                    )
+                    op_res = await self.extract_actions(req)
+                    if op_res.get("success"): result = op_res.get("data")
+                    else: execution_error = op_res.get("error")
+
+                elif "send" in step_action:
+                    to_param = step_params.get("to", ["me"])
+                    to_list = [to_param] if isinstance(to_param, str) else (to_param if isinstance(to_param, list) else ["me"])
+
+                    attachment_file_ids = step_params.get("attachment_file_ids", [])
+                    attachment_paths = step_params.get("attachment_paths", [])
+
+                    if not attachment_file_ids:
+                        logger.info(f"DEBUG: No IDs provided. Scanning history (size={len(results)})...")
+                        for r in results:
+                            res_data = r.get("result", {})
+                            if isinstance(res_data, dict) and "files" in res_data:
+                                files = res_data["files"]
+                                found_ids = [f.get("file_id") for f in files if isinstance(f, dict) and f.get("file_id")]
+                                logger.info(f"DEBUG: Found {len(found_ids)} files in step {r.get('step')}: {found_ids}")
+                                attachment_file_ids.extend(found_ids)
+
+                    req = SendEmailRequest(
+                        to=to_list,
+                        subject=step_params.get("subject", "Automated Reply"),
+                        body=step_params.get("body", "Sent via Mail Agent"),
+                        attachment_file_ids=list(set(attachment_file_ids)),
+                        attachment_paths=attachment_paths if isinstance(attachment_paths, list) else [],
+                        user_id=step_params.get("user_id", "me")
+                    )
+
+                    try:
+                        send_res = await gmail_client.send_email_with_attachments(
+                            to=req.to,
+                            subject=req.subject,
+                            body=req.body,
+                            attachment_file_ids=req.attachment_file_ids,
+                            attachment_paths=req.attachment_paths,
+                            user_id=req.user_id
+                        )
+                        if send_res.get("success"): result = send_res.get("data")
+                        else: execution_error = send_res.get("error")
+                    except Exception as e:
+                        execution_error = str(e)
+                else:
+                    logger.warning(f"[WARNING] [STEP {i+1}] Unknown action type: {step_action}, skipping")
+                    result = "Skipped (unknown action)"
+                    
+            except Exception as e:
+                execution_error = str(e)
+
+            if execution_error:
+                logger.error(f"[STEP] [STEP {i+1}] Failed: {execution_error}")
+                step_failed = True
+                last_error = execution_error
+                break
+            else:
+                results.append({"step": i + 1, "action": step_action, "result": result})
+        
+        if step_failed:
+            return {"success": False, "error": last_error, "results": results}
+        else:
+            return {"success": True, "summary": f"Successfully executed {len(steps)} steps.", "results": results}
+
+
 # Initialize Central Agent
 central_agent = CentralAgent(gmail_client, llm_client, agent_memory)
 
@@ -353,13 +558,7 @@ async def health_check():
 async def search(request: SemanticSearchRequest):
     logger.info(f"[INCOMING] [SEARCH] Incoming request: query='{request.query}', max_results={request.max_results}, user_id={request.user_id}")
     try:
-        # --- MOCK PAUSE SCENARIO (Consistency with /execute) ---
-        # If query asks for "john" without context, ask for clarification
-        # This allows verifying the Orchestrator's pause/resume logic even via direct tool calls
-        # If query asks for "john" without context (and not a specific full name), ask for clarification
-        # This allows verifying the Orchestrator's pause/resume logic even via direct tool calls
         # [REFACTORED] LLM-First Ambiguity Check
-        # Replaced hardcoded "john" check with real intelligence
         ambiguity = await llm_client.check_ambiguity(request.query)
         if ambiguity.get("is_ambiguous"):
              logger.info(f"[PAUSE] Ambiguity detected via LLM: {request.query}")
@@ -482,12 +681,6 @@ async def send_email(request: SendEmailRequest):
                 requires_confirmation=True,
                 confirmation_message="Review and confirm to send this email"
             )
-            
-            # Attachments metadata for display (CanvasService email preview needs update to support attachments list if we want it perfect,
-            # but for now we can inject it or the service might just show body. 
-            # Actually, let's keep the manual structure for attachments if CanvasService doesn't support them explicitly yet?
-            # CanvasService build_email_preview only takes to, cc, subject, body.
-            # I should update CanvasService to support attachments or just inject it into canvas_data manually here.)
             
             # Inject attachments into canvas_data
             if request.attachment_file_ids or request.attachment_paths:
@@ -736,119 +929,18 @@ async def get_attachment_stats():
 # ==================== BIDIRECTIONAL DIALOGUE ENDPOINTS ====================
 
 @app.post("/execute", response_model=AgentResponse)
-async def execute_action(message: OrchestratorMessage):
+async def execute_task(request: Dict[str, Any]):
     """
-    Unified execution endpoint supporting bidirectional dialogue.
-    
-    Supports two modes:
-    1. SPECIFIC ACTION: When 'action' is provided (e.g., '/search'), executes that action directly
-    2. COMPLEX PROMPT: When 'prompt' is provided, decomposes the request internally and executes sequentially
+    Unified execution endpoint for Mail Agent.
     """
-    # Helper to log metrics and return response
-    def finish_with_metrics(response: AgentResponse) -> AgentResponse:
-        """Log metrics and return response."""
-        success = response.status == AgentResponseStatus.COMPLETE
-        gmail_client.log_execution_metrics(success)
-        return response
-    
     try:
-        payload = message.payload or {}
+        # Check if generic "prompt" or specific "action"
+        prompt = request.get("prompt")
+        action = request.get("action")
+        payload = request.get("payload", {})
         
-        # Generate or use existing task_id
-        task_id = payload.get("task_id", f"task-{len(dialogue_store)}-complex")
-        
-        # Check for complex prompt mode (new capability)
-        prompt = payload.get("prompt") or getattr(message, "prompt", None)
-        action = message.action
-        
-        logger.info(f"[EXECUTE] Action={action} Prompt={prompt[:100] if prompt else 'None'}... TaskID={task_id}")
-        
-        # Initialize context
-        context = DialogueManager.get_context(task_id)
-        if not context:
-            context = DialogueManager.create_context(task_id, "mail_agent")
-        
-        # ==================== COMPLEX PROMPT MODE ====================
+        # 1. Complex Decomposition (Prompt-based)
         if prompt and not action:
-            logger.info(f"[COMPLEX] Processing complex prompt: {prompt}")
-
-            # [REFACTORED] LLM-First Complex Ambiguity Check
-            # Replaced hardcoded "Mahesh Patnala" check
-            ambiguity = await llm_client.check_ambiguity(prompt)
-            if ambiguity.get("is_ambiguous"):
-                 logger.info(f"[TRIGGER] LLM detected ambiguity in complex prompt.")
-                 response = AgentResponse(
-                     status=AgentResponseStatus.NEEDS_INPUT,
-                     question=ambiguity.get("question", "I need clarification to proceed."),
-                     question_type="choice" if ambiguity.get("options") else "text",
-                     options=ambiguity.get("options", []),
-                     context={"original_prompt": prompt, "task_id": task_id}
-                 )
-                 DialogueManager.pause_task(task_id, response)
-                 return finish_with_metrics(response)
-            
-            # Retry loop for robust execution
-            max_retries = 3
-            current_attempt = 0
-            last_error = None
-            
-            while current_attempt < max_retries:
-                current_attempt += 1
-                logger.info(f"[RETRY] [COMPLEX] Execution Attempt {current_attempt}/{max_retries}")
-                
-                # Use internal LLM to decompose the prompt into steps (with error context if retry)
-                decomposition = await llm_client.decompose_complex_request(prompt, error_context=last_error)
-                
-                if not decomposition or not decomposition.get("steps"):
-                    if current_attempt == max_retries:
-                        return finish_with_metrics(AgentResponse(
-                            status=AgentResponseStatus.NEEDS_INPUT,
-                            question="I couldn't understand your request fully. Could you please break it down into specific steps?",
-                            question_type="text",
-                            context={"original_prompt": prompt}
-                        ))
-                    continue # Try again
-                
-                steps = decomposition.get("steps", [])
-                logger.info(f"[PLAN] [COMPLEX] Decomposed into {len(steps)} steps: {[s.get('action') for s in steps]}")
-                
-                # Initialize smart resolver if not already done
-                global smart_resolver
-                if smart_resolver is None:
-                    init_smart_resolver()
-                
-                # Execute steps sequentially
-                results = []
-                step_failed = False
-                
-                for i, step in enumerate(steps):
-                    step_action = step.get("action", "").lower()
-                    step_params = step.get("params", {})
-                    
-                    logger.info(f"[STEP] [STEP {i+1}/{len(steps)}] Executing: {step_action}")
-                    
-                    # Execute each step based on action type
-                    result = None
-                    execution_error = None
-                    
-                    try:
-                        if "search" in step_action:
-                            req = SemanticSearchRequest(
-                                query=step_params.get("query", prompt),
-                                max_results=step_params.get("max_results", 10),
-                                user_id=step_params.get("user_id", "me")
-                            )
-                            op_res = await search(req)
-                            if op_res.success: result = op_res.result
-                            else: execution_error = op_res.error
-
-                        elif "summarize" in step_action or "summary" in step_action:
-                            # SMART RESOLVER: Get message IDs from target_query or history
-                            message_ids = await smart_resolver.resolve_message_ids(
-                                step_params,
-                                user_id="me",
-                                single_id=False
-                            )
                             
                             if message_ids:
                                 logger.info(f"[SMART] Resolved {len(message_ids)} emails for summarize")

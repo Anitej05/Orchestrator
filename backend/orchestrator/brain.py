@@ -18,7 +18,7 @@ import time
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel, Field
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, BaseMessage, AIMessage
 from langchain_core.runnables import RunnableConfig
 
 from .schemas import TaskItem, TaskStatus, TaskPriority, PlanPhase, ParallelAction
@@ -48,13 +48,13 @@ class BrainDecision(BaseModel):
     resource_id: Optional[str] = Field(
         None, description="Identifier for the resource (agent_id, tool_name, etc.)"
     )
-    payload: Dict[str, Any] = Field(
+    payload: Optional[Dict[str, Any]] = Field(
         default_factory=dict, description="Parameters for the action execution"
     )
     reasoning: Optional[str] = Field(None, description="Why this action was chosen")
     user_response: Optional[str] = Field(
         None,
-        description="Actual final response text to show the user (required when action_type='finish')",
+        description="The final answer to the user. MUST be detailed, thorough, and strictly follow length/style constraints (e.g. '100 words'). If the user asked for a story or long text, provide the FULL text here.",
     )
     memory_updates: Optional[Dict[str, Any]] = Field(
         None, description="Key-value pairs to store in persistent memory"
@@ -120,16 +120,17 @@ class Brain:
         iteration_count = state.get("iteration_count", 0)
         failure_count = state.get("failure_count", 0)
 
-        # Check error conditions FIRST - these override normal execution
+        # Initialize state FIRST if this is a new conversation with no tasks
+        # This must happen before failure checks to avoid fallback on new conversations
+        if not todo_list and state.get("original_prompt"):
+            return self._initialize_initial_state(state)
+
+        # Check error conditions AFTER initialization check
         if iteration_count > self.max_iterations:
             return self._force_finish_with_error(state, "Maximum iterations reached")
 
         if failure_count >= self.max_failures:
             return self._enter_fallback_mode(state, memory, insights)
-
-        # Initialize state if this is a new conversation with no tasks
-        if not todo_list and state.get("original_prompt"):
-            return self._initialize_initial_state(state)
 
         # Extract insights from last execution if significant
         updated_insights = self._extract_insights_from_last_action(state, insights)
@@ -145,6 +146,35 @@ class Brain:
             updates["insights"] = updated_insights
 
         return updates
+
+    def _build_conversation_history_view(self, messages: List[Any], limit: int = 10) -> str:
+        """Build a view of the recent conversation history (user & assistant messages)."""
+        if not messages:
+            return "No conversation history."
+        
+        recent_messages = messages[-limit:]
+        history_lines = []
+        
+        for msg in recent_messages:
+            # Handle both object and dict (just in case)
+            role = "User"
+            content = ""
+            
+            if hasattr(msg, "type"):
+                role = "User" if msg.type == "human" else "Assistant"
+                content = msg.content
+            elif isinstance(msg, dict):
+                role = "User" if msg.get("type") == "human" else "Assistant"
+                content = msg.get("content", "")
+            
+            # Simple truncation for very long messages to avoid context overflow
+            if len(content) > 500:
+                content = content[:500] + "... (truncated)"
+            
+            history_lines.append(f"{role}: {content}")
+            
+        return "\n".join(history_lines)
+
 
     async def _make_decision(
         self,
@@ -179,13 +209,28 @@ class Brain:
         # Build FULL action history view (never compressed)
         action_history_str = self._build_action_history_view(action_history)
 
+        # Build conversation history view (NEW)
+        conversation_history_str = self._build_conversation_history_view(state.get("messages", []))
+
+
         # Build insights view (key learnings, never compressed)
         insights_str = self._build_insights_view(insights)
 
         # Build execution plan view if exists
         plan_str = self._build_execution_plan_view(state)
 
-        prompt = f"""You are the Brain of an intelligent orchestrator. Achieve the objective by managing tasks and selecting the best resource for each.
+        # Build uploaded files view (NEW)
+        files_str = self._build_uploaded_files_view(state.get("uploaded_files", []))
+
+        prompt = f"""You are the Brain of an intelligent orchestrator. achieve the objective by managing tasks and selecting the best resource for each.
+
+## PERSONA
+You are a helpful, intelligent, and expressive AI assistant.
+- Your goal is to not only solve tasks but to do so in a way that is clear, engaging, and friendly.
+- When explaining comprehensive results, be thorough. When answering simple questions, be concise but polite.
+- If the user's request implies a need for creativity or detailed explanation, provide it.
+- **IMPORTANT**: If the user asks you to use a specific tool (like Python or an Agent), you MUST use it, even if you know the answer directly.
+- **NEVER** complain that "no code was provided". You are an intelligent agent; you must WRITE the code yourself based on the user's objective.
 
 ## OBJECTIVE
 {state.get("original_prompt", "No objective")}
@@ -196,14 +241,24 @@ class Brain:
 ## KEY INSIGHTS (preserved learnings - NEVER forget these)
 {insights_str}
 
+## UPLOADED FILES (Available for tools/agents)
+{files_str}
+- **CRITICAL**: You can see that files exist, but you DO NOT have their content yet.
+- To read or process these files, you MUST use an appropriate Agent (e.g., `DocumentAgent` for PDFs/Docs) or a Tool (e.g., `read_file` or `Python` code).
+- **NEVER** hallucinate or guess the contents of a file if it has not been explicitly read in the Action History.
+
 ## EXECUTION PLAN
 {plan_str}
 
 ## COMPLETE ACTION HISTORY (all actions with results)
 {action_history_str}
 
+## CONVERSATION HISTORY (Recent interactions)
+{conversation_history_str}
+
 ## RECENT CONTEXT (CMS optimized)
 {history_str}
+
 
 ## TO-DO LIST
 {todo_preview}
@@ -217,9 +272,23 @@ AGENTS (specialized, for complex domain work):
 TOOLS (fast, direct functions - PREFER over agents when both qualify):
 {tool_list or "None"}
 
+## TOOL USE GUIDELINES
+1. **Explicit Requests**: If the user asks to "run code", "use python", "search", or "use [AgentName]", you **MUST** prioritize that action type.
+2. **Contextual Logic**: If the objective requires calculation, data processing, or current time/date, use **PYTHON** or **TERMINAL**. Do not guess.
+3. **No unnecessary planning**: If the task is simple and can be solved with a single tool/agent call, DO NOT create a complex plan. Just execute.
+
+AGENT: Delegate to a specialized agent.
+  - Use action_type='agent', resource_id='<Agent Name>'
+  - Payload must include:
+    - 'prompt': A clear, natural language description of what you want the agent to do.
+  - **DO NOT** specify technical `action` endpoints unless absolutely necessary. The agent will plan its own actions.
+  - Example: {{"action_type": "agent", "resource_id": "Document Agent", "payload": {{"prompt": "Summarize the Q3 report and highlight risks."}}}}
+
 PYTHON: Execute Python code directly in sandbox.
   - Use action_type='python' when user asks to: run code, calculate, compute, process data, parse, convert, generate.
-  - Provide: payload.code (the Python code to execute)
+  - **YOU MUST GENERATE THE CODE**. The user will not provide it.
+  - **Output**: The output of your code (stdout) and the value of the variable `result` (if assigned) will be returned.
+  - Provide: payload.code (the full, valid Python code to execute)
   - Example: {{"action_type": "python", "payload": {{"code": "print(2 + 2)"}}}}
   - The sandbox has access to: pandas, numpy, json, datetime, re, math, statistics.
   - PREFER PYTHON over agents for quick calculations and data processing.
@@ -320,12 +389,17 @@ Return JSON with:
 """
 
         try:
+            # Log the full prompt for debugging
+            logger.debug(f"🧠 Brain Prompt:\n{prompt}")
+
             decision = await inference_service.generate_structured(
                 messages=[HumanMessage(content=prompt)],
                 schema=BrainDecision,
                 priority=InferencePriority.SPEED,
-                temperature=0.1,
+                temperature=0.5,
             )
+
+            logger.info(f"🧠 Brain Decision: {decision.model_dump_json(indent=2)}")
             return decision
         except Exception as e:
             logger.error(f"Brain LLM failed: {e}")
@@ -411,6 +485,28 @@ Return JSON with:
             return "No insights yet."
 
         return "\n".join([f"• {key}: {value}" for key, value in insights.items()])
+
+    def _build_uploaded_files_view(self, uploaded_files: List[Any]) -> str:
+        """Build a view of uploaded files available in the context."""
+        if not uploaded_files:
+            return "No files uploaded."
+        
+        lines = []
+        for f in uploaded_files:
+            # Handle both dict and Pydantic object
+            if isinstance(f, dict):
+                name = f.get("file_name") or f.get("filename", "Unknown")
+                path = f.get("file_path", "Unknown")
+                ftype = f.get("file_type", "Unknown")
+            else:
+                name = getattr(f, "file_name", "Unknown")
+                path = getattr(f, "file_path", "Unknown")
+                ftype = getattr(f, "file_type", "Unknown")
+                
+            lines.append(f"- {name} (Type: {ftype})")
+            lines.append(f"  Path: {path}")
+            
+        return "\n".join(lines)
 
     def _build_execution_plan_view(self, state: Dict[str, Any]) -> str:
         """Build a view of the execution plan for complex tasks."""
@@ -525,8 +621,13 @@ Return JSON with:
         execution_plan = state.get("execution_plan")
         current_phase_id = state.get("current_phase_id")
 
+        decision_dump = decision.model_dump()
+        # Ensure payload is never None (safety for Hands dispatcher)
+        if decision_dump.get("payload") is None:
+            decision_dump["payload"] = {}
+
         updates = {
-            "decision": decision.model_dump(),
+            "decision": decision_dump,
             "iteration_count": state.get("iteration_count", 0) + 1,
         }
 
@@ -740,6 +841,7 @@ Return JSON with:
                 action_type="finish",
                 user_response=f"I've encountered multiple issues, but here is what I know: {json.dumps(context_summary, default=str)}",
                 is_finished=True,
+                fallback_mode=True,
             ).model_dump(),
             "final_response": f"I've encountered multiple issues, but here is what I know: {json.dumps(context_summary, default=str)}",
             "current_task_id": None,

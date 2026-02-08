@@ -44,7 +44,9 @@ import services.tool_registry_service
 def setup_mocks():
     """Reset mocks before each test."""
     mock_inference_service_impl.generate_structured.reset_mock()
-    yield
+    # Patch the inference_service in brain module
+    with patch("orchestrator.brain.inference_service", mock_inference_service_impl):
+        yield
 
 
 @pytest.fixture
@@ -382,7 +384,7 @@ class TestBrainDecisionMaking:
     async def test_plan_creation_decision(
         self,
         brain,
-        sample_state,
+        sample_state_with_tasks,
         mock_agent_registry,
         mock_tool_registry,
         mock_content_orchestrator,
@@ -409,11 +411,47 @@ class TestBrainDecisionMaking:
         mock_inference_service_impl.generate_structured.return_value = mock_decision
 
         config = {"configurable": {"thread_id": "test_thread"}}
-        result = await brain.think(sample_state, config)
+        result = await brain.think(sample_state_with_tasks, config)
 
         assert result["decision"]["action_type"] == "plan"
         assert "execution_plan" in result
-        assert len(result["execution_plan"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_prompt_content(
+        self,
+        brain,
+        sample_state_with_tasks,
+    ):
+        """Test that the prompt includes key sections."""
+        mock_decision = BrainDecision(
+            action_type="plan",
+            reasoning="Need to plan first",
+            execution_plan=[{"phase_id": "phase_1", "step": "step_1"}]
+        )
+        mock_inference_service_impl.generate_structured.return_value = mock_decision
+
+        config = {"configurable": {"thread_id": "test_thread"}}
+        result = await brain.think(sample_state_with_tasks, config)
+
+        # Get the call arguments
+        call_args = mock_inference_service_impl.generate_structured.call_args
+        assert call_args is not None
+        
+        # Extract the prompt from the call args
+        # call_args is (args, kwargs) tuple for AsyncMock
+        if isinstance(call_args, tuple):
+            kwargs = call_args[1]
+        else:
+            kwargs = call_args.kwargs
+
+        messages = kwargs['messages']
+        prompt = messages[0].content
+
+        assert "## PERSONA" in prompt
+        assert "expressive AI assistant" in prompt
+        assert "## TOOL USE GUIDELINES" in prompt
+        assert "YOU MUST GENERATE THE CODE" in prompt
+        assert len(result["execution_plan"]) == 1
         assert result["execution_plan"][0]["phase_id"] == "phase_1"
 
     @pytest.mark.asyncio
@@ -645,19 +683,23 @@ class TestBrainActionHistoryBuilding:
         """Test Brain builds empty action history."""
         result = brain._build_action_history_view([])
 
-        assert "No actions recorded" in result
+        assert "No actions taken yet" in result
 
     def test_build_action_history_below_budget(self, brain):
         """Test Brain includes all actions below budget."""
         action_history = [
             {
-                "action": {"action_type": "agent", "resource_id": "TestAgent"},
-                "result": {"success": True, "output": "Data retrieved"},
+                "action_type": "agent",
+                "resource_id": "TestAgent",
+                "success": True,
+                "result_summary": "Data retrieved",
                 "timestamp": "2024-01-01T10:00:00",
             },
             {
-                "action": {"action_type": "python", "payload": {"code": "print(2+2)"}},
-                "result": {"success": True, "output": "4"},
+                "action_type": "python",
+                "payload": {"code": "print(2+2)"},
+                "success": True,
+                "result_summary": "4",
                 "timestamp": "2024-01-01T10:01:00",
             },
         ]
@@ -674,8 +716,10 @@ class TestBrainActionHistoryBuilding:
         for i in range(25):  # More than the action_history budget
             action_history.append(
                 {
-                    "action": {"action_type": "agent", "resource_id": f"Agent{i}"},
-                    "result": {"success": True, "output": f"Result {i}"},
+                    "action_type": "agent",
+                    "resource_id": f"Agent{i}",
+                    "success": True,
+                    "result_summary": f"Result {i}",
                     "timestamp": f"2024-01-01T10:{i:02d}:00",
                 }
             )
@@ -685,7 +729,7 @@ class TestBrainActionHistoryBuilding:
         # Should truncate, showing recent actions
         assert (
             "TRUNCATED" in result
-            or "recent actions" in result.lower()
+            or "archived" in result
             or len(result) < 10000
         )
 
@@ -800,8 +844,7 @@ class TestBrainErrorHandling:
         assert "error" in result or "final_response" in result
         assert result.get("iteration_count", 100) >= 100
 
-    @pytest.mark.asyncio
-    async def test_max_failures_triggers_fallback(
+    def test_max_failures_triggers_fallback(
         self,
         brain,
         sample_state_with_tasks,
@@ -812,10 +855,10 @@ class TestBrainErrorHandling:
         state = dict(sample_state_with_tasks)
         state["failure_count"] = 5
 
-        result = await brain._enter_fallback_mode(state, {}, {})
+        result = brain._enter_fallback_mode(state, {}, {})
 
         assert result["decision"]["fallback_mode"] is True
-        assert result["decision"]["is_finished"] is False
+        assert result["decision"]["is_finished"] is True
 
 
 class TestBrainTodoPreview:

@@ -84,17 +84,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"❌ Failed to create tables: {str(e)}", exc_info=True)
     
-    # Sync agent definitions from agent_entries/*.json to database
+    # Sync agent definitions from SKILL.md files (UAP) to database
     try:
-        from manage import sync_agent_entries
-        logger.info("Syncing agent definitions to database...")
-        result = sync_agent_entries(verbose=True)
+        from manage import sync_skill_entries
+        logger.info("Syncing SKILL.md agent definitions to database...")
+        result = sync_skill_entries(verbose=True)
         if result.get('errors'):
-            logger.warning(f"Agent sync completed with {len(result['errors'])} error(s)")
+            logger.warning(f"SKILL.md sync completed with {len(result['errors'])} error(s)")
         else:
-            logger.info("✅ Agent sync completed successfully")
+            logger.info("✅ SKILL.md agent sync completed successfully")
     except Exception as e:
-        logger.error(f"Failed to sync agent entries: {str(e)}", exc_info=True)
+        logger.error(f"Failed to sync SKILL.md entries: {str(e)}", exc_info=True)
     
     # Start agents in background
     start_agents_async()
@@ -806,66 +806,50 @@ def start_agent_servers():
     os.makedirs(logs_dir, exist_ok=True)
     logger.info(f"Agent logs will be stored in the '{logs_dir}' directory.")
 
-    agent_files = [f for f in os.listdir(agents_dir) if f.endswith("_agent.py")]
-    logger.info(f"Found {len(agent_files)} agent(s) to check: {agent_files}")
-
     started_agents = []
     failed_agents = []
 
-    # Optimized Startup: Read from JSON definitions first (Source of Truth)
-    json_dir = os.path.join(project_root, "agent_entries")
-    
-    # Map agent_id -> {port, script_name}
+    # UAP: Read from SKILL.md definitions (Source of Truth)
     agent_configs = {}
     
-    # 1. Load from JSONs
-    if os.path.isdir(json_dir):
-        for json_file in os.listdir(json_dir):
-            if not json_file.endswith(".json"): continue
-            try:
-                with open(os.path.join(json_dir, json_file), 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    agent_id = data.get("id")
-                    # Try to find corresponding python file
-                    # Convention: agent_id.json -> agent_id.py OR agent_id_agent.py
-                    script_name = f"{agent_id}.py"
-                    if not os.path.exists(os.path.join(agents_dir, script_name)):
-                        script_name = f"{agent_id}_agent.py"
-                        if not os.path.exists(os.path.join(agents_dir, script_name)):
-                             continue # Script not found
-                    
-                    # Extract port from connection_config
-                    port = None
-                    cc = data.get("connection_config", {})
-                    base_url = cc.get("base_url", "")
-                    if base_url:
-                        # Parse port from http://localhost:8090
-                        match = re.search(r':(\d+)', base_url)
-                        if match:
-                            port = int(match.group(1))
-                    
-                    if port:
-                        agent_configs[script_name] = port
-            except Exception as e:
-                logger.warning(f"Failed to parse {json_file}: {e}")
+    # SKILL.md directories to scan (each contains SKILL.md with port)
+    skill_dirs = [
+        ("spreadsheet_agent", "spreadsheet_agent/__init__.py"),
+        ("mail_agent", "mail_agent.py"),
+        ("browser_agent", "browser_agent/__init__.py"),
+        ("document_agent_lib", "document_agent_lib/__init__.py"),
+        ("zoho_books", "zoho_books/zoho_books_agent.py"),
+    ]
+    
+    import yaml
+    for skill_dir, script_path in skill_dirs:
+        skill_file = os.path.join(agents_dir, skill_dir, "SKILL.md")
+        full_script_path = os.path.join(agents_dir, script_path)
+        
+        if not os.path.exists(skill_file):
+            continue
+            
+        if not os.path.exists(full_script_path):
+            logger.warning(f"Script not found for {skill_dir}: {script_path}")
+            continue
+            
+        try:
+            with open(skill_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+                # Extract YAML frontmatter
+                if content.startswith('---'):
+                    parts = content.split('---', 2)
+                    if len(parts) >= 3:
+                        yaml_content = parts[1]
+                        config = yaml.safe_load(yaml_content)
+                        port = config.get('port')
+                        if port:
+                            agent_configs[full_script_path] = int(port)
+                            logger.info(f"UAP: Found {skill_dir} on port {port}")
+        except Exception as e:
+            logger.warning(f"Failed to parse SKILL.md for {skill_dir}: {e}")
 
-    # 2. Scan Python files for any that weren't in JSON (Backward Compatibility)
-    for agent_file in os.listdir(agents_dir):
-        if agent_file.endswith("_agent.py") and agent_file not in agent_configs:
-            # Regex Fallback
-            agent_path = os.path.join(agents_dir, agent_file)
-            try:
-                with open(agent_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                    match = re.search(r'port\s*=\s*int\(os\.getenv\([^,]+,\s*(\d+)\)', content)
-                    if not match:
-                        match = re.search(r"port\s*=\s*(\d+)", content)
-                    if match:
-                        agent_configs[agent_file] = int(match.group(1))
-            except:
-                pass
-
-    logger.info(f"Target Agent Configurations: {agent_configs}")
+    logger.info(f"Target Agent Configurations: {len(agent_configs)} agents")
 
     for agent_file, port in agent_configs.items():
         agent_path = os.path.join(agents_dir, agent_file)
@@ -1574,7 +1558,11 @@ def process_node_data(node_name: str, node_output, progress: float, node_count: 
                     
             elif node_name in ["omni_hands", "execute_next_action"]:
                 # Handle task execution updates
-                if key == "executed_task_id":
+                if key == "execution_plan":
+                    node_specific_data["execution_plan"] = serialize_complex_object(value)
+                    node_specific_data["description"] = "Updated execution plan status"
+
+                elif key == "executed_task_id":
                     node_specific_data["executed_task_id"] = value
                     
                     # Try to find task description from todo_list if available in same output

@@ -324,20 +324,35 @@ class Hands:
                 f"No base URL configured for agent '{agent['name']}' (ID: {agent_id}). Check connection_config or agent_entries file."
             )
             return ActionResult(
-                action_type="agent",
-                resource_id=agent_id,
+                action_id=f"agent_{agent_id}",
                 success=False,
                 error_message=f"Agent '{agent['name']}' has no configured base URL. Cannot execute.",
                 execution_time_ms=(time.time() - start_time) * 1000,
             )
 
-        url = f"{base_url.rstrip('/')}/process"
+        url = f"{base_url.rstrip('/')}/execute"
+
+        # Build UAP-compliant request payload
+        uap_request = {
+            "type": "execute",  # Explicitly set message type
+            "action": payload.get("action"),  # Extract action from payload (CRITICAL FIX)
+            "prompt": instruction,
+            "payload": payload.get("payload", {}),
+            "task_id": payload.get("task_id"),
+            "thread_id": payload.get("thread_id"),
+        }
+        # Remove None values
+        uap_request = {k: v for k, v in uap_request.items() if v is not None}
 
         async def _call_agent():
             async with httpx.AsyncClient(timeout=self.timeout_map["agent"]) as client:
-                return await client.post(
-                    url, json={"request": instruction}, headers=auth_headers
+                # UAP: All agents receive standardized request format
+                logger.debug(f"📤 Sending UAP Request to {url}: {json.dumps(uap_request, default=str)}")
+                resp = await client.post(
+                    url, json=uap_request, headers=auth_headers
                 )
+                logger.debug(f"📥 Received Response from {url}: Status={resp.status_code}, Body={resp.text[:500]}...") # Truncate for brevity
+                return resp
 
         try:
             response = await RetryManager.retry_async(
@@ -362,11 +377,16 @@ class Hands:
                 agent["name"], success, (time.time() - start_time) * 1000
             )
 
+            # Extract error from Standard Response if available
+            error_message = agent_result.get("error")
+            if not error_message and "standard_response" in agent_result:
+                error_message = agent_result["standard_response"].get("error_message")
+
             return ActionResult(
                 action_id=f"agent_{agent['id']}",
                 success=success,
                 output=agent_result,
-                error_message=agent_result.get("error") if not success else None,
+                error_message=error_message if not success else None,
                 execution_time_ms=(time.time() - start_time) * 1000,
             )
 
@@ -517,6 +537,28 @@ class Hands:
             "action_history": existing_action_history + [history_entry],
         }
 
+        # SOTA: Extract Canvas Data from Standard Response (UAP v2)
+        # This Bubbles up the canvas display to the top-level state so main.py can see it
+        if isinstance(result.output, dict) and "standard_response" in result.output:
+            std_response = result.output["standard_response"]
+            if isinstance(std_response, dict) and "canvas_display" in std_response:
+                canvas = std_response["canvas_display"]
+                if canvas:
+                    logger.info(f"🎨 Hands: Extracting canvas display from agent response")
+                    updates["has_canvas"] = True
+                    updates["canvas_type"] = canvas.get("canvas_type")
+                    updates["canvas_content"] = canvas.get("canvas_content")
+                    updates["canvas_data"] = canvas.get("canvas_data")
+                    updates["canvas_title"] = canvas.get("heading") or canvas.get("title")
+                    
+                    # For browser view specifically
+                    if canvas.get("canvas_type") == "html":
+                        updates["browser_view"] = canvas.get("canvas_content")
+                        updates["current_view"] = "browser"
+                    elif canvas.get("canvas_type") == "plan_graph":
+                        updates["plan_view"] = canvas.get("canvas_data") 
+                        updates["current_view"] = "plan"
+
         if not result.success:
             failure_count = state.get("failure_count", 0) + 1
             updates["failure_count"] = failure_count
@@ -547,6 +589,79 @@ class Hands:
         if action_type == "parallel" and result.success:
             insights_updates = self._extract_parallel_insights(state, result)
             updates.update(insights_updates)
+
+        # === EXPLICIT PHASE COMPLETION (LLM-DRIVEN) ===
+        if decision_dict.get("phase_complete"):
+            phase_updates = self._handle_explicit_phase_completion(state, decision_dict)
+            updates.update(phase_updates)
+
+        return updates
+
+    def _handle_explicit_phase_completion(
+        self, state: Dict[str, Any], decision: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Handle explicit phase completion triggered by the Brain.
+        Marks current phase as completed and advances to the next one.
+        """
+        execution_plan = state.get("execution_plan")
+        current_phase_id = state.get("current_phase_id")
+        reasoning = decision.get("phase_goal_verified") or "Phase goal met"
+
+        if not execution_plan or not current_phase_id:
+            logger.warning("⚠️ Phase completion requested but no active plan/phase found.")
+            return {}
+
+        # Find current phase index
+        current_idx = -1
+        current_phase = None
+        for idx, phase in enumerate(execution_plan):
+            if phase.get("phase_id") == current_phase_id:
+                current_phase = phase
+                current_idx = idx
+                break
+
+        if not current_phase:
+            return {}
+
+        logger.info(f"✅ Phase '{current_phase.get('name')}' EXPLICITLY completed by Brain.")
+
+        # update plan
+        new_plan = list(execution_plan)
+        new_plan[current_idx] = {
+            **current_phase,
+            "status": "completed",
+            "result_summary": reasoning
+        }
+
+        # Find next phase
+        next_phase_id = None
+        # Simple logic: find first pending phase that depends on this one, or just next in list if linear
+        # But we should respect dependencies.
+        
+        # Get set of all completed phases (including this one)
+        completed_ids = {p.get("phase_id") for p in new_plan if p.get("status") in ("completed", "skipped")}
+        
+        for phase in new_plan:
+             pid = phase.get("phase_id")
+             if pid in completed_ids:
+                 continue
+             
+             # Check dependencies
+             deps = phase.get("depends_on", [])
+             if not deps or all(d in completed_ids for d in deps):
+                 next_phase_id = pid
+                 break
+        
+        updates = {
+            "execution_plan": new_plan,
+            "current_phase_id": next_phase_id
+        }
+
+        if next_phase_id:
+            logger.info(f"➡ Advancing to phase: {next_phase_id}")
+        else:
+            logger.info("🎉 All phases completed.")
 
         return updates
 
@@ -681,10 +796,17 @@ class Hands:
             return output[:max_length] + ("..." if len(output) > max_length else "")
 
         if isinstance(output, dict):
-            # Extract key fields for summary
+            # UAP v2: Check for StandardAgentResponse summary FIRST
+            # This is the dedicated summary specifically for the Orchestrator Brain
+            if "standard_response" in output and isinstance(output["standard_response"], dict):
+                std_summary = output["standard_response"].get("summary")
+                if std_summary:
+                    return std_summary[:max_length]
+
+            # Extract key fields for summary (Legacy fallback)
             summary_parts = []
             for key in ["result", "message", "data", "response", "output"]:
-                if key in output:
+                if key in output and key != "standard_response": # Avoid recursing into standard_response
                     val = str(output[key])[:200]
                     summary_parts.append(f"{key}: {val}")
             if summary_parts:

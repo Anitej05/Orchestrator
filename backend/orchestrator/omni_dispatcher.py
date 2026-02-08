@@ -134,7 +134,7 @@ async def omni_hands_node(
 def omni_route_condition(state: Dict[str, Any]) -> str:
     """
     Conditional routing for the OMNI-DISPATCHER graph.
-    Routes: "hands" | "approval" | "finish"
+    Routes: "hands" | "approval" | "finish" | "brain"
     """
     # Check for pending approval first
     if state.get("pending_approval"):
@@ -146,6 +146,11 @@ def omni_route_condition(state: Dict[str, Any]) -> str:
 
     if action_type == "finish" or final_res:
         return "finish"
+    
+    # Skip action should loop back to Brain for another thinking cycle
+    # This happens during initialization when todo_list is being set up
+    if action_type == "skip":
+        return "brain"
 
     return "hands"
 

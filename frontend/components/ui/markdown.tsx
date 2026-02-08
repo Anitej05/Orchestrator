@@ -4,7 +4,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
 import rehypeRaw from "rehype-raw";
-import { FC } from "react";
+import React, { FC } from "react";
 
 interface MarkdownProps {
   content: string;
@@ -170,7 +170,7 @@ const Markdown: FC<MarkdownProps> = ({ content }) => {
               (child) => React.isValidElement(child) && (child.type === 'code' || (child.props as any)?.className?.includes('language-'))
             ) as React.ReactElement | undefined;
 
-            const className = codeElement?.props?.className || '';
+            const className = (codeElement?.props as any)?.className || '';
             const language = className.replace('language-', '');
 
             return (
