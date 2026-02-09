@@ -380,7 +380,7 @@ export function ScheduleWorkflowDialog({
               </Label>
               <div className="bg-muted p-3 rounded-md space-y-1">
                 {nextRuns.map((run, idx) => (
-                  <div key={idx} className="flex items-center gap-2 text-sm">
+                  <div key={`run-${idx}-${run}`} className="flex items-center gap-2 text-sm">
                     <Clock className="h-3 w-3 text-muted-foreground" />
                     <span>{run}</span>
                     {idx === 0 && (
@@ -445,3 +445,4 @@ export function ScheduleWorkflowDialog({
     </Dialog>
   );
 }
+

@@ -1,23 +1,23 @@
 // app/page.tsx
 "use client"
 
-import { useState, useRef, useEffect } from "react"
+import { useState, useRef, useEffect, Suspense } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
-import AppSidebar from "@/components/app-sidebar"
-import TaskBuilder from "@/components/task-builder"
-import { SidebarProvider, SidebarInset, SidebarTrigger, useSidebar } from "@/components/ui/sidebar"
+import dynamic from "next/dynamic"
+import { SidebarInset, useSidebar } from "@/components/ui/sidebar"
 import OrchestrationDetailsSidebar, { type OrchestrationDetailsSidebarRef } from "@/components/orchestration-details-sidebar"
 import { type TaskAgentPair, type ProcessResponse } from "@/lib/types"
 import { useToast } from "@/hooks/use-toast"
 import { useConversationStore } from "@/lib/conversation-store"
 import { useWebSocketManager } from "@/hooks/use-websocket-conversation"
+import { useNewConversation } from "@/hooks/use-new-conversation"
 import { useUser } from "@clerk/nextjs"
+import WorkflowOrchestration from "@/components/workflow-orchestration"
 import {
   ResizablePanelGroup,
   ResizablePanel,
   ResizableHandle,
 } from "@/components/ui/resizable"
-import Navbar from "@/components/navbar"
 
 interface ExecutionResult {
   taskId: string
@@ -38,11 +38,16 @@ interface ApiResponse {
   question_for_user: string | null
 }
 
+const InteractiveChatInterface = dynamic(
+  () => import("@/components/interactive-chat-interface").then((mod) => mod.InteractiveChatInterface),
+  { ssr: false }
+);
+
 function HomeContent() {
-  const { open } = useSidebar()
   const router = useRouter()
   const searchParams = useSearchParams()
   const { user, isLoaded: clerkLoaded } = useUser()
+  const { open } = useSidebar()
   const [taskAgentPairs, setTaskAgentPairs] = useState<TaskAgentPair[]>([])
   const [selectedAgents, setSelectedAgents] = useState<Record<string, string>>({})
   const [isExecuting, setIsExecuting] = useState(false)
@@ -62,6 +67,7 @@ function HomeContent() {
     loadConversation
   } = useConversationStore(state => state.actions);
   const isConversationLoading = useConversationStore((state: any) => state.isLoading);
+  const { startConversation, continueConversation } = useConversationStore((state: any) => state.actions);
 
   // Initialize the WebSocket manager. It will automatically connect and keep the Zustand store in sync with backend updates.
   useWebSocketManager();
@@ -214,7 +220,10 @@ function HomeContent() {
     }
   };
 
-  const handleViewCanvas = (canvasContent: string, canvasType: 'html' | 'markdown') => {
+  const handleViewCanvas = (
+    canvasContent: string,
+    canvasType: 'html' | 'markdown' | 'pdf' | 'spreadsheet' | 'email_preview' | 'document' | 'image' | 'json'
+  ) => {
     sidebarRef.current?.viewCanvas(canvasContent, canvasType);
   };
 
@@ -244,53 +253,9 @@ function HomeContent() {
     }
   };
 
-  const handleNewConversation = () => {
-    console.log('Starting new conversation - clearing all state');
-    setIsResetting(true);
-    
-    // Clear localStorage to prevent auto-restoration
-    if (typeof window !== 'undefined') {
-      localStorage.removeItem('thread_id')
-    }
-    
-    // Force clear the Zustand store's metadata and plan FIRST
-    useConversationStore.setState({
-      metadata: {},
-      plan: [],
-      task_agent_pairs: [],
-      messages: [],
-      final_response: undefined,
-      thread_id: undefined,
-      status: 'idle',
-      canvas_content: undefined,
-      has_canvas: false,
-      task_statuses: {},
-      current_executing_task: null,
-    });
-    
-    // Reset ALL conversation state including metadata and plan
-    resetConversation();
-    setTaskAgentPairs([]);
-    setSelectedAgents({});
-    setExecutionResults([]);
-    setApiResponseData(null);
-    setCurrentThreadId(null);
-    
-    // If we're on a conversation page, navigate to home
-    if (typeof window !== 'undefined' && window.location.pathname !== '/') {
-      router.push('/');
-    }
-    
-    // Clear the resetting flag after navigation has settled
-    setTimeout(() => {
-      setIsResetting(false);
-    }, 200);
+  const { startNewConversation } = useNewConversation()
 
-    toast({
-      title: "New conversation started",
-      description: "Ready to start a new orchestration",
-    });
-  }
+  const handleNewConversation = startNewConversation
 
   const handleOrchestrationComplete = (results: ExecutionResult[]) => {
     setExecutionResults(results)
@@ -359,60 +324,53 @@ function HomeContent() {
     })
   }
 
-  // This useEffect was causing issues with sidebar content display
-  // The sidebar should update naturally through its existing mechanisms
-  // useEffect(() => {
-  //   // Check if the last message is an assistant message (AI response)
-  //   if (conversationState.messages.length > 0) {
-  //     const lastMessage = conversationState.messages[conversationState.messages.length - 1];
-  //     if (lastMessage.type === 'assistant') {
-  //       // Small delay to ensure the backend has time to update the plan file
-  //       const timer = setTimeout(() => {
-  //         if (sidebarRef.current) {
-  //           console.log("Calling refreshPlan from page.tsx");
-  //           sidebarRef.current.refreshPlan();
-  //         }
-  //       }, 1500); // 1.5 second delay to ensure plan file is updated
-  //       
-  //       // Cleanup function to clear the timeout if the effect runs again before timeout completes
-  //       return () => clearTimeout(timer);
-  //     }
-  //   }
-  // }, [conversationState.messages]);
-
   return (
-    <>
-      <AppSidebar
-        onConversationSelect={handleConversationSelect}
-        onNewConversation={handleNewConversation}
-        currentThreadId={conversationState.thread_id || undefined}
-      />
-      
-      <SidebarInset className={!open ? "ml-16" : ""}>
-        <div className="h-screen pt-[64px] bg-gradient-to-br from-gray-50 to-gray-100 dark:from-gray-950 dark:to-gray-900 relative flex flex-col transition-all duration-300 max-h-screen overflow-hidden">
-          {/* Main Content Area - Resizable */}
-          <ResizablePanelGroup direction="horizontal" className="flex-1 overflow-hidden max-h-full">
-            <ResizablePanel defaultSize={45} minSize={35} maxSize={60} className="overflow-hidden">
-              <main className="h-full p-6 overflow-auto">
-                <TaskBuilder
-                  onWorkflowComplete={handleInteractiveWorkflowComplete}
-                  onOrchestrationComplete={handleOrchestrationComplete}
-                  taskAgentPairs={taskAgentPairs}
-                  selectedAgents={selectedAgents}
-                  isExecuting={isExecuting}
-                  apiResponseData={apiResponseData}
-                  onThreadIdUpdate={handleThreadIdUpdate}
-                  onExecutionResultsUpdate={handleExecutionResultsUpdate}
-                  onViewCanvas={handleViewCanvas}
-                  owner={user?.id}
-                  onAcceptPlan={handleAcceptPlan}
-                />
+    <SidebarInset className="h-screen overflow-hidden">
+      <div className="flex-1 bg-bg-page relative flex flex-col overflow-hidden w-full h-full">
+        {/* Main Content Area - Resizable */}
+        <ResizablePanelGroup direction="horizontal" className="flex-1 overflow-hidden w-full h-full">
+            <ResizablePanel defaultSize={95} minSize={45} maxSize={65} className="overflow-hidden w-full">
+              <main className="h-full p-0">
+                <div className="h-full flex flex-col">
+                  <InteractiveChatInterface
+                    onWorkflowComplete={handleInteractiveWorkflowComplete}
+                    onError={(error) => {
+                      toast({
+                        title: "Orchestration Error",
+                        description: error,
+                        variant: "destructive",
+                      });
+                    }}
+                    state={conversationState}
+                    isLoading={isConversationLoading}
+                    startConversation={startConversation}
+                    continueConversation={continueConversation}
+                    resetConversation={resetConversation}
+                    onViewCanvas={handleViewCanvas}
+                    owner={user?.id}
+                    onAcceptPlan={handleAcceptPlan}
+                  />
+
+                  <div className="hidden">
+                    {isExecuting && apiResponseData && (
+                      <WorkflowOrchestration
+                        isExecuting={isExecuting}
+                        isDryRun={false}
+                        taskAgentPairs={taskAgentPairs}
+                        selectedAgents={selectedAgents}
+                        onComplete={handleOrchestrationComplete}
+                        onThreadIdUpdate={handleThreadIdUpdate}
+                        onExecutionResultsUpdate={handleExecutionResultsUpdate}
+                      />
+                    )}
+                  </div>
+                </div>
               </main>
             </ResizablePanel>
 
             <ResizableHandle withHandle />
 
-            <ResizablePanel defaultSize={50} maxSize={65} minSize={35} className="overflow-hidden">
+            <ResizablePanel defaultSize={50} maxSize={65} minSize={35} className="overflow-hidden w-full">
               <OrchestrationDetailsSidebar
                 ref={sidebarRef}
                 executionResults={executionResults}
@@ -424,18 +382,14 @@ function HomeContent() {
             </ResizablePanel>
           </ResizablePanelGroup>
         </div>
-      </SidebarInset>
-    </>
+    </SidebarInset>
   )
 }
 
 export default function Home() {
   return (
-    <>
-      <Navbar />
-      <SidebarProvider defaultOpen={false}>
-        <HomeContent />
-      </SidebarProvider>
-    </>
+    <Suspense fallback={<div>Loading...</div>}>
+      <HomeContent />
+    </Suspense>
   )
 }

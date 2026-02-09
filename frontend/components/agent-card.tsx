@@ -60,38 +60,38 @@ export default function AgentCard({ agent, isRegistered = false, onToggleRegistr
   }
 
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 hover:shadow-lg hover:border-blue-500 dark:hover:border-blue-400 transition-all">
+    <div className="ui-card-hover p-6">
       {/* Header */}
       <div className="flex items-start justify-between mb-4">
         <div>
-          <h3 className="font-semibold text-lg text-gray-900 dark:text-gray-100">{agent.name}</h3>
+          <h3 className="ui-task-name">{agent.name}</h3>
           <div className="flex items-center space-x-2 mt-1">
             <StarRating currentRating={currentRating} readonly={true} size="sm" />
-            <Badge variant={agent.status === "active" ? "default" : "secondary"} className="text-xs">
+            <Badge variant={agent.status === "active" ? "ui-active" : "ui-pending"}>
               {agent.status}
             </Badge>
           </div>
         </div>
         <div className="text-right">
-          <div className="flex items-center text-green-600 dark:text-green-400">
+          <div className="flex items-center text-status-success-dark">
             <DollarSign className="w-4 h-4" />
-            <span className="font-semibold">{agent.price_per_call_usd}</span>
+            <span className="ui-metadata-mono">{agent.price_per_call_usd}</span>
           </div>
         </div>
       </div>
 
       {/* Description */}
-      <p className="text-gray-600 dark:text-gray-300 text-sm mb-4 line-clamp-2">{agent.description}</p>
+      <p className="ui-task-description mb-4 line-clamp-2">{agent.description}</p>
 
       {/* Capabilities */}
       <div className="flex flex-wrap gap-1 mb-4">
         {agent.capabilities.slice(0, 3).map((cap, index) => (
-          <Badge key={`${agent.id}-${cap}-${index}`} variant="secondary" className="text-xs">
+          <Badge key={`${agent.id}-${cap}-${index}`} variant="ui-pending" className="ui-file-meta">
             {cap.replace(/_/g, " ")}
           </Badge>
         ))}
         {agent.capabilities.length > 3 && (
-          <Badge variant="outline" className="text-xs">
+          <Badge variant="outline" className="ui-file-meta">
             +{agent.capabilities.length - 3}
           </Badge>
         )}
@@ -101,17 +101,17 @@ export default function AgentCard({ agent, isRegistered = false, onToggleRegistr
       <div className="flex items-center justify-between">
         <Dialog open={isRatingOpen} onOpenChange={setIsRatingOpen}>
           <DialogTrigger asChild>
-            <Button variant="outline" size="sm">
+            <Button variant="ui-secondary" size="sm">
               <Star className="w-4 h-4 mr-1" />
               Rate
             </Button>
           </DialogTrigger>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Rate {agent.name}</DialogTitle>
+              <DialogTitle className="ui-section-header">Rate {agent.name}</DialogTitle>
             </DialogHeader>
             <div className="space-y-4">
-              <p className="text-sm text-gray-600">
+              <p className="ui-section-subtitle">
                 How would you rate your experience with this agent?
               </p>
               <InteractiveStarRating
@@ -126,27 +126,28 @@ export default function AgentCard({ agent, isRegistered = false, onToggleRegistr
 
         <Dialog open={isTestOpen} onOpenChange={setIsTestOpen}>
           <DialogTrigger asChild>
-            <Button variant="outline" size="sm">
+            <Button variant="ui-secondary" size="sm">
               <MessageSquare className="w-4 h-4 mr-1" />
               Test
             </Button>
           </DialogTrigger>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Test {agent.name}</DialogTitle>
+              <DialogTitle className="ui-section-header">Test {agent.name}</DialogTitle>
             </DialogHeader>
             <div className="space-y-4">
               <Textarea
+                className="ui-textarea"
                 placeholder="Enter test prompt..."
                 value={testPrompt}
                 onChange={(e) => setTestPrompt(e.target.value)}
                 rows={3}
               />
               <div className="flex justify-end space-x-2">
-                <Button variant="outline" onClick={() => setIsTestOpen(false)}>
+                <Button variant="ui-secondary" onClick={() => setIsTestOpen(false)}>
                   Cancel
                 </Button>
-                <Button onClick={handleTest} disabled={isTesting || !testPrompt.trim()}>
+                <Button variant="ui-primary" onClick={handleTest} disabled={isTesting || !testPrompt.trim()}>
                   {isTesting ? "Testing..." : "Test"}
                 </Button>
               </div>
@@ -157,3 +158,4 @@ export default function AgentCard({ agent, isRegistered = false, onToggleRegistr
     </div>
   )
 }
+

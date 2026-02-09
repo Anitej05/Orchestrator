@@ -45,7 +45,7 @@ export default function AgentGrid({ agents, searchQuery = "" }: AgentGridProps) 
   if (filteredAgents.length === 0) {
     return (
       <div className="text-center py-12">
-        <p className="text-gray-500">No agents found</p>
+        <p className="ui-section-subtitle">No agents found</p>
       </div>
     )
   }
@@ -63,3 +63,4 @@ export default function AgentGrid({ agents, searchQuery = "" }: AgentGridProps) 
     </div>
   )
 }
+

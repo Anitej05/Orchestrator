@@ -73,8 +73,8 @@ export function StarRating({
                 sizes[size],
                 "transition-colors duration-150",
                 displayRating >= star
-                  ? "text-yellow-400 fill-yellow-400"
-                  : "text-gray-300"
+                  ? "text-status-pending fill-status-pending"
+                  : "text-text-disabled"
               )}
             />
           </Button>
@@ -82,10 +82,10 @@ export function StarRating({
       </div>
       {showValue && (
         <div className="flex items-center space-x-1 ml-2">
-          <span className="text-sm text-gray-600 font-medium tabular-nums">
+          <span className="text-orbimesh-metadata-value text-text-secondary font-medium tabular-nums">
             ({(currentRating ?? 0).toFixed(1)})
           </span>
-          <Star className="w-3.5 h-3.5 text-yellow-400 fill-yellow-400" />
+          <Star className="w-3.5 h-3.5 text-status-pending fill-status-pending" />
         </div>
       )}
     </div>
@@ -172,11 +172,11 @@ export function InteractiveStarRating({
 
         {/* Status Messages */}
         <div className="w-20 h-4 text-left">
-            {isSubmitting && <Loader2 className="w-4 h-4 animate-spin text-gray-400" />}
+            {isSubmitting && <Loader2 className="w-4 h-4 animate-spin text-text-tertiary" />}
             {message && (
                 <span className={cn(
                 "text-xs",
-                message.includes("Thank you") ? "text-green-600" : "text-red-600"
+              message.includes("Thank you") ? "text-status-success-dark" : "text-status-error"
                 )}>
                 {message}
                 </span>
@@ -185,3 +185,4 @@ export function InteractiveStarRating({
     </div>
   )
 }
+

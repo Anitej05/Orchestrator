@@ -66,7 +66,14 @@ export async function authFetch(url: string, options: RequestInit = {}): Promise
 		console.warn('[authFetch] No token available for request to', url);
 	}
 	
-	return fetch(url, { ...options, headers });
+	try {
+		const response = await fetch(url, { ...options, headers });
+		return response;
+	} catch (error) {
+		console.error('[authFetch] Network error for', url, ':', error);
+		// Re-throw with more context
+		throw new Error(`Network request failed for ${url}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+	}
 }
 
 export async function getOwnerFromClerk(): Promise<{ user_id: string; email?: string } | undefined> {

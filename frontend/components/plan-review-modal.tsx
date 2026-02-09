@@ -70,7 +70,7 @@ export function PlanReviewModal({
             <div className="space-y-2 max-h-48 overflow-y-auto">
               {taskAgentPairs.map((pair, idx) => (
                 <div
-                  key={idx}
+                  key={`review-task-${idx}-${pair.task_name || pair.task_description || ''}`}
                   className="border border-gray-200 dark:border-gray-700 rounded-md p-3 text-sm"
                 >
                   <div className="flex items-start gap-2">
@@ -159,3 +159,4 @@ export function PlanReviewModal({
     </div>
   )
 }
+

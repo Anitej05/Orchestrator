@@ -1,26 +1,29 @@
 // components/app-sidebar.tsx
 "use client"
 
-import { useState } from "react"
 import Link from "next/link"
 import Image from "next/image"
-import { Button } from "@/components/ui/button"
+import { usePathname, useRouter } from "next/navigation"
+import { useState, useEffect } from "react"
+import { UserButtonWrapper } from "@/components/user-button-wrapper"
 import {
-  Sidebar,
   SidebarContent,
   SidebarHeader,
-  SidebarMenu,
-  SidebarMenuButton,
-  SidebarMenuItem,
   SidebarGroup,
   SidebarGroupContent,
-  SidebarGroupLabel,
-  SidebarFooter,
   useSidebar,
 } from "@/components/ui/sidebar"
-import { Plus, Home, Users, Workflow, BarChart3, Settings, Bot, Menu, X } from "lucide-react"
-import { UserButton } from "@clerk/nextjs"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
+import { Plus, Users, Workflow, BarChart3, History, X, Link2, Loader2, CalendarClock, Save, Settings } from "lucide-react"
 import ConversationsDropdown from "./conversations-dropdown"
+import { ThemeToggle } from "./theme-toggle"
+import { cn } from "@/lib/utils"
+import { useNewConversation } from "@/hooks/use-new-conversation"
 
 interface AppSidebarProps {
   onConversationSelect?: (threadId: string) => void;
@@ -30,104 +33,193 @@ interface AppSidebarProps {
 
 export default function AppSidebar({ onConversationSelect, onNewConversation, currentThreadId }: AppSidebarProps) {
   const { open, setOpen, toggleSidebar } = useSidebar()
+  const pathname = usePathname()
+  const router = useRouter()
+  const [navigatingTo, setNavigatingTo] = useState<string | null>(null)
+  const { startNewConversation } = useNewConversation()
+  
+  // Use provided callback or fall back to the hook default
+  const handleNewConversation = onNewConversation || startNewConversation
+
+  // Use provided conversation select or fall back to navigation route
+  const handleConversationSelect = onConversationSelect || ((threadId: string) => {
+    router.push(`/c/${threadId}`)
+  })
+
+  // Reset navigation state when pathname changes
+  useEffect(() => {
+    setNavigatingTo(null)
+  }, [pathname])
   
   const navItems = [
     { href: "/", label: "Orchestrator", icon: Workflow },
     { href: "/agents", label: "Agent Directory", icon: Users },
-    { href: "/saved-workflows", label: "Saved Workflows", icon: BarChart3 },
-    { href: "/profile", label: "Profile / Settings", icon: Settings },
+    { href: "/saved-workflows", label: "Saved Workflows", icon: Save },
+    { href: "/schedules", label: "Schedules", tooltipLabel: "Scheduled Workflows", icon: CalendarClock },
+    { href: "/connections", label: "Connections", icon: Link2 },
   ]
+
+  const handleNavClick = (href: string) => {
+    if (pathname !== href) {
+      setNavigatingTo(href)
+    }
+  }
 
   return (
     <>
-      {/* Mini Sidebar - Always visible when sidebar is collapsed */}
-      {!open && (
-        <div className="fixed left-0 top-16 h-[calc(100vh-4rem)] w-16 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800/30 z-40 flex flex-col items-center py-4 gap-2">
-          <button
-            onClick={toggleSidebar}
-            className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors flex items-center justify-center w-10 h-10"
-            aria-label="Open sidebar"
-          >
-            <Menu className="w-6 h-6 text-gray-700 dark:text-gray-300" />
-          </button>
-          {/* Mini navigation icons */}
-          <div className="flex flex-col gap-2 items-center w-full mt-2">
-            {navItems.map((item) => (
-              <Link
-                key={item.href}
-                href={item.href}
-                className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors flex items-center justify-center w-10 h-10 mx-auto"
-                title={item.label}
-              >
-                <item.icon className="w-5 h-5 text-gray-700 dark:text-gray-300" />
-              </Link>
-            ))}
-          </div>
-        </div>
-      )}
+      {/* Mini Sidebar - Always visible */}
+      <TooltipProvider delayDuration={0}>
+        <div className="fixed left-0 top-0 h-screen w-16 bg-bg-card border-r border-border-color z-40 flex flex-col items-center py-4 gap-2">
+            <Link href="/" className="flex items-center gap-2 bottom-0 mb-4 transition-transform active:scale-95">
+              <Image
+                src="/logo.png"
+                alt="Orbimesh Logo"
+                width={32}
+                height={32}
+                className="rounded"
+                priority
+              />
+            </Link>
 
-      {/* Main Sidebar */}
-      <Sidebar 
-        collapsible="offcanvas" 
-        className="border-r z-40 fixed left-0 top-16 h-[calc(100vh-4rem)] bg-white dark:bg-gray-900 [&_[data-sidebar=sidebar]]:bg-white [&_[data-sidebar=sidebar]]:dark:bg-gray-900 overflow-hidden" 
-        open={open} 
-        onOpenChange={setOpen}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  onClick={handleNewConversation}
+                  className="p-2 rounded-orbimesh-lg hover:bg-bg-hover transition-colors flex items-center justify-center w-10 h-10 active:scale-95 transition-transform"
+                  aria-label="New conversation"
+                >
+                  <Plus className="w-5 h-5 text-text-secondary" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="right">
+                <p>New Conversation</p>
+              </TooltipContent>
+            </Tooltip>
+
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  onClick={toggleSidebar}
+                  className={cn(
+                    "p-2 rounded-orbimesh-lg hover:bg-bg-hover transition-all flex items-center justify-center w-10 h-10 active:scale-95",
+                    open && "bg-bg-hover text-text-primary"
+                  )}
+                  aria-label="Conversation history"
+                >
+                  <History className="w-5 h-5 text-text-secondary" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="right">
+                <p>Conversation History</p>
+              </TooltipContent>
+            </Tooltip>
+            
+            {/* Mini navigation icons */}
+            <div className="flex flex-col gap-2 items-center w-full mt-2">
+              {navItems.map((item) => {
+                const isActive = pathname === item.href
+                const isNavigating = navigatingTo === item.href
+
+                return (
+                  <Tooltip key={item.href}>
+                    <TooltipTrigger asChild>
+                      <Link
+                        href={item.href}
+                        onClick={() => handleNavClick(item.href)}
+                        className={cn(
+                          "p-2 rounded-orbimesh-lg flex items-center justify-center w-10 h-10 mx-auto transition-all duration-200",
+                          "hover:bg-bg-hover active:scale-90",
+                          isActive 
+                            ? "bg-status-active-light text-status-active-dark shadow-sm ring-1 ring-status-active-border" 
+                            : "text-text-secondary hover:text-text-primary",
+                          isNavigating && "opacity-80 cursor-wait bg-bg-subtle"
+                        )}
+                        aria-label={item.label}
+                      >
+                        {isNavigating ? (
+                          <Loader2 className="w-5 h-5 animate-spin text-status-active-dark" />
+                        ) : (
+                          <item.icon className={cn(
+                            "w-5 h-5 transition-colors",
+                            isActive ? "text-status-active-dark" : "text-text-secondary" 
+                          )} />
+                        )}
+                      </Link>
+                    </TooltipTrigger>
+                    <TooltipContent side="right">
+                      <p>{item.tooltipLabel ?? item.label}</p>
+                    </TooltipContent>
+                  </Tooltip>
+                )
+              })}
+            </div>
+            <div className="mt-auto flex flex-col items-center gap-2 pb-2">
+                <Tooltip>
+                    <TooltipTrigger asChild>
+                        <div>
+                            <ThemeToggle />
+                        </div>
+                    </TooltipTrigger>
+                    <TooltipContent side="right">
+                        <p>Toggle Theme</p>
+                    </TooltipContent>
+                </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Link
+                    href="/settings"
+                    className="p-2 rounded-orbimesh-lg hover:bg-bg-hover transition-colors flex items-center justify-center w-10 h-10 active:scale-95"
+                    aria-label="Settings"
+                  >
+                    <Settings className="w-5 h-5 text-text-secondary" />
+                  </Link>
+                </TooltipTrigger>
+                <TooltipContent side="right">
+                  <p>Settings</p>
+                </TooltipContent>
+              </Tooltip>
+              <UserButtonWrapper />
+            </div>
+          </div>
+      </TooltipProvider>
+
+      {/* Conversation History Sidebar */}
+      <div
+        className={cn(
+          "fixed top-0 left-16 h-screen w-64 bg-bg-card border-r border-border-color z-30 transition-transform duration-200 ease-out",
+          open ? "translate-x-0" : "-translate-x-full"
+        )}
       >
         <div className="flex h-full flex-col overflow-hidden">
-      <SidebarContent className="flex-1 overflow-y-auto">
-        <SidebarGroup>
-          <SidebarGroupLabel className="text-gray-700 dark:text-gray-300">Navigation</SidebarGroupLabel>
-          <SidebarGroupContent>
-            <SidebarMenu>
-              {navItems.map((item) => (
-                <SidebarMenuItem key={item.href + item.label}>
-                  <SidebarMenuButton asChild>
-                    <Link href={item.href} className="flex items-center space-x-2 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800">
-                      <item.icon className="w-4 h-4" />
-                      <span>{item.label}</span>
-                    </Link>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              ))}
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
+          <SidebarHeader className="border-b border-border-color p-4 flex-shrink-0">
+            <div className="flex items-center justify-between">
+              <span className="ui-nav-brand">Conversations</span>
+              <button
+                onClick={toggleSidebar}
+                className="p-2 rounded-orbimesh-lg hover:bg-bg-hover transition-colors flex items-center justify-center"
+                aria-label="Close conversation history"
+              >
+                <X className="w-5 h-5 text-text-secondary" />
+              </button>
+            </div>
+          </SidebarHeader>
 
-        <SidebarGroup className="flex-1 overflow-hidden">
-          {/* <SidebarGroupLabel>Conversations</SidebarGroupLabel> */}
-          <SidebarGroupContent className="px-2 pt-2 flex flex-col items-center">
-            {onConversationSelect && (
-              <div className="w-full flex flex-col items-center">
-                <ConversationsDropdown
-                  onConversationSelect={onConversationSelect}
-                  onNewConversation={onNewConversation}
-                  currentThreadId={currentThreadId}
-                />
-              </div>
-            )}
-          </SidebarGroupContent>
-        </SidebarGroup>
-      </SidebarContent>
-
-      <SidebarFooter className="border-t border-gray-200 dark:border-gray-800/30 p-4 flex-shrink-0">
-        {/* Close button */}
-        <button
-          onClick={toggleSidebar}
-          className="mb-3 p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors flex items-center gap-2 w-full"
-        >
-          <X className="w-5 h-5 text-gray-700 dark:text-gray-300" />
-          <span className="text-sm text-gray-700 dark:text-gray-300">Close Sidebar</span>
-        </button>
-        
-        <Link href="/register-agent">
-          <Button className="w-full bg-blue-600 hover:bg-blue-700 text-white">
-            <Plus className="w-4 h-4 mr-2" />
-            Register Agent
-          </Button>
-        </Link>
-      </SidebarFooter>
+          <SidebarContent className="flex-1 overflow-y-auto">
+            <SidebarGroup>
+              <SidebarGroupContent className="px-3 pt-2 flex flex-col">
+                <div className="w-full flex flex-col">
+                  <ConversationsDropdown
+                    onConversationSelect={handleConversationSelect}
+                    onNewConversation={handleNewConversation}
+                    currentThreadId={currentThreadId}
+                  />
+                </div>
+              </SidebarGroupContent>
+            </SidebarGroup>
+          </SidebarContent>
+        </div>
       </div>
-    </Sidebar>
     </>
   )
 }
+

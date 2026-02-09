@@ -59,36 +59,39 @@ export default function WorkflowManager({ threadId }: { threadId?: string }) {
   return (
     <div className="space-y-4">
       {threadId && (
-        <Card>
+        <Card className="ui-card">
           <CardHeader>
-            <CardTitle>Save as Workflow</CardTitle>
+            <CardTitle className="ui-section-header">Save as Workflow</CardTitle>
           </CardHeader>
           <CardContent className="space-y-2">
             <Input
+              className="ui-input"
               placeholder="Workflow name"
               value={saveName}
               onChange={(e) => setSaveName(e.target.value)}
             />
             <Textarea
+              className="ui-textarea"
               placeholder="Description"
               value={saveDesc}
               onChange={(e) => setSaveDesc(e.target.value)}
             />
-            <Button onClick={saveAsWorkflow}>Save</Button>
+            <Button variant="ui-primary" onClick={saveAsWorkflow}>Save</Button>
           </CardContent>
         </Card>
       )}
 
-      <Card>
+      <Card className="ui-card">
         <CardHeader>
-          <CardTitle>My Workflows</CardTitle>
+          <CardTitle className="ui-section-header">My Workflows</CardTitle>
         </CardHeader>
         <CardContent>
           {workflows.map((w) => (
-            <div key={w.workflow_id} className="p-2 border rounded mb-2">
-              <h3 className="font-bold">{w.name}</h3>
-              <p className="text-sm text-gray-600">{w.description}</p>
+            <div key={w.workflow_id} className="ui-card-hover p-2 mb-2">
+              <h3 className="ui-task-name">{w.name}</h3>
+              <p className="ui-task-description">{w.description}</p>
               <Button 
+                variant="ui-secondary"
                 size="sm" 
                 onClick={() => setSelectedWorkflow(w.workflow_id)}
                 className="mt-2"
@@ -102,3 +105,4 @@ export default function WorkflowManager({ threadId }: { threadId?: string }) {
     </div>
   );
 }
+

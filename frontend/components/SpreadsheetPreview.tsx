@@ -83,7 +83,7 @@ export const SpreadsheetPreview: React.FC<SpreadsheetPreviewProps> = ({
             <tr>
               {canvasDisplay.columns.map((col, idx) => (
                 <th
-                  key={idx}
+                  key={`col-${col || idx}`}
                   className="px-4 py-2 text-left font-semibold text-gray-700 border-r last:border-r-0"
                 >
                   {col}
@@ -148,3 +148,4 @@ function renderCell(value: string | number | boolean): React.ReactNode {
 }
 
 export default SpreadsheetPreview;
+

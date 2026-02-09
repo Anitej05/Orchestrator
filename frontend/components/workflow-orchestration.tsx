@@ -506,13 +506,13 @@ export default function WorkflowOrchestration({
     <div className="space-y-6">
       {/* Introduction Phase */}
       {(currentPhase === "intro" || (!isExecuting && currentPhase !== "")) && (
-        <div className="bg-white rounded-lg border border-gray-200 p-6">
+        <div className="ui-card p-6">
           <div className="flex items-start space-x-3">
-            <div className="w-8 h-8 bg-gray-100 rounded-full flex items-center justify-center flex-shrink-0 mt-1">
+            <div className="w-8 h-8 bg-bg-subtle rounded-full flex items-center justify-center flex-shrink-0 mt-1">
               <span className="text-lg">🤖</span>
             </div>
             <div className="flex-1">
-              <p className="text-gray-700 leading-relaxed">
+              <p className="ui-task-description leading-relaxed">
                 {displayText ||
                   (taskAgentPairs.length > 0
                     ? `I executed your ${taskAgentPairs.length}-step workflow: ${taskAgentPairs.map((pair) => pair.task_name.replace(/_/g, " ")).join(", ")}. Connected to required data sources and agents.`
@@ -526,21 +526,21 @@ export default function WorkflowOrchestration({
 
       {/* Loading Phase */}
       {currentPhase === "loading" && (
-        <div className="bg-white rounded-lg border border-gray-200 p-6">
+        <div className="ui-card p-6">
           <div className="flex items-center space-x-2 mb-4">
-            <Database className="w-5 h-5 text-blue-500" />
-            <h3 className="text-lg font-medium text-gray-900">Loading data sources...</h3>
+            <Database className="w-5 h-5 text-brand-teal" />
+            <h3 className="ui-section-header">Loading data sources...</h3>
           </div>
           <div className="space-y-3">
             {dataSources.map((source, index) => (
               <div key={`${source.name}-${index}`} className="flex items-center space-x-3">
                 <div
-                  className={`w-2 h-2 rounded-full ${source.status === "connected" ? "bg-green-500" : "bg-yellow-500"}`}
+                  className={`w-2 h-2 rounded-full ${source.status === "connected" ? "bg-status-success" : "bg-status-pending"}`}
                 />
                 <span className="text-2xl">{source.icon}</span>
                 <div className="flex-1">
-                  <span className="font-medium text-gray-900">{source.name}</span>
-                  <span className="text-gray-500 ml-2">
+                  <span className="ui-task-name">{source.name}</span>
+                  <span className="ui-metadata-label ml-2">
                     {source.status === "loading" ? (
                       <span className="flex items-center">
                         <Loader2 className="w-3 h-3 animate-spin mr-1" />
@@ -559,19 +559,19 @@ export default function WorkflowOrchestration({
 
       {/* Data Sources Connected */}
       {currentPhase !== "intro" && dataSources.length > 0 && (
-        <div className="bg-white rounded-lg border border-gray-200 p-6">
+        <div className="ui-card p-6">
           <div className="flex items-center space-x-2 mb-4">
-            <Database className="w-5 h-5 text-blue-500" />
-            <h3 className="text-lg font-medium text-gray-900">Data sources connected</h3>
+            <Database className="w-5 h-5 text-brand-teal" />
+            <h3 className="ui-section-header">Data sources connected</h3>
           </div>
           <div className="space-y-3">
             {dataSources.map((source, index) => (
               <div key={`${source.name}-${index}`} className="flex items-center space-x-3">
-                <div className="w-2 h-2 rounded-full bg-green-500" />
+                <div className="w-2 h-2 rounded-full bg-status-success" />
                 <span className="text-2xl">{source.icon}</span>
                 <div className="flex-1">
-                  <span className="font-medium text-gray-900">{source.name}</span>
-                  <span className="text-gray-500 ml-2">{source.description}</span>
+                  <span className="ui-task-name">{source.name}</span>
+                  <span className="ui-metadata-label ml-2">{source.description}</span>
                 </div>
               </div>
             ))}
@@ -581,13 +581,13 @@ export default function WorkflowOrchestration({
 
       {/* Task Analysis */}
       {(currentPhase === "analysis" || currentPhase === "insights" || (!isExecuting && taskAnalysis)) && (
-        <div className="bg-white rounded-lg border border-gray-200 p-6">
+        <div className="ui-card p-6">
           <div className="flex items-center space-x-2 mb-4">
-            <Users className="w-5 h-5 text-green-500" />
-            <h3 className="text-lg font-medium text-gray-900">Task Analysis</h3>
-            <span className="text-green-600 font-semibold">{taskAgentPairs.length}</span>
+            <Users className="w-5 h-5 text-status-success" />
+            <h3 className="ui-section-header">Task Analysis</h3>
+            <span className="ui-metadata-mono text-status-success-dark">{taskAgentPairs.length}</span>
           </div>
-          <p className="text-gray-700 leading-relaxed">
+          <p className="ui-task-description leading-relaxed">
             {currentPhase === "analysis" && isExecuting ? (
               <>
                 {displayText}
@@ -602,18 +602,18 @@ export default function WorkflowOrchestration({
 
       {/* Task Segments */}
       {taskSegments.length > 0 && (
-        <div className="bg-white rounded-lg border border-gray-200 p-6">
+        <div className="ui-card p-6">
           <div className="flex items-center space-x-2 mb-4">
-            <BarChart3 className="w-5 h-5 text-blue-500" />
-            <h3 className="text-lg font-medium text-gray-900">Task Segments</h3>
+            <BarChart3 className="w-5 h-5 text-brand-teal" />
+            <h3 className="ui-section-header">Task Segments</h3>
           </div>
           <div className="space-y-2">
             {taskSegments.map((segment, index) => (
               <div key={`${segment.name}-${index}`} className="flex items-center space-x-2">
-                <div className="w-2 h-2 rounded-full bg-blue-500 mt-2 flex-shrink-0" />
-                <span className="text-gray-700">
+                <div className="w-2 h-2 rounded-full bg-brand-teal mt-2 flex-shrink-0" />
+                <span className="ui-task-description">
                   {segment.name}{" "}
-                  <span className="text-gray-500">
+                  <span className="ui-metadata-label">
                     ({segment.agent} - ${segment.estimatedCost})
                   </span>
                 </span>
@@ -625,16 +625,16 @@ export default function WorkflowOrchestration({
 
       {/* Key Insights */}
       {(currentPhase === "insights" || (!isExecuting && taskInsights.length > 0)) && (
-        <div className="bg-gray-50 rounded-lg border border-gray-200 p-6">
+        <div className="ui-metadata-item p-6">
           <div className="flex items-center space-x-2 mb-4">
-            <Lightbulb className="w-5 h-5 text-purple-500" />
-            <h3 className="text-lg font-medium text-gray-900">Key Insights</h3>
+            <Lightbulb className="w-5 h-5 text-status-pending" />
+            <h3 className="ui-section-header">Key Insights</h3>
           </div>
           <div className="space-y-4">
             {(taskInsights.length > 0 ? taskInsights : generateTaskInsights()).map((insight, index) => (
               <div key={`insight-${index}`} className="flex items-start space-x-3">
-                <div className="w-2 h-2 rounded-full bg-purple-500 mt-2 flex-shrink-0" />
-                <p className="text-gray-700 leading-relaxed">{insight.text}</p>
+                <div className="w-2 h-2 rounded-full bg-status-pending mt-2 flex-shrink-0" />
+                <p className="ui-task-description leading-relaxed">{insight.text}</p>
               </div>
             ))}
           </div>
@@ -642,14 +642,14 @@ export default function WorkflowOrchestration({
       )}
 
       {/* Status Bar */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4">
+      <div className="ui-card p-4">
         <div className="flex items-center justify-between text-sm">
           <div className="flex items-center space-x-4">
             <div className="flex items-center space-x-2">
               <div
-                className={`w-2 h-2 rounded-full ${isExecuting ? "bg-green-400 animate-pulse" : "bg-green-500"}`}
+                className={`w-2 h-2 rounded-full ${isExecuting ? "bg-status-success animate-pulse" : "bg-status-success"}`}
               ></div>
-              <span className={`font-medium ${isExecuting ? "text-green-600" : "text-green-700"}`}>
+              <span className={`ui-metadata-label ${isExecuting ? "text-status-success" : "text-status-success-dark"}`}>
                 {isExecuting
                   ? isDryRun
                     ? "DRY RUN MODE"
@@ -659,7 +659,7 @@ export default function WorkflowOrchestration({
                     : "EXECUTION COMPLETED"}
               </span>
             </div>
-            <div className="text-gray-500">
+            <div className="ui-metadata-label">
               {isExecuting ? (
                 <>
                   {currentPhase === "intro" && "Initializing workflow..."}
@@ -672,7 +672,7 @@ export default function WorkflowOrchestration({
               )}
             </div>
           </div>
-          <div className="text-gray-500">
+          <div className="ui-metadata-mono">
             {elapsedTime.toFixed(1)}s {isExecuting ? "elapsed" : "total"}
           </div>
         </div>
@@ -716,3 +716,4 @@ export default function WorkflowOrchestration({
     </div>
   )
 }
+

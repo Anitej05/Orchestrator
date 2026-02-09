@@ -2,7 +2,9 @@ import type React from "react"
 import type { Metadata } from "next"
 import { Inter } from "next/font/google"
 import { ClerkProvider } from '@clerk/nextjs'
-import "./globals.css"
+import { SidebarProvider } from "@/components/ui/sidebar"
+import AppSidebar from "@/components/app-sidebar"
+import "@/styles/globals.css"
 import { Toaster } from "@/components/ui/toaster"
 import { ThemeProvider } from "@/components/theme-provider"
 
@@ -20,8 +22,8 @@ export default function RootLayout({
 }) {
   return (
     <ClerkProvider>
-      <html lang="en" suppressHydrationWarning>
-        <body className={inter.className} suppressHydrationWarning>
+      <html lang="en" suppressHydrationWarning className="h-screen">
+        <body className={`${inter.className} h-screen`} suppressHydrationWarning>
           <ThemeProvider
             attribute="class"
             defaultTheme="light"
@@ -29,11 +31,17 @@ export default function RootLayout({
             storageKey="orbimesh-theme"
             disableTransitionOnChange
           >
-            {children}
-            <Toaster />
+            <SidebarProvider defaultOpen={false}>
+              <AppSidebar />
+              <div className="ml-16 min-h-screen w-full">
+                {children}
+              </div>
+              <Toaster />
+            </SidebarProvider>
           </ThemeProvider>
         </body>
       </html>
     </ClerkProvider>
   )
 }
+

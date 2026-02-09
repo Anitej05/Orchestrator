@@ -12,153 +12,153 @@ interface OrchestrationProgressProps {
 const stageConfig = {
   initializing: {
     icon: Loader2,
-    color: "text-blue-500",
-    bgColor: "bg-blue-50 dark:bg-blue-950/30",
-    borderColor: "border-blue-200 dark:border-blue-800",
+    color: "text-blue-500 dark:text-blue-400",
+    bgColor: "bg-blue-50 dark:bg-blue-950/40",
+    borderColor: "border-blue-200 dark:border-blue-800/50",
     message: "Starting agent orchestration...",
     spin: true
   },
   analyzing: {
     icon: Brain,
-    color: "text-purple-500",
-    bgColor: "bg-purple-50 dark:bg-purple-950/30",
-    borderColor: "border-purple-200 dark:border-purple-800",
+    color: "text-purple-500 dark:text-purple-400",
+    bgColor: "bg-purple-50 dark:bg-purple-950/40",
+    borderColor: "border-purple-200 dark:border-purple-800/50",
     message: "Analyzing your request...",
     spin: false
   },
   parsing: {
     icon: FileText,
-    color: "text-purple-500",
-    bgColor: "bg-purple-50 dark:bg-purple-950/30",
-    borderColor: "border-purple-200 dark:border-purple-800",
+    color: "text-sky-500 dark:text-sky-400",
+    bgColor: "bg-sky-50 dark:bg-sky-950/40",
+    borderColor: "border-sky-200 dark:border-sky-800/50",
     message: "Breaking down your request...",
     spin: false
   },
   searching: {
     icon: Search,
-    color: "text-green-500",
-    bgColor: "bg-green-50 dark:bg-green-950/30",
-    borderColor: "border-green-200 dark:border-green-800",
+    color: "text-green-500 dark:text-green-400",
+    bgColor: "bg-green-50 dark:bg-green-950/40",
+    borderColor: "border-green-200 dark:border-green-800/50",
     message: "Searching for agents (REST & MCP)...",
     spin: false
   },
   ranking: {
     icon: Users,
-    color: "text-orange-500",
-    bgColor: "bg-orange-50 dark:bg-orange-950/30",
-    borderColor: "border-orange-200 dark:border-orange-800",
+    color: "text-orange-500 dark:text-orange-400",
+    bgColor: "bg-orange-50 dark:bg-orange-950/40",
+    borderColor: "border-orange-200 dark:border-orange-800/50",
     message: "Ranking agents for your tasks...",
     spin: false
   },
   planning: {
     icon: Settings,
-    color: "text-indigo-500",
-    bgColor: "bg-indigo-50 dark:bg-indigo-950/30",
-    borderColor: "border-indigo-200 dark:border-indigo-800",
+    color: "text-indigo-500 dark:text-indigo-400",
+    bgColor: "bg-indigo-50 dark:bg-indigo-950/40",
+    borderColor: "border-indigo-200 dark:border-indigo-800/50",
     message: "Creating execution plan...",
     spin: false
   },
   validating: {
     icon: Shield,
-    color: "text-teal-500",
-    bgColor: "bg-teal-50 dark:bg-teal-950/30",
-    borderColor: "border-teal-200 dark:border-teal-800",
+    color: "text-teal-500 dark:text-teal-400",
+    bgColor: "bg-teal-50 dark:bg-teal-950/40",
+    borderColor: "border-teal-200 dark:border-teal-800/50",
     message: "Validating execution plan...",
     spin: false
   },
   approval_required: {
     icon: AlertCircle,
-    color: "text-amber-500",
-    bgColor: "bg-amber-50 dark:bg-amber-950/30",
-    borderColor: "border-amber-200 dark:border-amber-800",
+    color: "text-amber-500 dark:text-amber-400",
+    bgColor: "bg-amber-50 dark:bg-amber-950/40",
+    borderColor: "border-amber-200 dark:border-amber-800/50",
     message: "Waiting for plan approval...",
     spin: false
   },
   executing: {
     icon: Zap,
-    color: "text-red-500",
-    bgColor: "bg-red-50 dark:bg-red-950/30",
-    borderColor: "border-red-200 dark:border-red-800",
+    color: "text-rose-500 dark:text-rose-400",
+    bgColor: "bg-rose-50 dark:bg-rose-950/40",
+    borderColor: "border-rose-200 dark:border-rose-800/50",
     message: "Executing tasks with agents...",
     spin: true
   },
   evaluating: {
     icon: BarChart3,
-    color: "text-pink-500",
-    bgColor: "bg-pink-50 dark:bg-pink-950/30",
-    borderColor: "border-pink-200 dark:border-pink-800",
+    color: "text-pink-500 dark:text-pink-400",
+    bgColor: "bg-pink-50 dark:bg-pink-950/40",
+    borderColor: "border-pink-200 dark:border-pink-800/50",
     message: "Evaluating agent responses...",
     spin: false
   },
   aggregating: {
     icon: BarChart3,
-    color: "text-cyan-500",
-    bgColor: "bg-cyan-50 dark:bg-cyan-950/30",
-    borderColor: "border-cyan-200 dark:border-cyan-800",
+    color: "text-cyan-500 dark:text-cyan-400",
+    bgColor: "bg-cyan-50 dark:bg-cyan-950/40",
+    borderColor: "border-cyan-200 dark:border-cyan-800/50",
     message: "Generating final response...",
     spin: false
   },
   finalizing: {
     icon: CheckCircle,
-    color: "text-blue-500",
-    bgColor: "bg-blue-50 dark:bg-blue-950/30",
-    borderColor: "border-blue-200 dark:border-blue-800",
+    color: "text-blue-500 dark:text-blue-400",
+    bgColor: "bg-blue-50 dark:bg-blue-950/40",
+    borderColor: "border-blue-200 dark:border-blue-800/50",
     message: "Finalizing...",
     spin: false
   },
   saving: {
     icon: Database,
-    color: "text-slate-500",
-    bgColor: "bg-slate-50 dark:bg-slate-950/30",
-    borderColor: "border-slate-200 dark:border-slate-800",
+    color: "text-slate-500 dark:text-slate-400",
+    bgColor: "bg-slate-50 dark:bg-slate-800/20",
+    borderColor: "border-slate-200 dark:border-slate-700/50",
     message: "Saving conversation...",
     spin: false
   },
   loading: {
     icon: Loader2,
-    color: "text-gray-500",
-    bgColor: "bg-gray-50 dark:bg-gray-950/30",
-    borderColor: "border-gray-200 dark:border-gray-800",
+    color: "text-gray-500 dark:text-gray-400",
+    bgColor: "bg-gray-50 dark:bg-gray-800/20",
+    borderColor: "border-gray-200 dark:border-gray-700/50",
     message: "Loading conversation history...",
     spin: true
   },
   waiting: {
     icon: AlertCircle,
-    color: "text-yellow-500",
-    bgColor: "bg-yellow-50 dark:bg-yellow-950/30",
-    borderColor: "border-yellow-200 dark:border-yellow-800",
+    color: "text-yellow-500 dark:text-yellow-400",
+    bgColor: "bg-yellow-50 dark:bg-yellow-950/40",
+    borderColor: "border-yellow-200 dark:border-yellow-800/50",
     message: "Waiting for your input...",
     spin: false
   },
   waiting_for_user: {
     icon: AlertCircle,
-    color: "text-yellow-500",
-    bgColor: "bg-yellow-50 dark:bg-yellow-950/30",
-    borderColor: "border-yellow-200 dark:border-yellow-800",
+    color: "text-yellow-500 dark:text-yellow-400",
+    bgColor: "bg-yellow-50 dark:bg-yellow-950/40",
+    borderColor: "border-yellow-200 dark:border-yellow-800/50",
     message: "Waiting for your response...",
     spin: false
   },
   connecting_mcp: {
     icon: Link2,
-    color: "text-violet-500",
-    bgColor: "bg-violet-50 dark:bg-violet-950/30",
-    borderColor: "border-violet-200 dark:border-violet-800",
+    color: "text-violet-500 dark:text-violet-400",
+    bgColor: "bg-violet-50 dark:bg-violet-950/40",
+    borderColor: "border-violet-200 dark:border-violet-800/50",
     message: "Connecting to MCP servers...",
     spin: true
   },
   completed: {
     icon: CheckCircle,
-    color: "text-green-500",
-    bgColor: "bg-green-50 dark:bg-green-950/30",
-    borderColor: "border-green-200 dark:border-green-800",
+    color: "text-green-500 dark:text-green-400",
+    bgColor: "bg-green-50 dark:bg-green-950/40",
+    borderColor: "border-green-200 dark:border-green-800/50",
     message: "Orchestration completed successfully!",
     spin: false
   },
   error: {
     icon: AlertCircle,
-    color: "text-red-500",
-    bgColor: "bg-red-50 dark:bg-red-950/30",
-    borderColor: "border-red-200 dark:border-red-800",
+    color: "text-red-500 dark:text-red-400",
+    bgColor: "bg-red-50 dark:bg-red-950/40",
+    borderColor: "border-red-200 dark:border-red-800/50",
     message: "An error occurred during orchestration",
     spin: false
   }
@@ -267,3 +267,4 @@ export function OrchestrationProgress({ className }: OrchestrationProgressProps)
     </AnimatePresence>
   );
 }
+

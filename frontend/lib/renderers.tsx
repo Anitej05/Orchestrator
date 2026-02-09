@@ -53,7 +53,7 @@ function renderTextStats(response: StandardResponse) {
       {data.statistics && Array.isArray(data.statistics) && (
         <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mt-4">
           {data.statistics.map((stat: any, idx: number) => (
-            <div key={idx} className="p-4 border border-gray-200 rounded-lg bg-white shadow-sm">
+            <div key={`stat-${stat.column || idx}`} className="p-4 border border-gray-200 rounded-lg bg-white shadow-sm">
               <h4 className="font-semibold text-gray-900">{stat.column}</h4>
               <div className="text-sm text-gray-600 space-y-1 mt-2">
                 {stat.mean !== undefined && <p>Mean: {stat.mean.toFixed(2)}</p>}
@@ -103,7 +103,7 @@ function renderTablePreview(response: StandardResponse) {
         </thead>
         <tbody className="bg-white divide-y divide-gray-200">
           {preview.map((row: any, idx: number) => (
-            <tr key={idx}>
+            <tr key={`row-${idx}-${JSON.stringify(row).substring(0, 50)}`}>
               {columns.map((col) => (
                 <td key={col} className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                   {row[col]}
@@ -161,7 +161,7 @@ function renderPlanCanvas(response: StandardResponse) {
         <div className="bg-white shadow overflow-hidden sm:rounded-md">
           <ul className="divide-y divide-gray-200">
             {actions.map((action: any, idx: number) => (
-              <li key={idx} className="px-6 py-4">
+              <li key={`action-${idx}-${action.action_type || ''}`} className="px-6 py-4">
                 <div className="flex items-start">
                   <div className="flex-shrink-0">
                     <span className="inline-flex items-center justify-center h-8 w-8 rounded-full bg-blue-100 text-blue-800 font-semibold">
@@ -217,7 +217,7 @@ function renderAnswerWithTable(response: StandardResponse) {
           </summary>
           <ul className="list-disc list-inside mt-2 text-sm text-gray-600">
             {data.steps_taken.map((step: string, idx: number) => (
-              <li key={idx}>{step}</li>
+              <li key={`step-${idx}-${step.substring(0, 30)}`}>{step}</li>
             ))}
           </ul>
         </details>
@@ -399,3 +399,4 @@ export function renderErrorState(response: StandardResponse) {
     </div>
   );
 }
+

@@ -23,7 +23,7 @@ interface InteractiveChatInterfaceProps {
   startConversation: (input: string, files?: File[], planningMode?: boolean, owner?: string) => Promise<void>;
   continueConversation: (input: string, files?: File[], planningMode?: boolean, owner?: string) => Promise<void>;
   resetConversation: () => void;
-  onViewCanvas?: (canvasContent: string, canvasType: 'html' | 'markdown') => void;
+  onViewCanvas?: (canvasContent: string, canvasType: 'html' | 'markdown' | 'pdf' | 'spreadsheet' | 'email_preview' | 'document' | 'image' | 'json') => void;
   owner?: string;
   onAcceptPlan?: (modifiedPrompt?: string) => Promise<void>;
 }
@@ -300,15 +300,15 @@ export function InteractiveChatInterface({
   const isBrowserRunning = currentStage === 'executing' && browserView;
 
   return (
-    <div className="flex flex-col h-full bg-gradient-to-br from-gray-50 via-white to-gray-50/50 dark:from-gray-950 dark:via-gray-900/95 dark:to-gray-950">
-      {/* Chat Messages */}
-      <div className="flex-1 space-y-6 overflow-y-auto p-6">
-        {state.messages.length === 0 && !isBrowserRunning && !state.final_response && (
-          <div className="text-center text-gray-400 dark:text-gray-500 py-8 h-full flex flex-col justify-center items-center">
-            <div className="p-6 rounded-full bg-white/40 dark:bg-gray-800/40 backdrop-blur-sm mb-6 border border-gray-200/50 dark:border-gray-700/50">
-              <MessageCircle className="w-16 h-16 text-gray-300 dark:text-gray-600" />
+    <div className={`flex flex-col h-full overflow-hidden ${className}`}>
+      {/* Chat Messages - Full Width Edge-to-Edge */}
+      <div className="flex-1 overflow-y-auto bg-bg-subtle w-full">
+        {state.messages.length === 0 && !isBrowserRunning && (
+          <div className="text-center py-8 h-full flex flex-col justify-center items-center">
+            <div className="p-6 rounded-full bg-bg-card/40 backdrop-blur-sm mb-6 border border-border-color-light">
+              <MessageCircle className="w-16 h-16 text-text-tertiary" />
             </div>
-            <p className="text-lg font-medium">Start a conversation to orchestrate your workflow</p>
+            <p className="ui-section-header">Start a conversation to orchestrate your workflow</p>
           </div>
         )}
 
@@ -325,12 +325,12 @@ export function InteractiveChatInterface({
             const messageId = message.id || `message-${index}-${Date.now()}`;
 
             return (
-              <div key={messageId} className={`message message-${message.type} w-full flex ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div className={`p-4 rounded-2xl shadow-lg ${message.type === 'user'
-                  ? 'bg-gradient-to-br from-blue-600 to-blue-700 dark:from-blue-600 dark:to-blue-800 text-white max-w-[85%] shadow-lg shadow-blue-500/30'
-                  : message.type === 'system'
-                    ? 'bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700/40 text-amber-900 dark:text-amber-200 max-w-[90%] shadow-md'
-                    : 'bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700/40 text-gray-900 dark:text-gray-100 max-w-[95%] shadow-md'
+              <div key={messageId} className={`message message-${message.type} w-full flex px-6 py-3 ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}>
+                <div className={`${message.type === 'user' 
+                  ? 'ui-user-bubble' 
+                  : message.type === 'system' 
+                    ? 'ui-system-bubble' 
+                    : 'ui-agent-bubble'
                   }`}>
                   <div className="message-content space-y-2">
                     {message.content && (message.type === 'assistant' ? <Markdown content={message.content} /> : <p>{message.content}</p>)}
@@ -340,7 +340,7 @@ export function InteractiveChatInterface({
                       <div className="browsing-trace mt-3">
                         <button
                           onClick={() => toggleTrace(messageId)}
-                          className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 transition-colors"
+                          className="flex items-center gap-2 ui-metadata-label hover:text-text-secondary transition-colors"
                         >
                           {expandedTraces.has(messageId) ? (
                             <ChevronUp className="w-4 h-4" />
@@ -354,27 +354,27 @@ export function InteractiveChatInterface({
                         </button>
 
                         {expandedTraces.has(messageId) && (
-                          <div className="mt-2 space-y-2 p-3 bg-gray-50 dark:bg-gray-800/30 rounded-lg border border-gray-200 dark:border-gray-800/30">
-                            <h4 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Browsing Trace:</h4>
+                          <div className="mt-2 space-y-2 ui-metadata-item">
+                            <h4 className="ui-metadata-label mb-2">Browsing Trace:</h4>
                             {message.browsing_trace.map((step, i) => (
-                              <div key={i} className="flex items-start gap-3 p-2 bg-white dark:bg-gray-800/50 rounded border border-gray-100 dark:border-gray-800/30">
+                              <div key={`${messageId}-trace-${step.step_number || i}-${step.action}`} className="flex items-start gap-3 p-2 ui-card">
                                 <div className="flex-shrink-0 mt-0.5">
-                                  {step.status === 'success' && <CheckCircle className="w-4 h-4 text-green-500" />}
-                                  {step.status === 'error' && <AlertCircle className="w-4 h-4 text-red-500" />}
-                                  {step.status === 'pending' && <Loader2 className="w-4 h-4 animate-spin text-blue-500" />}
+                                  {step.status === 'success' && <CheckCircle className="w-4 h-4 text-status-success" />}
+                                  {step.status === 'error' && <AlertCircle className="w-4 h-4 text-status-error" />}
+                                  {step.status === 'pending' && <Loader2 className="w-4 h-4 animate-spin text-status-active" />}
                                 </div>
                                 <div className="flex-1 min-w-0">
                                   <div className="flex items-center justify-between">
-                                    <span className="text-sm font-medium text-gray-900 dark:text-gray-100">
+                                    <span className="ui-task-name">
                                       {step.step_number}. {step.action}
                                     </span>
                                     {step.duration && (
-                                      <span className="text-xs text-gray-500 dark:text-gray-400">
+                                      <span className="ui-metadata-mono">
                                         {step.duration.toFixed(1)}s
                                       </span>
                                     )}
                                   </div>
-                                  <p className="text-xs text-gray-600 dark:text-gray-400 mt-1 truncate">
+                                  <p className="ui-file-meta mt-1 truncate">
                                     {step.description}
                                   </p>
                                 </div>
@@ -390,11 +390,11 @@ export function InteractiveChatInterface({
                         {message.attachments.map((att: Attachment, attIndex: number) => (
                           <div key={`${messageId}-attachment-${attIndex}`}>
                             {att.type.startsWith('image/') && att.content ? (
-                              <img src={att.content} alt={att.name} className="max-w-xs max-h-48 rounded-lg" />
+                              <img src={att.content} alt={att.name} className="max-w-xs max-h-48 rounded-orbimesh-lg" />
                             ) : (
-                              <div className="flex items-center gap-2 p-2 rounded-md bg-gray-20 text-sm">
+                              <div className="flex items-center gap-2 ui-metadata-item">
                                 <FileIcon className="w-4 h-4" />
-                                <span>{att.name}</span>
+                                <span className="ui-file-name">{att.name}</span>
                               </div>
                             )}
                           </div>
@@ -404,10 +404,10 @@ export function InteractiveChatInterface({
                     {/* View in Canvas button for messages with canvas content or data */}
                     {message.has_canvas && (message.canvas_content || (message as any).canvas_data) && message.canvas_type && (
                       <Button
-                        variant="outline"
+                        variant="ui-secondary"
                         size="sm"
                         className="mt-2 text-xs"
-                        onClick={() => onViewCanvas?.(message.canvas_content || JSON.stringify((message as any).canvas_data || {}), message.canvas_type as any)}
+                        onClick={() => onViewCanvas?.(message.canvas_content || JSON.stringify((message as any).canvas_data || {}), message.canvas_type!)}
                       >
                         <FileText className="w-3 h-3 mr-1" />
                         View in Canvas
@@ -415,8 +415,8 @@ export function InteractiveChatInterface({
                     )}
                   </div>
                   {/* Footer with timestamp and copy button */}
-                  <div className={`flex items-center justify-between mt-1.5 ${message.type === 'user' ? 'text-blue-100 dark:text-blue-200' : 'text-gray-500 dark:text-gray-400'}`}>
-                    <div className="text-xs opacity-60 font-medium">
+                  <div className={`flex items-center justify-between mt-1.5 ${message.type === 'user' ? 'text-text-tertiary' : 'text-text-tertiary'}`}>
+                    <div className="ui-file-meta opacity-60">
                       {message.timestamp.toLocaleTimeString()}
                     </div>
                     {/* Action buttons for assistant messages */}
@@ -425,11 +425,11 @@ export function InteractiveChatInterface({
                         {/* Read Aloud button */}
                         <button
                           onClick={() => handleReadAloud(messageId, message.content!)}
-                          className={`p-1.5 rounded-lg transition-all duration-300 ease-out hover:bg-gray-100 dark:hover:bg-gray-700/50 ${speakingMessageId === messageId && isSpeaking
-                            ? 'text-blue-500 scale-110'
+                          className={`p-1.5 rounded-orbimesh-lg transition-all duration-300 ease-out hover:bg-bg-hover ${speakingMessageId === messageId && isSpeaking
+                            ? 'text-brand-teal scale-110'
                             : (speakingMessageId === messageId && isTTSGenerating) || (isTTSLoading && speakingMessageId === messageId)
-                              ? 'text-gray-500 hover:text-gray-600 dark:text-gray-400 dark:hover:text-gray-300'
-                              : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300'
+                              ? 'text-text-tertiary hover:text-text-secondary'
+                              : 'text-text-tertiary hover:text-text-secondary'
                             }`}
                           title={
                             speakingMessageId === messageId && isSpeaking
@@ -455,9 +455,9 @@ export function InteractiveChatInterface({
                         {/* Copy button */}
                         <button
                           onClick={() => copyToClipboard(messageId, message.content!)}
-                          className={`p-1.5 rounded-lg transition-all duration-300 ease-out hover:bg-gray-100 dark:hover:bg-gray-700/50 ${copiedMessageId === messageId
-                            ? 'text-green-500 scale-110'
-                            : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300'
+                          className={`p-1.5 rounded-orbimesh-lg transition-all duration-300 ease-out hover:bg-bg-hover ${copiedMessageId === messageId
+                            ? 'text-status-success scale-110'
+                            : 'text-text-tertiary hover:text-text-secondary'
                             }`}
                           title={copiedMessageId === messageId ? 'Copied!' : 'Copy message'}
                         >
@@ -475,25 +475,23 @@ export function InteractiveChatInterface({
             );
           })}
 
-
-
         {/* Live Browser Stream - shown AFTER messages while browser is running */}
         {isBrowserRunning && (
           <div className="browser-live-stream w-full flex justify-start">
-            <div className="w-full max-w-[95%] rounded-2xl overflow-hidden shadow-lg border border-gray-200 dark:border-gray-700 bg-gray-900">
+            <div className="w-full max-w-[95%] rounded-orbimesh-xl overflow-hidden shadow-lg ui-card bg-bg-card">
               {/* Header */}
-              <div className="bg-gradient-to-r from-gray-800 to-gray-900 px-4 py-3 flex items-center justify-between border-b border-gray-700">
+              <div className="bg-bg-subtle px-4 py-3 flex items-center justify-between border-b border-border-color">
                 <div className="flex items-center gap-3">
                   <div className="relative">
-                    <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse"></div>
-                    <div className="absolute inset-0 w-3 h-3 bg-green-500 rounded-full animate-ping opacity-75"></div>
+                    <div className="w-3 h-3 bg-status-success rounded-full animate-pulse"></div>
+                    <div className="absolute inset-0 w-3 h-3 bg-status-success rounded-full animate-ping opacity-75"></div>
                   </div>
                   <div className="flex items-center gap-2">
-                    <Globe className="w-4 h-4 text-blue-400" />
-                    <span className="text-sm font-semibold text-white">Live Browser View</span>
+                    <Globe className="w-4 h-4 text-brand-teal" />
+                    <span className="ui-task-name text-text-primary">Live Browser View</span>
                   </div>
                 </div>
-                <div className="flex items-center gap-2 text-xs text-gray-400">
+                <div className="flex items-center gap-2 ui-file-meta text-text-tertiary">
                   <Loader2 className="w-3 h-3 animate-spin" />
                   <span>Automating...</span>
                 </div>
@@ -513,91 +511,91 @@ export function InteractiveChatInterface({
       </div>
 
       {/* Input Form */}
-      <div className="p-4 border-t border-gray-200 dark:border-gray-800/30 bg-gray-50/80 dark:bg-gray-800/70 backdrop-blur-lg rounded-b-lg">
+      <div className="p-4 bg-bg-subtle/95 backdrop-blur-lg border-t border-border-color">
         {/* Consolidated Status Indicator - Shows orchestration progress above input */}
         {(isLoading || state.status === 'processing') && !state.isWaitingForUser && (
-          <div className={`status-indicator p-3 rounded-lg mb-4 ${state.isWaitingForUser
-            ? 'bg-yellow-50 border border-yellow-200'
+          <div className={`status-indicator p-3 rounded-orbimesh-lg mb-4 ${state.isWaitingForUser
+            ? 'bg-status-pending-light border border-status-pending'
             : state.metadata?.currentStage === 'completed'
-              ? 'bg-green-50 border border-green-200'
+              ? 'bg-status-success-light border border-status-success'
               : state.metadata?.currentStage === 'error'
-                ? 'bg-red-50 border border-red-200'
+                ? 'bg-status-error-light border border-status-error'
                 : state.metadata?.currentStage === 'parsing'
-                  ? 'bg-purple-50 border border-purple-200'
+                  ? 'bg-status-active-light border border-status-active'
                   : state.metadata?.currentStage === 'searching'
-                    ? 'bg-green-50 border border-green-200'
+                    ? 'bg-status-success-light border border-status-success'
                     : state.metadata?.currentStage === 'ranking'
-                      ? 'bg-orange-50 border border-orange-200'
+                      ? 'bg-status-pending-light border border-status-pending'
                       : state.metadata?.currentStage === 'planning'
-                        ? 'bg-indigo-50 border border-indigo-200'
+                        ? 'bg-status-active-light border border-status-active'
                         : state.metadata?.currentStage === 'validating'
-                          ? 'bg-teal-50 border border-teal-200'
+                          ? 'bg-brand-teal-light border border-brand-teal'
                           : state.metadata?.currentStage === 'executing'
-                            ? 'bg-red-50 border border-red-200'
+                            ? 'bg-status-error-light border border-status-error'
                             : state.metadata?.currentStage === 'aggregating'
-                              ? 'bg-cyan-50 border border-cyan-200'
-                              : 'bg-blue-50 border border-blue-200'  // default initializing state
+                              ? 'bg-status-active-light border border-status-active'
+                              : 'bg-brand-teal-light border border-brand-teal'  // default initializing state
             }`}>
             <div className="flex items-center space-x-2">
               {state.isWaitingForUser ? (
-                <AlertCircle className="w-4 h-4 text-yellow-600" />
+                <AlertCircle className="w-4 h-4 text-status-pending" />
               ) : state.metadata?.currentStage === 'completed' ? (
-                <CheckCircle className="w-4 h-4 text-green-600" />
+                <CheckCircle className="w-4 h-4 text-status-success" />
               ) : state.metadata?.currentStage === 'error' ? (
-                <AlertCircle className="w-4 h-4 text-red-600" />
+                <AlertCircle className="w-4 h-4 text-status-error" />
               ) : state.metadata?.currentStage === 'parsing' ? (
-                <Brain className="w-4 h-4 text-purple-600" />
+                <Brain className="w-4 h-4 text-status-active" />
               ) : state.metadata?.currentStage === 'searching' ? (
-                <Search className="w-4 h-4 text-green-600" />
+                <Search className="w-4 h-4 text-status-success" />
               ) : state.metadata?.currentStage === 'ranking' ? (
-                <Users className="w-4 h-4 text-orange-600" />
+                <Users className="w-4 h-4 text-status-pending" />
               ) : state.metadata?.currentStage === 'planning' ? (
-                <FileText className="w-4 h-4 text-indigo-600" />
+                <FileText className="w-4 h-4 text-status-active" />
               ) : state.metadata?.currentStage === 'validating' ? (
-                <CheckCircle className="w-4 h-4 text-teal-600" />
+                <CheckCircle className="w-4 h-4 text-brand-teal" />
               ) : state.metadata?.currentStage === 'executing' ? (
-                <Play className="w-4 h-4 text-red-600" />
+                <Play className="w-4 h-4 text-status-error" />
               ) : state.metadata?.currentStage === 'aggregating' ? (
-                <BarChart3 className="w-4 h-4 text-cyan-600" />
+                <BarChart3 className="w-4 h-4 text-status-active" />
               ) : (
-                <Loader2 className={`w-4 h-4 animate-spin text-blue-600`} />
+                <Loader2 className={`w-4 h-4 animate-spin text-brand-teal`} />
               )}
-              <span className={`font-medium text-sm ${state.isWaitingForUser
-                ? 'text-yellow-800'
+              <span className={`ui-metadata-label ${state.isWaitingForUser
+                ? 'text-status-pending-dark'
                 : state.metadata?.currentStage === 'completed'
-                  ? 'text-green-800'
+                  ? 'text-status-success-dark'
                   : state.metadata?.currentStage === 'error'
-                    ? 'text-red-800'
+                    ? 'text-status-error'
                     : state.metadata?.currentStage === 'parsing'
-                      ? 'text-purple-800'
+                      ? 'text-status-active-dark'
                       : state.metadata?.currentStage === 'searching'
-                        ? 'text-green-800'
+                        ? 'text-status-success-dark'
                         : state.metadata?.currentStage === 'ranking'
-                          ? 'text-orange-800'
+                          ? 'text-status-pending-dark'
                           : state.metadata?.currentStage === 'planning'
-                            ? 'text-indigo-800'
+                            ? 'text-status-active-dark'
                             : state.metadata?.currentStage === 'validating'
-                              ? 'text-teal-800'
+                              ? 'text-brand-teal'
                               : state.metadata?.currentStage === 'executing'
-                                ? 'text-red-800'
+                                ? 'text-status-error'
                                 : state.metadata?.currentStage === 'aggregating'
-                                  ? 'text-cyan-800'
-                                  : 'text-blue-800'  // default initializing state
+                                  ? 'text-status-active-dark'
+                                  : 'text-brand-teal'  // default initializing state
                 }`}>
                 {state.metadata?.stageMessage || (state.isWaitingForUser ? 'Waiting for your response...' : 'Processing your request...')}
               </span>
               {state.metadata?.progress && !state.isWaitingForUser && state.metadata?.currentStage !== 'completed' && state.metadata?.currentStage !== 'error' && (
-                <div className="flex-1 bg-gray-200 dark:bg-gray-700/50 rounded-full h-2 ml-4 overflow-hidden">
+                <div className="flex-1 bg-border-DEFAULT rounded-full h-2 ml-4 overflow-hidden">
                   <div
-                    className={`h-2 rounded-full transition-all duration-300 ${state.metadata?.currentStage === 'initializing' ? 'bg-blue-500' :
-                      state.metadata?.currentStage === 'parsing' ? 'bg-purple-500' :
-                        state.metadata?.currentStage === 'searching' ? 'bg-green-500' :
-                          state.metadata?.currentStage === 'ranking' ? 'bg-orange-500' :
-                            state.metadata?.currentStage === 'planning' ? 'bg-indigo-500' :
-                              state.metadata?.currentStage === 'validating' ? 'bg-teal-500' :
-                                state.metadata?.currentStage === 'executing' ? 'bg-red-500' :
-                                  state.metadata?.currentStage === 'aggregating' ? 'bg-cyan-500' :
-                                    'bg-blue-500'
+                    className={`h-2 rounded-full transition-all duration-300 ${state.metadata?.currentStage === 'initializing' ? 'bg-brand-teal' :
+                      state.metadata?.currentStage === 'parsing' ? 'bg-status-active' :
+                        state.metadata?.currentStage === 'searching' ? 'bg-status-success' :
+                          state.metadata?.currentStage === 'ranking' ? 'bg-status-pending' :
+                            state.metadata?.currentStage === 'planning' ? 'bg-status-active' :
+                              state.metadata?.currentStage === 'validating' ? 'bg-brand-teal' :
+                                state.metadata?.currentStage === 'executing' ? 'bg-status-error' :
+                                  state.metadata?.currentStage === 'aggregating' ? 'bg-status-active' :
+                                    'bg-brand-teal'
                       }`}
                     style={{ width: `${state.metadata.progress}%` }}
                   />
@@ -617,7 +615,7 @@ export function InteractiveChatInterface({
                   onChange={(e) => setUserResponse(e.target.value)}
                   placeholder="Type your response here..."
                   disabled={isLoading}
-                  className="min-h-[120px] text-base"
+                  className="ui-textarea min-h-[120px] text-base"
                   onKeyDown={handleKeyDown}
                   autoFocus
                 />
@@ -628,67 +626,76 @@ export function InteractiveChatInterface({
                 <div className="flex flex-wrap gap-2">
                   {attachedFiles.filter(f => f.type.startsWith('image/')).map((file, index) => (
                     <div key={file.name} className="relative">
-                      <img src={previewUrls[index]} alt={file.name} className="h-20 w-20 object-cover rounded-md" />
+                      <img src={previewUrls[index]} alt={file.name} className="h-20 w-20 object-cover rounded-orbimesh-md" />
                       <button
                         type="button"
                         onClick={() => removeFile(file.name)}
-                        className="absolute top-0 right-0 bg-red-500 text-white rounded-full p-1 text-xs"
+                        className="absolute top-0 right-0 bg-status-error text-white rounded-full p-1 text-xs hover:bg-red-600 transition-colors"
                       >
                         <X className="w-3 h-3" />
                       </button>
                     </div>
                   ))}
                   {attachedFiles.filter(f => !f.type.startsWith('image/')).map(file => (
-                    <Badge key={file.name} variant="secondary" className="flex items-center gap-1">
+                    <Badge key={file.name} variant="ui-pending" className="flex items-center gap-1 pr-1">
                       <FileIcon className="w-4 h-4" />
-                      {file.name}
-                      <X className="w-3 h-3 cursor-pointer" onClick={() => removeFile(file.name)} />
+                      <span className="max-w-[200px] truncate">{file.name}</span>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          removeFile(file.name);
+                        }}
+                        className="ml-1 hover:bg-red-500/20 rounded-full p-0.5 transition-colors"
+                        title="Remove attachment"
+                      >
+                        <X className="w-3 h-3 cursor-pointer hover:text-status-error" />
+                      </button>
                     </Badge>
                   ))}
                 </div>
 
-                {/* Planning Mode Toggle */}
-                <div className="flex items-center justify-between px-1 py-2">
-                  <div className="flex items-center gap-2">
-                    <Switch
-                      id="planning-mode"
-                      checked={planningMode}
-                      onCheckedChange={setPlanningMode}
-                    />
-                    <label
-                      htmlFor="planning-mode"
-                      className="text-sm font-medium cursor-pointer select-none"
-                    >
-                      Planning Mode
-                    </label>
-                  </div>
+                {/* Planning Mode Toggle - Above Textarea */}
+                <div className="flex items-center gap-2">
+                  <Switch
+                    id="planning-mode"
+                    checked={planningMode}
+                    onCheckedChange={setPlanningMode}
+                    className="border-2 border-brand-teal rounded-full [&>span]:bg-slate-700 [&>span]:dark:bg-white [&[data-state=checked]>span]:bg-white"
+                  />
+                  <label
+                    htmlFor="planning-mode"
+                    className="ui-metadata-label cursor-pointer select-none"
+                  >
+                    Planning Mode
+                  </label>
                   {planningMode && (
-                    <Badge variant="secondary" className="text-xs">
+                    <Badge variant="ui-pending" className="ui-file-meta">
                       Will pause for approval
                     </Badge>
                   )}
                 </div>
 
                 <div className="space-y-2">
-                  <div className="relative">
+                  <div className="relative flex-1">
                     {/* Audio Recording Overlay */}
                     {isListening && (
-                      <div className="absolute inset-0 bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-blue-900/30 dark:to-indigo-900/30 rounded-lg border-2 border-blue-400 dark:border-blue-500 flex flex-col items-center justify-center z-10">
+                      <div className="absolute inset-0 bg-brand-teal-light rounded-orbimesh-lg border-2 border-brand-teal flex flex-col items-center justify-center z-10">
                         <AudioWaveSVG
                           isActive={isListening}
                           audioLevel={audioLevel}
-                          color="#3b82f6"
+                          color="#0D9488"
                           width={160}
                           height={50}
                         />
                         <div className="flex items-center gap-2 mt-3">
-                          <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
-                          <span className="text-sm font-medium text-blue-700 dark:text-blue-300">
+                          <div className="w-2 h-2 bg-status-error rounded-full animate-pulse"></div>
+                          <span className="ui-metadata-label text-brand-teal">
                             Listening...
                           </span>
                         </div>
                         {(transcript || interimTranscript) && (
-                          <p className="text-xs text-gray-600 dark:text-gray-400 mt-2 px-4 text-center max-w-full truncate">
+                          <p className="ui-file-meta mt-2 px-4 text-center max-w-full truncate">
                             {transcript}{interimTranscript && <span className="opacity-60">{interimTranscript}</span>}
                           </p>
                         )}
@@ -699,7 +706,7 @@ export function InteractiveChatInterface({
                       onChange={(e) => setInputValue(e.target.value)}
                       placeholder="Describe what you want to accomplish..."
                       disabled={isLoading || isListening}
-                      className={`min-h-[60px] text-base ${isListening ? 'opacity-0' : ''}`}
+                      className={`ui-textarea min-h-[60px] text-base ${isListening ? 'opacity-0' : ''}`}
                       onKeyDown={handleKeyDown}
                     />
                   </div>
@@ -707,11 +714,12 @@ export function InteractiveChatInterface({
               </>
             )}
 
-            <div className="flex justify-between items-center">
+            <div className="flex items-center justify-between gap-2">
+              {/* Attachment and Audio Buttons - Left Side */}
               <div className="flex items-center gap-2">
                 <Button
                   type="button"
-                  variant="outline"
+                  variant="ui-secondary"
                   size="sm"
                   onClick={() => fileInputRef.current?.click()}
                   disabled={isLoading}
@@ -729,12 +737,12 @@ export function InteractiveChatInterface({
                 {isSTTSupported && (
                   <Button
                     type="button"
-                    variant={isListening ? "default" : "outline"}
+                    variant={isListening ? "default" : "ui-secondary"}
                     size="sm"
                     onClick={handleMicrophoneToggle}
                     disabled={isLoading}
                     className={isListening
-                      ? "bg-red-500 hover:bg-red-600 text-white border-red-500"
+                      ? "bg-status-error hover:bg-status-error text-foreground border-status-error"
                       : ""
                     }
                     title={isListening ? "Stop recording" : "Start voice input"}
@@ -747,7 +755,9 @@ export function InteractiveChatInterface({
                   </Button>
                 )}
               </div>
-              <div className="flex space-x-2">
+
+              {/* Action Buttons - Right Side */}
+              <div className="flex items-center gap-2">
                 {/* Plan Approval Buttons - Only show when in planning mode with approval required, or executing saved workflows */}
                 {((planningMode && state.approval_required) || ((state.metadata?.currentStage === 'validating' || state.status === 'planning_complete') && onAcceptPlan && state.metadata?.from_workflow)) ? (
                   <>
@@ -755,10 +765,9 @@ export function InteractiveChatInterface({
                     {planningMode && !state.metadata?.from_workflow && (
                       <Button
                         type="button"
-                        variant="outline"
+                        variant="ui-secondary"
                         size="sm"
                         onClick={handleModifyPlan}
-                        className="border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-800"
                       >
                         Modify Plan
                       </Button>
@@ -769,7 +778,7 @@ export function InteractiveChatInterface({
                       type="button"
                       size="sm"
                       onClick={handleAcceptAndExecute}
-                      className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white shadow-md"
+                      className="bg-gradient-to-r from-brand-teal to-status-active hover:from-brand-teal-hover hover:to-status-active text-foreground shadow-md"
                     >
                       Accept & Execute
                     </Button>
@@ -782,6 +791,7 @@ export function InteractiveChatInterface({
                     isLoading ||
                     (state.isWaitingForUser ? !userResponse.trim() : (!inputValue.trim() && attachedFiles.length === 0))
                   }
+                  variant="ui-primary"
                 >
                   {isLoading
                     ? 'Processing...'
@@ -795,7 +805,7 @@ export function InteractiveChatInterface({
                 {state.messages.length > 0 && (
                   <Button
                     type="button"
-                    variant="outline"
+                    variant="ui-secondary"
                     onClick={resetConversation}
                     disabled={isLoading}
                   >
@@ -823,3 +833,4 @@ export function InteractiveChatInterface({
     </div>
   );
 }
+
