@@ -36,6 +36,7 @@ from services.content_management_service import (
     ContentPriority
 )
 from services.canvas_service import CanvasService
+from backend.schemas import AgentResponse, StandardAgentResponse, AgentResponseStatus
 
 logger = logging.getLogger("spreadsheet_agent.agent")
 
@@ -90,7 +91,7 @@ class SpreadsheetAgent:
         task_id: str = None,
         file_content: bytes = None,
         filename: str = None
-    ) -> ExecuteResponse:
+    ) -> AgentResponse:
         """
         Unified execution endpoint.
         
@@ -209,31 +210,53 @@ class SpreadsheetAgent:
             
             # Complex prompt mode
             if prompt and not action:
-                return await self._execute_complex(prompt, thread_id, session, params)
+                 exec_res = await self._execute_complex(prompt, thread_id, session, params)
             
             # Direct action mode
-            if action:
-                return await self._execute_action(action, params, thread_id, session)
+            elif action:
+                 exec_res = await self._execute_action(action, params, thread_id, session)
             
             # Auto-generated prompt if file exists but no instruction
-            if not prompt and session.get_latest_file_id():
+            elif not prompt and session.get_latest_file_id():
                 logger.info("No prompt/action provided but file exists in session. Defaulting to summary.")
                 prompt = "Provide a comprehensive summary of this data including columns, rows, and key statistics."
-                return await self._execute_complex(prompt, thread_id, session, params)
+                exec_res = await self._execute_complex(prompt, thread_id, session, params)
             
             # No valid input
-            return ExecuteResponse(
-                status=TaskStatus.ERROR,
-                success=False,
-                error="Either 'prompt' or 'action' must be provided"
+            else:
+                exec_res = ExecuteResponse(
+                    status=TaskStatus.ERROR,
+                    success=False,
+                    error="Either 'prompt' or 'action' must be provided"
+                )
+
+            # --- STANDARDIZATION ADAPTER ---
+            # Convert internal ExecuteResponse to StandardAgentResponse
+            std_response = StandardAgentResponse(
+                status="success" if exec_res.success else "error",
+                summary=exec_res.message or ("Task completed" if exec_res.success else "Task failed"),
+                data=exec_res.result or {},
+                canvas_display=exec_res.canvas_display.model_dump() if exec_res.canvas_display else None,
+                error_message=exec_res.error
+            )
+            
+            return AgentResponse(
+                status=AgentResponseStatus.COMPLETE if exec_res.success else AgentResponseStatus.ERROR,
+                result=exec_res.dict(), # Keep full legacy result for now
+                standard_response=std_response,
+                error=exec_res.error
             )
             
         except Exception as e:
             logger.error(f"Execute failed: {e}\n{traceback.format_exc()}")
-            return ExecuteResponse(
-                status=TaskStatus.ERROR,
-                success=False,
-                error=str(e)
+            return AgentResponse(
+                status=AgentResponseStatus.ERROR,
+                error=str(e),
+                standard_response=StandardAgentResponse(
+                    status="error",
+                    summary="Execution failed hard",
+                    error_message=str(e)
+                )
             )
     
     async def continue_task(

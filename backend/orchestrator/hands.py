@@ -58,52 +58,62 @@ class Hands:
         action_type = decision_dict.get("action_type")
         resource_id = decision_dict.get("resource_id")
         payload = decision_dict.get("payload", {})
-        
+
         # Get thread_id and user_id for credential lookup
         owner = (config or {}).get("configurable", {}).get("owner", {})
         if isinstance(owner, str):
-             user_id = owner
+            user_id = owner
         else:
-             user_id = owner.get("user_id", "system")
+            user_id = owner.get("user_id", "system")
         thread_id = (config or {}).get("configurable", {}).get("thread_id", "default")
 
         start_time = time.time()
         logger.info(f"🚀 Hands: Executing {action_type} -> {resource_id}")
 
         result = None
-        
+
         # === PLAN action: just acknowledge, no execution needed ===
         if action_type == "plan":
             result = ActionResult(
                 action_id=f"plan_{int(time.time())}",
                 success=True,
-                output={"message": "Execution plan created", "phases": len(decision_dict.get("execution_plan", []))},
+                output={
+                    "message": "Execution plan created",
+                    "phases": len(decision_dict.get("execution_plan", [])),
+                },
                 execution_time_ms=(time.time() - start_time) * 1000,
             )
-            logger.info(f"📋 Plan created with {len(decision_dict.get('execution_plan', []))} phases")
+            logger.info(
+                f"📋 Plan created with {len(decision_dict.get('execution_plan', []))} phases"
+            )
             return self._update_state_with_result(state, result, config)
-        
+
         # === REPLAN action: acknowledge plan modification ===
         if action_type == "replan":
             new_phases = decision_dict.get("execution_plan", [])
             result = ActionResult(
                 action_id=f"replan_{int(time.time())}",
                 success=True,
-                output={"message": "Execution plan modified", "new_phases": len(new_phases)},
+                output={
+                    "message": "Execution plan modified",
+                    "new_phases": len(new_phases),
+                },
                 execution_time_ms=(time.time() - start_time) * 1000,
             )
             logger.info(f"🔄 Plan modified with {len(new_phases)} new phases")
             return self._update_state_with_result(state, result, config)
-        
+
         # === PARALLEL action: execute all actions concurrently ===
         if action_type == "parallel":
             parallel_actions = decision_dict.get("parallel_actions", [])
             result = await self._execute_parallel(parallel_actions, user_id, start_time)
             return self._update_state_with_result(state, result, config)
-        
+
         # === Direct execution actions ===
         if action_type == "agent":
-            result = await self._execute_agent(resource_id, payload, user_id, start_time)
+            result = await self._execute_agent(
+                resource_id, payload, user_id, start_time
+            )
         elif action_type == "tool":
             result = await self._execute_tool(resource_id, payload, start_time)
         elif action_type == "terminal":
@@ -134,15 +144,18 @@ class Hands:
             processed_output = await hooks.on_task_complete(
                 resource_id or action_type,
                 {"result": result.output, "status": "completed"},
-                thread_id
+                thread_id,
             )
             result.output = processed_output
 
         return self._update_state_with_result(state, result, config)
-    
+
     async def _execute_parallel(
-        self, parallel_actions: List[Dict[str, Any]], user_id: str, start_time: float,
-        max_retries: int = 2
+        self,
+        parallel_actions: List[Dict[str, Any]],
+        user_id: str,
+        start_time: float,
+        max_retries: int = 2,
     ) -> ActionResult:
         """
         Execute multiple actions concurrently using asyncio.gather.
@@ -155,9 +168,9 @@ class Hands:
                 error_message="No parallel actions provided",
                 execution_time_ms=(time.time() - start_time) * 1000,
             )
-        
+
         logger.info(f"⚡ Executing {len(parallel_actions)} actions in parallel")
-        
+
         async def execute_single_with_retry(
             action: Dict[str, Any], idx: int, retries: int = 0
         ) -> Dict[str, Any]:
@@ -166,12 +179,16 @@ class Hands:
             action_type = action.get("action_type")
             resource_id = action.get("resource_id")
             payload = action.get("payload", {})
-            
+
             try:
                 if action_type == "agent":
-                    result = await self._execute_agent(resource_id, payload, user_id, action_start)
+                    result = await self._execute_agent(
+                        resource_id, payload, user_id, action_start
+                    )
                 elif action_type == "tool":
-                    result = await self._execute_tool(resource_id, payload, action_start)
+                    result = await self._execute_tool(
+                        resource_id, payload, action_start
+                    )
                 elif action_type == "terminal":
                     result = await self._execute_terminal(payload, action_start)
                 elif action_type == "python":
@@ -183,9 +200,9 @@ class Hands:
                         "resource_id": resource_id,
                         "success": False,
                         "error": f"Unknown action type: {action_type}",
-                        "retries": retries
+                        "retries": retries,
                     }
-                
+
                 if result.success:
                     return {
                         "index": idx,
@@ -194,16 +211,18 @@ class Hands:
                         "success": True,
                         "output": result.output,
                         "error": None,
-                        "retries": retries
+                        "retries": retries,
                     }
-                
+
                 # Failed - retry with backoff if retries remaining
                 if retries < max_retries:
-                    backoff = (2 ** retries) * 0.5  # 0.5s, 1s, 2s...
-                    logger.info(f"⚠️ Parallel action {idx} failed, retrying in {backoff}s...")
+                    backoff = (2**retries) * 0.5  # 0.5s, 1s, 2s...
+                    logger.info(
+                        f"⚠️ Parallel action {idx} failed, retrying in {backoff}s..."
+                    )
                     await asyncio.sleep(backoff)
                     return await execute_single_with_retry(action, idx, retries + 1)
-                
+
                 return {
                     "index": idx,
                     "action_type": action_type,
@@ -211,30 +230,35 @@ class Hands:
                     "success": False,
                     "output": result.output,
                     "error": result.error_message,
-                    "retries": retries
+                    "retries": retries,
                 }
-                
+
             except Exception as e:
                 # Exception - retry with backoff if retries remaining
                 if retries < max_retries:
-                    backoff = (2 ** retries) * 0.5
-                    logger.info(f"⚠️ Parallel action {idx} exception, retrying in {backoff}s...")
+                    backoff = (2**retries) * 0.5
+                    logger.info(
+                        f"⚠️ Parallel action {idx} exception, retrying in {backoff}s..."
+                    )
                     await asyncio.sleep(backoff)
                     return await execute_single_with_retry(action, idx, retries + 1)
-                
+
                 return {
                     "index": idx,
                     "action_type": action_type,
                     "resource_id": resource_id,
                     "success": False,
                     "error": str(e),
-                    "retries": retries
+                    "retries": retries,
                 }
-        
+
         # Execute all actions concurrently with retry
-        tasks = [execute_single_with_retry(action, i) for i, action in enumerate(parallel_actions)]
+        tasks = [
+            execute_single_with_retry(action, i)
+            for i, action in enumerate(parallel_actions)
+        ]
         results = await asyncio.gather(*tasks)
-        
+
         # Aggregate results
         all_success = all(r.get("success", False) for r in results)
         total_retries = sum(r.get("retries", 0) for r in results)
@@ -243,16 +267,20 @@ class Hands:
             "total_actions": len(parallel_actions),
             "successful": sum(1 for r in results if r.get("success")),
             "failed": sum(1 for r in results if not r.get("success")),
-            "total_retries": total_retries
+            "total_retries": total_retries,
         }
-        
-        logger.info(f"⚡ Parallel execution: {combined_output['successful']}/{combined_output['total_actions']} succeeded ({total_retries} retries)")
-        
+
+        logger.info(
+            f"⚡ Parallel execution: {combined_output['successful']}/{combined_output['total_actions']} succeeded ({total_retries} retries)"
+        )
+
         return ActionResult(
             action_id=f"parallel_{int(time.time())}",
             success=all_success,
             output=combined_output,
-            error_message=None if all_success else f"{combined_output['failed']} actions failed after retries",
+            error_message=None
+            if all_success
+            else f"{combined_output['failed']} actions failed after retries",
             execution_time_ms=(time.time() - start_time) * 1000,
         )
 
@@ -262,7 +290,14 @@ class Hands:
         """Execute an agent call with robust retry and credential handling."""
         agents = agent_registry.list_active_agents()
         # Case-insensitive match for name or exact match for ID
-        agent = next((a for a in agents if a["name"].lower() == agent_id.lower() or a["id"] == agent_id), None)
+        agent = next(
+            (
+                a
+                for a in agents
+                if a["name"].lower() == agent_id.lower() or a["id"] == agent_id
+            ),
+            None,
+        )
 
         if not agent:
             return ActionResult(
@@ -273,62 +308,91 @@ class Hands:
             )
 
         instruction = payload.get("instruction", payload.get("prompt", ""))
-        
+
         # Get absolute URL from registry
         db = SessionLocal()
         try:
-            base_url = agent_registry.get_agent_url(agent['id'], agent['name'], db)
-            auth_headers = get_credentials_for_headers(db, agent['id'], user_id, agent.get('type', 'http_rest'))
+            base_url = agent_registry.get_agent_url(agent["id"], agent["name"], db)
+            auth_headers = get_credentials_for_headers(
+                db, agent["id"], user_id, agent.get("type", "http_rest")
+            )
         finally:
             db.close()
 
         if not base_url:
-            logger.error(f"No base URL configured for agent '{agent['name']}' (ID: {agent_id}). Check connection_config or agent_entries file.")
+            logger.error(
+                f"No base URL configured for agent '{agent['name']}' (ID: {agent_id}). Check connection_config or agent_entries file."
+            )
             return ActionResult(
-                action_type="agent",
-                resource_id=agent_id,
+                action_id=f"agent_{agent_id}",
                 success=False,
                 error_message=f"Agent '{agent['name']}' has no configured base URL. Cannot execute.",
                 execution_time_ms=(time.time() - start_time) * 1000,
             )
 
-        url = f"{base_url.rstrip('/')}/process"
+        url = f"{base_url.rstrip('/')}/execute"
+
+        # Build UAP-compliant request payload
+        uap_request = {
+            "type": "execute",  # Explicitly set message type
+            "action": payload.get("action"),  # Extract action from payload (CRITICAL FIX)
+            "prompt": instruction,
+            "payload": payload.get("payload", {}),
+            "task_id": payload.get("task_id"),
+            "thread_id": payload.get("thread_id"),
+        }
+        # Remove None values
+        uap_request = {k: v for k, v in uap_request.items() if v is not None}
 
         async def _call_agent():
             async with httpx.AsyncClient(timeout=self.timeout_map["agent"]) as client:
-                return await client.post(url, json={"request": instruction}, headers=auth_headers)
+                # UAP: All agents receive standardized request format
+                logger.debug(f"📤 Sending UAP Request to {url}: {json.dumps(uap_request, default=str)}")
+                resp = await client.post(
+                    url, json=uap_request, headers=auth_headers
+                )
+                logger.debug(f"📥 Received Response from {url}: Status={resp.status_code}, Body={resp.text[:500]}...") # Truncate for brevity
+                return resp
 
         try:
             response = await RetryManager.retry_async(
                 func=_call_agent,
                 max_retries=2,
                 operation_name=f"AgentCall({agent['name']})",
-                retry_on_status_codes=[502, 503, 504]
+                retry_on_status_codes=[502, 503, 504],
             )
-            
+
             agent_result = response.json()
             success = response.status_code == 200
-            
+
             # Deep validation
             if isinstance(agent_result, dict):
-                if agent_result.get("success") is False or agent_result.get("status") == "error":
+                if (
+                    agent_result.get("success") is False
+                    or agent_result.get("status") == "error"
+                ):
                     success = False
 
             telemetry_service.log_agent_call(
-                agent['name'], success, (time.time() - start_time) * 1000
+                agent["name"], success, (time.time() - start_time) * 1000
             )
+
+            # Extract error from Standard Response if available
+            error_message = agent_result.get("error")
+            if not error_message and "standard_response" in agent_result:
+                error_message = agent_result["standard_response"].get("error_message")
 
             return ActionResult(
                 action_id=f"agent_{agent['id']}",
                 success=success,
                 output=agent_result,
-                error_message=agent_result.get("error") if not success else None,
+                error_message=error_message if not success else None,
                 execution_time_ms=(time.time() - start_time) * 1000,
             )
 
         except Exception as e:
             telemetry_service.log_agent_call(
-                agent['name'], False, (time.time() - start_time) * 1000
+                agent["name"], False, (time.time() - start_time) * 1000
             )
 
             return ActionResult(
@@ -352,11 +416,21 @@ class Hands:
             if isinstance(result_value, dict) and "error" in result_value:
                 success = False
 
+            # Ensure error_message is always a string or None
+            error_msg = exec_result.get("error")
+            if error_msg is not None and not isinstance(error_msg, str):
+                error_msg = str(error_msg)
+
+            if error_msg is None and isinstance(result_value, dict):
+                error_msg = result_value.get("error")
+                if error_msg is not None and not isinstance(error_msg, str):
+                    error_msg = str(error_msg)
+
             return ActionResult(
                 action_id=f"tool_{tool_name}",
                 success=success,
                 output=result_value,
-                error_message=exec_result.get("error") or (result_value.get("error") if isinstance(result_value, dict) else None),
+                error_message=error_msg,
                 execution_time_ms=(time.time() - start_time) * 1000,
             )
 
@@ -438,10 +512,10 @@ class Hands:
         decision_dict = state.get("decision", {})
         iteration = state.get("iteration_count", 0)
         action_type = decision_dict.get("action_type", "unknown")
-        
+
         # Generate result summary (first 500 chars of string representation)
         result_summary = self._generate_result_summary(result.output)
-        
+
         # Create action history entry for FULL context awareness
         history_entry = {
             "iteration": iteration,
@@ -454,13 +528,36 @@ class Hands:
             "timestamp": time.time(),
             "execution_time_ms": result.execution_time_ms,
         }
-        
+
+        existing_action_history = list(state.get("action_history", []))
         updates = {
-            "execution_result": result.dict(),
+            "execution_result": result.model_dump(),
             "error": result.error_message if not result.success else None,
-            # Append to action history (append_reducer will handle merging)
-            "action_history": [history_entry],
+            # Append to action history manually
+            "action_history": existing_action_history + [history_entry],
         }
+
+        # SOTA: Extract Canvas Data from Standard Response (UAP v2)
+        # This Bubbles up the canvas display to the top-level state so main.py can see it
+        if isinstance(result.output, dict) and "standard_response" in result.output:
+            std_response = result.output["standard_response"]
+            if isinstance(std_response, dict) and "canvas_display" in std_response:
+                canvas = std_response["canvas_display"]
+                if canvas:
+                    logger.info(f"🎨 Hands: Extracting canvas display from agent response")
+                    updates["has_canvas"] = True
+                    updates["canvas_type"] = canvas.get("canvas_type")
+                    updates["canvas_content"] = canvas.get("canvas_content")
+                    updates["canvas_data"] = canvas.get("canvas_data")
+                    updates["canvas_title"] = canvas.get("heading") or canvas.get("title")
+                    
+                    # For browser view specifically
+                    if canvas.get("canvas_type") == "html":
+                        updates["browser_view"] = canvas.get("canvas_content")
+                        updates["current_view"] = "browser"
+                    elif canvas.get("canvas_type") == "plan_graph":
+                        updates["plan_view"] = canvas.get("canvas_data") 
+                        updates["current_view"] = "plan"
 
         if not result.success:
             failure_count = state.get("failure_count", 0) + 1
@@ -484,17 +581,90 @@ class Hands:
                     break
 
             updates["todo_list"] = todo_list
-        
+
         # Phase completion is now LLM-DRIVEN via brain.py (phase_complete field)
         # No auto-completion here - the LLM explicitly decides when a phase goal is met
-        
+
         # === SOTA ENHANCEMENT 2: Parallel Result Insights Extraction ===
         if action_type == "parallel" and result.success:
             insights_updates = self._extract_parallel_insights(state, result)
             updates.update(insights_updates)
 
+        # === EXPLICIT PHASE COMPLETION (LLM-DRIVEN) ===
+        if decision_dict.get("phase_complete"):
+            phase_updates = self._handle_explicit_phase_completion(state, decision_dict)
+            updates.update(phase_updates)
+
         return updates
-    
+
+    def _handle_explicit_phase_completion(
+        self, state: Dict[str, Any], decision: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Handle explicit phase completion triggered by the Brain.
+        Marks current phase as completed and advances to the next one.
+        """
+        execution_plan = state.get("execution_plan")
+        current_phase_id = state.get("current_phase_id")
+        reasoning = decision.get("phase_goal_verified") or "Phase goal met"
+
+        if not execution_plan or not current_phase_id:
+            logger.warning("⚠️ Phase completion requested but no active plan/phase found.")
+            return {}
+
+        # Find current phase index
+        current_idx = -1
+        current_phase = None
+        for idx, phase in enumerate(execution_plan):
+            if phase.get("phase_id") == current_phase_id:
+                current_phase = phase
+                current_idx = idx
+                break
+
+        if not current_phase:
+            return {}
+
+        logger.info(f"✅ Phase '{current_phase.get('name')}' EXPLICITLY completed by Brain.")
+
+        # update plan
+        new_plan = list(execution_plan)
+        new_plan[current_idx] = {
+            **current_phase,
+            "status": "completed",
+            "result_summary": reasoning
+        }
+
+        # Find next phase
+        next_phase_id = None
+        # Simple logic: find first pending phase that depends on this one, or just next in list if linear
+        # But we should respect dependencies.
+        
+        # Get set of all completed phases (including this one)
+        completed_ids = {p.get("phase_id") for p in new_plan if p.get("status") in ("completed", "skipped")}
+        
+        for phase in new_plan:
+             pid = phase.get("phase_id")
+             if pid in completed_ids:
+                 continue
+             
+             # Check dependencies
+             deps = phase.get("depends_on", [])
+             if not deps or all(d in completed_ids for d in deps):
+                 next_phase_id = pid
+                 break
+        
+        updates = {
+            "execution_plan": new_plan,
+            "current_phase_id": next_phase_id
+        }
+
+        if next_phase_id:
+            logger.info(f"➡ Advancing to phase: {next_phase_id}")
+        else:
+            logger.info("🎉 All phases completed.")
+
+        return updates
+
     def _check_phase_completion(
         self, state: Dict[str, Any], result: ActionResult
     ) -> Dict[str, Any]:
@@ -504,10 +674,10 @@ class Hands:
         """
         execution_plan = state.get("execution_plan")
         current_phase_id = state.get("current_phase_id")
-        
+
         if not execution_plan or not current_phase_id or not result.success:
             return {}
-        
+
         # Find current phase
         current_phase = None
         current_idx = -1
@@ -516,19 +686,19 @@ class Hands:
                 current_phase = phase
                 current_idx = idx
                 break
-        
+
         if not current_phase:
             return {}
-        
+
         # Check if phase should be completed based on result
         # Heuristic: Phase completes after successful action if not already in progress for multiple iterations
         decision = state.get("decision", {})
         action_type = decision.get("action_type")
-        
+
         # Skip phase advancement for plan/parallel setup actions
         if action_type in ("plan", "skip"):
             return {}
-        
+
         # Mark current phase as completed with result summary
         updates = {"execution_plan": list(execution_plan)}  # Copy
         updates["execution_plan"][current_idx] = {
@@ -536,39 +706,44 @@ class Hands:
             "status": "completed",
             "result_summary": self._generate_result_summary(result.output, 200),
         }
-        
+
         # Find next phase whose dependencies are all completed
         next_phase_id = None
-        completed_phases = {p.get("phase_id") for p in execution_plan if p.get("status") == "completed"}
+        completed_phases = {
+            p.get("phase_id") for p in execution_plan if p.get("status") == "completed"
+        }
         completed_phases.add(current_phase_id)  # Include current (just completed)
-        
+
         for phase in execution_plan:
             if phase.get("phase_id") == current_phase_id:
                 continue
             if phase.get("status") in ("completed", "skipped"):
                 continue
-            
+
             # Check if all dependencies are completed
             deps = phase.get("depends_on", [])
             if all(dep in completed_phases for dep in deps):
                 next_phase_id = phase.get("phase_id")
                 break
-        
+
         if next_phase_id:
             updates["current_phase_id"] = next_phase_id
-            logger.info(f"✅ Phase '{current_phase_id}' complete → Moving to phase '{next_phase_id}'")
+            logger.info(
+                f"✅ Phase '{current_phase_id}' complete → Moving to phase '{next_phase_id}'"
+            )
         else:
             # All phases complete or no valid next phase
             all_complete = all(
-                p.get("status") in ("completed", "skipped") or p.get("phase_id") == current_phase_id
+                p.get("status") in ("completed", "skipped")
+                or p.get("phase_id") == current_phase_id
                 for p in execution_plan
             )
             if all_complete:
                 updates["current_phase_id"] = None
                 logger.info(f"🎉 All phases complete!")
-        
+
         return updates
-    
+
     def _extract_parallel_insights(
         self, state: Dict[str, Any], result: ActionResult
     ) -> Dict[str, Any]:
@@ -578,24 +753,24 @@ class Hands:
         """
         insights = dict(state.get("insights", {}))
         iteration = state.get("iteration_count", 0)
-        
+
         if not result.output or not isinstance(result.output, dict):
             return {}
-        
+
         parallel_results = result.output.get("parallel_results", [])
-        
+
         for pr in parallel_results:
             if not pr.get("success"):
                 continue
-            
+
             output = pr.get("output")
             if not output:
                 continue
-            
+
             idx = pr.get("index", 0)
             resource = pr.get("resource_id", "unknown")
             insight_key = f"parallel_{iteration}_{idx}"
-            
+
             # Extract meaningful content
             if isinstance(output, dict):
                 for key in ["result", "data", "message", "response", "summary"]:
@@ -606,29 +781,36 @@ class Hands:
                             break
             elif isinstance(output, str) and len(output) > 20:
                 insights[insight_key] = f"[{resource}] {output[:150]}"
-        
-        if insights != state.get("insights", {}):
+
+        # Always return insights dict if any were extracted or if original state had insights
+        if insights or state.get("insights"):
             return {"insights": insights}
         return {}
-    
+
     def _generate_result_summary(self, output: Any, max_length: int = 500) -> str:
         """Generate a concise summary of the result for quick reference."""
         if output is None:
             return "No output"
-        
+
         if isinstance(output, str):
             return output[:max_length] + ("..." if len(output) > max_length else "")
-        
+
         if isinstance(output, dict):
-            # Extract key fields for summary
+            # UAP v2: Check for StandardAgentResponse summary FIRST
+            # This is the dedicated summary specifically for the Orchestrator Brain
+            if "standard_response" in output and isinstance(output["standard_response"], dict):
+                std_summary = output["standard_response"].get("summary")
+                if std_summary:
+                    return std_summary[:max_length]
+
+            # Extract key fields for summary (Legacy fallback)
             summary_parts = []
             for key in ["result", "message", "data", "response", "output"]:
-                if key in output:
+                if key in output and key != "standard_response": # Avoid recursing into standard_response
                     val = str(output[key])[:200]
                     summary_parts.append(f"{key}: {val}")
             if summary_parts:
                 return "; ".join(summary_parts)[:max_length]
             return json.dumps(output, default=str)[:max_length]
-        
-        return str(output)[:max_length]
 
+        return str(output)[:max_length]

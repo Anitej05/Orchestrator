@@ -58,6 +58,7 @@ def create_graph_with_checkpointer(checkpointer):
         {
             "hands": "omni_hands",
             "approval": "action_approval_required",
+            "brain": "omni_brain",  # Skip action loops back for another thinking cycle
             "finish": END
         }
     )

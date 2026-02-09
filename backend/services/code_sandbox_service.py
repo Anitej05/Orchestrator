@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 import requests
 import json
+import ast
 from typing import Dict, Any, Optional, List
 
 logger = logging.getLogger("CodeSandboxService")
@@ -46,6 +47,7 @@ class CodeSandboxService:
         'filter': filter,
         'any': any,
         'all': all,
+        '__import__': __import__,
     }
 
     def __init__(self):
@@ -96,10 +98,9 @@ class CodeSandboxService:
         new_vars = []
         
         try:
-            # Execute the code
-            # We wrap in a function to allow 'return' if needed, but 'exec' works better for scripts
-            # For this implementation, we assume script-style with variables
+            # Execute the code - Standard exec (no AST auto-return)
             exec(code, exec_globals)
+            
             success = True
             
             # Helper to safely serialize results
@@ -115,15 +116,13 @@ class CodeSandboxService:
                     return [safe_serialize(i, depth+1) for i in obj[:10]] # TRUNCATE lists
                 return str(obj)
 
-            # Capture "result" variable if it exists, roughly mimicking a return
+            # Capture "result" variable if it exists (Legacy/Explicit support)
             if 'result' in exec_globals:
                 result = safe_serialize(exec_globals['result'])
-            
+
             # Identify new variables created (for reporting)
             current_keys = set(exec_globals.keys())
-            # We can't easily track *new* keys without tracking previous keys, 
-            # but for now we just return interesting ones (not starting with _)
-            
+
         except Exception as e:
             error = str(e)
             logger.error(f"Sandbox execution failed: {e}\n{traceback.format_exc()}")
@@ -131,6 +130,10 @@ class CodeSandboxService:
             sys.stdout = old_stdout
             
         stdout = redirected_output.getvalue()
+
+        # FEEDBACK: If code ran but produced no output/result, warn the LLM
+        if success and not stdout.strip() and result is None:
+            stdout = "[SYSTEM WARNING] Code executed successfully but produced NO OUTPUT. Did you forget to print()?"
         
         return {
             "success": success,

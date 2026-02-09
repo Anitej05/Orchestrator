@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """
 Agent Management Script
-Automatically syncs agent definitions from agent_entries/*.json to the database.
+
+UAP Edition: Syncs agent definitions from SKILL.md files (preferred) or 
+legacy agent_entries/*.json to the database.
 """
 
 import sys
 import json
 import os
+import re
+import yaml
 from pathlib import Path
 from sqlalchemy.orm import Session, joinedload
 from database import SessionLocal, engine, Base
@@ -19,7 +23,6 @@ try:
     from agent_schemas import validate_agent_schema, validate_agent_file
     SCHEMA_VALIDATION_AVAILABLE = True
 except ImportError:
-    logger.warning("agent_schemas module not found - validation will be skipped")
     SCHEMA_VALIDATION_AVAILABLE = False
 
 # Configure logging
@@ -28,6 +31,16 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 AGENT_ENTRIES_DIR = Path(__file__).parent / "agent_entries"
+AGENTS_DIR = Path(__file__).parent / "agents"
+
+# UAP: Agent subdirectories that contain SKILL.md files
+AGENT_DIRS = [
+    "spreadsheet_agent",
+    "mail_agent", 
+    "browser_agent",
+    "document_agent_lib",
+    "zoho_books",
+]
 
 # Lazy load embedding model
 _embedding_model = None
@@ -45,6 +58,183 @@ def get_embedding_model():
             logger.warning("Continuing without embeddings - agent will still register but semantic search may not work")
             _embedding_model = None
     return _embedding_model
+
+
+# =============================================================================
+# UAP: SKILL.md PARSING AND SYNC
+# =============================================================================
+
+def parse_skill_md(skill_path: Path) -> dict:
+    """
+    Parse a SKILL.md file and extract agent configuration.
+    
+    Returns:
+        Dict with id, name, port, version, host, description
+    """
+    try:
+        content = skill_path.read_text(encoding='utf-8')
+        
+        # Extract YAML frontmatter (between --- markers)
+        frontmatter_match = re.match(r'^---\s*\n(.*?)\n---\s*\n', content, re.DOTALL)
+        if not frontmatter_match:
+            logger.warning(f"No frontmatter found in {skill_path}")
+            return None
+            
+        frontmatter_text = frontmatter_match.group(1)
+        body = content[frontmatter_match.end():]
+        
+        # Parse YAML frontmatter
+        config = yaml.safe_load(frontmatter_text)
+        if not config:
+            return None
+            
+        agent_id = config.get('id')
+        if not agent_id:
+            logger.warning(f"Missing 'id' in {skill_path}")
+            return None
+        
+        # Extract first paragraph as description
+        lines = body.strip().split('\n')
+        description_lines = []
+        in_description = False
+        
+        for line in lines:
+            if line.startswith('# '):
+                in_description = True
+                continue
+            if line.startswith('#'):
+                break
+            if in_description and line.strip():
+                description_lines.append(line.strip())
+            if in_description and not line.strip() and description_lines:
+                break
+        
+        description = ' '.join(description_lines) if description_lines else config.get('name', agent_id)
+            
+        return {
+            "id": agent_id,
+            "name": config.get('name', agent_id),
+            "port": config.get('port', 8000),
+            "version": config.get('version', '1.0.0'),
+            "host": config.get('host', 'localhost'),
+            "description": description,
+            "skill_text": body.strip(),
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to parse {skill_path}: {e}")
+        return None
+
+
+def sync_skill_entries(verbose: bool = True):
+    """
+    UAP: Sync all SKILL.md files to the agents table.
+    
+    This creates minimal agent entries without endpoints (UAP uses fixed endpoints).
+    
+    Returns:
+        dict: Summary of sync operation
+    """
+    if verbose:
+        logger.info("=" * 60)
+        logger.info("UAP Skill Sync: Starting...")
+        logger.info("=" * 60)
+    
+    # Ensure tables exist
+    create_tables()
+    
+    added_count = 0
+    updated_count = 0
+    unchanged_count = 0
+    errors = []
+    
+    for agent_subdir in AGENT_DIRS:
+        skill_path = AGENTS_DIR / agent_subdir / 'SKILL.md'
+        
+        if not skill_path.exists():
+            if verbose:
+                logger.warning(f"⚠️  No SKILL.md found in {agent_subdir}")
+            continue
+        
+        try:
+            skill_config = parse_skill_md(skill_path)
+            if not skill_config:
+                errors.append(f"Failed to parse {skill_path}")
+                continue
+            
+            agent_id = skill_config['id']
+            agent_name = skill_config['name']
+            
+            with SessionLocal() as db:
+                db_agent = db.query(Agent).get(agent_id)
+                
+                if db_agent is None:
+                    # Create new agent
+                    if verbose:
+                        logger.info(f"➕ Adding from SKILL.md: {agent_name}")
+                    
+                    db_agent = Agent(
+                        id=agent_id,
+                        owner_id="orbimesh",
+                        name=agent_name,
+                        description=skill_config['description'],
+                        capabilities=[],  # UAP: capabilities in SKILL.md text
+                        price_per_call_usd=0.0,
+                        status=StatusEnum.active,
+                        agent_type=AgentType.HTTP_REST.value,
+                        connection_config={
+                            "base_url": f"http://{skill_config['host']}:{skill_config['port']}"
+                        },
+                        requires_credentials=False,
+                    )
+                    db.add(db_agent)
+                    db.commit()
+                    added_count += 1
+                else:
+                    # Check if update needed
+                    new_url = f"http://{skill_config['host']}:{skill_config['port']}"
+                    current_url = (db_agent.connection_config or {}).get('base_url', '')
+                    
+                    if (db_agent.name != agent_name or 
+                        db_agent.description != skill_config['description'] or
+                        current_url != new_url):
+                        
+                        if verbose:
+                            logger.info(f"🔄 Updating from SKILL.md: {agent_name}")
+                        
+                        db_agent.name = agent_name
+                        db_agent.description = skill_config['description']
+                        db_agent.connection_config = {"base_url": new_url}
+                        db.commit()
+                        updated_count += 1
+                    else:
+                        if verbose:
+                            logger.info(f"✅ Up-to-date (SKILL.md): {agent_name}")
+                        unchanged_count += 1
+                        
+        except Exception as e:
+            error_msg = f"Failed to sync {agent_subdir}: {str(e)}"
+            logger.error(f"❌ {error_msg}")
+            errors.append(error_msg)
+    
+    if verbose:
+        logger.info("=" * 60)
+        logger.info("UAP Skill Sync: Complete")
+        logger.info("=" * 60)
+        logger.info(f"➕ New agents added: {added_count}")
+        logger.info(f"🔄 Agents updated: {updated_count}")
+        logger.info(f"✅ Agents unchanged: {unchanged_count}")
+        if errors:
+            logger.error(f"❌ Errors: {len(errors)}")
+        logger.info("=" * 60)
+    
+    return {
+        "added": added_count,
+        "updated": updated_count,
+        "unchanged": unchanged_count,
+        "errors": errors
+    }
+
 
 def create_tables():
     """Create all database tables if they don't exist."""
@@ -411,10 +601,10 @@ def main():
     parser = argparse.ArgumentParser(description="Manage agent database synchronization and validation")
     parser.add_argument(
         'action',
-        choices=['sync', 'create-tables', 'validate', 'validate-all'],
+        choices=['sync', 'sync-skills', 'sync-all', 'create-tables', 'validate', 'validate-all'],
         nargs='?',
-        default='sync',
-        help='Action to perform (default: sync)'
+        default='sync-all',
+        help='Action to perform. sync-all (default) syncs both SKILL.md and JSON files.'
     )
     parser.add_argument(
         'agent_id',
@@ -430,9 +620,24 @@ def main():
     args = parser.parse_args()
     
     if args.action == 'sync':
+        # Legacy: sync JSON files only
         result = sync_agent_entries(verbose=not args.quiet)
-        # Exit with error code if there were errors
         if result.get('errors'):
+            sys.exit(1)
+    elif args.action == 'sync-skills':
+        # UAP: sync SKILL.md files only
+        result = sync_skill_entries(verbose=not args.quiet)
+        if result.get('errors'):
+            sys.exit(1)
+    elif args.action == 'sync-all':
+        # Sync both SKILL.md (preferred) and JSON files
+        if not args.quiet:
+            logger.info("Syncing SKILL.md files (UAP)...")
+        result1 = sync_skill_entries(verbose=not args.quiet)
+        if not args.quiet:
+            logger.info("\nSyncing legacy JSON files...")
+        result2 = sync_agent_entries(verbose=not args.quiet)
+        if result1.get('errors') or result2.get('errors'):
             sys.exit(1)
     elif args.action == 'create-tables':
         create_tables()
