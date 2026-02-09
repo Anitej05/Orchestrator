@@ -5,6 +5,24 @@ Unified spreadsheet operations with LLM-powered task decomposition.
 Only 4 endpoints: /execute, /continue, /health, /files
 """
 
+import os
+import sys
+from pathlib import Path
+
+# ==================== ROBUST PATH HANDLING ====================
+# Allow running this script directly or as a package
+PACKAGE_DIR = Path(__file__).parent.absolute()
+AGENTS_DIR = PACKAGE_DIR.parent
+BACKEND_DIR = AGENTS_DIR.parent
+PROJECT_ROOT = BACKEND_DIR.parent
+
+# Ensure correct paths in sys.path
+# Order: PROJECT_ROOT > BACKEND_DIR > AGENTS_DIR > PACKAGE_DIR
+for path in [str(PROJECT_ROOT), str(BACKEND_DIR), str(AGENTS_DIR), str(PACKAGE_DIR)]:
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+
 import logging
 from typing import Optional, Dict, Any, Union
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException

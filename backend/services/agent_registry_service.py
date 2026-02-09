@@ -293,22 +293,6 @@ class AgentRegistryService:
                     if base_url:
                         return base_url
             
-            # 3. Fallback to legacy agent_entries JSON (deprecated)
-            backend_dir = Path(__file__).resolve().parents[1]
-            entry_path = backend_dir / 'agent_entries' / f'{agent_id}.json'
-            
-            if entry_path.exists():
-                data = json.loads(entry_path.read_text(encoding='utf-8'))
-                if isinstance(data, dict):
-                    conn_config = data.get('connection_config', {})
-                    if conn_config:
-                        base_url = conn_config.get('base_url') or conn_config.get('url')
-                        if base_url:
-                            logger.warning(f"Using deprecated JSON config for {agent_id}. Migrate to SKILL.md.")
-                            return base_url
-                    if data.get('base_url'):
-                        return data.get('base_url')
-            
             logger.warning(f"No base URL found for agent {agent_id}")
             return None
             
@@ -326,42 +310,7 @@ class AgentRegistryService:
         UAP Edition: Always returns 'json' for standard endpoints.
         """
         # UAP: Standard endpoints always use JSON
-        if endpoint_path in ['/execute', '/continue', '/health', '/metrics']:
-            return 'json'
-            
-        # Legacy fallback for non-standard endpoints
-        try:
-            normalized_endpoint_path = (endpoint_path or "").strip()
-            if normalized_endpoint_path and not normalized_endpoint_path.startswith('/'):
-                normalized_endpoint_path = '/' + normalized_endpoint_path
-
-            backend_dir = Path(__file__).resolve().parents[1]
-            entry_path = backend_dir / 'agent_entries' / f'{agent_id}.json'
-            
-            if not entry_path.exists():
-                return 'json'  # Default to JSON for UAP
-
-            data = json.loads(entry_path.read_text(encoding='utf-8'))
-            if not isinstance(data, dict):
-                return 'json'
-
-            for ep in data.get('endpoints', []) or []:
-                if not isinstance(ep, dict):
-                    continue
-
-                ep_path = (ep.get('endpoint') or "").strip()
-                if ep_path and not ep_path.startswith('/'):
-                    ep_path = '/' + ep_path
-
-                if ep_path == normalized_endpoint_path:
-                    rf = ep.get('request_format')
-                    if isinstance(rf, str) and rf.strip():
-                        return rf.strip()
-                    return 'json'
-            return 'json'
-        except Exception as e:
-            logger.error(f"Error resolving request format for {agent_id}: {e}")
-            return 'json'
+        return 'json'
 
     def _serialize_agent(self, agent: Agent) -> Dict[str, Any]:
         """Convert Agent ORM object to dictionary"""

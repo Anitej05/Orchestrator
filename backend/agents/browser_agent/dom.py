@@ -235,11 +235,6 @@ class DOMExtractor:
             return ""
         # Remove Private Use Area characters (E000-F8FF) commonly used for icons
         return "".join(c for c in text if not (0xE000 <= ord(c) <= 0xF8FF)).strip()
-
-    async def _get_accessibility_tree(self, page: Page) -> str:
-        """DEPRECATED: Use build_unified_page_tree instead.
-        Kept for backward compatibility during transition."""
-        return await self.build_unified_page_tree(page, [], mode='text')
     
     async def build_unified_page_tree(
         self, 

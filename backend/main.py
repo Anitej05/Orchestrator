@@ -813,9 +813,10 @@ def start_agent_servers():
     agent_configs = {}
     
     # SKILL.md directories to scan (each contains SKILL.md with port)
+    # SKILL.md directories to scan (each contains SKILL.md with port)
     skill_dirs = [
         ("spreadsheet_agent", "spreadsheet_agent/__init__.py"),
-        ("mail_agent", "mail_agent.py"),
+        ("mail_agent", "mail_agent/agent.py"),
         ("browser_agent", "browser_agent/__init__.py"),
         ("document_agent_lib", "document_agent_lib/__init__.py"),
         ("zoho_books", "zoho_books/zoho_books_agent.py"),
