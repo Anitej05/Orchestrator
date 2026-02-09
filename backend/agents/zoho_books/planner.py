@@ -76,7 +76,6 @@ If customer/item names are given but IDs are needed, make a best guess or use pl
             logger.error(f"Zoho Planning failed: {e}")
             # Fallback: Default to list invoices safest
             return ZohoActionPlan(
-            return ZohoActionPlan(
                 action="/invoices",
                 method="GET",
                 payload={},
