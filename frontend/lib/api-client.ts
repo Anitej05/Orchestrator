@@ -1,9 +1,7 @@
 // lib/api-client.ts
 import type { Agent, ProcessResponse, ConversationStatus, ConversationState, Message } from "./types"
-
-// API base URL
-const API_BASE_URL = 'http://localhost:8000';
 import { authFetch } from './auth-fetch';
+import { API_BASE_URL } from './config';
 
 // Agent Management Functions
 export async function fetchAllAgents(): Promise<Agent[]> {
@@ -92,32 +90,6 @@ export async function searchAgents(options: {
   }
 }
 
-export async function rateAgent(agentId: string, rating: number): Promise<Agent> {
-  try {
-    if (rating < 0 || rating > 5) {
-      throw new Error('Rating must be between 0 and 5');
-    }
-
-    const response = await authFetch(`${API_BASE_URL}/api/agents/${encodeURIComponent(agentId)}/rate`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ rating }),
-    });
-    
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-    }
-    
-    const updatedAgent = await response.json();
-    return updatedAgent;
-  } catch (error) {
-    console.error('Error rating agent:', error);
-    throw error;
-  }
-}
-
 export async function rateAgentByName(agentName: string, rating: number): Promise<Agent> {
   try {
     if (rating < 0 || rating > 5) {
@@ -140,22 +112,6 @@ export async function rateAgentByName(agentName: string, rating: number): Promis
     return updatedAgent;
   } catch (error) {
     console.error('Error rating agent by name:', error);
-    throw error;
-  }
-}
-
-export async function fetchAgentById(agentId: string): Promise<Agent> {
-  try {
-    const response = await authFetch(`${API_BASE_URL}/api/agents/${encodeURIComponent(agentId)}`);
-    
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-    }
-    
-    const agent = await response.json();
-    return agent;
-  } catch (error) {
-    console.error('Error fetching agent by ID:', error);
     throw error;
   }
 }
@@ -262,23 +218,6 @@ export async function getConversationStatus(threadId: string): Promise<Conversat
   }
 }
 
-export async function clearConversation(threadId: string): Promise<{ message: string }> {
-  try {
-    const response = await authFetch(`${API_BASE_URL}/api/chat/${threadId}`, {
-      method: 'DELETE'
-    });
-    
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-    }
-    
-    return await response.json();
-  } catch (error) {
-    console.error('Error clearing conversation:', error);
-    throw error;
-  }
-}
-
 export async function uploadFiles(files: File[]): Promise<any[]> {
   const formData = new FormData();
   files.forEach(file => {
@@ -319,41 +258,6 @@ export async function processPrompt(request: { prompt: string }): Promise<{
     };
   } catch (error) {
     console.error('Error processing prompt:', error);
-    throw error;
-  }
-}
-
-export async function fetchPlanFile(threadId: string): Promise<string> {
-  try {
-    const response = await authFetch(`${API_BASE_URL}/api/plan/${threadId}`);
-    
-    if (!response.ok) {
-      if (response.status === 404) {
-        console.log(`No plan file found for threadId: ${threadId}`);
-        return ""; // Return empty string if not found, so the UI doesn't break.
-      }
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-    }
-    
-    const data = await response.json();
-    return data.content;
-  } catch (error) {
-    console.error('Error fetching plan file from backend:', error);
-    throw error;
-  }
-}
-
-export async function healthCheck(): Promise<{ status: string }> {
-  try {
-    const response = await authFetch(`${API_BASE_URL}/api/health`);
-    
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-    }
-    
-    return await response.json();
-  } catch (error) {
-    console.error('Error checking API health:', error);
     throw error;
   }
 }

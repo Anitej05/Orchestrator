@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Play, Trash2, Copy, Calendar, Clock, DollarSign, Zap } from "lucide-react"
+import { API_BASE_URL } from '@/lib/config'
 
 interface Workflow {
   workflow_id: string
@@ -37,7 +38,7 @@ function SavedWorkflowsContent() {
 
     try {
       const { authFetch } = await import("@/lib/auth-fetch")
-      const response = await authFetch("http://localhost:8000/api/workflows")
+      const response = await authFetch(`${API_BASE_URL}/api/workflows`)
 
       if (!response.ok) {
         throw new Error("Failed to load workflows")
@@ -62,7 +63,7 @@ function SavedWorkflowsContent() {
 
       toast.info("Loading workflow...")
 
-      const response = await authFetch(`http://localhost:8000/api/workflows/${workflowId}/create-conversation`, {
+      const response = await authFetch(`${API_BASE_URL}/api/workflows/${workflowId}/create-conversation`, {
         method: "POST",
         headers: { "Content-Type": "application/json" }
       })
@@ -99,7 +100,7 @@ function SavedWorkflowsContent() {
       const { toast } = await import("sonner")
 
       toast.info("Deleting workflow...")
-      const response = await authFetch(`http://localhost:8000/api/workflows/${workflowId}`, {
+      const response = await authFetch(`${API_BASE_URL}/api/workflows/${workflowId}`, {
         method: "DELETE"
       })
 
@@ -124,7 +125,7 @@ function SavedWorkflowsContent() {
       const { toast } = await import("sonner")
 
       toast.info("Cloning workflow...")
-      const response = await authFetch(`http://localhost:8000/api/workflows/${workflowId}/clone`, {
+      const response = await authFetch(`${API_BASE_URL}/api/workflows/${workflowId}/clone`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ new_name: "Copy of workflow" })

@@ -4,6 +4,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Plus } from 'lucide-react';
+import { API_BASE_URL } from '@/lib/config';
 
 interface ConversationsDropdownProps {
   onConversationSelect: (threadId: string) => void;
@@ -68,7 +69,7 @@ export default function ConversationsDropdown({
       try {
         const { authFetch } = await import('@/lib/auth-fetch');
         const response = await authFetch(
-          `http://localhost:8000/api/conversations?limit=${pageSize}&offset=${nextOffset}`
+          `${API_BASE_URL}/api/conversations?limit=${pageSize}&offset=${nextOffset}`
         );
 
         if (!response.ok) {

@@ -192,7 +192,6 @@ class AgentRegistryService:
                         "name": skill_config['name'],
                         "description": skill_config['description'],
                         "capabilities": [],
-                        "rating": None,
                         "price_per_call_usd": None,
                         "endpoints": [],  # UAP: endpoints are standardized, no need to list
                         "type": "http_rest",
@@ -234,7 +233,6 @@ class AgentRegistryService:
                     "name": skill['name'],
                     "description": skill['description'],
                     "capabilities": [],
-                    "rating": None,
                     "price_per_call_usd": None,
                     "endpoints": [],
                     "type": "http_rest",
@@ -335,7 +333,6 @@ class AgentRegistryService:
             "name": agent.name,
             "description": agent.description,
             "capabilities": agent.capabilities,
-            "rating": agent.rating,
             "price_per_call_usd": agent.price_per_call_usd,
             "endpoints": endpoints_info,
             "type": agent.agent_type,

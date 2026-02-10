@@ -43,7 +43,7 @@ const Markdown: FC<MarkdownProps> = ({ content }) => {
   const extractText = (child: React.ReactNode): string => {
     if (typeof child === 'string') return child;
     if (Array.isArray(child)) return child.map(extractText).join('');
-    if (React.isValidElement(child)) return extractText(child.props.children);
+    if (React.isValidElement(child)) return extractText((child.props as any).children);
     return '';
   };
 

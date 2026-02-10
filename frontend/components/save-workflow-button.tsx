@@ -8,6 +8,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Save, Check, Calendar } from "lucide-react";
 import { authFetch } from "@/lib/auth-fetch";
 import { ScheduleWorkflowDialog } from "@/components/schedule-workflow-dialog";
+import { API_BASE_URL } from "@/lib/config";
 
 interface SaveWorkflowButtonProps {
   threadId: string | null;
@@ -29,7 +30,7 @@ export default function SaveWorkflowButton({ threadId, disabled }: SaveWorkflowB
     setSaving(true);
     try {
       const response = await authFetch(
-        `http://localhost:8000/api/workflows?thread_id=${threadId}&name=${encodeURIComponent(name)}&description=${encodeURIComponent(description)}`,
+        `${API_BASE_URL}/api/workflows?thread_id=${threadId}&name=${encodeURIComponent(name)}&description=${encodeURIComponent(description)}`,
         { 
           method: "POST",
           headers: {

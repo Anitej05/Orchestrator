@@ -8,6 +8,7 @@ import {
 import {
   uploadFiles as apiUploadFiles,
 } from '@/lib/api-client';
+import { API_BASE_URL } from './config';
 
 // Helper to read a file as a Data URL for image previews
 const readFileAsDataURL = (file: File): Promise<string> => {
@@ -385,7 +386,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
 
         // Use authFetch helper which handles Clerk JWT properly
         const { authFetch } = await import('./auth-fetch');
-        const response = await authFetch(`http://localhost:8000/api/conversations/${cleanThreadId}`);
+        const response = await authFetch(`${API_BASE_URL}/api/conversations/${cleanThreadId}`);
 
         if (!response.ok) {
           if (response.status === 404) {

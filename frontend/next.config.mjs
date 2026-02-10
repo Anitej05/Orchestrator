@@ -1,14 +1,13 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  eslint: {
-    ignoreDuringBuilds: true,
-  },
   typescript: {
     ignoreBuildErrors: true,
   },
   images: {
     unoptimized: true,
   },
+  // Add empty turbopack config to silence Next.js 16 warning
+  turbopack: {},
   // Enable WebAssembly support for kokoro-js TTS
   webpack: (config, { isServer }) => {
     // Enable WebAssembly

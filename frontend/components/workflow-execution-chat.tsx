@@ -89,7 +89,8 @@ export default function WorkflowExecutionChat({ workflowId, workflow, onCancel }
   }, [messages]);
 
   const connectWebSocket = (threadId: string) => {
-    const ws = new WebSocket(`ws://localhost:8000/ws/chat?thread_id=${threadId}`);
+    import { WS_BASE_URL } from '@/lib/config';
+    const ws = new WebSocket(`${WS_BASE_URL}/ws/chat?thread_id=${threadId}`);
     
     ws.onopen = () => {
       console.log('WebSocket connected for workflow execution');
@@ -184,7 +185,8 @@ export default function WorkflowExecutionChat({ workflowId, workflow, onCancel }
     
     try {
       // Execute workflow using the saved task_plan directly
-      const response = await authFetch(`http://localhost:8000/api/workflows/${workflowId}/execute`, {
+      import { API_BASE_URL } from '@/lib/config';
+      const response = await authFetch(`${API_BASE_URL}/api/workflows/${workflowId}/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({})

@@ -10,12 +10,12 @@ import CollapsibleSection from "@/components/CollapsibleSection"
 import PlanGraph from "@/components/PlanGraph"
 import SaveWorkflowButton from "@/components/save-workflow-button"
 import { useEffect, useState } from "react"
-import { InteractiveStarRating, StarRating } from "@/components/ui/star-rating"
 import { useConversationStore } from "@/lib/conversation-store"
 import Markdown from '@/components/ui/markdown'
 import { CanvasRenderer } from '@/components/canvas-renderer'
 import type { Agent, Message, TaskAgentPair } from "@/lib/types"
 import { cn } from "@/lib/utils"
+import { API_BASE_URL } from "@/lib/config"
 
 
 interface ExecutionResult {
@@ -55,7 +55,7 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
         const [plan, setPlan] = useState<Plan>({ pendingTasks: [], completedTasks: [] });
         const [isLoadingPlan, setIsLoadingPlan] = useState(false);
         const [agents, setAgents] = useState<Agent[]>([]);
-        const [activeTab, setActiveTab] = useState<string>("metadata");
+        const [activeTab, setActiveTab] = useState<string>("plan");
         const [lastCanvasContent, setLastCanvasContent] = useState<string | undefined>(undefined);
         // State for viewing specific canvas content from messages
         const [viewedCanvasContent, setViewedCanvasContent] = useState<string | undefined>(undefined);
@@ -107,10 +107,8 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                         // @ts-ignore
                         pendingTasks.push([{
                             task: batch.task_name || 'Unknown Task',
-                            description: batch.task_description || 'No description',
-                            agent: batch.primary?.id || batch.primary?.name || 'Unknown Agent',
-                            short_description: batch.short_description,  // AI-generated summary
-                            agent_image_url: batch.primary?.image_url    // Agent avatar URL
+                            description: batch.task_description || batch.short_description || 'No description',
+                            agent: batch.primary?.id || batch.primary?.name || 'Unknown Agent'
                         }]);
                     }
                 });
@@ -247,7 +245,7 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                     fileExt.endsWith('.png') || fileExt.endsWith('.gif') ||
                     fileExt.endsWith('.webp')) {
                     // Construct URL to serve the image from backend
-                    content = `http://localhost:8000/api/files/${encodeURIComponent(file.file_path)}`;
+                    content = `${API_BASE_URL}/api/files/${encodeURIComponent(file.file_path)}`;
                 }
             }
 
@@ -263,8 +261,7 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
         return (
             <aside className={cn("border-l border-border-color bg-bg-card text-text-primary p-4 flex flex-col h-full", className)}>
                 <Tabs value={activeTab} onValueChange={setActiveTab} className="h-full flex flex-col">
-                    <TabsList className="grid w-full grid-cols-4 bg-bg-subtle/80 backdrop-blur-xl border border-border-color/50 shadow-orbimesh-panel">
-                        <TabsTrigger value="metadata">Metadata</TabsTrigger>
+                    <TabsList className="grid w-full grid-cols-3 bg-bg-subtle/80 backdrop-blur-xl border border-border-color/50 shadow-orbimesh-panel">
                         <TabsTrigger value="plan" className="relative">
                             Plan
                             {(conversationState.metadata?.currentStage === 'executing' ||
@@ -277,96 +274,7 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                         <TabsTrigger value="attachments">Attachments</TabsTrigger>
                         <TabsTrigger value="canvas">Canvas</TabsTrigger>
                     </TabsList>
-                    <TabsContent value="metadata" className="flex-1 overflow-y-auto mt-4 space-y-4">
-                        <Card>
-                            <CardHeader>
-                                <CardTitle>Execution Summary</CardTitle>
-                                <CardDescription>Overview of task execution and performance metrics</CardDescription>
-                            </CardHeader>
-                            <CardContent className="space-y-4">
-                                {isLoadingPlan ? (
-                                    <p className="text-orbimesh-section-subtitle text-text-tertiary text-center py-4">Loading plan...</p>
-                                ) : hasResults ? (
-                                    <>
-                                        <Table>
-                                            <TableBody>
-                                                <TableRow>
-                                                    <TableCell><span className="text-orbimesh-metadata-label text-text-tertiary flex items-center"><DollarSign className="w-4 h-4 mr-2" /> Total Cost</span></TableCell>
-                                                    <TableCell className="text-right text-orbimesh-metadata-value font-semibold">${totalCost.toFixed(4)}</TableCell>
-                                                </TableRow>
-                                                <TableRow>
-                                                    <TableCell><span className="text-orbimesh-metadata-label text-text-tertiary flex items-center"><Clock className="w-4 h-4 mr-2" /> Total Time</span></TableCell>
-                                                    <TableCell className="text-right text-orbimesh-metadata-value font-semibold">{totalTime.toFixed(1)}s</TableCell>
-                                                </TableRow>
-                                            </TableBody>
-                                        </Table>
-                                        <CollapsibleSection title="Agents Used" count={agents.length}>
-                                            <div className="space-y-3 pt-2">
-                                                {agents.map((agent) => (
-                                                    <div key={agent.id} className="flex items-center justify-between text-orbimesh-task-description">
-                                                        <span>{agent.name}</span>
-                                                        <div className="flex items-center justify-end space-x-2">
-                                                            <StarRating currentRating={agent.rating} readonly size="sm" showValue={false} />
-                                                            <span className="text-orbimesh-metadata-mono text-text-tertiary w-16 text-right">
-                                                                ({(agent.rating ?? 0).toFixed(1)} / {agent.rating_count ?? 0})
-                                                            </span>
-                                                        </div>
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        </CollapsibleSection>
-                                        <CollapsibleSection title="Tasks" count={allTasks.length}>
-                                            <Table>
-                                                <TableHeader>
-                                                    <TableRow>
-                                                        <TableHead>Task</TableHead>
-                                                        <TableHead>Description</TableHead>
-                                                    </TableRow>
-                                                </TableHeader>
-                                                <TableBody>
-                                                    {allTasks.map((task, index) => (
-                                                        <TableRow key={`${task.task}-${index}`}>
-                                                            <TableCell className="text-orbimesh-task-name font-semibold">{task.task}</TableCell>
-                                                            <TableCell className="text-orbimesh-task-description text-text-secondary">{"description" in task && task.description}</TableCell>
-                                                        </TableRow>
-                                                    ))}
-                                                </TableBody>
-                                            </Table>
-                                        </CollapsibleSection>
-                                    </>
-                                ) : (
-                                    <p className="text-orbimesh-section-subtitle text-text-tertiary text-center py-4">Run a workflow to see the summary.</p>
-                                )}
-                            </CardContent>
-                        </Card>
 
-                        {hasResults && agents.length > 0 && (
-                            <Card>
-                                <CardHeader>
-                                    <CardTitle>Rate Agents</CardTitle>
-                                    <CardDescription>Provide feedback on the agents used in this workflow.</CardDescription>
-                                </CardHeader>
-                                <CardContent>
-                                    <div className="space-y-3">
-                                        {agents.map((agent) => (
-                                            <div
-                                                key={agent.id}
-                                                className="flex items-center justify-between"
-                                            >
-                                                <span className="text-orbimesh-task-name font-medium">{agent.name}</span>
-                                                <InteractiveStarRating
-                                                    agentId={agent.id}
-                                                    agentName={agent.name}
-                                                    currentRating={agent.rating}
-                                                    onRatingUpdate={(newRating) => handleRatingUpdate(agent.id, newRating)}
-                                                />
-                                            </div>
-                                        ))}
-                                    </div>
-                                </CardContent>
-                            </Card>
-                        )}
-                    </TabsContent>
                     <TabsContent value="plan" className="flex-1 flex flex-col">
                         {/* Plan Tab Header with Save Workflow Button */}
                         <div className="flex items-center justify-between mt-4 px-4 py-3">

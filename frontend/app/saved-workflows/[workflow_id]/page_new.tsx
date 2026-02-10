@@ -65,7 +65,8 @@ export default function WorkflowDetailPage() {
     setError(null);
     
     try {
-      const response = await authFetch(`http://localhost:8000/api/workflows/${workflowId}`);
+      import { API_BASE_URL, WS_BASE_URL } from '@/lib/config';
+      const response = await authFetch(`${API_BASE_URL}/api/workflows/${workflowId}`);
       
       if (!response.ok) {
         throw new Error('Failed to load workflow');
@@ -82,7 +83,7 @@ export default function WorkflowDetailPage() {
   };
 
   const connectWebSocket = (threadId: string) => {
-    const ws = new WebSocket(`ws://localhost:8000/ws/chat?thread_id=${threadId}`);
+    const ws = new WebSocket(`${WS_BASE_URL}/ws/chat?thread_id=${threadId}`);
     
     ws.onopen = () => {
       console.log('WebSocket connected for workflow execution');
@@ -173,7 +174,7 @@ export default function WorkflowDetailPage() {
     
     try {
       toast.info('Deleting workflow...');
-      const response = await authFetch(`http://localhost:8000/api/workflows/${workflowId}`, {
+      const response = await authFetch(`${API_BASE_URL}/api/workflows/${workflowId}`, {
         method: 'DELETE'
       });
       

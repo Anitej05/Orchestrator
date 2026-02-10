@@ -27,7 +27,8 @@ export default function WorkflowManager({ threadId }: { threadId?: string }) {
 
   const loadWorkflows = async () => {
     try {
-      const response = await authFetch("http://localhost:8000/api/workflows");
+      import { API_BASE_URL } from '@/lib/config';
+      const response = await authFetch(`${API_BASE_URL}/api/workflows`);
       const data = await response.json();
       setWorkflows(data);
     } catch (error) {
@@ -39,7 +40,7 @@ export default function WorkflowManager({ threadId }: { threadId?: string }) {
     if (!threadId || !saveName) return;
     
     try {
-      await authFetch(`http://localhost:8000/api/workflows?thread_id=${threadId}&name=${encodeURIComponent(saveName)}&description=${encodeURIComponent(saveDesc)}`, {
+      await authFetch(`${API_BASE_URL}/api/workflows?thread_id=${threadId}&name=${encodeURIComponent(saveName)}&description=${encodeURIComponent(saveDesc)}`, {
         method: "POST"
       });
       setSaveName("");

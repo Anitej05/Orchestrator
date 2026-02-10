@@ -4,6 +4,8 @@ import { useState } from "react"
 import { Star, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import { authFetch } from "@/lib/auth-fetch"
+import { API_BASE_URL } from "@/lib/config"
 
 interface StarRatingProps {
   currentRating?: number
@@ -116,9 +118,7 @@ export function InteractiveStarRating({
     setMessage("")
 
     try {
-      const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
-
-      const response = await fetch(`${API_BASE_URL}/api/agents/${encodeURIComponent(agentId)}/rate`, {
+      const response = await authFetch(`${API_BASE_URL}/api/agents/${encodeURIComponent(agentId)}/rate`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -127,7 +127,7 @@ export function InteractiveStarRating({
       })
 
       if (!response.ok) {
-        const nameResponse = await fetch(`${API_BASE_URL}/api/agents/by-name/${encodeURIComponent(agentName)}/rate`, {
+        const nameResponse = await authFetch(`${API_BASE_URL}/api/agents/by-name/${encodeURIComponent(agentName)}/rate`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',

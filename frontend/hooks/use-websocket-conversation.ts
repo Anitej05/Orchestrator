@@ -33,7 +33,7 @@ interface UseWebSocketManagerProps {
  * connection and data-flow manager.
  */
 export function useWebSocketManager({
-  url = 'ws://localhost:8000/ws/chat',
+  url = process.env.NEXT_PUBLIC_API_URL ? process.env.NEXT_PUBLIC_API_URL.replace(/^http/, 'ws') + '/ws/chat' : 'ws://localhost:8000/ws/chat',
 }: UseWebSocketManagerProps = {}) {
   const ws = useRef<WebSocket | null>(null);
   const [isConnected, setIsConnected] = useState(false);

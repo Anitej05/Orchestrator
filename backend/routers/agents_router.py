@@ -109,7 +109,6 @@ def search_agents(
     db: Session = Depends(get_db),
     capabilities: List[str] = Query(..., description="A list of task names to find capable agents for."),
     max_price: Optional[float] = Query(None),
-    min_rating: Optional[float] = Query(None),
     similarity_threshold: float = Query(0.5, description="Cosine distance threshold (lower is stricter).")
 ):
     """
@@ -135,8 +134,6 @@ def search_agents(
 
         if max_price is not None:
             query = query.filter(Agent.price_per_call_usd <= max_price)
-        if min_rating is not None:
-            query = query.filter(Agent.rating >= min_rating)
 
         return query.all()
     
@@ -148,8 +145,6 @@ def search_agents(
         
         if max_price is not None:
             query = query.filter(Agent.price_per_call_usd <= max_price)
-        if min_rating is not None:
-            query = query.filter(Agent.rating >= min_rating)
         
         return query.all()
 
@@ -171,40 +166,3 @@ def get_agent(agent_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Agent not found!")
     return db_agent
 
-
-@router.post("/{agent_id}/rate", response_model=AgentCard)
-def rate_agent(agent_id: str, rating: float = Body(..., embed=True), db: Session = Depends(get_db)):
-    """Update the agent's rating as the mean of the current rating and the new user rating."""
-    db_agent = db.get(Agent, agent_id)
-    if not db_agent:
-        raise HTTPException(status_code=404, detail="Agent not found!")
-    if rating < 0 or rating > 5:
-        raise HTTPException(status_code=400, detail="Rating must be between 0 and 5.")
-    
-    current_rating = db_agent.rating if db_agent.rating is not None else 0.0
-    count = db_agent.rating_count if db_agent.rating_count is not None else 0
-    new_rating = ((current_rating * count) + rating) / (count + 1) if count > 0 else rating
-    db_agent.rating = float(new_rating)
-    db_agent.rating_count = int(count + 1)
-    db.commit()
-    db.refresh(db_agent)
-    return AgentCard.model_validate(db_agent)
-
-
-@router.post("/by-name/{agent_name}/rate", response_model=AgentCard)
-def rate_agent_by_name(agent_name: str, rating: float = Body(..., embed=True), db: Session = Depends(get_db)):
-    """Update the agent's rating using the agent's name as a fallback."""
-    db_agent = db.query(Agent).filter(Agent.name == agent_name).first()
-    if not db_agent:
-        raise HTTPException(status_code=404, detail="Agent not found!")
-    if rating < 0 or rating > 5:
-        raise HTTPException(status_code=400, detail="Rating must be between 0 and 5.")
-    
-    current_rating = db_agent.rating if db_agent.rating is not None else 0.0
-    count = db_agent.rating_count if db_agent.rating_count is not None else 0
-    new_rating = ((current_rating * count) + rating) / (count + 1) if count > 0 else rating
-    db_agent.rating = float(new_rating)
-    db_agent.rating_count = int(count + 1)
-    db.commit()
-    db.refresh(db_agent)
-    return AgentCard.model_validate(db_agent)

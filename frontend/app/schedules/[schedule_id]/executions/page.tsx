@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import { useRouter, useParams } from "next/navigation";
 import { useAuth } from "@clerk/nextjs";
+import { authFetch } from "@/lib/auth-fetch";
+import { API_BASE_URL } from "@/lib/config";
 import { SidebarInset, SidebarTrigger, useSidebar } from "@/components/ui/sidebar";
 import { Button } from "@/components/ui/button";
 import {
@@ -67,13 +69,7 @@ function ExecutionHistoryContent() {
 
   const loadExecutions = async () => {
     try {
-      const token = await getToken();
-      const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-      const response = await fetch(`${API_URL}/api/schedules/${scheduleId}/executions`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
+      const response = await authFetch(`${API_BASE_URL}/api/schedules/${scheduleId}/executions`);
 
       if (!response.ok) throw new Error("Failed to load executions");
 

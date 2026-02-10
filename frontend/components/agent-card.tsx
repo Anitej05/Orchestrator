@@ -8,7 +8,6 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Textarea } from "@/components/ui/textarea"
 import { Star, DollarSign, MessageSquare } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
-import { StarRating, InteractiveStarRating } from "@/components/ui/star-rating"
 import type { Agent } from "@/lib/types"
 
 interface AgentCardProps {
@@ -20,18 +19,8 @@ interface AgentCardProps {
 export default function AgentCard({ agent, isRegistered = false, onToggleRegistration }: AgentCardProps) {
   const [testPrompt, setTestPrompt] = useState("")
   const [isTestOpen, setIsTestOpen] = useState(false)
-  const [isRatingOpen, setIsRatingOpen] = useState(false)
   const [isTesting, setIsTesting] = useState(false)
-  const [currentRating, setCurrentRating] = useState(agent.rating)
   const { toast } = useToast()
-
-  const handleRatingUpdate = (newRating: number) => {
-    setCurrentRating(newRating)
-    toast({
-      title: "Rating submitted",
-      description: `Thank you for rating ${agent.name}!`,
-    })
-  }
 
   const handleTest = async () => {
     if (!testPrompt.trim()) return
@@ -65,8 +54,7 @@ export default function AgentCard({ agent, isRegistered = false, onToggleRegistr
       <div className="flex items-start justify-between mb-4">
         <div>
           <h3 className="ui-task-name">{agent.name}</h3>
-          <div className="flex items-center space-x-2 mt-1">
-            <StarRating currentRating={currentRating} readonly={true} size="sm" />
+          <div className="mt-1">
             <Badge variant={agent.status === "active" ? "ui-active" : "ui-pending"}>
               {agent.status}
             </Badge>
@@ -99,31 +87,6 @@ export default function AgentCard({ agent, isRegistered = false, onToggleRegistr
 
       {/* Actions */}
       <div className="flex items-center justify-between">
-        <Dialog open={isRatingOpen} onOpenChange={setIsRatingOpen}>
-          <DialogTrigger asChild>
-            <Button variant="ui-secondary" size="sm">
-              <Star className="w-4 h-4 mr-1" />
-              Rate
-            </Button>
-          </DialogTrigger>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle className="ui-section-header">Rate {agent.name}</DialogTitle>
-            </DialogHeader>
-            <div className="space-y-4">
-              <p className="ui-section-subtitle">
-                How would you rate your experience with this agent?
-              </p>
-              <InteractiveStarRating
-                agentId={agent.id}
-                agentName={agent.name}
-                currentRating={currentRating}
-                onRatingUpdate={handleRatingUpdate}
-              />
-            </div>
-          </DialogContent>
-        </Dialog>
-
         <Dialog open={isTestOpen} onOpenChange={setIsTestOpen}>
           <DialogTrigger asChild>
             <Button variant="ui-secondary" size="sm">

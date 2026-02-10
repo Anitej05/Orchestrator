@@ -84,6 +84,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"❌ Failed to create tables: {str(e)}", exc_info=True)
     
+    # Initialize integrations singletons (thread-safe)
+    try:
+        logger.info("🔧 Initializing integrations services...")
+        from services.integrations import get_auth_manager, get_tool_manager
+        app.state.auth_manager = get_auth_manager()
+        app.state.tool_manager = get_tool_manager()
+        logger.info("✅ Integrations services initialized")
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize integrations: {str(e)}", exc_info=True)
+    
     # Sync agent definitions from SKILL.md files (UAP) to database
     try:
         from manage import sync_skill_entries
@@ -219,6 +229,10 @@ app.include_router(credentials_router.router)
 # Import and include content management router
 from routers import content_router
 app.include_router(content_router.router)
+
+# Import and include integrations router
+from routers import integrations_router
+app.include_router(integrations_router.router)
 
 # Import and include the new modular routers
 from routers import files_router, agents_router, conversations_router, workflows_router, dashboard_router
@@ -819,7 +833,6 @@ def start_agent_servers():
         ("mail_agent", "mail_agent/agent.py"),
         ("browser_agent", "browser_agent/__init__.py"),
         ("document_agent_lib", "document_agent_lib/__init__.py"),
-        ("zoho_books", "zoho_books/zoho_books_agent.py"),
     ]
     
     import yaml

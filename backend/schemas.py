@@ -41,7 +41,6 @@ class AgentCard(BaseModel):
     price_per_call_usd: float
     status: Literal['active', 'inactive', 'deprecated'] = 'active'
     endpoints: List[EndpointDetail]
-    rating: float = 0.0
     public_key_pem: Optional[str] = None
     agent_type: Literal['http_rest', 'mcp_http', 'tool'] = 'http_rest'  # Added 'tool' type
     connection_config: Optional[Dict[str, Any]] = None

@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@clerk/nextjs";
+import { authFetch } from "@/lib/auth-fetch";
+import { API_BASE_URL } from "@/lib/config";
 import { SidebarInset, SidebarTrigger, useSidebar } from "@/components/ui/sidebar";
 import { Button } from "@/components/ui/button";
 import {
@@ -71,13 +73,7 @@ function SchedulesContent() {
 
   const loadSchedules = async () => {
     try {
-      const token = await getToken();
-      const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-      const response = await fetch(`${API_URL}/api/schedules`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
+      const response = await authFetch(`${API_BASE_URL}/api/schedules`);
 
       if (!response.ok) throw new Error("Failed to load schedules");
 
@@ -98,12 +94,9 @@ function SchedulesContent() {
   const toggleSchedule = async (scheduleId: string, currentActive: boolean) => {
     setActionLoading(scheduleId);
     try {
-      const token = await getToken();
-      const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-      const response = await fetch(`${API_URL}/api/schedules/${scheduleId}`, {
+      const response = await authFetch(`${API_BASE_URL}/api/schedules/${scheduleId}`, {
         method: "PATCH",
         headers: {
-          Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ is_active: !currentActive }),
@@ -134,13 +127,8 @@ function SchedulesContent() {
   const deleteSchedule = async (scheduleId: string, workflowId: string) => {
     setActionLoading(scheduleId);
     try {
-      const token = await getToken();
-      const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-      const response = await fetch(`${API_URL}/api/workflows/${workflowId}/schedule/${scheduleId}`, {
+      const response = await authFetch(`${API_BASE_URL}/api/workflows/${workflowId}/schedule/${scheduleId}`, {
         method: "DELETE",
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
       });
 
       if (!response.ok) throw new Error("Failed to delete schedule");

@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react"
 import { useUser } from "@clerk/nextjs"
+import { authFetch } from "@/lib/auth-fetch"
+import { API_BASE_URL } from "@/lib/config"
 import { SidebarInset, useSidebar } from "@/components/ui/sidebar"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -81,9 +83,7 @@ function MetricsContent() {
 
       setLoading(true)
       try {
-        const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
-
-        const metricsRes = await fetch(`${API_URL}/api/metrics/dashboard`, {
+        const metricsRes = await authFetch(`${API_BASE_URL}/api/metrics/dashboard`, {
           method: "GET",
           headers: {
             "X-User-ID": user.id,
@@ -94,7 +94,7 @@ function MetricsContent() {
         if (metricsRes.ok) {
           const data = await metricsRes.json()
 
-          const agentsRes = await fetch(`${API_URL}/api/agents/all`, {
+          const agentsRes = await authFetch(`${API_BASE_URL}/api/agents/all`, {
             method: "GET",
             headers: {
               "Content-Type": "application/json"

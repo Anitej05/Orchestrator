@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react"
 import { Database, Users, BarChart3, Lightbulb, Loader2 } from "lucide-react"
 import { useUser } from "@clerk/nextjs"
 import type { TaskAgentPair } from "@/lib/types"
+import { WS_BASE_URL } from '@/lib/config'
 
 interface ExecutionResult {
   taskId: string
@@ -469,7 +470,7 @@ export default function WorkflowOrchestration({
       wsRef.current.close()
       wsRef.current = null
     }
-    const ws = new window.WebSocket("ws://localhost:8000/ws/chat")
+    const ws = new window.WebSocket(`${WS_BASE_URL}/ws/chat`)
     wsRef.current = ws
 
     ws.onopen = () => {
