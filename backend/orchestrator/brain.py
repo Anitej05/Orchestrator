@@ -23,7 +23,7 @@ from langchain_core.runnables import RunnableConfig
 
 from .schemas import TaskItem, TaskStatus, TaskPriority, PlanPhase, ParallelAction
 from .content_orchestrator import get_optimized_llm_context
-from services.inference_service import inference_service, InferencePriority
+from backend.services.inference_service import inference_service, InferencePriority
 
 logger = logging.getLogger(__name__)
 
@@ -147,34 +147,35 @@ class Brain:
 
         return updates
 
-    def _build_conversation_history_view(self, messages: List[Any], limit: int = 10) -> str:
+    def _build_conversation_history_view(
+        self, messages: List[Any], limit: int = 10
+    ) -> str:
         """Build a view of the recent conversation history (user & assistant messages)."""
         if not messages:
             return "No conversation history."
-        
+
         recent_messages = messages[-limit:]
         history_lines = []
-        
+
         for msg in recent_messages:
             # Handle both object and dict (just in case)
             role = "User"
             content = ""
-            
+
             if hasattr(msg, "type"):
                 role = "User" if msg.type == "human" else "Assistant"
                 content = msg.content
             elif isinstance(msg, dict):
                 role = "User" if msg.get("type") == "human" else "Assistant"
                 content = msg.get("content", "")
-            
+
             # Simple truncation for very long messages to avoid context overflow
             if len(content) > 500:
                 content = content[:500] + "... (truncated)"
-            
-            history_lines.append(f"{role}: {content}")
-            
-        return "\n".join(history_lines)
 
+            history_lines.append(f"{role}: {content}")
+
+        return "\n".join(history_lines)
 
     async def _make_decision(
         self,
@@ -187,14 +188,36 @@ class Brain:
         """
         Use LLM to decide next action based on state.
         """
-        from services.agent_registry_service import agent_registry
-        from services.tool_registry_service import tool_registry
+        from backend.services.agent_registry_service import agent_registry
+        from backend.services.tool_registry_service import tool_registry
 
         active_agents = agent_registry.list_active_agents()
         active_tools = tool_registry.list_tools()
 
+        # UAP: Include full skill context and standardized agent list for selection
+        agent_skills_context = agent_registry.get_all_skills_context()
+        active_agents = agent_registry.list_active_agents()
+
+        # Build standardized agent list using centralized registry
         agent_list = "\n".join(
-            [f"- {a['name']}: {a['description']}" for a in active_agents]
+            [
+                f"- **{a['name']}** (ID: {a['id']}): {a.get('description', '').split('.')[0]}"
+                for a in active_agents
+            ]
+        )
+
+        agent_list = "\n".join(
+            [
+                f"- **{a['name']}** (ID: {a['id']}): {a['use_when']}"
+                for a in structured_agents
+            ]
+        )
+
+        agent_list = "\n".join(
+            [
+                f"- **{a['agent_name']}** (ID: {a['id']}): {a['use_when']}"
+                for a in structured_agents
+            ]
         )
         tool_list = "\n".join(
             [f"- {t['name']}: {t['description']}" for t in active_tools]
@@ -210,8 +233,9 @@ class Brain:
         action_history_str = self._build_action_history_view(action_history)
 
         # Build conversation history view (NEW)
-        conversation_history_str = self._build_conversation_history_view(state.get("messages", []))
-
+        conversation_history_str = self._build_conversation_history_view(
+            state.get("messages", [])
+        )
 
         # Build insights view (key learnings, never compressed)
         insights_str = self._build_insights_view(insights)
@@ -267,7 +291,14 @@ You are a helpful, intelligent, and expressive AI assistant.
 
 ## AVAILABLE RESOURCES
 AGENTS (specialized, for complex domain work):
-{agent_list or "None"}
+{agent_skills_context or agent_list or "None"}
+
+**QUICK REFERENCE - Use these exact names:**
+- Browser Automation Agent (ID: browser_automation_agent) → Web navigation, scraping, forms
+- Spreadsheet Agent (ID: spreadsheet_agent) → CSV, Excel, data analysis  
+- Mail Agent (ID: mail_agent) → Email, Gmail, messages
+- Document Agent (ID: document_agent) → PDF, Word, text documents
+- Zoho Books Agent (ID: zoho_books_agent) → Invoicing, accounting, finance
 
 TOOLS (fast, direct functions - PREFER over agents when both qualify):
 {tool_list or "None"}
@@ -278,11 +309,23 @@ TOOLS (fast, direct functions - PREFER over agents when both qualify):
 3. **No unnecessary planning**: If the task is simple and can be solved with a single tool/agent call, DO NOT create a complex plan. Just execute.
 
 AGENT: Delegate to a specialized agent.
-  - Use action_type='agent', resource_id='<Agent Name>'
+  - Use action_type='agent', resource_id='<Agent Name>' (use exact names from AVAILABLE RESOURCES)
   - Payload must include:
     - 'prompt': A clear, natural language description of what you want the agent to do.
   - **DO NOT** specify technical `action` endpoints unless absolutely necessary. The agent will plan its own actions.
-  - Example: {{"action_type": "agent", "resource_id": "Document Agent", "payload": {{"prompt": "Summarize the Q3 report and highlight risks."}}}}
+  
+  **Agent Selection Guide:**
+  - **Browser Automation Agent**: Navigation, scraping, forms, any website interaction
+  - **Spreadsheet Agent**: CSV, Excel, data analysis, tables, charts
+  - **Mail Agent**: Email, Gmail, messages, drafts
+  - **Document Agent**: PDF, Word, text documents
+  - **Zoho Books Agent**: Invoicing, accounting, finance
+  
+  - Example: {{"action_type": "agent", "resource_id": "Browser Automation Agent", "payload": {{"prompt": "Go to example.com and extract all product prices."}}}}
+  - Example: {{"action_type": "agent", "resource_id": "Spreadsheet Agent", "payload": {{"prompt": "Calculate the average revenue per region from this CSV."}}}}
+  - Example: {{"action_type": "agent", "resource_id": "Document Agent", "payload": {{"prompt": "Summarize this PDF document."}}}}
+  - Example: {{"action_type": "agent", "resource_id": "Mail Agent", "payload": {{"prompt": "Find emails from John about the project."}}}}
+  - Example: {{"action_type": "agent", "resource_id": "Zoho Books Agent", "payload": {{"prompt": "Show me all unpaid invoices."}}}}
 
 PYTHON: Execute Python code directly in sandbox.
   - Use action_type='python' when user asks to: run code, calculate, compute, process data, parse, convert, generate.
@@ -490,7 +533,7 @@ Return JSON with:
         """Build a view of uploaded files available in the context."""
         if not uploaded_files:
             return "No files uploaded."
-        
+
         lines = []
         for f in uploaded_files:
             # Handle both dict and Pydantic object
@@ -502,10 +545,10 @@ Return JSON with:
                 name = getattr(f, "file_name", "Unknown")
                 path = getattr(f, "file_path", "Unknown")
                 ftype = getattr(f, "file_type", "Unknown")
-                
+
             lines.append(f"- {name} (Type: {ftype})")
             lines.append(f"  Path: {path}")
-            
+
         return "\n".join(lines)
 
     def _build_execution_plan_view(self, state: Dict[str, Any]) -> str:

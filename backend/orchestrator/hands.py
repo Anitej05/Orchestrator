@@ -18,13 +18,13 @@ from langchain_core.runnables import RunnableConfig
 
 from .schemas import ActionResult, TaskStatus
 from .content_orchestrator import hooks
-from utils.retry_utils import RetryManager
-from services.agent_registry_service import agent_registry
-from services.tool_registry_service import tool_registry
-from services.telemetry_service import telemetry_service
-from services.code_sandbox_service import code_sandbox
-from services.terminal_service import terminal_service
-from services.credential_service import get_credentials_for_headers
+from backend.utils.retry_utils import RetryManager
+from backend.services.agent_registry_service import agent_registry
+from backend.services.tool_registry_service import tool_registry
+from backend.services.telemetry_service import telemetry_service
+from backend.services.code_sandbox_service import code_sandbox
+from backend.services.terminal_service import terminal_service
+from backend.services.credential_service import get_credentials_for_headers
 from database import SessionLocal
 
 logger = logging.getLogger(__name__)
@@ -288,16 +288,8 @@ class Hands:
         self, agent_id: str, payload: Dict[str, Any], user_id: str, start_time: float
     ) -> ActionResult:
         """Execute an agent call with robust retry and credential handling."""
-        agents = agent_registry.list_active_agents()
-        # Case-insensitive match for name or exact match for ID
-        agent = next(
-            (
-                a
-                for a in agents
-                if a["name"].lower() == agent_id.lower() or a["id"] == agent_id
-            ),
-            None,
-        )
+        # Use centralized agent lookup for consistent naming
+        agent = agent_registry.find_agent(agent_id)
 
         if not agent:
             return ActionResult(
@@ -335,7 +327,9 @@ class Hands:
         # Build UAP-compliant request payload
         uap_request = {
             "type": "execute",  # Explicitly set message type
-            "action": payload.get("action"),  # Extract action from payload (CRITICAL FIX)
+            "action": payload.get(
+                "action"
+            ),  # Extract action from payload (CRITICAL FIX)
             "prompt": instruction,
             "payload": payload.get("payload", {}),
             "task_id": payload.get("task_id"),
@@ -347,11 +341,13 @@ class Hands:
         async def _call_agent():
             async with httpx.AsyncClient(timeout=self.timeout_map["agent"]) as client:
                 # UAP: All agents receive standardized request format
-                logger.debug(f"📤 Sending UAP Request to {url}: {json.dumps(uap_request, default=str)}")
-                resp = await client.post(
-                    url, json=uap_request, headers=auth_headers
+                logger.debug(
+                    f"📤 Sending UAP Request to {url}: {json.dumps(uap_request, default=str)}"
                 )
-                logger.debug(f"📥 Received Response from {url}: Status={resp.status_code}, Body={resp.text[:500]}...") # Truncate for brevity
+                resp = await client.post(url, json=uap_request, headers=auth_headers)
+                logger.debug(
+                    f"📥 Received Response from {url}: Status={resp.status_code}, Body={resp.text[:500]}..."
+                )  # Truncate for brevity
                 return resp
 
         try:
@@ -544,19 +540,23 @@ class Hands:
             if isinstance(std_response, dict) and "canvas_display" in std_response:
                 canvas = std_response["canvas_display"]
                 if canvas:
-                    logger.info(f"🎨 Hands: Extracting canvas display from agent response")
+                    logger.info(
+                        f"🎨 Hands: Extracting canvas display from agent response"
+                    )
                     updates["has_canvas"] = True
                     updates["canvas_type"] = canvas.get("canvas_type")
                     updates["canvas_content"] = canvas.get("canvas_content")
                     updates["canvas_data"] = canvas.get("canvas_data")
-                    updates["canvas_title"] = canvas.get("heading") or canvas.get("title")
-                    
+                    updates["canvas_title"] = canvas.get("heading") or canvas.get(
+                        "title"
+                    )
+
                     # For browser view specifically
                     if canvas.get("canvas_type") == "html":
                         updates["browser_view"] = canvas.get("canvas_content")
                         updates["current_view"] = "browser"
                     elif canvas.get("canvas_type") == "plan_graph":
-                        updates["plan_view"] = canvas.get("canvas_data") 
+                        updates["plan_view"] = canvas.get("canvas_data")
                         updates["current_view"] = "plan"
 
         if not result.success:
@@ -609,7 +609,9 @@ class Hands:
         reasoning = decision.get("phase_goal_verified") or "Phase goal met"
 
         if not execution_plan or not current_phase_id:
-            logger.warning("⚠️ Phase completion requested but no active plan/phase found.")
+            logger.warning(
+                "⚠️ Phase completion requested but no active plan/phase found."
+            )
             return {}
 
         # Find current phase index
@@ -624,39 +626,42 @@ class Hands:
         if not current_phase:
             return {}
 
-        logger.info(f"✅ Phase '{current_phase.get('name')}' EXPLICITLY completed by Brain.")
+        logger.info(
+            f"✅ Phase '{current_phase.get('name')}' EXPLICITLY completed by Brain."
+        )
 
         # update plan
         new_plan = list(execution_plan)
         new_plan[current_idx] = {
             **current_phase,
             "status": "completed",
-            "result_summary": reasoning
+            "result_summary": reasoning,
         }
 
         # Find next phase
         next_phase_id = None
         # Simple logic: find first pending phase that depends on this one, or just next in list if linear
         # But we should respect dependencies.
-        
+
         # Get set of all completed phases (including this one)
-        completed_ids = {p.get("phase_id") for p in new_plan if p.get("status") in ("completed", "skipped")}
-        
-        for phase in new_plan:
-             pid = phase.get("phase_id")
-             if pid in completed_ids:
-                 continue
-             
-             # Check dependencies
-             deps = phase.get("depends_on", [])
-             if not deps or all(d in completed_ids for d in deps):
-                 next_phase_id = pid
-                 break
-        
-        updates = {
-            "execution_plan": new_plan,
-            "current_phase_id": next_phase_id
+        completed_ids = {
+            p.get("phase_id")
+            for p in new_plan
+            if p.get("status") in ("completed", "skipped")
         }
+
+        for phase in new_plan:
+            pid = phase.get("phase_id")
+            if pid in completed_ids:
+                continue
+
+            # Check dependencies
+            deps = phase.get("depends_on", [])
+            if not deps or all(d in completed_ids for d in deps):
+                next_phase_id = pid
+                break
+
+        updates = {"execution_plan": new_plan, "current_phase_id": next_phase_id}
 
         if next_phase_id:
             logger.info(f"➡ Advancing to phase: {next_phase_id}")
@@ -798,7 +803,9 @@ class Hands:
         if isinstance(output, dict):
             # UAP v2: Check for StandardAgentResponse summary FIRST
             # This is the dedicated summary specifically for the Orchestrator Brain
-            if "standard_response" in output and isinstance(output["standard_response"], dict):
+            if "standard_response" in output and isinstance(
+                output["standard_response"], dict
+            ):
                 std_summary = output["standard_response"].get("summary")
                 if std_summary:
                     return std_summary[:max_length]
@@ -806,7 +813,9 @@ class Hands:
             # Extract key fields for summary (Legacy fallback)
             summary_parts = []
             for key in ["result", "message", "data", "response", "output"]:
-                if key in output and key != "standard_response": # Avoid recursing into standard_response
+                if (
+                    key in output and key != "standard_response"
+                ):  # Avoid recursing into standard_response
                     val = str(output[key])[:200]
                     summary_parts.append(f"{key}: {val}")
             if summary_parts:
