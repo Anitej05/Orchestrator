@@ -334,10 +334,10 @@ function HomeContent() {
 
   return (
     <SidebarInset className="h-screen overflow-hidden">
-      <div className="flex-1 bg-bg-page relative flex flex-col overflow-hidden w-full h-full">
+      <div className="flex-1 bg-bg-page relative flex flex-col overflow-hidden w-full h-full max-w-full">
         {/* Main Content Area - Resizable */}
-        <ResizablePanelGroup direction="horizontal" className="flex-1 overflow-hidden w-full h-full">
-            <ResizablePanel defaultSize={70} minSize={45} maxSize={75} className="overflow-hidden w-full">
+        <ResizablePanelGroup direction="horizontal" className="flex-1 overflow-hidden w-full h-full max-w-full">
+            <ResizablePanel defaultSize={70} minSize={45} maxSize={75} className="overflow-hidden w-full min-w-0">
               <main className="h-full p-0">
                 <div className="h-full flex flex-col">
                   <InteractiveChatInterface
@@ -364,7 +364,7 @@ function HomeContent() {
 
             <ResizableHandle withHandle />
 
-            <ResizablePanel defaultSize={50} maxSize={65} minSize={35} className="overflow-hidden w-full">
+            <ResizablePanel defaultSize={50} maxSize={65} minSize={35} className="overflow-hidden w-full min-w-0">
               <OrchestrationDetailsSidebar
                 ref={sidebarRef}
                 executionResults={executionResults}

@@ -22,8 +22,8 @@ export default function RootLayout({
 }) {
   return (
     <ClerkProvider>
-      <html lang="en" suppressHydrationWarning className="h-screen">
-        <body className={`${inter.className} h-screen`} suppressHydrationWarning>
+      <html lang="en" suppressHydrationWarning className="h-screen overflow-hidden">
+        <body className={`${inter.className} h-screen overflow-hidden`} suppressHydrationWarning>
           <ThemeProvider
             attribute="class"
             defaultTheme="light"
@@ -33,7 +33,7 @@ export default function RootLayout({
           >
             <SidebarProvider defaultOpen={false}>
               <AppSidebar />
-              <div className="ml-16 min-h-screen w-full">
+              <div className="ml-16 min-h-screen w-full max-w-full overflow-hidden">
                 {children}
               </div>
               <Toaster />

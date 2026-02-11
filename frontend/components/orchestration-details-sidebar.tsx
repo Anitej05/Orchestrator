@@ -242,8 +242,8 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
         const hasResults = executionResults.length > 0 || allTasks.length > 0
 
         return (
-            <aside className={cn("border-l border-border-color bg-bg-card text-text-primary p-4 flex flex-col h-full", className)}>
-                <Tabs value={activeTab} onValueChange={setActiveTab} className="h-full flex flex-col">
+            <aside className={cn("border-l border-border-color bg-bg-card text-text-primary p-4 flex flex-col h-full overflow-hidden", className)}>
+                <Tabs value={activeTab} onValueChange={setActiveTab} className="h-full flex flex-col overflow-hidden min-w-0">
                     <TabsList className="grid w-full grid-cols-3 bg-bg-subtle/80 backdrop-blur-xl border border-border-color/50 shadow-orbimesh-panel">
                         <TabsTrigger value="plan" className="relative">
                             Plan
@@ -303,14 +303,16 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                             />
                         </div>
                     </TabsContent>
-                    <TabsContent value="attachments" className="flex-1 overflow-hidden mt-4">
+                    <TabsContent value="attachments" className="flex-1 overflow-hidden mt-4 min-w-0 max-w-full">
                         {viewingFile ? (
-                            <DocumentViewer
-                                file={viewingFile}
-                                onBack={() => setViewingFile(null)}
-                            />
+                            <div className="h-full overflow-hidden max-w-full">
+                                <DocumentViewer
+                                    file={viewingFile}
+                                    onBack={() => setViewingFile(null)}
+                                />
+                            </div>
                         ) : allAttachments.length > 0 ? (
-                            <div className="grid grid-cols-2 gap-3 overflow-y-auto h-full">
+                            <div className="grid grid-cols-[repeat(auto-fill,minmax(144px,144px))] gap-2 overflow-y-auto overflow-x-hidden h-full justify-start p-2">
                                 {allAttachments.map((att: any, index: number) => {
                                     // Check both type and file extension for images
                                     const fileName = att.name.toLowerCase();
@@ -326,29 +328,29 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                                     return (
                                         <div 
                                             key={`${att.name}-${index}`} 
-                                            className="flex flex-col items-center p-3 rounded-xl bg-bg-card border border-border-color hover:shadow-orbimesh-card-hover hover:scale-105 transition-all duration-200 cursor-pointer"
+                                            className="flex flex-col items-center p-2 rounded-lg bg-bg-card border border-border-color hover:shadow-orbimesh-card-hover transition-all duration-200 cursor-pointer w-[144px] h-[168px]"
                                             onClick={() => setViewingFile(att)}
                                         >
                                             {isImage && att.content ? (
-                                                <div className="w-full aspect-square rounded-lg overflow-hidden bg-bg-subtle border border-border-color mb-2">
+                                                <div className="w-[112px] h-[112px] rounded-md overflow-hidden bg-bg-subtle border border-border-color mb-2 flex-shrink-0">
                                                     <img src={att.content} alt={att.name} className="w-full h-full object-cover" />
                                                 </div>
                                             ) : (
-                                                <div className="w-full aspect-square rounded-md bg-bg-subtle border border-border-color flex items-center justify-center mb-2">
+                                                <div className="w-[112px] h-[112px] rounded-md bg-bg-subtle border border-border-color flex items-center justify-center mb-2 flex-shrink-0">
                                                     {isPdf ? (
-                                                        <FileText className="w-16 h-16 text-status-error" />
+                                                        <FileText className="w-14 h-14 text-status-error" />
                                                     ) : isDoc ? (
-                                                        <FileText className="w-16 h-16 text-status-active" />
+                                                        <FileText className="w-14 h-14 text-status-active" />
                                                     ) : isExcel ? (
-                                                        <FileText className="w-16 h-16 text-status-success" />
+                                                        <FileText className="w-14 h-14 text-status-success" />
                                                     ) : isImage ? (
-                                                        <ImageIcon className="w-16 h-16 text-status-pending" />
+                                                        <ImageIcon className="w-14 h-14 text-status-pending" />
                                                     ) : (
-                                                        <FileIcon className="w-16 h-16 text-text-disabled" />
+                                                        <FileIcon className="w-14 h-14 text-text-disabled" />
                                                     )}
                                                 </div>
                                             )}
-                                            <span className="text-orbimesh-file-name text-text-secondary text-center font-medium truncate w-full" title={att.name}>
+                                            <span className="text-[10px] text-text-secondary text-center font-medium line-clamp-2 w-full leading-tight px-1" title={att.name}>
                                                 {att.name}
                                             </span>
                                         </div>
