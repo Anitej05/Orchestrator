@@ -1,2 +1,0 @@
-INFO:spreadsheet_agent.state:SessionState initialized
-INFO:utils.key_manager:Loaded 1 Cerebras API key from environment (CEREBRAS_API_KEY)
