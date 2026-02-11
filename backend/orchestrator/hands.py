@@ -535,29 +535,64 @@ class Hands:
 
         # SOTA: Extract Canvas Data from Standard Response (UAP v2)
         # This Bubbles up the canvas display to the top-level state so main.py can see it
-        if isinstance(result.output, dict) and "standard_response" in result.output:
-            std_response = result.output["standard_response"]
+        # Handle both dict and Pydantic object responses
+        output = result.output
+        std_response = None
+
+        if isinstance(output, dict) and "standard_response" in output:
+            # Dict format
+            std_response = output.get("standard_response")
+        elif hasattr(output, "standard_response") and output.standard_response:
+            # Pydantic object format (AgentResponse, etc.)
+            std_response = output.standard_response
+
+        if std_response:
+            # Handle both dict and Pydantic object for std_response
             if isinstance(std_response, dict) and "canvas_display" in std_response:
                 canvas = std_response["canvas_display"]
-                if canvas:
-                    logger.info(
-                        f"🎨 Hands: Extracting canvas display from agent response"
-                    )
-                    updates["has_canvas"] = True
-                    updates["canvas_type"] = canvas.get("canvas_type")
-                    updates["canvas_content"] = canvas.get("canvas_content")
-                    updates["canvas_data"] = canvas.get("canvas_data")
-                    updates["canvas_title"] = canvas.get("heading") or canvas.get(
-                        "title"
-                    )
+            elif (
+                hasattr(std_response, "canvas_display") and std_response.canvas_display
+            ):
+                canvas = std_response.canvas_display
+            else:
+                canvas = None
 
-                    # For browser view specifically
-                    if canvas.get("canvas_type") == "html":
-                        updates["browser_view"] = canvas.get("canvas_content")
-                        updates["current_view"] = "browser"
-                    elif canvas.get("canvas_type") == "plan_graph":
-                        updates["plan_view"] = canvas.get("canvas_data")
-                        updates["current_view"] = "plan"
+            if canvas:
+                logger.info(f"🎨 Hands: Extracting canvas display from agent response")
+                updates["has_canvas"] = True
+                updates["canvas_type"] = (
+                    canvas.get("canvas_type")
+                    if isinstance(canvas, dict)
+                    else canvas.canvas_type
+                )
+                updates["canvas_content"] = (
+                    canvas.get("canvas_content")
+                    if isinstance(canvas, dict)
+                    else canvas.canvas_content
+                )
+                updates["canvas_data"] = (
+                    canvas.get("canvas_data")
+                    if isinstance(canvas, dict)
+                    else canvas.canvas_data
+                )
+                updates["canvas_title"] = (
+                    canvas.get("heading") or canvas.get("canvas_title")
+                    if isinstance(canvas, dict)
+                    else (canvas.canvas_title or getattr(canvas, "heading", None))
+                )
+
+                # For browser view specifically
+                canvas_type = updates["canvas_type"]
+                if canvas_type == "html":
+                    updates["browser_view"] = updates["canvas_content"]
+                    updates["current_view"] = "browser"
+                elif canvas_type == "plan_graph":
+                    updates["plan_view"] = updates["canvas_data"]
+                    updates["current_view"] = "plan"
+                elif canvas_type == "email_preview":
+                    updates["current_view"] = "browser"
+                elif canvas_type == "spreadsheet":
+                    updates["current_view"] = "spreadsheet"
 
         if not result.success:
             failure_count = state.get("failure_count", 0) + 1
