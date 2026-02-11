@@ -1,0 +1,8 @@
+GMAIL_MCP_URL not set. Gmail agent will not function.
+GMAIL_CONNECTION_ID not set. Using URL without connection ID.
+Loaded 1 Cerebras API key from environment (CEREBRAS_API_KEY)
+ContentManagementService initialized with 0 items
+AgentFileManager connected to ContentManagementService
+AgentFileManager initialized for mail_agent at C:\Users\mahes\OneDrive\Desktop\Projects\Orbimesh\Orchestrator-new\storage\mail_agent\attachments
+ContentManagementService initialized with 0 items
+ContentManagementService initialized with 0 items

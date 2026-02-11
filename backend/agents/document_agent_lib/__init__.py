@@ -27,7 +27,7 @@ import schemas as backend_schemas
 WORKSPACE_ROOT = Path(__file__).parent.parent.parent.parent.resolve()
 STORAGE_DIR = WORKSPACE_ROOT / "storage" / "documents"
 
-from .schemas import (
+from .agent_schemas import (
     AnalyzeDocumentRequest, AnalyzeDocumentResponse,
     DisplayDocumentRequest, DisplayDocumentResponse,
     CreateDocumentRequest, CreateDocumentResponse,
@@ -742,3 +742,12 @@ async def shutdown_event():
     """Cleanup on shutdown."""
     logger.info("Document Agent shutting down...")
     # Cleanup can be added here if needed
+
+
+def run_agent() -> None:
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8050)
+
+
+if __name__ == "__main__":
+    run_agent()

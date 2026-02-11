@@ -450,17 +450,17 @@ class ComposioAuthManager:
                     results.append(connection_info)
                 
                 # SYNC TO DATABASE: Save connected apps to user_connections table
-                if is_connected and connected_account_id and slug:
-                    logger.info(f"🔗 Found active connection: {slug} (ID: {connected_account_id})")
+                # Use connection_info from the current iteration, not the loop variable
+                if connection_info["is_connected"] and connection_info["connected_account_id"] and slug:
+                    logger.info(f"🔗 Found active connection: {slug} (ID: {connection_info['connected_account_id']})")
                     self._save_connection_to_db(
                         user_id,
                         slug,
-                        connected_account_id,
+                        connection_info["connected_account_id"],
                         status="active",
                         app_metadata={
-                            "app_name": app_name,
-                            "integration_id": integration_id,
-                            "composio_status": status,
+                            "app_name": connection_info.get("name", slug),
+                            "composio_status": "active",
                         },
                     )
 
@@ -608,7 +608,19 @@ class ComposioAuthManager:
             if not connection_id:
                 connection = self.get_connection_for_agent(user_id, app_slug)
                 if not connection:
-                    return {"success": False, "error": f"No connection found for {app_slug}"}
+                    # Try syncing from Composio first
+                    logger.info(f"No local connection found, attempting to sync from Composio for {app_slug}")
+                    sync_result = self.check_connection_status(user_id, app_slug)
+                    if sync_result.get("success"):
+                        # Try again after sync
+                        connection = self.get_connection_for_agent(user_id, app_slug)
+                
+                if not connection:
+                    return {
+                        "success": False, 
+                        "error": f"No connection found for {app_slug}. Please reconnect the integration.",
+                        "needs_reconnect": True
+                    }
                 connection_id = connection["connection_id"]
             
             logger.info(f"🔄 Refreshing connection: {app_slug} for user {user_id}")
@@ -901,18 +913,19 @@ class ComposioAuthManager:
         """
         with SessionLocal() as db:
             try:
+                # Look for active OR stale connections (stale can be refreshed)
                 connection = (
                     db.query(UserConnection)
-                    .filter_by(
-                        user_id=user_id,
-                        app_slug=app_slug,
-                        status="active"
+                    .filter(
+                        UserConnection.user_id == user_id,
+                        UserConnection.app_slug == app_slug,
+                        UserConnection.status.in_(["active", "stale"])
                     )
                     .first()
                 )
                 
                 if not connection:
-                    logger.warning(f"No active connection found for user {user_id}, app {app_slug}")
+                    logger.warning(f"No active or stale connection found for user {user_id}, app {app_slug}")
                     return None
                 
                 # Check if connection needs verification (older than 1 hour)

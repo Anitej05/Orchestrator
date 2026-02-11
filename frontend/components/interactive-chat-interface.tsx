@@ -314,11 +314,13 @@ export function InteractiveChatInterface({
 
         {state.messages
           .filter((message: Message) => {
-            // Filter out empty assistant messages to prevent empty bubbles
-            if (message.type === 'assistant') {
-              return message.content && message.content.trim() !== '';
-            }
-            return true;
+            // Filter out empty messages - must have content, attachments, canvas, or browsing trace
+            const hasContent = message.content && message.content.trim() !== '';
+            const hasAttachments = message.attachments && message.attachments.length > 0;
+            const hasCanvas = message.has_canvas && (message.canvas_content || (message as any).canvas_data);
+            const hasBrowsingTrace = message.browsing_trace && message.browsing_trace.length > 0;
+            
+            return hasContent || hasAttachments || hasCanvas || hasBrowsingTrace;
           })
           .map((message: Message, index: number) => {
             // Ensure message.id is a valid string
@@ -333,7 +335,9 @@ export function InteractiveChatInterface({
                     : 'ui-agent-bubble'
                   }`}>
                   <div className="message-content space-y-2">
-                    {message.content && (message.type === 'assistant' ? <Markdown content={message.content} /> : <p>{message.content}</p>)}
+                    {message.content && message.content.trim() !== '' && (
+                      message.type === 'assistant' ? <Markdown content={message.content} /> : <p>{message.content}</p>
+                    )}
 
                     {/* Collapsible browsing trace */}
                     {message.browsing_trace && message.browsing_trace.length > 0 && (
@@ -392,9 +396,9 @@ export function InteractiveChatInterface({
                             {att.type.startsWith('image/') && att.content ? (
                               <img src={att.content} alt={att.name} className="max-w-xs max-h-48 rounded-orbimesh-lg" />
                             ) : (
-                              <div className="flex items-center gap-2 ui-metadata-item">
-                                <FileIcon className="w-4 h-4" />
-                                <span className="ui-file-name">{att.name}</span>
+                              <div className="flex items-center gap-2 px-3 py-2 rounded-orbimesh-md bg-bg-card border border-border-color">
+                                <FileIcon className="w-4 h-4 text-text-tertiary" />
+                                <span className="text-sm text-text-primary">{att.name}</span>
                               </div>
                             )}
                           </div>
@@ -657,23 +661,39 @@ export function InteractiveChatInterface({
 
                 {/* Planning Mode Toggle - Above Textarea */}
                 <div className="flex items-center gap-2">
-                  <Switch
-                    id="planning-mode"
-                    checked={planningMode}
-                    onCheckedChange={setPlanningMode}
-                    className="border-2 border-brand-teal rounded-full [&>span]:bg-slate-700 [&>span]:dark:bg-white [&[data-state=checked]>span]:bg-white"
-                  />
+                  <label className="planning-mode-switch">
+                    <input
+                      type="checkbox"
+                      checked={planningMode}
+                      onChange={(e) => setPlanningMode(e.target.checked)}
+                    />
+                    <div className="slider">
+                      <div className="circle">
+                        <svg className="cross" viewBox="0 0 365.696 365.696" height="6" width="6" xmlns="http://www.w3.org/2000/svg">
+                          <g>
+                            <path fill="currentColor" d="M243.188 182.86 356.32 69.726c12.5-12.5 12.5-32.766 0-45.247L341.238 9.398c-12.504-12.503-32.77-12.503-45.25 0L182.86 122.528 69.727 9.374c-12.5-12.5-32.766-12.5-45.247 0L9.375 24.457c-12.5 12.504-12.5 32.77 0 45.25l113.152 113.152L9.398 295.99c-12.503 12.503-12.503 32.769 0 45.25L24.48 356.32c12.5 12.5 32.766 12.5 45.247 0l113.132-113.132L295.99 356.32c12.503 12.5 32.769 12.5 45.25 0l15.081-15.082c12.5-12.504 12.5-32.77 0-45.25zm0 0"></path>
+                          </g>
+                        </svg>
+                        <svg className="checkmark" viewBox="0 0 24 24" height="10" width="10" xmlns="http://www.w3.org/2000/svg">
+                          <g>
+                            <path fill="currentColor" d="M9.707 19.121a.997.997 0 0 1-1.414 0l-5.646-5.647a1.5 1.5 0 0 1 0-2.121l.707-.707a1.5 1.5 0 0 1 2.121 0L9 14.171l9.525-9.525a1.5 1.5 0 0 1 2.121 0l.707.707a1.5 1.5 0 0 1 0 2.121z"></path>
+                          </g>
+                        </svg>
+                      </div>
+                    </div>
+                  </label>
                   <label
                     htmlFor="planning-mode"
                     className="ui-metadata-label cursor-pointer select-none"
                   >
                     Planning Mode
                   </label>
-                  {planningMode && (
-                    <Badge variant="ui-pending" className="ui-file-meta">
-                      Will pause for approval
-                    </Badge>
-                  )}
+                  <Badge 
+                    variant="ui-pending" 
+                    className={`ui-file-meta transition-opacity duration-200 ${planningMode ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
+                  >
+                    Will pause for approval
+                  </Badge>
                 </div>
 
                 <div className="space-y-2">

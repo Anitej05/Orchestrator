@@ -193,12 +193,17 @@ async def continue_task(request: UAPContinueRequest):
     )
 
 
+
 # =============================================================================
 # MAIN
 # =============================================================================
 
-if __name__ == "__main__":
+def run_agent() -> None:
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8090)
+
+
+if __name__ == "__main__":
+    run_agent()
 
 

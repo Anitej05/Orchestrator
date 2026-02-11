@@ -17,8 +17,9 @@ BACKEND_DIR = AGENTS_DIR.parent
 PROJECT_ROOT = BACKEND_DIR.parent
 
 # Ensure correct paths in sys.path
-# Order: PROJECT_ROOT > BACKEND_DIR > AGENTS_DIR > PACKAGE_DIR
-for path in [str(PROJECT_ROOT), str(BACKEND_DIR), str(AGENTS_DIR), str(PACKAGE_DIR)]:
+# PROJECT_ROOT for `from backend.X` imports, BACKEND_DIR for `from services.X`, `from utils.X`
+# NOTE: Do NOT add AGENTS_DIR — it causes `agents/utils/` to shadow `backend/utils/`
+for path in [str(PROJECT_ROOT), str(BACKEND_DIR)]:
     if path not in sys.path:
         sys.path.insert(0, path)
 
@@ -29,7 +30,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import AGENT_PORT, AGENT_VERSION, logger
-from .schemas import (
+from .agent_schemas import (
     ExecuteRequest, ContinueRequest, ExecuteResponse,
     HealthResponse, TaskStatus
 )
@@ -335,6 +336,10 @@ async def shutdown():
 # FOR RUNNING DIRECTLY
 # ============================================================================
 
-if __name__ == "__main__":
+def run_agent() -> None:
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=AGENT_PORT)
+
+
+if __name__ == "__main__":
+    run_agent()

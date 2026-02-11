@@ -34,11 +34,11 @@ if not hasattr(backend_schemas, 'AgentResponseStatus'):
     raise ImportError(f"schemas module from {backend_schemas.__file__} does not have AgentResponseStatus. This is likely the wrong schemas module (local document_agent/schemas.py instead of backend/schemas.py)")
 AgentResponseStatus = backend_schemas.AgentResponseStatus
 
-from .schemas import (
+from .agent_schemas import (
     AnalyzeDocumentRequest, EditDocumentRequest, CreateDocumentRequest,
     UndoRedoRequest, VersionHistoryRequest, ExtractDataRequest, EditAction
 )
-from .schemas import AgentResponseStatus as LocalAgentResponseStatus
+from .agent_schemas import AgentResponseStatus as LocalAgentResponseStatus
 from .editors import DocumentEditor
 from .state import DocumentSessionManager, DocumentVersionManager, EditAction as StateEditAction
 from .llm import DocumentLLMClient

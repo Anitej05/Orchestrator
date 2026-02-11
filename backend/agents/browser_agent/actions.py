@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 from playwright.async_api import Page, TimeoutError as PTimeoutError, Error as PError
 
-from .schemas import ActionPlan, ActionResult, AtomicAction
+from .agent_schemas import ActionPlan, ActionResult, AtomicAction
 from .dom import DOMExtractor
 from .config import CONFIG
 from .persistent_memory import get_persistent_memory

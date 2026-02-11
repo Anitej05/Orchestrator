@@ -4,7 +4,7 @@ from fastapi import FastAPI, HTTPException
 from typing import Optional, Dict, Any
 
 from .config import COMPOSIO_API_KEY, CONNECTION_ID, logger
-from .schemas import (
+from .agent_schemas import (
     GmailRequest, SendEmailRequest, GmailResponse,
     DownloadAttachmentsRequest, SemanticSearchRequest,
     SummarizeRequest, DraftReplyRequest, ExtractActionItemsRequest,

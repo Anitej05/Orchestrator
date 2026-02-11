@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Any
 from backend.services.inference_service import inference_service, InferencePriority
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
-from .schemas import ExecutionPlan, StepPlan
+from .agent_schemas import ExecutionPlan, StepPlan
 
 logger = logging.getLogger("spreadsheet_agent.llm")
 

@@ -24,7 +24,7 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
     
-from .schemas import ActionPlan, AtomicAction
+from .agent_schemas import ActionPlan, AtomicAction
 
 load_dotenv()
 logger = logging.getLogger(__name__)

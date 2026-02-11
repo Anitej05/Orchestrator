@@ -14,7 +14,7 @@ import pandas as pd
 import uuid
 
 from .config import logger
-from .schemas import (
+from .agent_schemas import (
     ExecuteRequest, ExecuteResponse, ExecutionPlan, StepResult,
     TaskStatus, FileInfo
 )
@@ -517,7 +517,7 @@ class SpreadsheetAgent:
             )
             
             if adjusted:
-                from .schemas import StepPlan
+                from .agent_schemas import StepPlan
                 return StepPlan(
                     action=adjusted.get('action', step.action),
                     params=adjusted.get('params', step.params),
@@ -1447,7 +1447,7 @@ class SpreadsheetAgent:
             df = await self.resolver.resolve_dataframe(params, thread_id, require_data=False)
             
             # Create step and execute
-            from .schemas import StepPlan
+            from .agent_schemas import StepPlan
             step = StepPlan(action=action, params=params)
             result = await self._execute_step(step, session, df, thread_id)
             

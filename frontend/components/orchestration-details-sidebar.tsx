@@ -266,7 +266,7 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                             Plan
                             {(conversationState.metadata?.currentStage === 'executing' ||
                                 conversationState.metadata?.currentStage === 'validating') && (
-                                    <span className="ml-1 px-1.5 py-0.5 text-[10px] font-semibold bg-status-active text-foreground rounded-full animate-pulse">
+                                    <span className="ml-1 px-1.5 py-0.5 text-[10px] font-semibold bg-status-pending text-foreground rounded-full animate-pulse">
                                         Running
                                     </span>
                                 )}

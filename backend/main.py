@@ -4083,8 +4083,10 @@ agent_status = {}  # {agent_name: {'port': int, 'process': subprocess.Popen, 'st
 agent_status_lock = asyncio.Lock()
 
 def cleanup_agents():
-    """Stop all agent processes"""
+    """Stop all agent processes — both tracked handles and orphaned port holders"""
     global agent_processes
+    
+    # 1. Kill tracked process handles (from current session)
     for process in agent_processes:
         try:
             process.terminate()
@@ -4096,6 +4098,45 @@ def cleanup_agents():
                 pass
     agent_processes = []
     agent_status.clear()
+
+
+def _kill_process_on_port(port: int):
+    """Kill any process listening on the given port (handles orphaned agents after reload)"""
+    if platform.system() == "Windows":
+        try:
+            result = subprocess.run(
+                ["netstat", "-ano"],
+                capture_output=True, text=True, timeout=5
+            )
+            for line in result.stdout.splitlines():
+                # Match lines like: TCP  0.0.0.0:9000  0.0.0.0:0  LISTENING  12345
+                if f":{port}" in line and "LISTENING" in line:
+                    parts = line.split()
+                    pid = int(parts[-1])
+                    if pid > 0:
+                        try:
+                            subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                                         capture_output=True, timeout=5)
+                            logger.info(f"  Killed orphaned process on port {port} (pid={pid})")
+                        except:
+                            pass
+        except:
+            pass
+    else:
+        try:
+            result = subprocess.run(
+                ["lsof", "-ti", f":{port}"],
+                capture_output=True, text=True, timeout=5
+            )
+            for pid_str in result.stdout.strip().split('\n'):
+                if pid_str.strip():
+                    try:
+                        os.kill(int(pid_str.strip()), 9)
+                        logger.info(f"  Killed orphaned process on port {port} (pid={pid_str.strip()})")
+                    except:
+                        pass
+        except:
+            pass
 
 async def wait_for_agent_ready(agent_name: str, port: int, timeout: float = 30.0) -> bool:
     """
@@ -4165,7 +4206,13 @@ async def check_agent_health_background():
                         pass
 
 def start_agents_async():
-    """Start agents asynchronously without blocking main.py startup"""
+    """
+    Start agent servers as subprocesses without blocking main.py startup.
+    
+    Uses SKILL.md files as source of truth for agent discovery and port config.
+    Each agent runs as a separate uvicorn process from the backend directory.
+    Agents are idle (sleep-state) until the orchestrator sends them HTTP requests.
+    """
     global agent_processes, agent_status
     
     # Clean up any existing agents first
@@ -4188,48 +4235,108 @@ def start_agents_async():
     if skip_agents:
         logger.info(f"SKIP_AGENTS configured: {skip_agents}")
 
-    agent_files = [f for f in os.listdir(agents_dir) if f.endswith("_agent.py")]
-    logger.info(f"Starting {len(agent_files)} agent server(s)...")
-
-    for agent_file in agent_files:
-        agent_path = os.path.join(agents_dir, agent_file)
-        agent_name = agent_file.replace('.py', '')
-        port = None
+    # UAP: Discover agents by scanning for SKILL.md + entry script pairs
+    # Each tuple: (agent_name, script_relative_to_agents_dir)
+    import yaml
+    agent_configs = []  # List of (name, script_path, port)
+    
+    for item in os.listdir(agents_dir):
+        item_path = os.path.join(agents_dir, item)
+        if not os.path.isdir(item_path):
+            continue
         
+        skill_file = os.path.join(item_path, "SKILL.md")
+        if not os.path.exists(skill_file):
+            continue
+        
+        # Parse port from SKILL.md frontmatter
+        try:
+            with open(skill_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+            if content.startswith('---'):
+                parts = content.split('---', 2)
+                if len(parts) >= 3:
+                    config = yaml.safe_load(parts[1])
+                    port = config.get('port')
+                    if not port:
+                        logger.warning(f"No port in SKILL.md for {item}, skipping")
+                        continue
+                    port = int(port)
+                else:
+                    continue
+            else:
+                continue
+        except Exception as e:
+            logger.warning(f"Failed to parse SKILL.md for {item}: {e}")
+            continue
+        
+        # Determine module path for `python -m` invocation
+        # All agents use __init__.py with if __name__ == "__main__" blocks
+        init_file = os.path.join(item_path, "__init__.py")
+        
+        module_path = None
+        
+        if os.path.exists(init_file):
+            # Check if __init__.py has uvicorn entry point
+            with open(init_file, 'r', encoding='utf-8') as f:
+                init_content = f.read()
+            if 'if __name__' in init_content and 'uvicorn' in init_content:
+                module_path = f"agents.{item}"
+        
+        if module_path:
+            agent_configs.append((item, module_path, port))
+        else:
+            logger.warning(f"No runnable entry point found for {item} (missing if __name__ block in __init__.py), skipping")
+
+    logger.info(f"Starting {len(agent_configs)} agent server(s)...")
+
+    # Kill any orphaned agent processes from previous reload cycles
+    for _, _, port in agent_configs:
+        _kill_process_on_port(port)
+
+    for agent_name, module_path, port in agent_configs:
         # Check if this agent should be skipped (for running in separate terminal)
-        if agent_name.lower() in skip_agents or agent_file.lower() in skip_agents:
+        if agent_name.lower() in skip_agents:
             logger.info(f"Skipping {agent_name} (in SKIP_AGENTS, run it separately)")
             continue
         
         try:
-            # Extract port from agent file
-            with open(agent_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-                match = re.search(r'port\s*=\s*int\(os\.getenv\([^,]+,\s*(\d+)\)', content)
-                if not match:
-                    match = re.search(r"port\s*=\s*(\d+)", content)
-                if match:
-                    port = int(match.group(1))
+            log_path = os.path.join(logs_dir, f"{agent_name}.log")
 
-            if port is None:
-                continue
-
-            log_path = os.path.join(logs_dir, f"{agent_file}.log")
-
-            # Start the agent process
+            # Start agent using `python -m <module>` from the backend directory
+            # -m preserves package context so relative imports work correctly
+            # cwd=project_root (backend/) ensures `from services.X`, `from utils.X` resolve
+            #
+            # PYTHONPATH must include:
+            #   1. project_root (backend/) — for `from services.X`, `from utils.X`, `from models import`
+            #   2. parent of project_root — for `from backend.services.X` (used by agent llm.py files)
+            env = os.environ.copy()
+            parent_of_backend = os.path.dirname(project_root)
+            extra_paths = os.pathsep.join([project_root, parent_of_backend])
+            env["PYTHONPATH"] = extra_paths + os.pathsep + env.get("PYTHONPATH", "")
+            
             with open(log_path, 'w') as log_file:
+                cmd = [
+                    sys.executable,
+                    "-c",
+                    f"from {module_path} import run_agent; run_agent()"
+                ]
                 if platform.system() == "Windows":
                     process = subprocess.Popen(
-                        [sys.executable, agent_path],
+                        cmd,
                         stdout=log_file,
                         stderr=log_file,
+                        cwd=project_root,
+                        env=env,
                         creationflags=subprocess.CREATE_NO_WINDOW
                     )
                 else:
                     process = subprocess.Popen(
-                        [sys.executable, agent_path],
+                        cmd,
                         stdout=log_file,
                         stderr=log_file,
+                        cwd=project_root,
+                        env=env,
                         start_new_session=True
                     )
                 
@@ -4239,8 +4346,10 @@ def start_agents_async():
                     'process': process,
                     'status': 'starting'
                 }
+                logger.info(f"  → {agent_name} starting on port {port} via -m {module_path} (pid={process.pid})")
         
         except Exception as e:
+            logger.error(f"Failed to start {agent_name}: {e}")
             agent_status[agent_name] = {
                 'port': port,
                 'process': None,
@@ -4267,7 +4376,8 @@ if __name__ == "__main__":
         host="0.0.0.0",  # Changed from 127.0.0.1 to support both IPv4 and IPv6
         port=8000, 
         reload=True,
-        reload_includes=["*.py", "orchestrator/*.py", "agents/*.py", "services/*.py", "routers/*.py"],  # Watch all Python files
+        reload_includes=["*.py"],  # Watch all Python files (removed redundant patterns)
+        reload_excludes=["logs/*", "storage/*", "*.log"],  # Don't reload on agent log writes
         ws_ping_interval=20,  # Send ping every 20 seconds
         ws_ping_timeout=20,   # Wait 20 seconds for pong
         log_level="info"

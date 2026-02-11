@@ -36,7 +36,7 @@ except ImportError:
         ACTIVE = "active"
     AgentFileManager = None
 from pathlib import Path
-from .schemas import ActionPlan, ActionResult, BrowserResult
+from .agent_schemas import ActionPlan, ActionResult, BrowserResult
 from .state import AgentMemory
 from .planner import Planner
 from .persistent_memory import get_persistent_memory

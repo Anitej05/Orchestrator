@@ -329,7 +329,7 @@ function HomeContent() {
       <div className="flex-1 bg-bg-page relative flex flex-col overflow-hidden w-full h-full">
         {/* Main Content Area - Resizable */}
         <ResizablePanelGroup direction="horizontal" className="flex-1 overflow-hidden w-full h-full">
-            <ResizablePanel defaultSize={95} minSize={45} maxSize={65} className="overflow-hidden w-full">
+            <ResizablePanel defaultSize={70} minSize={45} maxSize={75} className="overflow-hidden w-full">
               <main className="h-full p-0">
                 <div className="h-full flex flex-col">
                   <InteractiveChatInterface

@@ -11,7 +11,7 @@ from cachetools import TTLCache
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 from schemas import AgentResponse, AgentResponseStatus
-from .schemas import (
+from .agent_schemas import (
     SearchRequest, SendEmailRequest, ReplyRequest,
     CreateDraftRequest, SummarizeRequest, DraftReplyRequest,
     ExtractActionsRequest, AddLabelsRequest, DownloadAttachmentsRequest,
