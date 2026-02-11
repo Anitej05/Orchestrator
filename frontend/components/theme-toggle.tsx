@@ -2,7 +2,7 @@
 
 import * as React from "react"
 import { Moon, Sun, Monitor } from "lucide-react"
-import { useTheme } from "next-themes"
+import { ThemeProvider as NextThemesProvider, useTheme, type ThemeProviderProps } from "next-themes"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -74,5 +74,10 @@ export function ThemeToggle() {
       </DropdownMenuContent>
     </DropdownMenu>
   )
+}
+
+// Theme Provider wrapper component
+export function ThemeProvider({ children, ...props }: ThemeProviderProps) {
+  return <NextThemesProvider {...props}>{children}</NextThemesProvider>
 }
 

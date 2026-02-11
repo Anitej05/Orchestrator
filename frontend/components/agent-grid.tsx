@@ -11,7 +11,6 @@ interface AgentGridProps {
 }
 
 export default function AgentGrid({ agents, searchQuery = "" }: AgentGridProps) {
-  const [registeredAgents, setRegisteredAgents] = useState<Set<string>>(new Set())
   const [filteredAgents, setFilteredAgents] = useState<Agent[]>(agents)
 
   useEffect(() => {
@@ -30,18 +29,6 @@ export default function AgentGrid({ agents, searchQuery = "" }: AgentGridProps) 
     setFilteredAgents(filtered)
   }, [agents, searchQuery])
 
-  const handleToggleRegistration = (agentId: string) => {
-    setRegisteredAgents((prev) => {
-      const newSet = new Set(prev)
-      if (newSet.has(agentId)) {
-        newSet.delete(agentId)
-      } else {
-        newSet.add(agentId)
-      }
-      return newSet
-    })
-  }
-
   if (filteredAgents.length === 0) {
     return (
       <div className="text-center py-12">
@@ -56,8 +43,6 @@ export default function AgentGrid({ agents, searchQuery = "" }: AgentGridProps) 
         <AgentCard
           key={agent.id}
           agent={agent}
-          isRegistered={registeredAgents.has(agent.id)}
-          onToggleRegistration={() => handleToggleRegistration(agent.id)}
         />
       ))}
     </div>

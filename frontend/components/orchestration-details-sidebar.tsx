@@ -6,7 +6,6 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
 import { DollarSign, Clock, FileIcon, FileText, Image as ImageIcon } from "lucide-react"
-import CollapsibleSection from "@/components/CollapsibleSection"
 import PlanGraph from "@/components/PlanGraph"
 import SaveWorkflowButton from "@/components/save-workflow-button"
 import { useEffect, useState } from "react"
@@ -16,6 +15,7 @@ import { CanvasRenderer } from '@/components/canvas-renderer'
 import type { Agent, Message, TaskAgentPair } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { API_BASE_URL } from "@/lib/config"
+import DocumentViewer from "@/components/document-viewer"
 
 
 interface ExecutionResult {
@@ -54,12 +54,13 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
     ({ executionResults, threadId, className, onThreadIdUpdate, onAcceptPlan, onRejectPlan }, ref) => {
         const [plan, setPlan] = useState<Plan>({ pendingTasks: [], completedTasks: [] });
         const [isLoadingPlan, setIsLoadingPlan] = useState(false);
-        const [agents, setAgents] = useState<Agent[]>([]);
         const [activeTab, setActiveTab] = useState<string>("plan");
         const [lastCanvasContent, setLastCanvasContent] = useState<string | undefined>(undefined);
         // State for viewing specific canvas content from messages
         const [viewedCanvasContent, setViewedCanvasContent] = useState<string | undefined>(undefined);
         const [viewedCanvasType, setViewedCanvasType] = useState<'html' | 'markdown' | 'pdf' | 'spreadsheet' | 'email_preview' | 'document' | 'image' | 'json' | undefined>(undefined);
+        // State for viewing specific attachment file
+        const [viewingFile, setViewingFile] = useState<any | null>(null);
 
         // Get conversation state from Zustand store
         const conversationState = useConversationStore();
@@ -182,28 +183,6 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
             }
         }, [hasCanvas, canvasContent, (conversationState as any).canvas_data, lastCanvasContent, conversationState.metadata?.currentStage]);
 
-        useEffect(() => {
-            const uniqueAgentsFromPairs = Array.from(new Set(taskAgentPairs.map((pair: TaskAgentPair) => pair.primary.id)))
-                .map(id => taskAgentPairs.find((pair: TaskAgentPair) => pair.primary.id === id)!.primary);
-            setAgents(uniqueAgentsFromPairs);
-        }, [taskAgentPairs]);
-
-        const handleRatingUpdate = (agentId: string, newRating: number) => {
-            setAgents(prevAgents =>
-                prevAgents.map(agent =>
-                    agent.id === agentId ? { ...agent, rating: newRating, rating_count: (agent.rating_count ?? 0) + 1 } : agent
-                )
-            );
-        };
-
-        // Simplified refreshPlan function that just sets loading state
-        const refreshPlan = async () => {
-            setIsLoadingPlan(true);
-            // In a real implementation, you might want to trigger a refresh of the conversation store here
-            // For now, we'll just reset the loading state
-            setTimeout(() => setIsLoadingPlan(false), 500);
-        };
-
         // Method to view specific canvas content from a message
         const viewCanvas = (canvasContent: string, canvasType: 'html' | 'markdown' | 'pdf' | 'spreadsheet' | 'email_preview' | 'document' | 'image' | 'json') => {
             setViewedCanvasContent(canvasContent);
@@ -213,7 +192,10 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
 
         // Expose methods via ref
         useImperativeHandle(ref, () => ({
-            refreshPlan,
+            refreshPlan: async () => {
+                setIsLoadingPlan(true);
+                setTimeout(() => setIsLoadingPlan(false), 500);
+            },
             viewCanvas
         }));
 
@@ -252,7 +234,8 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
             return {
                 name: fileName,
                 type: file.file_type || file.type || 'unknown',
-                content: content
+                content: content,
+                file_path: file.file_path
             };
         });
 
@@ -320,9 +303,14 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                             />
                         </div>
                     </TabsContent>
-                    <TabsContent value="attachments" className="flex-1 overflow-y-auto mt-4">
-                        {allAttachments.length > 0 ? (
-                            <div className="grid grid-cols-2 gap-3">
+                    <TabsContent value="attachments" className="flex-1 overflow-hidden mt-4">
+                        {viewingFile ? (
+                            <DocumentViewer
+                                file={viewingFile}
+                                onBack={() => setViewingFile(null)}
+                            />
+                        ) : allAttachments.length > 0 ? (
+                            <div className="grid grid-cols-2 gap-3 overflow-y-auto h-full">
                                 {allAttachments.map((att: any, index: number) => {
                                     // Check both type and file extension for images
                                     const fileName = att.name.toLowerCase();
@@ -336,7 +324,11 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                                     const isExcel = fileName.endsWith('.xls') || fileName.endsWith('.xlsx');
 
                                     return (
-                                        <div key={`${att.name}-${index}`} className="flex flex-col items-center p-3 rounded-xl bg-bg-card border border-border-color hover:shadow-orbimesh-card-hover hover:scale-105 transition-all duration-200">
+                                        <div 
+                                            key={`${att.name}-${index}`} 
+                                            className="flex flex-col items-center p-3 rounded-xl bg-bg-card border border-border-color hover:shadow-orbimesh-card-hover hover:scale-105 transition-all duration-200 cursor-pointer"
+                                            onClick={() => setViewingFile(att)}
+                                        >
                                             {isImage && att.content ? (
                                                 <div className="w-full aspect-square rounded-lg overflow-hidden bg-bg-subtle border border-border-color mb-2">
                                                     <img src={att.content} alt={att.name} className="w-full h-full object-cover" />

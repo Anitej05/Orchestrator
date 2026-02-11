@@ -17,11 +17,7 @@ from .agent_schemas import ActionPlan, ActionResult, AtomicAction
 from .dom import DOMExtractor
 from .config import CONFIG
 from .persistent_memory import get_persistent_memory
-try:
-    from agents.utils.agent_file_manager import AgentFileManager, FileType, FileStatus
-except ImportError:
-    # Fallback to old location or relative import if needed
-    from agents.agent_file_manager import AgentFileManager, FileType, FileStatus
+from agents.utils.agent_file_manager import AgentFileManager, FileType, FileStatus
 
 logger = logging.getLogger(__name__)
 

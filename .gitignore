@@ -58,6 +58,7 @@ backend/conversation_history/
 # Temporary / Generated
 tmp_*/
 __pycache__/
+test_logs/
 
 # Specific standalone test scripts (user requested cleanup)
 backend/test_*.py

@@ -783,176 +783,6 @@ def get_db():
     finally:
         db.close()
 
-# --- Agent Server Startup ---
-def is_port_in_use(port: int) -> bool:
-    """Checks if a local port is already in use."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        return s.connect_ex(('127.0.0.1', port)) == 0
-
-def wait_for_port(port: int, agent_file: str, timeout: int = 15):
-    """Waits for a network port to become active."""
-    start_time = time.time()
-    logger.info(f"Waiting for agent '{agent_file}' to start on port {port}...")
-    while time.time() - start_time < timeout:
-        if is_port_in_use(port):
-            logger.info(f"Agent '{agent_file}' is now running on port {port}.")
-            return True
-        time.sleep(0.5)
-    logger.error(f"Agent '{agent_file}' did not start on port {port} within {timeout} seconds.")
-    return False
-
-def start_agent_servers():
-    """
-    Finds and starts agent servers, with enhanced logging and better error handling
-    to track which agents start successfully and which fail.
-    """
-    global agent_processes
-    
-    # Use absolute path based on the project root directory
-    project_root = os.path.dirname(os.path.abspath(__file__))  # This gets the backend directory
-    agents_dir = os.path.join(project_root, "agents")
-    
-    if not os.path.isdir(agents_dir):
-        logger.warning(f"'{agents_dir}' directory not found. Skipping agent server startup.")
-        return
-
-    logs_dir = "logs"
-    os.makedirs(logs_dir, exist_ok=True)
-    logger.info(f"Agent logs will be stored in the '{logs_dir}' directory.")
-
-    started_agents = []
-    failed_agents = []
-
-    # UAP: Read from SKILL.md definitions (Source of Truth)
-    agent_configs = {}
-    
-    # SKILL.md directories to scan (each contains SKILL.md with port)
-    # SKILL.md directories to scan (each contains SKILL.md with port)
-    skill_dirs = [
-        ("spreadsheet_agent", "spreadsheet_agent/__init__.py"),
-        ("mail_agent", "mail_agent/agent.py"),
-        ("browser_agent", "browser_agent/__init__.py"),
-        ("document_agent_lib", "document_agent_lib/__init__.py"),
-    ]
-    
-    import yaml
-    for skill_dir, script_path in skill_dirs:
-        skill_file = os.path.join(agents_dir, skill_dir, "SKILL.md")
-        full_script_path = os.path.join(agents_dir, script_path)
-        
-        if not os.path.exists(skill_file):
-            continue
-            
-        if not os.path.exists(full_script_path):
-            logger.warning(f"Script not found for {skill_dir}: {script_path}")
-            continue
-            
-        try:
-            with open(skill_file, 'r', encoding='utf-8') as f:
-                content = f.read()
-                # Extract YAML frontmatter
-                if content.startswith('---'):
-                    parts = content.split('---', 2)
-                    if len(parts) >= 3:
-                        yaml_content = parts[1]
-                        config = yaml.safe_load(yaml_content)
-                        port = config.get('port')
-                        if port:
-                            agent_configs[full_script_path] = int(port)
-                            logger.info(f"UAP: Found {skill_dir} on port {port}")
-        except Exception as e:
-            logger.warning(f"Failed to parse SKILL.md for {skill_dir}: {e}")
-
-    logger.info(f"Target Agent Configurations: {len(agent_configs)} agents")
-
-    for agent_file, port in agent_configs.items():
-        agent_path = os.path.join(agents_dir, agent_file)
-        
-        if is_port_in_use(port):
-            logger.info(f"Agent '{agent_file}' is already running on port {port}.")
-            started_agents.append({
-                'agent': agent_file,
-                'port': port,
-                'status': 'already_running'
-            })
-            continue
-
-        logger.info(f"Attempting to start '{agent_file}' on port {port}...")
-        log_path = os.path.join(logs_dir, f"{agent_file}.log")
-
-        # Create the subprocess
-        process = None
-        if platform.system() == "Windows":
-             try:
-                with open(log_path, 'w') as log_file:
-                    process = subprocess.Popen(
-                        [sys.executable, agent_path],
-                        stdout=log_file,
-                        stderr=log_file,
-                        creationflags=subprocess.CREATE_NO_WINDOW
-                    )
-                    agent_processes.append(process)
-             except Exception as e:
-                logger.error(f"Failed to start {agent_file}: {e}")
-        else:
-            with open(log_path, 'w') as log_file:
-                process = subprocess.Popen(
-                    [sys.executable, agent_path],
-                    stdout=log_file,
-                    stderr=log_file
-                )
-                agent_processes.append(process)
-
-            # Wait for the port to be in use with a timeout
-            # With lazy imports and reload=False, agents should start quickly
-            agent_timeout = 15  # Reasonable timeout for fast startup
-            
-            if wait_for_port(port, agent_file, timeout=agent_timeout):
-                logger.info(f"Successfully started agent '{agent_file}' on port {port}")
-                started_agents.append({
-                    'agent': agent_file,
-                    'port': port,
-                    'status': 'started',
-                    'process': process
-                })
-            else:
-                logger.error(f"Timed out waiting for agent '{agent_file}' to start on port {port}")
-                failed_agents.append({
-                    'agent': agent_file,
-                    'reason': f'Timed out waiting for port {port} to become available',
-                    'port': port
-                })
-                if process:
-                    try:
-                        process.terminate()
-                        process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-
-
-
-    # Log summary of agent startup results
-    logger.info(f"Agent startup completed. Started: {len(started_agents)}, Failed: {len(failed_agents)}")
-    
-    if started_agents:
-        logger.info("Successfully started agents:")
-        for agent_info in started_agents:
-            logger.info(f"  - {agent_info['agent']} on port {agent_info['port']} ({agent_info['status']})")
-    
-    if failed_agents:
-        logger.error("Failed to start agents:")
-        for agent_info in failed_agents:
-            logger.error(f"  - {agent_info['agent']}: {agent_info['reason']}")
-        
-        # Provide detailed instructions for manual startup
-        logger.info("To start agents manually, run these commands in separate terminals:")
-        for agent_info in failed_agents:
-            agent_file = agent_info['agent']
-            agent_path = os.path.join(agents_dir, agent_file)
-            logger.info(f"  - python {agent_path}")
-    
-    logger.info("Agent startup check completed.")
-
 os.makedirs("storage/images", exist_ok=True)
 os.makedirs("storage/documents", exist_ok=True)
 
@@ -2962,7 +2792,8 @@ async def websocket_workflow_execute(websocket: WebSocket, workflow_id: str, tok
     db = None
     
     try:
-        from orchestrator.workflow_executor import WorkflowExecutor
+        # TODO: WorkflowExecutor module doesn't exist - needs implementation
+        # from orchestrator.workflow_executor import WorkflowExecutor
         from auth import verify_clerk_token
         
         # Verify token from query params
@@ -3004,12 +2835,16 @@ async def websocket_workflow_execute(websocket: WebSocket, workflow_id: str, tok
         db.add(execution)
         db.commit()
         
+        # TODO: WorkflowExecutor doesn't exist - needs implementation
         # Use WorkflowExecutor to prepare execution
-        executor = WorkflowExecutor(workflow.blueprint)
-        execution_data = await executor.execute(inputs, owner)
+        # executor = WorkflowExecutor(workflow.blueprint)
+        # execution_data = await executor.execute(inputs, owner)
+        # thread_id = execution_data["thread_id"]
+        # prompt = execution_data["prompt"]
         
-        thread_id = execution_data["thread_id"]
-        prompt = execution_data["prompt"]
+        # Temporary fallback until WorkflowExecutor is implemented
+        await websocket.send_json({"node": "__error__", "error": "WorkflowExecutor not implemented yet"})
+        return
         
         logger.info(f"Executing workflow {workflow_id} as thread {thread_id}")
         
@@ -3467,10 +3302,6 @@ async def websocket_chat(websocket: WebSocket):
             finally:
                 # Stop polling - always cleanup regardless of success/failure
                 polling_active = False
-                try:
-                    await polling_task
-                except:
-                    pass
 
             # Check if workflow is paused for user input
             if final_state.get("pending_user_input"):

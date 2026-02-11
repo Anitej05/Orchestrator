@@ -6,7 +6,7 @@ import { SidebarProvider } from "@/components/ui/sidebar"
 import AppSidebar from "@/components/app-sidebar"
 import "@/styles/globals.css"
 import { Toaster } from "@/components/ui/toaster"
-import { ThemeProvider } from "@/components/theme-provider"
+import { ThemeProvider } from "@/components/theme-toggle"
 
 const inter = Inter({ subsets: ["latin"] })
 

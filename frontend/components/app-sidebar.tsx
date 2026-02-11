@@ -85,7 +85,7 @@ export default function AppSidebar({ onConversationSelect, onNewConversation, cu
               <TooltipTrigger asChild>
                 <button
                   onClick={handleNewConversation}
-                  className="p-2 rounded-orbimesh-lg hover:bg-bg-hover transition-colors flex items-center justify-center w-10 h-10 active:scale-95 transition-transform"
+                  className="p-2 rounded-orbimesh-lg hover:bg-bg-hover flex items-center justify-center w-10 h-10 active:scale-95 transition-all"
                   aria-label="New conversation"
                 >
                   <Plus className="w-5 h-5 text-text-secondary" />
