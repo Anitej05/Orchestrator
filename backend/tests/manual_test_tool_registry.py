@@ -14,7 +14,7 @@ if sys.platform == "win32":
 # Set path (assumes run from root or backend)
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-from services.tool_registry_service import ToolRegistryService, ToolDefinition
+from backend.services.tool_registry_service import ToolRegistryService, ToolDefinition
 
 class TestToolRegistry(unittest.TestCase):
     def setUp(self):

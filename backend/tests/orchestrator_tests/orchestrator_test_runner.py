@@ -598,7 +598,7 @@ class OrchestratorTestRunner:
     
     async def run_all_tests(self, category_filter: str = None, only_failed: bool = False) -> TestRun:
         """Run all enabled tests"""
-        from orchestrator.graph import create_graph_with_checkpointer
+        from backend.orchestrator.graph import create_graph_with_checkpointer
         from langgraph.checkpoint.memory import MemorySaver
         
         self._add_file_handler()

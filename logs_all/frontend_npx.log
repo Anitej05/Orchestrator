@@ -1,0 +1,3 @@
+npm warn exec The following package was not found and will be installed: next@16.1.6
+error: unknown option '--host'
+(Did you mean --port?)

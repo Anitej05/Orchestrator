@@ -13,7 +13,7 @@ sys.path.insert(0, backend_dir)
 logging.basicConfig(level=logging.INFO, format="%(name)s - %(levelname)s - %(message)s")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-from orchestrator.graph import graph
+from backend.orchestrator.graph import graph
 
 
 # Cleanup function

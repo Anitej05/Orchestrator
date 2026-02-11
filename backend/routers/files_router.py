@@ -12,7 +12,7 @@ from aiofiles import open as aio_open
 from urllib.parse import unquote
 from mimetypes import guess_type
 
-from schemas import FileObject
+from backend.schemas import FileObject
 
 router = APIRouter(prefix="/api", tags=["Files"])
 

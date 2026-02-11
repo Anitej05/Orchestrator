@@ -32,7 +32,7 @@ except ImportError:
 
 # Local imports
 # Adjust as needed if these are used elsewhere
-from agents.utils.standard_file_interface import AgentFileMetadata
+from backend.agents.utils.standard_file_interface import AgentFileMetadata
 
 # Robust Import for KeyManager (Handles potential shadowing)
 import sys
@@ -40,8 +40,8 @@ orbimesh_root = Path(__file__).parent.parent.parent.resolve() # services -> back
 if str(orbimesh_root) not in sys.path:
     sys.path.insert(0, str(orbimesh_root))
 
-from utils.key_manager import get_cerebras_key, report_rate_limit
-from services.inference_service import inference_service, InferencePriority
+from backend.utils.key_manager import get_cerebras_key, report_rate_limit
+from backend.services.inference_service import inference_service, InferencePriority
 from langchain_core.messages import HumanMessage
 
 logger = logging.getLogger("ContentManagementService")

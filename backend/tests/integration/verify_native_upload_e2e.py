@@ -20,7 +20,7 @@ try:
     except ImportError:
         # Try relative import if running from root
         sys.path.append(os.getcwd())
-        from agents.mail_agent.client import GmailClient
+        from backend.agents.mail_agent.client import GmailClient
 except Exception as e:
     with open("test_result.txt", "w") as f: f.write(f"Import Error: {e}")
     print(f"Import Error: {e}")

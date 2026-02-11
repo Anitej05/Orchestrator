@@ -15,9 +15,9 @@ backend_root = Path(__file__).resolve().parents[1]
 if str(backend_root) not in sys.path:
     sys.path.insert(0, str(backend_root))
 
-from agents.document_agent_lib import get_agent as get_doc_agent, get_planner as get_doc_planner
-from agents.zoho_books.zoho_books_agent import get_planner as get_zoho_planner
-from schemas import OrchestratorMessage
+from backend.agents.document_agent_lib import get_agent as get_doc_agent, get_planner as get_doc_planner
+from backend.agents.zoho_books.zoho_books_agent import get_planner as get_zoho_planner
+from backend.schemas import OrchestratorMessage
 
 async def test_document_planner():
     print("\n--- Testing Document Planner ---")

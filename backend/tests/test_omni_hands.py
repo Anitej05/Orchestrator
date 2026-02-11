@@ -18,8 +18,8 @@ from pathlib import Path
 backend_root = Path(__file__).parent.parent
 sys.path.insert(0, str(backend_root))
 
-from orchestrator.hands import Hands
-from orchestrator.schemas import ActionResult, TaskStatus
+from backend.orchestrator.hands import Hands
+from backend.orchestrator.schemas import ActionResult, TaskStatus
 
 # Import utils for patching RetryManager
 from utils import retry_utils

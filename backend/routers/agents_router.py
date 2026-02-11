@@ -13,7 +13,7 @@ from sqlalchemy import or_, select
 
 from database import SessionLocal
 from models import Agent, AgentCapability, AgentEndpoint, EndpointParameter
-from schemas import AgentCard
+from backend.schemas import AgentCard
 
 router = APIRouter(prefix="/api/agents", tags=["Agents"])
 logger = logging.getLogger("uvicorn.error")

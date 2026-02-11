@@ -59,8 +59,8 @@ brain_nodes.tool_registry.execute_tool = mock_exec_tool
 
 # ----------------
 
-from orchestrator.graph import graph
-from orchestrator.state import State
+from backend.orchestrator.graph import graph
+from backend.orchestrator.state import State
 
 
 logging.basicConfig(level=logging.INFO)

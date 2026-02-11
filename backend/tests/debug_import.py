@@ -20,8 +20,8 @@ for p in sys.path[:5]:
 print("----------------")
 
 try:
-    print("Attempting: from agents.utils.standard_file_interface import AgentFileMetadata")
-    from agents.utils.standard_file_interface import AgentFileMetadata
+    print("Attempting: from backend.agents.utils.standard_file_interface import AgentFileMetadata")
+    from backend.agents.utils.standard_file_interface import AgentFileMetadata
     print("✅ Success: agents.utils...")
 except Exception as e:
     print(f"❌ Failed: {e}")

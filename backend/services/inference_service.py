@@ -13,7 +13,7 @@ from langchain_groq import ChatGroq
 from langchain_nvidia_ai_endpoints import ChatNVIDIA
 from dataclasses import dataclass, asdict
 
-from utils.key_manager import key_manager, get_cerebras_key, report_rate_limit
+from backend.utils.key_manager import key_manager, get_cerebras_key, report_rate_limit
 
 logger = logging.getLogger("InferenceService")
 

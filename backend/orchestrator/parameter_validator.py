@@ -12,7 +12,7 @@ This module provides a centralized way to handle parameters flowing through the 
 import logging
 from typing import Dict, Any, Optional, Set, List
 from pydantic import BaseModel, Field
-from schemas import Task
+from backend.schemas import Task
 
 logger = logging.getLogger("AgentOrchestrator")
 

@@ -17,7 +17,7 @@ if sys.platform == "win32":
 # Set path (assumes run from root or backend)
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-from services.content_management_service import (
+from backend.services.content_management_service import (
     ContentManagementService,
     ContentType,
     ContentSource,

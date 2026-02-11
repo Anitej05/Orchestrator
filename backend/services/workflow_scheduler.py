@@ -141,7 +141,7 @@ class WorkflowScheduler:
         try:
             from database import SessionLocal
             from models import WorkflowExecution, WorkflowSchedule, UserThread
-            from orchestrator.graph import graph
+            from backend.orchestrator.graph import graph
             import uuid
             import os
             import json
@@ -313,7 +313,7 @@ class WorkflowScheduler:
                 
                 # Update conversation JSON with final results
                 # Use get_serializable_state to properly serialize messages and other complex objects
-                from orchestrator.graph import get_serializable_state
+                from backend.orchestrator.graph import get_serializable_state
                 
                 # Get messages from final state or use existing
                 raw_messages = final_state.get("messages", existing_messages) if final_state else existing_messages

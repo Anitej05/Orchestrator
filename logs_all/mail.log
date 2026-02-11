@@ -1,0 +1,16 @@
+COMPOSIO_API_KEY not set. Gmail agent will not function.
+GMAIL_MCP_URL not set. Gmail agent will not function.
+GMAIL_CONNECTION_ID not set. Using URL without connection ID.
+CEREBRAS_API_KEY(S) not configured in environment - LLM calls may fail
+Loaded 51 content items from registry
+ContentManagementService initialized with 51 items
+AgentFileManager connected to ContentManagementService
+AgentFileManager initialized for mail_agent at /home/clawuser/.openclaw/workspace/Orchestrator/storage/mail_agent/attachments
+Loaded 51 content items from registry
+ContentManagementService initialized with 51 items
+Loaded 51 content items from registry
+ContentManagementService initialized with 51 items
+INFO:     Started server process [30427]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8040 (Press CTRL+C to quit)

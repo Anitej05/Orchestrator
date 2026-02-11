@@ -1,6 +1,6 @@
 from typing import Dict, Any, Optional, List, Union, Literal
 from pydantic import ValidationError
-from schemas import CanvasDisplay, StandardAgentResponse
+from backend.schemas import CanvasDisplay, StandardAgentResponse
 import logging
 
 logger = logging.getLogger("CanvasService")

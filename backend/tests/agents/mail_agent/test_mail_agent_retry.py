@@ -3,9 +3,9 @@ from unittest.mock import MagicMock, patch, AsyncMock
 import sys
 import os
 
-from schemas import AgentResponseStatus, OrchestratorMessage
-from agents.mail_agent.schemas import EmailAction
-from agents.mail_agent.agent import execute_action
+from backend.schemas import AgentResponseStatus, OrchestratorMessage
+from backend.agents.mail_agent.schemas import EmailAction
+from backend.agents.mail_agent.agent import execute_action
 
 @pytest.mark.asyncio
 async def test_error_feedback_loop():

@@ -1,0 +1,11 @@
+CEREBRAS_API_KEY(S) not configured in environment - LLM calls may fail
+CEREBRAS_API_KEY(S) not configured in environment - LLM calls may fail
+INFO:     Started server process [14094]
+INFO:     Waiting for application startup.
+INFO:backend.agents.document_agent_lib:Document Agent starting...
+INFO:backend.agents.document_agent_lib:Initializing DocumentAgent...
+INFO:ContentManagementService:Loaded 51 content items from registry
+INFO:ContentManagementService:ContentManagementService initialized with 51 items
+INFO:backend.agents.document_agent_lib:Document Agent ready
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8050 (Press CTRL+C to quit)

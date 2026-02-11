@@ -36,7 +36,7 @@ class TestAgentInitialization:
     @pytest.mark.unit
     def test_agent_configuration_loading(self):
         """Test configuration loads correctly."""
-        from agents.document_agent import DocumentAgent
+        from backend.agents.document_agent import DocumentAgent
         
         agent = DocumentAgent()
         
@@ -47,7 +47,7 @@ class TestAgentInitialization:
         
     def test_agent_storage_initialization(self, temp_storage):
         """Test file storage system initializes."""
-        from agents.document_agent import DocumentAgent
+        from backend.agents.document_agent import DocumentAgent
         from pathlib import Path
         
         agent = DocumentAgent()
@@ -175,7 +175,7 @@ class TestErrorHandling:
         with patch('agents.document_agent.agent.DocumentAgent.__init__',
                    side_effect=Exception("Init failed")):
             with pytest.raises(Exception):
-                from agents.document_agent import DocumentAgent
+                from backend.agents.document_agent import DocumentAgent
                 agent = DocumentAgent()
     
     def test_logging_configuration(self, document_agent):
@@ -218,7 +218,7 @@ class TestConfiguration:
     
     def test_default_configuration(self):
         """Test default configuration values."""
-        from agents.document_agent import DocumentAgent
+        from backend.agents.document_agent import DocumentAgent
         
         agent = DocumentAgent()
         

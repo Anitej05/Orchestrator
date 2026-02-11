@@ -17,8 +17,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("OrchestratorTest")
 
 async def test_orchestrator_flow():
-    from orchestrator.graph import graph
-    from orchestrator.state import State
+    from backend.orchestrator.graph import graph
+    from backend.orchestrator.state import State
     from langchain_core.messages import HumanMessage
     
     print("🚀 Starting Orchestrator Integration Test")

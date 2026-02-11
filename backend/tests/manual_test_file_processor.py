@@ -15,9 +15,9 @@ if sys.platform == "win32":
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-from schemas import FileObject
+from backend.schemas import FileObject
 # We import FileProcessor but will patch its dependencies
-from services.file_processor import FileProcessor
+from backend.services.file_processor import FileProcessor
 
 class TestFileProcessor(unittest.TestCase):
     def setUp(self):

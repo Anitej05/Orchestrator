@@ -12,7 +12,7 @@ if sys.platform == "win32":
 # NOTE: This script expects PYTHONPATH to include the 'backend' directory
 # e.g. set PYTHONPATH=path/to/backend
 from models import AgentCredential
-from services.credential_service import (
+from backend.services.credential_service import (
     save_agent_credentials,
     get_agent_credentials,
     get_credentials_for_headers
@@ -49,7 +49,7 @@ class TestCredentialService(unittest.TestCase):
     def test_decrypt_and_retrieve(self):
         print("\n=== Testing Decrypt & Retrieve ===")
         # Create a real credential object with encrypted data
-        from utils.encryption import encrypt
+        from backend.utils.encryption import encrypt
         encrypted_data = {
             "api_key": encrypt("secret_abc"),
             "region": encrypt("us-east-1")

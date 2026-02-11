@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from database import SessionLocal
 from models import Workflow, WorkflowExecution, WorkflowSchedule, WorkflowWebhook, UserThread
-from schemas import PlanResponse
+from backend.schemas import PlanResponse
 
 router = APIRouter(tags=["Workflows"])
 logger = logging.getLogger("uvicorn.error")
@@ -357,7 +357,7 @@ async def create_workflow_conversation(workflow_id: str, request: Request, db: S
 async def schedule_workflow(workflow_id: str, body: ScheduleWorkflowRequest, request: Request, db: Session = Depends(get_db)):
     """Schedule workflow execution with cron expression"""
     from auth import get_user_from_request
-    from services.workflow_scheduler import get_scheduler
+    from backend.services.workflow_scheduler import get_scheduler
     
     user = get_user_from_request(request)
     user_id = user.get("sub")
@@ -485,7 +485,7 @@ async def get_schedule_executions(schedule_id: str, request: Request, db: Sessio
 async def update_schedule(schedule_id: str, body: UpdateScheduleRequest, request: Request, db: Session = Depends(get_db)):
     """Update a workflow schedule (pause/resume, change cron, update inputs)"""
     from auth import get_user_from_request
-    from services.workflow_scheduler import get_scheduler
+    from backend.services.workflow_scheduler import get_scheduler
     
     user = get_user_from_request(request)
     user_id = user.get("sub")
@@ -548,7 +548,7 @@ async def update_schedule(schedule_id: str, body: UpdateScheduleRequest, request
 @router.post("/api/admin/reload-schedules", tags=["Admin"])
 async def reload_schedules(db: Session = Depends(get_db)):
     """Reload all active schedules from database into the scheduler."""
-    from services.workflow_scheduler import get_scheduler
+    from backend.services.workflow_scheduler import get_scheduler
     scheduler = get_scheduler()
     
     try:
@@ -564,7 +564,7 @@ async def reload_schedules(db: Session = Depends(get_db)):
 async def delete_schedule(workflow_id: str, schedule_id: str, request: Request, db: Session = Depends(get_db)):
     """Delete a workflow schedule"""
     from auth import get_user_from_request
-    from services.workflow_scheduler import get_scheduler
+    from backend.services.workflow_scheduler import get_scheduler
     
     user = get_user_from_request(request)
     user_id = user.get("sub")
@@ -638,7 +638,7 @@ async def trigger_webhook(webhook_id: str, payload: Dict[str, Any], webhook_toke
     db.add(execution)
     db.commit()
     
-    from services.workflow_scheduler import get_scheduler
+    from backend.services.workflow_scheduler import get_scheduler
     scheduler = get_scheduler()
     asyncio.create_task(
         scheduler._async_execute_workflow(

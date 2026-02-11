@@ -9,8 +9,8 @@ import json
 sys.path.append(str(Path(__file__).parent.parent))
 
 import asyncio
-from agents.mail_agent.agent import send_email
-from agents.mail_agent.schemas import SendEmailRequest
+from backend.agents.mail_agent.agent import send_email
+from backend.agents.mail_agent.schemas import SendEmailRequest
 
 async def test_agent_send_with_native_attachment():
     print("Starting Mail Agent Logic Test (Native Attachment)")

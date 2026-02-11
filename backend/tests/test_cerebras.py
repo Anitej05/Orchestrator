@@ -11,7 +11,7 @@ backend_root = Path(__file__).resolve().parents[1]
 if str(backend_root) not in sys.path:
     sys.path.insert(0, str(backend_root))
 
-from services.inference_service import inference_service, ProviderType
+from backend.services.inference_service import inference_service, ProviderType
 from langchain_core.messages import HumanMessage
 
 async def main():

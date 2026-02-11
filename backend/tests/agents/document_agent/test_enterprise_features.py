@@ -10,9 +10,9 @@ from typing import Dict, Any, List
 
 import pytest
 
-from agents.document_agent.agent import DocumentAgent
-from agents.document_agent.schemas import EditDocumentRequest, AnalyzeDocumentRequest
-from agents.document_agent.state import DialogueStateManager, DialogueRecord
+from backend.agents.document_agent.agent import DocumentAgent
+from backend.agents.document_agent.schemas import EditDocumentRequest, AnalyzeDocumentRequest
+from backend.agents.document_agent.state import DialogueStateManager, DialogueRecord
 
 
 @pytest.fixture()

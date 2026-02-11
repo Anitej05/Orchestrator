@@ -14,7 +14,7 @@ from typing import Dict, Any, List, Optional, Tuple
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from .schemas import ActionPlan, AtomicAction
+from .agent_schemas import ActionPlan, AtomicAction
 from .system_prompt import get_system_prompt
 from .message_manager import MessageManager
 

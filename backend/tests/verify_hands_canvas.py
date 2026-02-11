@@ -7,8 +7,8 @@ from unittest.mock import MagicMock
 # Add backend to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from orchestrator.hands import Hands
-from orchestrator.schemas import ActionResult
+from backend.orchestrator.hands import Hands
+from backend.orchestrator.schemas import ActionResult
 
 class TestHandsCanvas(unittest.TestCase):
     def test_update_state_with_canvas(self):

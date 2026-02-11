@@ -1,7 +1,7 @@
 """Test script for Browser Agent - Amazon S25 Ultra Search"""
 import asyncio
 import logging
-from agents.browser_agent.agent import BrowserAgent
+from backend.agents.browser_agent.agent import BrowserAgent
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(name)s | %(levelname)s | %(message)s')

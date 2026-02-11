@@ -10,17 +10,17 @@ from langchain_core.runnables import RunnableConfig
 
 from pydantic import BaseModel, Field
 
-from orchestrator.state import State
-from schemas import TaskItem, TaskStatus, TaskPriority
-from services.inference_service import inference_service, InferencePriority
+from backend.orchestrator.state import State
+from backend.schemas import TaskItem, TaskStatus, TaskPriority
+from backend.services.inference_service import inference_service, InferencePriority
 
 
-from services.terminal_service import terminal_service
-from services.agent_registry_service import agent_registry
-from services.tool_registry_service import tool_registry
-from orchestrator.content_orchestrator import get_optimized_llm_context, hooks
-from services.code_sandbox_service import code_sandbox
-from services.telemetry_service import telemetry_service
+from backend.services.terminal_service import terminal_service
+from backend.services.agent_registry_service import agent_registry
+from backend.services.tool_registry_service import tool_registry
+from backend.orchestrator.content_orchestrator import get_optimized_llm_context, hooks
+from backend.services.code_sandbox_service import code_sandbox
+from backend.services.telemetry_service import telemetry_service
 import httpx
 import re
 import time

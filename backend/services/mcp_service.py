@@ -9,7 +9,7 @@ import logging
 from typing import Dict, Any, Optional
 from sqlalchemy.orm import Session
 from models import Agent, AgentEndpoint, AgentCredential, EndpointParameter, AgentType, AuthType
-from utils.encryption import encrypt
+from backend.utils.encryption import encrypt
 import uuid
 
 logger = logging.getLogger("uvicorn.error")

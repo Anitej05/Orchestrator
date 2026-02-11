@@ -54,7 +54,7 @@ if str(backend_root) not in sys.path:
     sys.path.insert(0, str(backend_root))
 
 # CMS Integration moved inside methods to avoid circular imports
-# from services.content_management_service import (
+# from backend.services.content_management_service import (
 #     ContentManagementService,
 #     ContentSource,
 #     ContentType,
@@ -329,7 +329,7 @@ class AgentFileManager:
             
         # CMS Integration
         try:
-            from services.content_management_service import ContentManagementService
+            from backend.services.content_management_service import ContentManagementService
             self.cms = ContentManagementService()
             logger.info("AgentFileManager connected to ContentManagementService")
         except Exception as e:
@@ -492,7 +492,7 @@ class AgentFileManager:
             # CMS Sync
             if self.cms:
                 try:
-                    from services.content_management_service import ContentType, ContentSource, ContentPriority
+                    from backend.services.content_management_service import ContentType, ContentSource, ContentPriority
                     # Map metadata to CMS types
                     cms_type = ContentType.OTHER
                     if file_type == FileType.IMAGE: cms_type = ContentType.IMAGE

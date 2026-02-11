@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, AsyncMock
 # Add backend to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from services.content_management_service import (
+from backend.services.content_management_service import (
     ContentManagementService, 
     ProcessingTaskType,
     ProcessingStrategy,

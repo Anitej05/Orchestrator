@@ -1,0 +1,66 @@
+INFO:     Orchestrator logs will be saved to: logs/orchestrator_temp.log
+INFO:     Mounted /storage for serving screenshot files from /home/clawuser/.openclaw/workspace/Orchestrator/storage
+INFO:     Started server process [26113]
+INFO:     Waiting for application startup.
+INFO:     🔧 Running database migrations...
+ERROR:    ❌ Failed to run migrations: [Errno 2] No such file or directory: 'alembic'
+Traceback (most recent call last):
+  File "/home/clawuser/.openclaw/workspace/Orchestrator/backend/main.py", line 65, in lifespan
+    result = subprocess.run(
+        ["alembic", "upgrade", "head"],
+    ...<2 lines>...
+        text=True
+    )
+  File "/usr/lib/python3.13/subprocess.py", line 554, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ~~~~~^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/subprocess.py", line 1039, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                        pass_fds, cwd, env,
+                        ^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+                        gid, gids, uid, umask,
+                        ^^^^^^^^^^^^^^^^^^^^^^
+                        start_new_session, process_group)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/subprocess.py", line 1972, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+FileNotFoundError: [Errno 2] No such file or directory: 'alembic'
+INFO:     🔧 Ensuring database tables exist...
+2026-02-11 11:59:15,875 - INFO - Creating database tables...
+2026-02-11 11:59:16,008 - INFO - ✅ All tables created successfully
+INFO:     ✅ Database tables ready
+INFO:     Syncing SKILL.md agent definitions to database...
+2026-02-11 11:59:16,009 - INFO - ============================================================
+2026-02-11 11:59:16,009 - INFO - UAP Skill Sync: Starting...
+2026-02-11 11:59:16,009 - INFO - ============================================================
+2026-02-11 11:59:16,009 - INFO - Creating database tables...
+2026-02-11 11:59:16,159 - INFO - ✅ All tables created successfully
+2026-02-11 11:59:16,370 - INFO - ✅ Up-to-date (SKILL.md): Spreadsheet Agent
+2026-02-11 11:59:16,392 - INFO - ✅ Up-to-date (SKILL.md): Mail Agent
+2026-02-11 11:59:16,416 - INFO - ✅ Up-to-date (SKILL.md): Browser Automation Agent
+2026-02-11 11:59:16,439 - INFO - ✅ Up-to-date (SKILL.md): Document Agent
+2026-02-11 11:59:16,470 - INFO - ✅ Up-to-date (SKILL.md): Zoho Books Agent
+2026-02-11 11:59:16,471 - INFO - ============================================================
+2026-02-11 11:59:16,471 - INFO - UAP Skill Sync: Complete
+2026-02-11 11:59:16,471 - INFO - ============================================================
+2026-02-11 11:59:16,471 - INFO - ➕ New agents added: 0
+2026-02-11 11:59:16,471 - INFO - 🔄 Agents updated: 0
+2026-02-11 11:59:16,471 - INFO - ✅ Agents unchanged: 5
+2026-02-11 11:59:16,472 - INFO - ============================================================
+INFO:     ✅ SKILL.md agent sync completed successfully
+INFO:     Starting 0 agent server(s)...
+INFO:     Agent servers started. Ready for requests.
+INFO:     ✓ Agents started in background
+INFO:     ✓ Health checker started
+INFO:     Initializing workflow scheduler...
+2026-02-11 11:59:18,668 - INFO - Scheduler started
+2026-02-11 11:59:18,675 - INFO - Workflow scheduler initialized
+2026-02-11 11:59:18,692 - INFO - Loaded 0 active schedules
+INFO:     ✓ Workflow scheduler initialized with 0 jobs loaded
+INFO:     ============================================================
+INFO:     APPLICATION STARTUP COMPLETED
+INFO:     ============================================================
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)

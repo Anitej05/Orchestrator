@@ -13,20 +13,20 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 from playwright.async_api import Page, TimeoutError as PTimeoutError, Error as PError
 
-from .schemas import ActionPlan, ActionResult, AtomicAction
+from .agent_schemas import ActionPlan, ActionResult, AtomicAction
 from .dom import DOMExtractor
 from .config import CONFIG
 from .persistent_memory import get_persistent_memory
 try:
-    from agents.utils.agent_file_manager import AgentFileManager, FileType, FileStatus
+    from backend.agents.utils.agent_file_manager import AgentFileManager, FileType, FileStatus
 except ImportError:
     # Fallback to old location or relative import if needed
-    from agents.agent_file_manager import AgentFileManager, FileType, FileStatus
+    from backend.agents.agent_file_manager import AgentFileManager, FileType, FileStatus
 
 logger = logging.getLogger(__name__)
 
 # CMS Integration for query_page_content
-from services.content_management_service import (
+from backend.services.content_management_service import (
     ContentManagementService, 
     ProcessingTaskType,
     ProcessingStrategy

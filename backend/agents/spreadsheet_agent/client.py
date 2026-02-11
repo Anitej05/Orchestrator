@@ -35,7 +35,7 @@ class DataFrameClient:
         
         # Try to import file manager
         try:
-            from agents.utils.agent_file_manager import AgentFileManager, FileType, FileStatus
+            from backend.agents.utils.agent_file_manager import AgentFileManager, FileType, FileStatus
             self.file_manager = AgentFileManager(
                 agent_id="spreadsheet_agent",
                 storage_dir=str(self.storage_dir)

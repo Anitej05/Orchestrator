@@ -43,9 +43,9 @@ import httpx
 CONVERSATION_HISTORY_DIR = "conversation_history"
 from database import SessionLocal
 from models import Agent, StatusEnum, AgentCapability, AgentEndpoint, EndpointParameter, Workflow, WorkflowExecution, UserThread, WorkflowSchedule, WorkflowWebhook, AgentType
-from schemas import AgentCard, ProcessRequest, ProcessResponse, PlanResponse, FileObject, ActionApprovalRequest, ActionRejectRequest
-from orchestrator.graph import ForceJsonSerializer, create_graph_with_checkpointer, create_execution_subgraph, messages_from_dict, messages_to_dict, serialize_complex_object
-from orchestrator.state import State
+from backend.schemas import AgentCard, ProcessRequest, ProcessResponse, PlanResponse, FileObject, ActionApprovalRequest, ActionRejectRequest
+from backend.orchestrator.graph import ForceJsonSerializer, create_graph_with_checkpointer, create_execution_subgraph, messages_from_dict, messages_to_dict, serialize_complex_object
+from backend.orchestrator.state import State
 from langgraph.checkpoint.memory import MemorySaver
 from routers import connect_router
 from routers import credentials_router
@@ -107,7 +107,7 @@ async def lifespan(app: FastAPI):
     # Initialize workflow scheduler and load active schedules
     try:
         logger.info("Initializing workflow scheduler...")
-        from services.workflow_scheduler import init_scheduler
+        from backend.services.workflow_scheduler import init_scheduler
         from database import SessionLocal
         db = SessionLocal()
         try:
@@ -329,7 +329,7 @@ async def serve_file(file_path: str, request: Request):
             )
         
         # ===== SECURITY VALIDATION =====
-        from utils.file_server import is_safe_path, find_file_in_storage, get_mime_type, should_inline_preview
+        from backend.utils.file_server import is_safe_path, find_file_in_storage, get_mime_type, should_inline_preview
         
         # Check for path traversal attempts
         if not is_safe_path(file_path):
@@ -515,7 +515,7 @@ async def create_document_unified(request: CreateDocumentRequest, req: Request):
         
         # ===== GENERATE PREVIEW =====
         from pathlib import Path as PathlibPath
-        from utils.file_server import find_file_in_storage, get_mime_type
+        from backend.utils.file_server import find_file_in_storage, get_mime_type
         
         canvas_display = None
         relative_path = None
@@ -1178,7 +1178,7 @@ async def execute_orchestration(
                     print(f"!!! ORIGINAL PROMPT VALUE: '{initial_state['original_prompt'][:200]}...'")
                 
                 # Add user's modification message to the conversation history
-                from orchestrator.message_manager import MessageManager
+                from backend.orchestrator.message_manager import MessageManager
                 existing_messages = initial_state.get("messages", [])
                 modification_message = HumanMessage(content=user_response)
                 updated_messages = MessageManager.add_message(
@@ -1226,7 +1226,7 @@ async def execute_orchestration(
         logger.info(f"Prompt content: '{prompt[:100]}'")
         
         # Use MessageManager to add new message without duplicates
-        from orchestrator.message_manager import MessageManager
+        from backend.orchestrator.message_manager import MessageManager
         existing_messages = current_conversation.get("messages", [])
         # Create message with metadata to preserve timestamp and ID
         import hashlib
@@ -1459,14 +1459,14 @@ async def execute_orchestration(
             
         # Save conversation history using orchestrator's save routine
         try:
-            from orchestrator.graph import save_conversation_history
+            from backend.orchestrator.graph import save_conversation_history
             save_conversation_history(final_state, {"configurable": {"thread_id": thread_id}})
         except Exception as e:
             logger.error(f"Failed to save conversation history for {thread_id}: {e}")
 
         # Ensure a plan file is saved for every conversation
         try:
-            from orchestrator.graph import save_plan_to_file
+            from backend.orchestrator.graph import save_plan_to_file
             save_plan_to_file({**final_state, "thread_id": thread_id})
         except Exception as e:
             logger.error(f"Failed to save plan file for thread {thread_id}: {e}")
@@ -1661,7 +1661,7 @@ async def approve_action_endpoint(request: ActionApprovalRequest):
     logger.info(f"👍 APPROVING action for thread {thread_id}")
 
     try:
-        from orchestrator.omni_dispatcher import approve_pending_action
+        from backend.orchestrator.omni_dispatcher import approve_pending_action
         
         # Get current state
         with store_lock:
@@ -1697,7 +1697,7 @@ async def reject_action_endpoint(request: ActionRejectRequest):
     logger.info(f"👎 REJECTING action for thread {thread_id}: {request.reason}")
 
     try:
-        from orchestrator.omni_dispatcher import reject_pending_action
+        from backend.orchestrator.omni_dispatcher import reject_pending_action
         
         # Get current state
         with store_lock:
@@ -2542,7 +2542,7 @@ async def create_workflow_conversation(workflow_id: str, request: Request, db: S
 async def schedule_workflow(workflow_id: str, body: ScheduleWorkflowRequest, request: Request, db: Session = Depends(get_db)):
     """Schedule workflow execution with cron expression"""
     from auth import get_user_from_request
-    from services.workflow_scheduler import get_scheduler
+    from backend.services.workflow_scheduler import get_scheduler
     from database import SessionLocal
     
     user = get_user_from_request(request)
@@ -2728,7 +2728,7 @@ async def get_schedule_executions(schedule_id: str, request: Request, db: Sessio
 async def update_schedule(schedule_id: str, body: UpdateScheduleRequest, request: Request, db: Session = Depends(get_db)):
     """Update a workflow schedule (pause/resume, change cron, update inputs)"""
     from auth import get_user_from_request
-    from services.workflow_scheduler import get_scheduler
+    from backend.services.workflow_scheduler import get_scheduler
     from database import SessionLocal
     
     user = get_user_from_request(request)
@@ -2812,7 +2812,7 @@ async def reload_schedules(
     Reload all active schedules from database into the scheduler.
     Useful for debugging or recovering from scheduler initialization issues.
     """
-    from services.workflow_scheduler import get_scheduler
+    from backend.services.workflow_scheduler import get_scheduler
     scheduler = get_scheduler()
     
     try:
@@ -2844,7 +2844,7 @@ async def reload_schedules(
 async def delete_schedule(workflow_id: str, schedule_id: str, request: Request, db: Session = Depends(get_db)):
     """Delete a workflow schedule"""
     from auth import get_user_from_request
-    from services.workflow_scheduler import get_scheduler
+    from backend.services.workflow_scheduler import get_scheduler
     
     user = get_user_from_request(request)
     user_id = user.get("sub")
@@ -2897,7 +2897,7 @@ async def trigger_webhook(webhook_id: str, payload: Dict[str, Any], webhook_toke
     db.commit()
     
     # Execute workflow in background
-    from services.workflow_scheduler import get_scheduler
+    from backend.services.workflow_scheduler import get_scheduler
     scheduler = get_scheduler()
     asyncio.create_task(
         scheduler._async_execute_workflow(
@@ -2949,7 +2949,7 @@ async def websocket_workflow_execute(websocket: WebSocket, workflow_id: str, tok
     db = None
     
     try:
-        from orchestrator.workflow_executor import WorkflowExecutor
+        from backend.orchestrator.workflow_executor import WorkflowExecutor
         from auth import verify_clerk_token
         
         # Verify token from query params
@@ -3159,7 +3159,7 @@ async def websocket_chat(websocket: WebSocket):
             if not message_type and prompt:
                 # Check if there's a pending confirmation
                 try:
-                    from orchestrator.graph import graph
+                    from backend.orchestrator.graph import graph
                     config = {"configurable": {"thread_id": thread_id}}
                     current_state = graph.get_state(config)
                     
@@ -3521,7 +3521,7 @@ async def websocket_chat(websocket: WebSocket):
                     logger.error(f"Missing owner_id for thread {thread_id}. Conversation will NOT be saved.")
                     # Don't raise error - allow workflow to continue, just log the issue
                 else:
-                    from orchestrator.graph import save_conversation_history
+                    from backend.orchestrator.graph import save_conversation_history
                     
                     owner_obj = {"user_id": owner_id}
                     final_state["owner"] = owner_obj
@@ -3533,7 +3533,7 @@ async def websocket_chat(websocket: WebSocket):
             
             # Get serializable state with error handling
             try:
-                from orchestrator.graph import get_serializable_state
+                from backend.orchestrator.graph import get_serializable_state
                 serializable_state = get_serializable_state(final_state, thread_id)
             except Exception as serialize_err:
                 logger.warning(f"Failed to serialize complete state for thread {thread_id}: {serialize_err}")

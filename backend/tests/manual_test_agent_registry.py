@@ -14,7 +14,7 @@ if sys.platform == "win32":
 # Set path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-from services.agent_registry_service import AgentRegistryService
+from backend.services.agent_registry_service import AgentRegistryService
 
 class TestAgentRegistry(unittest.TestCase):
     def setUp(self):

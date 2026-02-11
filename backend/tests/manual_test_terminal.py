@@ -13,7 +13,7 @@ if sys.platform == "win32":
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-from services.terminal_service import TerminalService
+from backend.services.terminal_service import TerminalService
 
 class TestTerminalService(unittest.TestCase):
     def setUp(self):

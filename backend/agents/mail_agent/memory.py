@@ -3,7 +3,7 @@ from datetime import datetime
 import json
 import logging
 
-from services.content_management_service import (
+from backend.services.content_management_service import (
     ContentManagementService,
     ContentSource,
     ContentType,

@@ -28,8 +28,8 @@ backend_root = Path(__file__).parent.parent.parent.resolve()
 if str(backend_root) not in sys.path:
     sys.path.insert(0, str(backend_root))
 
-from services.content_management_service import ContentManagementService
-from services.canvas_service import CanvasService
+from backend.services.content_management_service import ContentManagementService
+from backend.services.canvas_service import CanvasService
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -48,7 +48,7 @@ from backend.schemas import AgentResponse, StandardAgentResponse, AgentResponseS
 
 # Import standardized file manager
 try:
-    from agents.utils.agent_file_manager import AgentFileManager, FileType, FileStatus
+    from backend.agents.utils.agent_file_manager import AgentFileManager, FileType, FileStatus
 except ImportError:
     from agent_file_manager import AgentFileManager, FileType, FileStatus
 

@@ -9,7 +9,7 @@ from typing import List, Dict, Any
 from pydantic import BaseModel
 from database import SessionLocal
 from models import Agent, AgentCredential
-from utils.encryption import encrypt, decrypt
+from backend.utils.encryption import encrypt, decrypt
 from auth import get_current_user_id
 import logging
 

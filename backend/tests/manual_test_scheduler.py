@@ -14,7 +14,7 @@ if sys.platform == "win32":
 # Set path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-from services.workflow_scheduler import WorkflowScheduler
+from backend.services.workflow_scheduler import WorkflowScheduler
 
 class TestWorkflowScheduler(unittest.TestCase):
     def setUp(self):

@@ -6,7 +6,7 @@ import sys
 # Add backend to path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from agents.browser_agent.agent import BrowserAgent
+from backend.agents.browser_agent.agent import BrowserAgent
 
 # Configure logging
 logging.basicConfig(

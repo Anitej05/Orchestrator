@@ -27,7 +27,7 @@ from .vision import VisionClient
 from .config import CONFIG
 
 try:
-    from agents.utils.agent_file_manager import AgentFileManager, FileType, FileStatus
+    from backend.agents.utils.agent_file_manager import AgentFileManager, FileType, FileStatus
 except ImportError:
     class FileType:
         DOWNLOAD = "download"
@@ -36,14 +36,14 @@ except ImportError:
         ACTIVE = "active"
     AgentFileManager = None
 from pathlib import Path
-from .schemas import ActionPlan, ActionResult, BrowserResult
+from .agent_schemas import ActionPlan, ActionResult, BrowserResult
 from .state import AgentMemory
 from .planner import Planner
 from .persistent_memory import get_persistent_memory
 
 # CMS Integration
 import sys
-from services.content_management_service import (
+from backend.services.content_management_service import (
     ContentManagementService, 
     ProcessingTaskType, 
     ContentType, 

@@ -43,7 +43,7 @@ logger.info(f"=== VNR VJIET Syllabus Test Started ===")
 logger.info(f"Log file: {log_file}")
 
 # NOW import browser agent (after logging is configured)
-from agents.browser_agent.agent import BrowserAgent
+from backend.agents.browser_agent.agent import BrowserAgent
 
 async def main():
     task = """

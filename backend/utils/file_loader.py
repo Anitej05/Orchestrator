@@ -152,7 +152,7 @@ async def build_file_context(loaded_files: Dict[str, Optional[str]], max_chars: 
                 safe_name = f"file_{os.path.basename(file_path)}_{int(time.time())}.txt"
                 
                 # Dynamic import for enums to avoid top-level circular deps
-                from services.content_management_service import ContentSource, ContentType, ContentPriority, ProcessingTaskType, ProcessingStrategy
+                from backend.services.content_management_service import ContentSource, ContentType, ContentPriority, ProcessingTaskType, ProcessingStrategy
 
                 # 1. Register
                 content_meta = await cms_service.register_content(

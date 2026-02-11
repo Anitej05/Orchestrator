@@ -1,0 +1,15 @@
+INFO:spreadsheet_agent.state:SessionState initialized
+WARNING:spreadsheet_agent.client:AgentFileManager not available, using basic file handling
+Traceback (most recent call last):
+  File "<frozen runpy>", line 189, in _run_module_as_main
+  File "<frozen runpy>", line 148, in _get_module_details
+  File "<frozen runpy>", line 112, in _get_module_details
+  File "/home/clawuser/.openclaw/workspace/Orchestrator/backend/agents/spreadsheet_agent/__init__.py", line 18, in <module>
+    from .agent import spreadsheet_agent
+  File "/home/clawuser/.openclaw/workspace/Orchestrator/backend/agents/spreadsheet_agent/agent.py", line 23, in <module>
+    from .llm import llm_client
+  File "/home/clawuser/.openclaw/workspace/Orchestrator/backend/agents/spreadsheet_agent/llm.py", line 9, in <module>
+    from backend.services.inference_service import inference_service, InferencePriority
+  File "/home/clawuser/.openclaw/workspace/Orchestrator/backend/services/inference_service.py", line 16, in <module>
+    from utils.key_manager import key_manager, get_cerebras_key, report_rate_limit
+ModuleNotFoundError: No module named 'utils'

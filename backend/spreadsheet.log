@@ -1,0 +1,14 @@
+INFO:spreadsheet_agent.state:SessionState initialized
+INFO:utils.key_manager:Loaded 1 Cerebras API key from environment (CEREBRAS_API_KEY)
+INFO:ContentManagementService:Loaded 3 content items from registry
+INFO:ContentManagementService:ContentManagementService initialized with 3 items
+INFO:agents.utils.agent_file_manager:AgentFileManager connected to ContentManagementService
+INFO:agents.utils.agent_file_manager:AgentFileManager initialized for spreadsheet_agent at /home/clawuser/.openclaw/workspace/Orchestrator/storage/spreadsheet_agent
+INFO:spreadsheet_agent.llm:LLMClient initialized (Delegating to Unified InferenceService)
+INFO:ContentManagementService:Loaded 3 content items from registry
+INFO:ContentManagementService:ContentManagementService initialized with 3 items
+INFO:spreadsheet_agent.agent:SpreadsheetAgent initialized
+<frozen runpy>:128: RuntimeWarning: 'agents.spreadsheet_agent.agent' found in sys.modules after import of package 'agents.spreadsheet_agent', but prior to execution of 'agents.spreadsheet_agent.agent'; this may result in unpredictable behaviour
+INFO:ContentManagementService:Loaded 3 content items from registry
+INFO:ContentManagementService:ContentManagementService initialized with 3 items
+INFO:spreadsheet_agent.agent:SpreadsheetAgent initialized

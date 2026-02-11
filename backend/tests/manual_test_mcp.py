@@ -15,7 +15,7 @@ if sys.platform == "win32":
 # Set path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-from services.mcp_service import probe_mcp_url, ingest_mcp_agent, list_user_connections
+from backend.services.mcp_service import probe_mcp_url, ingest_mcp_agent, list_user_connections
 from models import AgentCredential, AgentType
 
 # Use IsolatedAsyncioTestCase if available

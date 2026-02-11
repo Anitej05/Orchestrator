@@ -27,8 +27,8 @@ with (
     patch("services.inference_service.inference_service", mock_inference_service_impl),
     patch("orchestrator.brain.inference_service", mock_inference_service_impl),
 ):
-    from orchestrator.brain import Brain, BrainDecision
-    from orchestrator.schemas import (
+    from backend.orchestrator.brain import Brain, BrainDecision
+    from backend.orchestrator.schemas import (
         TaskItem,
         TaskStatus,
         TaskPriority,

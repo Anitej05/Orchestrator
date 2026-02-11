@@ -4,7 +4,7 @@ import sys
 import base64
 sys.path.insert(0, 'd:/Internship/Orbimesh/backend')
 
-from agents.browser_agent.vision import VisionClient
+from backend.agents.browser_agent.vision import VisionClient
 
 async def test_vision():
     v = VisionClient()

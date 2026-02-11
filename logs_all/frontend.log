@@ -1,0 +1,18 @@
+Unhandled Rejection: NodeError [SystemError]: A system error occurred: uv_interface_addresses returned Unknown system error 13 (Unknown system error 13)
+    at Object.networkInterfaces (node:os:217:16)
+    at getNetworkHosts (/home/clawuser/.npm/_npx/8b377f6eec906bc4/node_modules/next/dist/lib/get-network-host.js:18:36)
+    at getNetworkHost (/home/clawuser/.npm/_npx/8b377f6eec906bc4/node_modules/next/dist/lib/get-network-host.js:40:19)
+    at Server.<anonymous> (/home/clawuser/.npm/_npx/8b377f6eec906bc4/node_modules/next/dist/server/lib/start-server.js:290:84)
+    at Server.emit (node:events:531:35)
+    at emitListeningNT (node:net:1983:10)
+    at process.processTicksAndRejections (node:internal/process/task_queues:89:21) {
+  code: 'ERR_SYSTEM_ERROR',
+  info: {
+    errno: 13,
+    code: 'Unknown system error 13',
+    message: 'Unknown system error 13',
+    syscall: 'uv_interface_addresses'
+  },
+  errno: [Getter/Setter: 13],
+  syscall: [Getter/Setter: 'uv_interface_addresses']
+}

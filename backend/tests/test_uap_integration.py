@@ -4,7 +4,7 @@ Test SKILL.md parsing and UAP integration.
 import sys
 sys.path.insert(0, '.')
 
-from services.agent_registry_service import agent_registry, parse_skill_md
+from backend.services.agent_registry_service import agent_registry, parse_skill_md
 from pathlib import Path
 
 def test_skill_parsing():

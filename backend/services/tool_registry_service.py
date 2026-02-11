@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 
 from langchain_core.tools import BaseTool
 
-from services.telemetry_service import telemetry_service as telemetry
+from backend.services.telemetry_service import telemetry_service as telemetry
 
 logger = logging.getLogger("ToolRegistryService")
 

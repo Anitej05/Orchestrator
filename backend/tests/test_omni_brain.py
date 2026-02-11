@@ -17,8 +17,8 @@ from pathlib import Path
 backend_root = Path(__file__).parent.parent
 sys.path.insert(0, str(backend_root))
 
-from orchestrator.brain import Brain, BrainDecision
-from orchestrator.schemas import (
+from backend.orchestrator.brain import Brain, BrainDecision
+from backend.orchestrator.schemas import (
     TaskItem,
     TaskStatus,
     TaskPriority,

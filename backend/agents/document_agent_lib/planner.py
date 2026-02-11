@@ -10,7 +10,7 @@ backend_root = Path(__file__).parent.parent.parent.resolve()
 if str(backend_root) not in sys.path:
     sys.path.insert(0, str(backend_root))
 
-from services.inference_service import inference_service
+from backend.services.inference_service import inference_service
 
 logger = logging.getLogger(__name__)
 

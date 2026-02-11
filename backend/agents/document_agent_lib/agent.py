@@ -34,11 +34,11 @@ if not hasattr(backend_schemas, 'AgentResponseStatus'):
     raise ImportError(f"schemas module from {backend_schemas.__file__} does not have AgentResponseStatus. This is likely the wrong schemas module (local document_agent/schemas.py instead of backend/schemas.py)")
 AgentResponseStatus = backend_schemas.AgentResponseStatus
 
-from .schemas import (
+from .agent_schemas import (
     AnalyzeDocumentRequest, EditDocumentRequest, CreateDocumentRequest,
     UndoRedoRequest, VersionHistoryRequest, ExtractDataRequest, EditAction
 )
-from .schemas import AgentResponseStatus as LocalAgentResponseStatus
+from .agent_schemas import AgentResponseStatus as LocalAgentResponseStatus
 from .editors import DocumentEditor
 from .state import DocumentSessionManager, DocumentVersionManager, EditAction as StateEditAction
 from .llm import DocumentLLMClient
@@ -54,7 +54,7 @@ try:
     backend_path = str(Path(__file__).parent.parent.parent)
     if backend_path not in sys.path:
         sys.path.insert(0, backend_path)
-    from utils.metrics_display import display_execution_metrics, display_session_metrics
+    from backend.utils.metrics_display import display_execution_metrics, display_session_metrics
 except ImportError:
     # If that fails, use importlib to load directly
     import importlib.util
@@ -67,7 +67,7 @@ except ImportError:
     display_session_metrics = metrics_module.display_session_metrics
 
 # Import Content Management Service
-from services.content_management_service import (
+from backend.services.content_management_service import (
     ContentManagementService,
     ContentType,
     ContentSource,
@@ -75,7 +75,7 @@ from services.content_management_service import (
     ContentPriority,
     ProcessingTaskType
 )
-from services.canvas_service import CanvasService
+from backend.services.canvas_service import CanvasService
 
 logger = logging.getLogger(__name__)
 

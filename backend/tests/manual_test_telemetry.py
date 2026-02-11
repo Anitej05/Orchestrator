@@ -13,7 +13,7 @@ if sys.platform == "win32":
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-from services.telemetry_service import TelemetryService
+from backend.services.telemetry_service import TelemetryService
 
 class TestTelemetryService(unittest.TestCase):
     def setUp(self):

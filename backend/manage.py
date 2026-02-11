@@ -15,7 +15,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session, joinedload
 from database import SessionLocal, engine, Base
 from models import Agent, AgentEndpoint, AgentCapability, EndpointParameter, StatusEnum, AgentType
-from schemas import AgentCard
+from backend.schemas import AgentCard
 import logging
 
 # Import schema validation

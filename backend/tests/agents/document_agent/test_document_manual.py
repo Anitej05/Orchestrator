@@ -34,8 +34,8 @@ logger = logging.getLogger(__name__)
 WORKSPACE_ROOT = Path(__file__).parent.parent.parent.parent.parent.resolve()
 sys.path.insert(0, str(WORKSPACE_ROOT / "backend"))
 
-from agents.document_agent.agent import DocumentAgent
-from agents.document_agent.schemas import AnalyzeDocumentRequest
+from backend.agents.document_agent.agent import DocumentAgent
+from backend.agents.document_agent.schemas import AnalyzeDocumentRequest
 
 # ============================================================================
 # ENUMS AND DATA CLASSES

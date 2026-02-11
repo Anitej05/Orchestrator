@@ -1,0 +1,6 @@
+CEREBRAS_API_KEY(S) not configured in environment - LLM calls may fail
+INFO:     Started server process [14092]
+INFO:     Waiting for application startup.
+2026-02-09 01:59:47,264 - backend.agents.browser_agent - INFO - 🚀 Browser Agent starting...
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8090 (Press CTRL+C to quit)

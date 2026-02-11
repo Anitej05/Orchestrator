@@ -3,7 +3,7 @@ import os
 # Add backend root to sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from services.terminal_service import terminal_service
+from backend.services.terminal_service import terminal_service
 
 print(f"CWD: {terminal_service.current_cwd}")
 res = terminal_service.execute_command("echo Hello > test_iso.txt")

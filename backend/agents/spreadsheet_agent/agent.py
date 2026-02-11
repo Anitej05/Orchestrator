@@ -14,7 +14,7 @@ import pandas as pd
 import uuid
 
 from .config import logger
-from .schemas import (
+from .agent_schemas import (
     ExecuteRequest, ExecuteResponse, ExecutionPlan, StepResult,
     TaskStatus, FileInfo
 )
@@ -29,13 +29,13 @@ backend_root = Path(__file__).parent.parent.parent.resolve()
 if str(backend_root) not in sys.path:
     sys.path.insert(0, str(backend_root))
 
-from services.content_management_service import (
+from backend.services.content_management_service import (
     ContentManagementService,
     ContentSource,
     ContentType,
     ContentPriority
 )
-from services.canvas_service import CanvasService
+from backend.services.canvas_service import CanvasService
 from backend.schemas import AgentResponse, StandardAgentResponse, AgentResponseStatus
 
 logger = logging.getLogger("spreadsheet_agent.agent")
@@ -517,7 +517,7 @@ class SpreadsheetAgent:
             )
             
             if adjusted:
-                from .schemas import StepPlan
+                from .agent_schemas import StepPlan
                 return StepPlan(
                     action=adjusted.get('action', step.action),
                     params=adjusted.get('params', step.params),
@@ -1447,7 +1447,7 @@ class SpreadsheetAgent:
             df = await self.resolver.resolve_dataframe(params, thread_id, require_data=False)
             
             # Create step and execute
-            from .schemas import StepPlan
+            from .agent_schemas import StepPlan
             step = StepPlan(action=action, params=params)
             result = await self._execute_step(step, session, df, thread_id)
             

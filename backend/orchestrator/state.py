@@ -8,7 +8,7 @@ import operator
 
 # Import the Pydantic models from the single source of truth: schemas.py
 # This resolves the circular import error.
-from schemas import (
+from backend.schemas import (
     Task,
     AgentCard, # This is a Pydantic model
     TaskAgentPair, # This is a Pydantic model

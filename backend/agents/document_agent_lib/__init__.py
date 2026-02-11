@@ -27,7 +27,7 @@ import schemas as backend_schemas
 WORKSPACE_ROOT = Path(__file__).parent.parent.parent.parent.resolve()
 STORAGE_DIR = WORKSPACE_ROOT / "storage" / "documents"
 
-from .schemas import (
+from .agent_schemas import (
     AnalyzeDocumentRequest, AnalyzeDocumentResponse,
     DisplayDocumentRequest, DisplayDocumentResponse,
     CreateDocumentRequest, CreateDocumentResponse,

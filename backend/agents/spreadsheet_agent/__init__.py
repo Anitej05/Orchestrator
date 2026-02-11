@@ -29,7 +29,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import AGENT_PORT, AGENT_VERSION, logger
-from .schemas import (
+from .agent_schemas import (
     ExecuteRequest, ContinueRequest, ExecuteResponse,
     HealthResponse, TaskStatus
 )

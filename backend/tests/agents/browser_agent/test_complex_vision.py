@@ -10,7 +10,7 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 
-from agents.browser_agent.agent import BrowserAgent
+from backend.agents.browser_agent.agent import BrowserAgent
 
 async def main():
     # Wikipedia Picture of the Day Task - FULL VERSION

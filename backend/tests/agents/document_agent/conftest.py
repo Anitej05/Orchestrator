@@ -284,7 +284,7 @@ def large_file(test_data_dir: Path) -> Path:
 @pytest.fixture
 def document_agent():
     """Initialize a document agent instance."""
-    from agents.document_agent import DocumentAgent
+    from backend.agents.document_agent import DocumentAgent
     
     agent = DocumentAgent()
     yield agent

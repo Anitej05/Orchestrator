@@ -15,7 +15,7 @@ import asyncio
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass
 
-from services.content_management_service import (
+from backend.services.content_management_service import (
     ContentManagementService,
     UnifiedContentMetadata,
     ContentType,

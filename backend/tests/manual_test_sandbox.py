@@ -11,7 +11,7 @@ if sys.platform == "win32":
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-from services.code_sandbox_service import CodeSandboxService
+from backend.services.code_sandbox_service import CodeSandboxService
 
 class TestCodeSandbox(unittest.TestCase):
     def setUp(self):

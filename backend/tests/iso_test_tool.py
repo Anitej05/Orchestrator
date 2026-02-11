@@ -5,8 +5,8 @@ import os
 # Add backend root to sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from orchestrator.nodes.brain_nodes import execute_next_action
-from orchestrator.state import State
+from backend.orchestrator.nodes.brain_nodes import execute_next_action
+from backend.orchestrator.state import State
 from unittest.mock import MagicMock
 import orchestrator.nodes.brain_nodes as brain_nodes
 

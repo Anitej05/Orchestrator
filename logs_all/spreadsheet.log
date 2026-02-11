@@ -1,0 +1,16 @@
+INFO:spreadsheet_agent.state:SessionState initialized
+INFO:backend.utils.key_manager:Loaded 1 Cerebras API key from environment (CEREBRAS_API_KEY)
+INFO:ContentManagementService:Loaded 51 content items from registry
+INFO:ContentManagementService:ContentManagementService initialized with 51 items
+INFO:backend.agents.utils.agent_file_manager:AgentFileManager connected to ContentManagementService
+INFO:backend.agents.utils.agent_file_manager:AgentFileManager initialized for spreadsheet_agent at /home/clawuser/.openclaw/workspace/Orchestrator/storage/spreadsheet_agent
+INFO:spreadsheet_agent.llm:LLMClient initialized (Delegating to Unified InferenceService)
+INFO:ContentManagementService:Loaded 51 content items from registry
+INFO:ContentManagementService:ContentManagementService initialized with 51 items
+INFO:spreadsheet_agent.agent:SpreadsheetAgent initialized
+INFO:     Started server process [26107]
+INFO:     Waiting for application startup.
+INFO:spreadsheet_agent:Spreadsheet Agent v3.0.0 starting on port 9000
+INFO:spreadsheet_agent:Endpoints: /execute, /continue, /health, /files
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:9000 (Press CTRL+C to quit)
