@@ -1,6 +1,6 @@
 # agents/gmail_agent/agent.py
 import logging
-from fastapi import FastAPI, HTTPException, Body
+from fastapi import FastAPI, HTTPException, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, Any, Optional
 import sys
@@ -19,6 +19,8 @@ from .agent_schemas import (
 )
 from .service import GmailService
 from .memory import agent_memory
+from .rate_limiter import limiter, rate_limit_handler, check_user_rate_limit, get_rate_limit
+from slowapi.errors import RateLimitExceeded
 
 logger = logging.getLogger("gmail_agent")
 
@@ -28,6 +30,12 @@ app = FastAPI(
     description="Clean Composio-native Gmail agent using official SDK",
     version="1.0.0"
 )
+
+# Add rate limiter to app state
+app.state.limiter = limiter
+
+# Add rate limit exception handler
+app.add_exception_handler(RateLimitExceeded, rate_limit_handler)
 
 # CORS middleware
 app.add_middleware(
@@ -67,14 +75,15 @@ async def health():
 # === Email Operations ===
 
 @app.post("/search")
-async def search_emails(request: SearchRequest):
-    """Search emails with optional LLM optimization"""
+@limiter.limit(get_rate_limit("search"))
+async def search_emails(request: Request, search_request: SearchRequest):
+    """Search emails with optional LLM optimization (rate limited: 30/minute)"""
     try:
-        service = get_service(request.user_id)
+        service = get_service(search_request.user_id)
         result = await service.search_emails(
-            query=request.query,
-            max_results=request.max_results,
-            include_payload=request.include_payload
+            query=search_request.query,
+            max_results=search_request.max_results,
+            include_payload=search_request.include_payload
         )
         return result
     except ValueError as e:
@@ -84,18 +93,22 @@ async def search_emails(request: SearchRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/send")
-async def send_email(request: SendEmailRequest):
-    """Send email"""
+@limiter.limit(get_rate_limit("send_email"))
+async def send_email(request: Request, send_request: SendEmailRequest):
+    """Send email with rate limiting (10/minute per IP)"""
     try:
-        service = get_service(request.user_id)
+        # Additional user-based rate limiting (100/day per user)
+        check_user_rate_limit(send_request.user_id, "send_email", limit=100, window_seconds=86400)
+        
+        service = get_service(send_request.user_id)
         result = await service.send_email(
-            to=request.to,
-            subject=request.subject,
-            body=request.body,
-            cc=request.cc,
-            bcc=request.bcc,
-            is_html=request.is_html,
-            attachments=request.attachments
+            to=send_request.to,
+            subject=send_request.subject,
+            body=send_request.body,
+            cc=send_request.cc,
+            bcc=send_request.bcc,
+            is_html=send_request.is_html,
+            attachments=send_request.attachments
         )
         return result
     except ValueError as e:
@@ -165,16 +178,17 @@ async def trash_message(user_id: str, message_id: str):
 # === Draft Operations ===
 
 @app.post("/draft/create")
-async def create_draft(request: CreateDraftRequest):
-    """Create email draft"""
+@limiter.limit(get_rate_limit("create_draft"))
+async def create_draft(request: Request, draft_request: CreateDraftRequest):
+    """Create email draft (rate limited: 20/minute)"""
     try:
-        service = get_service(request.user_id)
+        service = get_service(draft_request.user_id)
         result = await service.create_draft(
-            to=request.to,
-            subject=request.subject,
-            body=request.body,
-            cc=request.cc,
-            thread_id=request.thread_id
+            to=draft_request.to,
+            subject=draft_request.subject,
+            body=draft_request.body,
+            cc=draft_request.cc,
+            thread_id=draft_request.thread_id
         )
         return result
     except ValueError as e:
@@ -197,9 +211,13 @@ async def list_drafts(user_id: str, max_results: int = 10):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/draft/{user_id}/{draft_id}/send")
-async def send_draft(user_id: str, draft_id: str):
-    """Send draft"""
+@limiter.limit(get_rate_limit("send_draft"))
+async def send_draft(request: Request, user_id: str, draft_id: str):
+    """Send draft (rate limited: 10/minute)"""
     try:
+        # Additional user-based rate limiting (100/day per user)
+        check_user_rate_limit(user_id, "send_draft", limit=100, window_seconds=86400)
+        
         service = get_service(user_id)
         result = await service.send_draft(draft_id)
         return result
@@ -299,11 +317,12 @@ async def download_attachments(request: DownloadAttachmentsRequest):
 # === LLM-Enhanced Operations ===
 
 @app.post("/summarize")
-async def summarize_emails(request: SummarizeRequest):
-    """Summarize emails"""
+@limiter.limit(get_rate_limit("batch_operations"))
+async def summarize_emails(request: Request, summarize_request: SummarizeRequest):
+    """Summarize emails (rate limited: 5/minute for batch operations)"""
     try:
-        service = get_service(request.user_id)
-        result = await service.summarize_emails(request.message_ids)
+        service = get_service(summarize_request.user_id)
+        result = await service.summarize_emails(summarize_request.message_ids)
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -328,11 +347,12 @@ async def draft_smart_reply(request: DraftReplyRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/extract-actions")
-async def extract_action_items(request: ExtractActionsRequest):
-    """Extract action items"""
+@limiter.limit(get_rate_limit("batch_operations"))
+async def extract_action_items(request: Request, extract_request: ExtractActionsRequest):
+    """Extract action items (rate limited: 5/minute for batch operations)"""
     try:
-        service = get_service(request.user_id)
-        result = await service.extract_action_items(request.message_ids)
+        service = get_service(extract_request.user_id)
+        result = await service.extract_action_items(extract_request.message_ids)
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

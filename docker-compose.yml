@@ -1,0 +1,140 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15
+    container_name: orbimesh-postgres
+    environment:
+      POSTGRES_DB: orbimesh
+      POSTGRES_USER: orbimesh
+      POSTGRES_PASSWORD: dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orbimesh"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Orchestrator Service
+  orchestrator:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: orbimesh-orchestrator
+    ports:
+      - "8000:8000"
+    environment:
+      # Database
+      DATABASE_URL: postgresql://orbimesh:dev_password@postgres:5432/orbimesh
+      
+      # Composio Integration
+      COMPOSIO_API_KEY: ${COMPOSIO_API_KEY}
+      
+      # Encryption
+      CONNECTION_ENCRYPTION_KEY: ${CONNECTION_ENCRYPTION_KEY}
+      
+      # LLM Configuration
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      CEREBRAS_API_KEY: ${CEREBRAS_API_KEY}
+      
+      # Clerk Authentication
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY}
+      
+      # Agent URLs (internal Docker network)
+      GMAIL_AGENT_URL: http://gmail_agent:8000
+      GENERAL_AGENT_URL: http://general_agent:8000
+      
+      # Environment
+      ENVIRONMENT: development
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backend/logs:/app/logs
+      - ./backend/conversation_history:/app/conversation_history
+      - ./backend/agent_plans:/app/agent_plans
+      - ./backend/plans:/app/plans
+      - ./backend/storage:/app/storage
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Gmail Agent Service
+  gmail_agent:
+    build:
+      context: ./backend
+      dockerfile: agents/gmail_agent/Dockerfile
+    container_name: orbimesh-gmail-agent
+    ports:
+      - "8001:8000"
+    environment:
+      # Database
+      DATABASE_URL: postgresql://orbimesh:dev_password@postgres:5432/orbimesh
+      
+      # Composio Integration
+      COMPOSIO_API_KEY: ${COMPOSIO_API_KEY}
+      
+      # Encryption
+      CONNECTION_ENCRYPTION_KEY: ${CONNECTION_ENCRYPTION_KEY}
+      
+      # LLM Configuration
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      
+      # Environment
+      ENVIRONMENT: development
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backend/logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # General Fallback Agent Service
+  general_agent:
+    build:
+      context: ./backend
+      dockerfile: agents/general_agent/Dockerfile
+    container_name: orbimesh-general-agent
+    ports:
+      - "8003:8000"
+    environment:
+      # Database
+      DATABASE_URL: postgresql://orbimesh:dev_password@postgres:5432/orbimesh
+      
+      # Composio Integration
+      COMPOSIO_API_KEY: ${COMPOSIO_API_KEY}
+      
+      # Encryption
+      CONNECTION_ENCRYPTION_KEY: ${CONNECTION_ENCRYPTION_KEY}
+      
+      # Environment
+      ENVIRONMENT: development
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backend/logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  postgres_data:
+    driver: local
