@@ -252,11 +252,12 @@ async def execute(request: Dict[str, Any]):
         payload = request.get("payload", {})
 
         if prompt and not action:
-            plan = await llm_client.decompose_request(prompt)
+            plan = await llm_client.decompose_complex_request(prompt)
             results = []
-            for step in plan.steps:
-                step_action = step.action.lower()
-                step_params = step.params
+            steps = plan.get("steps", [])
+            for step in steps:
+                step_action = step.get("action", "").lower()
+                step_params = step.get("params", {})
                 result = None
 
                 if "search" in step_action:
@@ -295,7 +296,7 @@ async def execute(request: Dict[str, Any]):
                     if isinstance(result, dict):
                         result["canvas_display"] = canvas.model_dump()
 
-                results.append({"step": step.action, "result": result})
+                results.append({"step": step.get("action", ""), "result": result})
 
             # Extract canvas_display from send actions if present
             last_canvas = None
@@ -311,8 +312,8 @@ async def execute(request: Dict[str, Any]):
                 result={"results": results},
                 standard_response=StandardAgentResponse(
                     status="success",
-                    summary="Email composition complete. Ready to send.",
-                    data=results,
+                    summary="Email operations completed.",
+                    data={"results": results},
                     canvas_display=last_canvas,
                 ),
             )

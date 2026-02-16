@@ -38,7 +38,7 @@ class Hands:
 
     def __init__(self):
         self.timeout_map = {
-            "agent": 60.0,
+            "agent": 120.0,
             "tool": 30.0,
             "terminal": 30.0,
             "python": 60.0,
@@ -327,9 +327,7 @@ class Hands:
         # Build UAP-compliant request payload
         uap_request = {
             "type": "execute",  # Explicitly set message type
-            "action": payload.get(
-                "action"
-            ),  # Extract action from payload (CRITICAL FIX)
+            "action": payload.get("action"),  # Extract action from payload (agent will plan if None)
             "prompt": instruction,
             "payload": payload.get("payload", {}),
             "task_id": payload.get("task_id"),

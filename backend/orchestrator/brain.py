@@ -205,20 +205,6 @@ class Brain:
                 for a in active_agents
             ]
         )
-
-        agent_list = "\n".join(
-            [
-                f"- **{a['name']}** (ID: {a['id']}): {a['use_when']}"
-                for a in structured_agents
-            ]
-        )
-
-        agent_list = "\n".join(
-            [
-                f"- **{a['agent_name']}** (ID: {a['id']}): {a['use_when']}"
-                for a in structured_agents
-            ]
-        )
         tool_list = "\n".join(
             [f"- {t['name']}: {t['description']}" for t in active_tools]
         )

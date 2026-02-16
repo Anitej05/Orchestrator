@@ -47,6 +47,7 @@ class CodeSandboxService:
         'filter': filter,
         'any': any,
         'all': all,
+        'open': open,
         '__import__': __import__,
     }
 
