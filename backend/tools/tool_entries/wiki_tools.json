@@ -16,8 +16,14 @@
                 {
                     "name": "query",
                     "type": "string",
-                    "required": true,
+                    "required": false,
                     "description": "The search term to look for (e.g., 'Artificial Intelligence')"
+                },
+                {
+                    "name": "search_query",
+                    "type": "string",
+                    "required": false,
+                    "description": "Alias for query"
                 }
             ],
             "returns": "Dictionary with list of matching page titles",
@@ -44,8 +50,14 @@
                 {
                     "name": "title",
                     "type": "string",
-                    "required": true,
+                    "required": false,
                     "description": "The exact title of the Wikipedia page"
+                },
+                {
+                    "name": "page_title",
+                    "type": "string",
+                    "required": false,
+                    "description": "Alias for title"
                 }
             ],
             "returns": "Dictionary with title, summary text, and URL",
@@ -74,14 +86,26 @@
                 {
                     "name": "title",
                     "type": "string",
-                    "required": true,
+                    "required": false,
                     "description": "The exact title of the Wikipedia page"
+                },
+                {
+                    "name": "page_title",
+                    "type": "string",
+                    "required": false,
+                    "description": "Alias for title"
                 },
                 {
                     "name": "section",
                     "type": "string",
-                    "required": true,
+                    "required": false,
                     "description": "The section title to retrieve (e.g., 'History', 'Applications')"
+                },
+                {
+                    "name": "section_name",
+                    "type": "string",
+                    "required": false,
+                    "description": "Alias for section"
                 }
             ],
             "returns": "Dictionary with title, section name, and section content",
@@ -108,8 +132,14 @@
                 {
                     "name": "title",
                     "type": "string",
-                    "required": true,
+                    "required": false,
                     "description": "The exact title of the Wikipedia page"
+                },
+                {
+                    "name": "page_title",
+                    "type": "string",
+                    "required": false,
+                    "description": "Alias for title"
                 }
             ],
             "returns": "Dictionary with title and list of image URLs",
