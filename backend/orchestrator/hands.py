@@ -486,7 +486,20 @@ class Hands:
         result = code_sandbox.execute_code(code, session_id=session_id)
 
         success = result.get("success", False)
-        output = result.get("stdout") or result.get("error") or "No output"
+        stdout = (result.get("stdout") or "").strip()
+        result_value = result.get("result")
+        error_value = result.get("error")
+
+        if stdout and result_value is not None:
+            output = f"{stdout}\nResult: {result_value}"
+        elif stdout:
+            output = stdout
+        elif result_value is not None:
+            output = str(result_value)
+        elif error_value:
+            output = str(error_value)
+        else:
+            output = "No output"
 
         return ActionResult(
             action_id="python",
@@ -595,10 +608,8 @@ class Hands:
         if not result.success:
             failure_count = state.get("failure_count", 0) + 1
             updates["failure_count"] = failure_count
-            updates["last_failure_id"] = result.action_id
         else:
             updates["failure_count"] = 0
-            updates["last_failure_id"] = None
 
         current_task_id = state.get("current_task_id")
         todo_list = state.get("todo_list", [])

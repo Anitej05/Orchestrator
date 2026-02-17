@@ -345,7 +345,6 @@ class TestHandsToolExecution:
         assert result["execution_result"]["success"] is False
         assert "error" in result
         assert result["failure_count"] == 1
-        assert result["last_failure_id"] is not None
 
         # Verify task status updated to failed
         task = next(t for t in result["todo_list"] if t["task_id"] == "task_1")

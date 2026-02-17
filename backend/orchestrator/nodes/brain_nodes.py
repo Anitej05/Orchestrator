@@ -38,7 +38,6 @@ class TaskUpdate(BaseModel):
     error_note: Optional[str] = Field(None, description="Note on why a task failed")
     reorder_tasks: Optional[List[str]] = Field(None, description="List of task IDs in new execution order")
     next_task_id: Optional[str] = Field(None, description="Explicitly select the next task ID to run")
-    is_finished: bool = Field(False, description="Set to True ONLY when the objective is fully achieved")
     memory_update: Optional[Dict[str, Any]] = Field(None, description="Updates to persistent memory")
     suggested_command: Optional[str] = Field(None, description="Suggest next command/tool (TERM:, AGENT:, TOOL:)")
 
@@ -50,25 +49,17 @@ async def manage_todo_list(state: State, config: Optional[RunnableConfig] = None
         todo_list = state.get("todo_list", [])
         memory = state.get("memory", {})
         iteration = state.get("iteration_count", 0)
-        failure_count = state.get("failure_count", 0)
-        last_failure_id = state.get("last_failure_id")
         
         if not todo_list and state.get("original_prompt"):
-            return {**_initialize_todo_list(state), "failure_count": 0, "last_failure_id": None}
+            return {**_initialize_todo_list(state), "failure_count": 0}
         
-        # Determine consecutive failures
-        non_pending_tasks = [t for t in todo_list if t['status'] in [TaskStatus.COMPLETED, TaskStatus.FAILED]]
-        
-        if non_pending_tasks:
-            last_processed = non_pending_tasks[-1]
-            if last_processed['status'] == TaskStatus.FAILED:
-                # Only increment if this is a NEW failure
-                if last_processed['id'] != last_failure_id:
-                    failure_count += 1
-                    last_failure_id = last_processed['id']
-            else:
-                failure_count = 0
-                last_failure_id = None
+        # Count consecutive failures from the end of the todo list
+        failure_count = 0
+        for task in reversed(todo_list):
+            if task['status'] == TaskStatus.FAILED:
+                failure_count += 1
+            elif task['status'] == TaskStatus.COMPLETED:
+                break
         
         pending_tasks = [t for t in todo_list if t['status'] == TaskStatus.PENDING]
         current_task = next((t for t in todo_list if t['status'] == TaskStatus.IN_PROGRESS), None)
@@ -129,7 +120,7 @@ async def manage_todo_list(state: State, config: Optional[RunnableConfig] = None
            - NO INTERNAL THOUGHTS: Do not include "I will now..." or "My plan is...". Just do it.
 
 
-           WHEN FINISHING (is_finished=True):
+           WHEN FINISHING (all tasks complete):
            - You MUST populate 'user_response'.
            - 'user_response' should be the direct answer/greeting without meta-commentary.
 
@@ -158,7 +149,7 @@ async def manage_todo_list(state: State, config: Optional[RunnableConfig] = None
         
         CRITICAL: 
         1. If the Last Task Result is insufficient, you MUST create a NEW TASK associated with the next step (e.g. "Read file", "Search detailed query").
-        2. If all tasks are completed and the Current Objective is met, you MUST set 'is_finished' to True.
+        2. If all tasks are completed and the Current Objective is met, set 'user_response' to provide the final answer.
         
         Return JSON matching TaskUpdate schema.
         Input for 'suggested_command' MUST follow these formats:
@@ -237,30 +228,22 @@ async def manage_todo_list(state: State, config: Optional[RunnableConfig] = None
             next_pending = next((t for t in new_todo_list if t['status'] == TaskStatus.PENDING), None)
             next_task_id = next_pending['id'] if next_pending else None
         
-        # SAFETY: If no task selected and not finished, force finish to avoid recursion loop
-        is_finished = update.is_finished
-        
-        # Determine strict final response (Separating THOUGHT from USER RESPONSE)
-        # Priority:
-        # SAFETY: If no task selected and not finished, force finish to avoid recursion loop
-        is_finished = update.is_finished
-        
         # Determine strict final response (Separating THOUGHT from USER RESPONSE)
         # ONLY set final_response if we are actually finished.
         # If tasks are pending/executing, we should NOT send a final response yet.
         final_response_content = None
+        is_finished = False
         
-        if is_finished:
+        # Check if we should finish: either user_response is provided (LLM signals completion)
+        # or there are no more pending tasks
+        if update.user_response:
             final_response_content = update.user_response
-            # If finished but no response provided, create a generic one
-            if not final_response_content:
-                 final_response_content = "Process completed successfully."
-        
-        if not next_task_id and not is_finished:
-            logger.warning("Brain provided no next task and is not finished. Force finishing to avoid loop.")
             is_finished = True
-            if not final_response_content:
-                final_response_content = "Process completed successfully."
+        elif not next_task_id:
+            # SAFETY: If no task selected and no user_response, force finish to avoid recursion loop
+            logger.warning("Brain provided no next task and no user_response. Force finishing to avoid loop.")
+            is_finished = True
+            final_response_content = "Process completed successfully."
 
         # ZOMBIE TASK CLEANUP:
         # If we are finished, mark all remaining PENDING tasks as SKIPPED.
@@ -307,7 +290,6 @@ async def manage_todo_list(state: State, config: Optional[RunnableConfig] = None
             "current_task_id": next_task_id,
             "iteration_count": iteration + 1,
             "failure_count": failure_count,
-            "last_failure_id": last_failure_id,
             "final_response": final_response_content if is_finished else None,
             "error": None # Clear previous error if any
         }
@@ -321,7 +303,6 @@ async def manage_todo_list(state: State, config: Optional[RunnableConfig] = None
             "todo_list": state.get("todo_list", []),
             "memory": state.get("memory", {}),
             "failure_count": state.get("failure_count", 0) + 1,
-            "last_failure_id": state.get("last_failure_id")
         }
 
 

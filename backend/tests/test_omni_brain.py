@@ -190,11 +190,9 @@ class TestBrainInitialization:
             resource_id="TestAgent",
             payload={"instruction": "Test instruction"},
             reasoning="Test reasoning",
-            is_finished=False,
         )
         assert decision.action_type == "agent"
         assert decision.resource_id == "TestAgent"
-        assert decision.is_finished is False
 
     def test_brain_decision_with_approval(self):
         """Test BrainDecision with human-in-the-loop approval."""
@@ -418,7 +416,6 @@ class TestBrainDecisionMaking:
         mock_decision = BrainDecision(
             action_type="finish",
             user_response="The calculation is complete: 2 + 2 = 4",
-            is_finished=True,
             reasoning="Task has been completed successfully",
         )
         mock_inference_service.generate_structured.return_value = mock_decision
@@ -717,7 +714,6 @@ class TestBrainErrorHandling:
         # When LLM fails, Brain should return a finish decision with final_response
         assert "decision" in result
         assert result["decision"]["action_type"] == "finish"
-        assert result["decision"]["is_finished"] is True
         assert "Brain error" in result["decision"]["user_response"]
         # The fallback logic also sets final_response
         assert "final_response" in result or result["decision"]["user_response"]

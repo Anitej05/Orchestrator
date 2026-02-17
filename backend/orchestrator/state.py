@@ -1,10 +1,9 @@
 # In Orbimesh Backend/orchestrator/state.py
 
-from typing import Annotated, Any, List, Optional, Dict, Literal
+from typing import Annotated, Any, List, Optional, Dict
 from typing_extensions import TypedDict
 from langgraph.graph.message import add_messages
 from langchain_core.messages import BaseMessage
-import operator
 
 # Import the Pydantic models from the single source of truth: schemas.py
 # This resolves the circular import error.
@@ -109,7 +108,6 @@ class State(TypedDict):
     # Error tracking
     error: Annotated[Optional[str], overwrite_reducer]
     failure_count: Annotated[int, overwrite_reducer] # Count of consecutive failed tasks
-    last_failure_id: Annotated[Optional[str], overwrite_reducer] # ID of the last failed task
     
     # Metadata
     thread_id: str

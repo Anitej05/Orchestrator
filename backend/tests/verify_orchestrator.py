@@ -41,7 +41,7 @@ def mock_invoke(*args, **kwargs):
         {
             "thought": "Tool finished. Workflow done.",
             "completed_task_id": "task_tool",
-            "is_finished": true
+            "user_response": "Workflow completed successfully"
         }
         """)
 

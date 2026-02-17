@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 from langchain_core.messages import HumanMessage, BaseMessage, AIMessage
 from langchain_core.runnables import RunnableConfig
 
-from .schemas import TaskItem, TaskStatus, TaskPriority, PlanPhase, ParallelAction
+from .schemas import TaskItem, TaskStatus
 from .content_orchestrator import get_optimized_llm_context
 from backend.services.inference_service import inference_service, InferencePriority
 
@@ -59,8 +59,6 @@ class BrainDecision(BaseModel):
     memory_updates: Optional[Dict[str, Any]] = Field(
         None, description="Key-value pairs to store in persistent memory"
     )
-    is_finished: bool = Field(False, description="True if the objective is fully met")
-
     # --- ADAPTIVE PLANNING ---
     execution_plan: Optional[List[Dict[str, Any]]] = Field(
         None,
@@ -91,9 +89,6 @@ class BrainDecision(BaseModel):
     approval_reason: Optional[str] = Field(
         None,
         description="When requires_approval=True: Clear explanation of what will happen and why approval is needed",
-    )
-    fallback_mode: bool = Field(
-        False, description="True if entering fallback due to consecutive failures"
     )
 
 
@@ -126,7 +121,7 @@ class Brain:
             return self._initialize_initial_state(state)
 
         # Check error conditions AFTER initialization check
-        if iteration_count > self.max_iterations:
+        if iteration_count >= self.max_iterations:
             return self._force_finish_with_error(state, "Maximum iterations reached")
 
         if failure_count >= self.max_failures:
@@ -138,6 +133,7 @@ class Brain:
         decision = await self._make_decision(
             state, config, memory, updated_insights, action_history
         )
+        decision = self._apply_stagnation_guard(state, decision)
 
         updates = self._apply_decision_to_state(state, decision)
 
@@ -400,7 +396,10 @@ When `requires_approval=True`:
 6. **Within a phase**: Focus only on the current phase's goal.
 7. **Phase done?**: Set phase_complete=True with phase_goal_verified when phase goal is met.
 8. **SENSITIVE ACTIONS**: Set requires_approval=True with approval_reason for emails, deletions, payments, etc.
-9. Set is_finished=True ONLY when ALL phases complete or objective is met.
+9. **STOPPING/TERMINATION - CRITICAL**:
+   - When the objective is COMPLETELY MET and you have the final answer → **MUST use action_type='finish'**
+    - When task is complete, you MUST use action_type='finish'
+   - If you have the answer ready, just set action_type='finish' and provide user_response
 
 ## OUTPUT
 Return JSON with:
@@ -414,7 +413,7 @@ Return JSON with:
 - requires_approval: True for sensitive operations (default False)
 - approval_reason: explanation of what will happen (when requires_approval=True)
 - reasoning: brief explanation
-- user_response: final answer (when is_finished=True)
+- user_response: final answer (when action_type='finish')
 """
 
         try:
@@ -435,7 +434,6 @@ Return JSON with:
             return BrainDecision(
                 action_type="finish",
                 user_response=f"Brain error: {str(e)}",
-                is_finished=True,
             )
 
     def _build_todo_preview(self, todo_list: List[Dict]) -> str:
@@ -503,6 +501,140 @@ Return JSON with:
             lines.append(f"   Result: {result[:200]}")
 
         return "\n".join(lines)
+
+    def _extract_text_output(self, output: Any) -> str:
+        """Extract readable text from execution output."""
+        if output is None:
+            return ""
+        if isinstance(output, str):
+            text = output.strip()
+            if "\nResult:" in text:
+                return text.split("\nResult:", 1)[-1].strip()
+            return text
+        if isinstance(output, dict):
+            for key in ("result", "output", "message", "response", "data"):
+                value = output.get(key)
+                if value:
+                    return str(value).strip()
+        return str(output).strip()
+
+    def _normalize_signature(self, value: str) -> str:
+        """Normalize signature strings to compare repeated actions robustly."""
+        return " ".join(str(value or "").split())
+
+    def _build_decision_signature(self, decision: BrainDecision) -> str:
+        """Build a stable signature for a proposed decision."""
+        payload = decision.payload or {}
+        try:
+            payload_str = json.dumps(
+                payload, sort_keys=True, separators=(",", ":"), default=str
+            )
+        except Exception:
+            payload_str = str(payload)
+        return self._normalize_signature(
+            f"{decision.action_type}|{decision.resource_id or ''}|{payload_str}"
+        )
+
+    def _build_history_signature(self, entry: Dict[str, Any]) -> str:
+        """Build a stable signature for an executed action history entry."""
+        action_type = entry.get("action_type") or ""
+        resource_id = entry.get("resource_id") or ""
+        instruction = entry.get("instruction") or ""
+        try:
+            # instruction is typically json.dumps(payload)
+            parsed = json.loads(instruction)
+            instruction = json.dumps(parsed, sort_keys=True, separators=(",", ":"))
+        except Exception:
+            # Keep raw instruction when it is truncated or non-JSON
+            pass
+        return self._normalize_signature(f"{action_type}|{resource_id}|{instruction}")
+
+    def _is_open_ended_objective(self, objective: str) -> bool:
+        """
+        Detect objectives that intentionally require ongoing/repeated actions.
+        In these cases, do not auto-finalize on repetition.
+        """
+        text = (objective or "").lower()
+        keywords = [
+            "monitor",
+            "watch continuously",
+            "keep checking",
+            "real-time",
+            "stream",
+            "poll",
+            "every second",
+            "every minute",
+            "continuously",
+        ]
+        return any(k in text for k in keywords)
+
+    def _build_stagnation_response(self, output_text: str) -> str:
+        """Build a concise final response from the latest successful output."""
+        cleaned = " ".join((output_text or "").split())
+        if not cleaned:
+            return "Task complete."
+        if len(cleaned) <= 400:
+            return f"Here is the latest result: {cleaned}"
+        return f"Here is the latest result: {cleaned[:400]}..."
+
+    def _apply_stagnation_guard(
+        self, state: Dict[str, Any], decision: BrainDecision
+    ) -> BrainDecision:
+        """
+        Generic loop breaker for repeated successful actions with no observable progress.
+        This is intentionally action-agnostic (not tied to a specific use case).
+        """
+        if decision.action_type in {
+            "finish",
+            "skip",
+            "plan",
+            "replan",
+            "parallel",
+        }:
+            return decision
+
+        if self._is_open_ended_objective(state.get("original_prompt", "")):
+            return decision
+
+        previous_result = state.get("execution_result") or {}
+        if not previous_result.get("success"):
+            return decision
+
+        if state.get("execution_plan"):
+            # In explicit plan mode, let the planner decide phase advancement.
+            return decision
+
+        action_history = list(state.get("action_history", []))
+        if len(action_history) < 3:
+            return decision
+
+        recent = action_history[-3:]
+        if not all(entry.get("success") for entry in recent):
+            return decision
+
+        recent_signatures = [self._build_history_signature(entry) for entry in recent]
+        current_signature = self._build_decision_signature(decision)
+
+        if not current_signature or any(not sig for sig in recent_signatures):
+            return decision
+        if len(set(recent_signatures + [current_signature])) != 1:
+            return decision
+
+        output_text = self._extract_text_output(previous_result.get("output"))
+        if not output_text:
+            return decision
+        lowered = output_text.lower()
+        if "[system warning]" in lowered and "no output" in lowered:
+            return decision
+
+        logger.warning(
+            "Stagnation guard triggered: repeated identical successful action detected; forcing finish."
+        )
+        return BrainDecision(
+            action_type="finish",
+            user_response=self._build_stagnation_response(output_text),
+            reasoning="Repeated identical successful actions detected without new progress; finalized using the latest successful result.",
+        )
 
     def _estimate_prompt_tokens(self, prompt: str) -> int:
         """Estimate token count for a prompt (rough: 4 chars ~ 1 token)."""
@@ -632,7 +764,6 @@ Return JSON with:
             "current_phase_id": None,
             "iteration_count": 0,
             "failure_count": 0,
-            "last_failure_id": None,
             "current_task_id": initial_task.task_id,
             "decision": BrainDecision(
                 action_type="skip",
@@ -777,8 +908,7 @@ Return JSON with:
             )
 
         # Handle finish
-        is_finished = decision.is_finished or decision.action_type == "finish"
-        if is_finished:
+        if decision.action_type == "finish":
             updates["final_response"] = decision.user_response or "Task complete."
 
             # CRITICAL: Append the final response to the message history so it appears in the chat
@@ -803,7 +933,7 @@ Return JSON with:
 
             for task in todo_list:
                 if task.get("status") in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS):
-                    task["status"] = "completed" if is_finished else "skipped"
+                    task["status"] = "completed"
             updates["todo_list"] = todo_list
 
         return updates
@@ -869,8 +999,6 @@ Return JSON with:
             "decision": BrainDecision(
                 action_type="finish",
                 user_response=f"I've encountered multiple issues, but here is what I know: {json.dumps(context_summary, default=str)}",
-                is_finished=True,
-                fallback_mode=True,
             ).model_dump(),
             "final_response": f"I've encountered multiple issues, but here is what I know: {json.dumps(context_summary, default=str)}",
             "current_task_id": None,
