@@ -51,11 +51,11 @@ class InferenceService:
     
     def __init__(self):
         self._initialized = True
-        # Default fallback order for standard queries
+        # Default fallback order - NVIDIA with minimax first (works with improved JSON extraction)
         self._default_providers = [
-            ProviderType.CEREBRAS,
+            ProviderType.NVIDIA,
             ProviderType.GROQ, 
-            ProviderType.NVIDIA
+            ProviderType.CEREBRAS
         ]
         
         # Metrics storage
@@ -243,8 +243,12 @@ class InferenceService:
                 llm = self._get_llm_client(current_provider, model_name, temperature, 4000, json_mode=True)
                 if not llm: continue
                 
-                # Use standard LangChain structured output interface
-                if hasattr(llm, "with_structured_output"):
+                # Skip with_structured_output for NVIDIA/minimax - use JSON fallback directly
+                # because minimax's structured output returns None but JSON extraction works
+                use_json_fallback = current_provider == ProviderType.NVIDIA
+                
+                # Use standard LangChain structured output interface (skip for NVIDIA)
+                if not use_json_fallback and hasattr(llm, "with_structured_output"):
                     structured_llm = llm.with_structured_output(schema)
                     result = await structured_llm.ainvoke(messages)
                     
@@ -255,10 +259,10 @@ class InferenceService:
                     else:
                         logger.warning(f"⚠️ {current_provider} returned None for structured output, trying fallback...")
                 
-                # Fallback implementation
+                # Fallback implementation (always try for NVIDIA, or when structured output fails)
                 formatted_messages = list(messages)
                 schema_json = schema.model_json_schema()
-                instruction = f"\n\nRespond with valid JSON that matches this schema:\n{schema_json}"
+                instruction = f"\n\nRespond with valid JSON that matches this schema:\n{schema_json}\n\nIMPORTANT: Output ONLY the JSON object, no other text."
                 
                 if isinstance(formatted_messages[-1], HumanMessage):
                     formatted_messages[-1].content += instruction
@@ -274,39 +278,50 @@ class InferenceService:
                 # Parse JSON
                 import json
                 try:
-                    # Clean the content
+                    # Clean the content - strip thinking tags first
                     cleaned_content = self._strip_think_tags(content)
                     cleaned_content = self._strip_markdown(cleaned_content)
                     
-                    # More robust JSON extraction using raw_decode
+                    # Robust JSON extraction - handles minimax thinking tags
                     def extract_json(text):
-                        # Find the first possible start of a JSON object or array
+                        if not isinstance(text, str):
+                            return None
+                        
+                        # Additional tag stripping for minimax formats
+                        import re
+                        tag_patterns = [
+                            r'<\|thinking\|>.*?</\|thinking\|>',
+                            r'<\|thought\|>.*?</\|thought\|>',
+                            r'<thinking>.*?</thinking>',
+                            r'<thought>.*?</thought>',
+                            r'【.*?】',  # Chinese brackets
+                        ]
+                        for p in tag_patterns:
+                            text = re.sub(p, '', text, flags=re.DOTALL | re.IGNORECASE)
+                        
+                        # Find the outermost JSON object using brace counting
                         start_idx = text.find('{')
-                        array_start = text.find('[')
-                        if start_idx == -1 or (array_start != -1 and array_start < start_idx):
-                            start_idx = array_start
-                            
                         if start_idx == -1:
                             return None
-                            
-                        text = text[start_idx:]
-                        decoder = json.JSONDecoder()
-                        try:
-                            # raw_decode returns the object and the index where it ended
-                            obj, idx = decoder.raw_decode(text)
-                            return obj
-                        except Exception as e:
-                            # If it failed, maybe there's garbage at the end that confused it
-                            # We can try to manually find the last closing brace
-                            for i in range(len(text), start_idx, -1):
-                                try:
-                                    return json.loads(text[:i])
-                                except:
-                                    continue
+                        
+                        text_from_start = text[start_idx:]
+                        depth = 0
+                        for i, c in enumerate(text_from_start):
+                            if c == '{':
+                                depth += 1
+                            elif c == '}':
+                                depth -= 1
+                                if depth == 0:
+                                    json_str = text_from_start[:i+1]
+                                    try:
+                                        return json.loads(json_str)
+                                    except:
+                                        continue
                         return None
 
                     data = extract_json(cleaned_content)
                     if data is not None:
+                        logger.info(f"✅ JSON extracted successfully from {current_provider}")
                         return schema.model_validate(data)
                         
                     # Fallback to direct loads
@@ -330,10 +345,7 @@ class InferenceService:
         if requested_provider:
             return [requested_provider] + [p for p in self._default_providers if p != requested_provider]
             
-        if priority == InferencePriority.QUALITY:
-             return [ProviderType.NVIDIA, ProviderType.CEREBRAS, ProviderType.GROQ]
-        
-        # Default SPEED
+        # Always prefer NVIDIA with minimax-m2.1 for better structured output
         return self._default_providers
 
     def _get_llm_client(self, provider: ProviderType, model: Optional[str], temp: float, max_tokens: int, json_mode: bool):

@@ -18,6 +18,7 @@ from langchain_core.runnables import RunnableConfig
 
 from .schemas import ActionResult, TaskStatus
 from .content_orchestrator import hooks
+from .workspace_manager import get_workspace_manager
 from backend.utils.retry_utils import RetryManager
 from backend.services.agent_registry_service import agent_registry
 from backend.services.tool_registry_service import tool_registry
@@ -109,6 +110,9 @@ class Hands:
             result = await self._execute_parallel(parallel_actions, user_id, start_time)
             return self._update_state_with_result(state, result, config)
 
+        # Initialize workspace manager for file tracking
+        workspace_manager = get_workspace_manager(thread_id)
+        
         # === Direct execution actions ===
         if action_type == "agent":
             result = await self._execute_agent(
@@ -118,8 +122,16 @@ class Hands:
             result = await self._execute_tool(resource_id, payload, start_time)
         elif action_type == "terminal":
             result = await self._execute_terminal(payload, start_time)
+            # Scan for files created by terminal command
+            new_files = workspace_manager.scan_for_new_files(created_by="terminal")
+            if new_files:
+                logger.info(f"📝 Terminal created {len(new_files)} new file(s): {[f.file_name for f in new_files]}")
         elif action_type == "python":
-            result = await self._execute_python(payload, start_time)
+            result = await self._execute_python(payload, start_time, thread_id)
+            # Scan for files created by Python code
+            new_files = workspace_manager.scan_for_new_files(created_by="python")
+            if new_files:
+                logger.info(f"📝 Python created {len(new_files)} new file(s): {[f.file_name for f in new_files]}")
         elif action_type == "skip" or action_type == "finish":
             # Return a valid result object even for skip/finish to ensure state consistency
             result = ActionResult(
@@ -287,112 +299,75 @@ class Hands:
     async def _execute_agent(
         self, agent_id: str, payload: Dict[str, Any], user_id: str, start_time: float
     ) -> ActionResult:
-        """Execute an agent call with robust retry and credential handling."""
-        # Use centralized agent lookup for consistent naming
+        """
+        Execute an agent task with on-demand spawning.
+        
+        The agent is automatically spawned if not running, executes the task,
+        and can be terminated after completion based on policy.
+        """
+        from backend.services.agent_manager import get_agent_manager
+        
+        # Get agent info for logging/telemetry
         agent = agent_registry.find_agent(agent_id)
-
-        if not agent:
-            return ActionResult(
-                action_id=f"agent_{agent_id}",
-                success=False,
-                error_message=f"Agent '{agent_id}' not found",
-                execution_time_ms=(time.time() - start_time) * 1000,
-            )
-
+        agent_name = agent.get("name", agent_id) if agent else agent_id
+        
+        # Prepare task
         instruction = payload.get("instruction", payload.get("prompt", ""))
-
-        # Get absolute URL from registry
-        db = SessionLocal()
-        try:
-            base_url = agent_registry.get_agent_url(agent["id"], agent["name"], db)
-            auth_headers = get_credentials_for_headers(
-                db, agent["id"], user_id, agent.get("type", "http_rest")
-            )
-        finally:
-            db.close()
-
-        if not base_url:
-            logger.error(
-                f"No base URL configured for agent '{agent['name']}' (ID: {agent_id}). Check connection_config or agent_entries file."
-            )
-            return ActionResult(
-                action_id=f"agent_{agent_id}",
-                success=False,
-                error_message=f"Agent '{agent['name']}' has no configured base URL. Cannot execute.",
-                execution_time_ms=(time.time() - start_time) * 1000,
-            )
-
-        url = f"{base_url.rstrip('/')}/execute"
-
-        # Build UAP-compliant request payload
-        uap_request = {
-            "type": "execute",  # Explicitly set message type
-            "action": payload.get("action"),  # Extract action from payload (agent will plan if None)
+        task = {
             "prompt": instruction,
+            "action": payload.get("action"),
             "payload": payload.get("payload", {}),
             "task_id": payload.get("task_id"),
             "thread_id": payload.get("thread_id"),
+            "user_id": user_id,
         }
-        # Remove None values
-        uap_request = {k: v for k, v in uap_request.items() if v is not None}
-
-        async def _call_agent():
-            async with httpx.AsyncClient(timeout=self.timeout_map["agent"]) as client:
-                # UAP: All agents receive standardized request format
-                logger.debug(
-                    f"📤 Sending UAP Request to {url}: {json.dumps(uap_request, default=str)}"
-                )
-                resp = await client.post(url, json=uap_request, headers=auth_headers)
-                logger.debug(
-                    f"📥 Received Response from {url}: Status={resp.status_code}, Body={resp.text[:500]}..."
-                )  # Truncate for brevity
-                return resp
-
+        
         try:
-            response = await RetryManager.retry_async(
-                func=_call_agent,
-                max_retries=2,
-                operation_name=f"AgentCall({agent['name']})",
-                retry_on_status_codes=[502, 503, 504],
-            )
-
-            agent_result = response.json()
-            success = response.status_code == 200
-
-            # Deep validation
+            # Get agent manager and ensure it's initialized
+            agent_manager = get_agent_manager()
+            if not agent_manager._initialized:
+                await agent_manager.initialize()
+            
+            # Execute task (agent spawned automatically if needed)
+            logger.info(f"🚀 Executing task on {agent_name} (on-demand)")
+            agent_result = await agent_manager.execute(agent_id, task)
+            
+            # Determine success
+            success = agent_result.get("status") != "error"
             if isinstance(agent_result, dict):
-                if (
-                    agent_result.get("success") is False
-                    or agent_result.get("status") == "error"
-                ):
+                if agent_result.get("success") is False:
                     success = False
-
+            
+            # Log telemetry
             telemetry_service.log_agent_call(
-                agent["name"], success, (time.time() - start_time) * 1000
+                agent_name, success, (time.time() - start_time) * 1000
             )
-
-            # Extract error from Standard Response if available
+            
+            # Extract error message
             error_message = agent_result.get("error")
             if not error_message and "standard_response" in agent_result:
                 error_message = agent_result["standard_response"].get("error_message")
-
+            
+            logger.info(f"✅ Agent {agent_name} execution complete (success={success})")
+            
             return ActionResult(
-                action_id=f"agent_{agent['id']}",
+                action_id=f"agent_{agent_id}",
                 success=success,
                 output=agent_result,
                 error_message=error_message if not success else None,
                 execution_time_ms=(time.time() - start_time) * 1000,
             )
-
+            
         except Exception as e:
+            logger.error(f"❌ Agent {agent_name} execution failed: {e}")
             telemetry_service.log_agent_call(
-                agent["name"], False, (time.time() - start_time) * 1000
+                agent_name, False, (time.time() - start_time) * 1000
             )
-
+            
             return ActionResult(
-                action_id=f"agent_{agent['id']}",
+                action_id=f"agent_{agent_id}",
                 success=False,
-                error_message=f"Agent connection error: {str(e)}",
+                error_message=f"Agent execution error: {str(e)}",
                 execution_time_ms=(time.time() - start_time) * 1000,
             )
 
@@ -469,9 +444,9 @@ class Hands:
         )
 
     async def _execute_python(
-        self, payload: Dict[str, Any], start_time: float
+        self, payload: Dict[str, Any], start_time: float, thread_id: str = "default"
     ) -> ActionResult:
-        """Execute Python code in the sandbox."""
+        """Execute Python code in the sandbox, tracking any created files."""
         code = payload.get("code", "")
         session_id = payload.get("session_id", "orchestrator_main")
 
@@ -483,7 +458,24 @@ class Hands:
                 execution_time_ms=(time.time() - start_time) * 1000,
             )
 
-        result = code_sandbox.execute_code(code, session_id=session_id)
+        # Get workspace path for this thread
+        workspace_manager = get_workspace_manager(thread_id)
+        workspace_path = str(workspace_manager.get_workspace_path())
+        
+        # Modify code to ensure it saves to workspace directory
+        # Add workspace path context at the beginning of code
+        modified_code = f"""
+import os
+os.chdir(r'{workspace_path}')
+
+{code}
+"""
+
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None, 
+            lambda: code_sandbox.execute_code(modified_code, session_id=session_id)
+        )
 
         success = result.get("success", False)
         stdout = (result.get("stdout") or "").strip()
@@ -519,6 +511,10 @@ class Hands:
         decision_dict = state.get("decision", {})
         iteration = state.get("iteration_count", 0)
         action_type = decision_dict.get("action_type", "unknown")
+        
+        # Get thread_id and user_id for workspace managers
+        thread_id = (config or {}).get("configurable", {}).get("thread_id", "default")
+        user_id = state.get("user_id", "default")
 
         # Generate result summary (first 500 chars of string representation)
         result_summary = self._generate_result_summary(result.output)
@@ -537,11 +533,27 @@ class Hands:
         }
 
         existing_action_history = list(state.get("action_history", []))
+        
+        # Get workspace managers for file tracking
+        workspace_manager = get_workspace_manager(thread_id)
+        created_files = workspace_manager.list_files()
+        
+        # Get shared workspace
+        from .shared_workspace import get_shared_workspace_manager
+        shared_manager = get_shared_workspace_manager(user_id)
+        shared_files = shared_manager.list_files()
+        
         updates = {
             "execution_result": result.model_dump(),
             "error": result.error_message if not result.success else None,
             # Append to action history manually
             "action_history": existing_action_history + [history_entry],
+            # Track created files and workspace
+            "created_files": [f.to_dict() for f in created_files],
+            "orchestrator_workspace": str(workspace_manager.get_workspace_path()),
+            # Track shared files
+            "shared_files": [f.to_dict() for f in shared_files],
+            "shared_workspace": str(shared_manager.get_workspace_path()),
         }
 
         # SOTA: Extract Canvas Data from Standard Response (UAP v2)

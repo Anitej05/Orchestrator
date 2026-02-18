@@ -79,19 +79,37 @@ def get_stock_quote(ticker: str = "", symbol: str = "") -> Dict:
 
 
 @tool
-def get_stock_history(ticker: str, period: str = "1mo") -> Dict:
+def get_stock_history(ticker: str = "", symbol: str = "", period: str = "1mo") -> Dict:
     """
     Get historical stock price data (OHLCV).
 
     Args:
-        ticker: Stock ticker symbol
-        period: Time period - '1d', '5d', '1mo', '3mo', '6mo', '1y', '5y', 'max'
+        ticker: Stock ticker symbol (e.g., 'TSLA', 'AAPL')
+        symbol: Alias for ticker
+        period: Time period - '1d', '5d', '1w', '1mo', '3mo', '6mo', '1y', '5y', 'max'
 
     Returns:
         Dictionary with ticker and list of historical data points
     """
     try:
-        stock = yf.Ticker(ticker.upper())
+        # Accept both ticker and symbol
+        ticker = (ticker or symbol).upper()
+        if not ticker:
+            return {"error": "No ticker symbol provided"}
+            
+        # Normalize period - convert common aliases
+        period_map = {
+            '1w': '5d',      # Week -> 5 trading days
+            'week': '5d',
+            '1m': '1mo',
+            '3m': '3mo',
+            '6m': '6mo',
+            '1y': '1y',
+            'ytd': 'ytd',
+        }
+        period = period_map.get(period.lower(), period)
+        
+        stock = yf.Ticker(ticker)
         hist = stock.history(period=period)
 
         if hist is None or hist.empty:
@@ -111,7 +129,7 @@ def get_stock_history(ticker: str, period: str = "1mo") -> Dict:
                 }
             )
 
-        return {"ticker": ticker.upper(), "period": period, "data": data}
+        return {"ticker": ticker, "period": period, "data": data}
 
     except Exception as e:
         return {"error": f"Failed to get history: {str(e)}"}

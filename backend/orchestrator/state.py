@@ -113,3 +113,13 @@ class State(TypedDict):
     thread_id: str
     user_id: str
     uploaded_files: Annotated[List[Dict], overwrite_reducer]
+    
+    # --- FILE TRACKING ---
+    # Files created by orchestrator during this conversation (persisted per thread)
+    created_files: Annotated[List[Dict], append_reducer]
+    # Path to orchestrator's workspace for this thread
+    orchestrator_workspace: Annotated[str, overwrite_reducer]
+    # Files in shared workspace (available across all conversations for this user)
+    shared_files: Annotated[List[Dict], overwrite_reducer]
+    # Path to shared workspace
+    shared_workspace: Annotated[str, overwrite_reducer]

@@ -253,11 +253,48 @@ You are a helpful, intelligent, and expressive AI assistant.
 - To read or process these files, you MUST use an appropriate Agent (e.g., `DocumentAgent` for PDFs/Docs) or a Tool (e.g., `read_file` or `Python` code).
 - **NEVER** hallucinate or guess the contents of a file if it has not been explicitly read in the Action History.
 
+## YOUR FILES
+
+### Thread Workspace (This conversation only)
+{self._build_created_files_view(state.get("created_files", []), state.get("orchestrator_workspace", "Unknown"))}
+- These files are private to THIS conversation
+- Use these for temporary analysis, charts, downloads
+- They won't be visible in other conversations
+
+### Shared Workspace (All your conversations)
+{self._build_shared_workspace_view(state.get("shared_files", []), state.get("shared_workspace", "Unknown"))}
+- These files persist ACROSS all your conversations
+- Use these for templates, saved reports, reusable data
+- When user says "save this for later" or "remember this", put files here
+- Files are shared across ALL your conversation threads
+
+## AGENT WORKSPACES (Files created by agents)
+{self._build_agent_workspaces_view()}
+- These are files stored in agent-specific directories
+- You can access these if needed for the task
+
 ## EXECUTION PLAN
 {plan_str}
 
 ## COMPLETE ACTION HISTORY (all actions with results)
 {action_history_str}
+
+## SELF-CHECK: Am I Making Progress?
+**Review your action history above and ask:**
+
+1. **Repetition Check**: Have I performed similar actions multiple times with similar results?
+   - Example: Multiple web searches about the same topic with same results
+   - Example: Running Python code multiple times with minor tweaks getting same output
+   - **If YES → STOP and finish with what you have**
+
+2. **Diminishing Returns Check**: Is each new action providing significantly less new information?
+   - First search: 10 new facts → Second search: 2 new facts → Third search: 0 new facts
+   - **If YES → STOP, you have sufficient information**
+
+3. **Completion Check**: Did the previous action already produce what the user asked for?
+   - User asked for "analysis" and you have analysis results
+   - User asked for "prediction" and you have prediction output
+   - **If YES → STOP and return the results**
 
 ## CONVERSATION HISTORY (Recent interactions)
 {conversation_history_str}
@@ -396,10 +433,102 @@ When `requires_approval=True`:
 6. **Within a phase**: Focus only on the current phase's goal.
 7. **Phase done?**: Set phase_complete=True with phase_goal_verified when phase goal is met.
 8. **SENSITIVE ACTIONS**: Set requires_approval=True with approval_reason for emails, deletions, payments, etc.
-9. **STOPPING/TERMINATION - CRITICAL**:
-   - When the objective is COMPLETELY MET and you have the final answer → **MUST use action_type='finish'**
-    - When task is complete, you MUST use action_type='finish'
-   - If you have the answer ready, just set action_type='finish' and provide user_response
+
+## TASK COMPLETION DETECTION - CRITICAL
+
+**You MUST stop when the task is complete. Do NOT continue indefinitely.**
+
+**Ask yourself these questions BEFORE every decision:**
+
+1. **Have I answered the user's original question?** 
+   - If YES → Use action_type='finish' immediately
+   - If NO → Continue with next action
+
+2. **Is the information I have sufficient to satisfy the objective?**
+   - For data/analysis tasks: Do I have the key results/data the user asked for?
+   - For research tasks: Have I found the core information requested?
+   - For coding tasks: Does the code run and produce the expected output?
+
+3. **Am I making progress or just repeating similar actions?**
+   - If the last 2-3 actions gave similar results → You likely have enough data
+   - If you're searching for "just one more" piece of info → You probably have enough
+
+**COMPLETION EXAMPLES:**
+
+✅ **User**: "Get Tesla stock news and prices, then predict future"
+- After: News fetched + Prices fetched + Python prediction ran with output
+- **ACTION**: action_type='finish' with the prediction results
+
+✅ **User**: "Summarize this PDF"
+- After: DocumentAgent reads PDF and returns summary
+- **ACTION**: action_type='finish' with the summary
+
+✅ **User**: "Calculate Q4 revenue"
+- After: Python code runs and returns the calculated value
+- **ACTION**: action_type='finish' with the answer
+
+❌ **DON'T**: Keep searching for "more context" or "verification" when you already have a clear answer
+❌ **DON'T**: Create additional analysis, charts, or reports unless explicitly requested
+❌ **DON'T**: Ask "Would you like me to..." - just finish if the core task is done
+
+## STOPPING/TERMINATION - CRITICAL
+- When the objective is COMPLETELY MET and you have the final answer → **MUST use action_type='finish'**
+- When task is complete, you MUST use action_type='finish'
+- If you have the answer ready, just set action_type='finish' and provide user_response
+- **BEFORE calling another tool/agent, ask: "Do I already have what the user needs?"**
+
+## FILE SHARING - WHEN TO USE WHICH WORKSPACE
+
+**Thread Workspace (Private):**
+- Use for: Temporary files, analysis results, charts, downloads
+- User says: "Create a chart", "Analyze this data", "Download this file"
+- Files stay private to this conversation
+- **Default location** for all created files
+
+**Shared Workspace (Persistent):**
+- Use for: Templates, saved reports, reusable data, important files
+- User says: "Save this for later", "Remember this", "Keep this for next time"
+- Files available in ALL your conversations
+- To share a file: Use Python to copy from thread workspace to shared workspace
+  ```python
+  import shutil
+  shutil.copy('chart.png', '../shared/user_123/chart.png')
+  ```
+
+**Example:**
+- User: "Create a sales report" → Save to thread workspace
+- User: "Save this report for future reference" → Copy to shared workspace
+- User: "Use that template from last week" → Read from shared workspace
+
+## INTELLIGENT FILE SHARING - YOU DECIDE
+
+As the orchestrator, YOU decide when to share files based on user intent:
+
+**Automatically SHARE to persistent storage when:**
+1. User explicitly says: "save this", "keep this", "remember this"
+2. Creating a template (email template, report template, etc.)
+3. User marks something as "important" or "permanent"
+4. User wants to "reuse" or "use again"
+5. File type suggests persistence (.docx report, .json config, etc.)
+
+**Keep PRIVATE (thread workspace) when:**
+1. Temporary analysis or charts
+2. One-time downloads
+3. Scratch/experimental files
+4. User doesn't indicate importance
+5. File type suggests temporary (.tmp, .cache, .log)
+
+**How to share after creating a file:**
+Use Python to copy the file:
+```python
+import shutil
+# After creating a file, copy to shared workspace
+shutil.copy('myfile.png', '../shared/test_user/myfile.png')
+```
+
+Then tell user: "I've saved this to your persistent storage so it's available in all your conversations."
+
+**Note:** Agents don't have direct access to shared storage - only YOU do. When an agent needs a shared file, YOU provide it to them.
 
 ## OUTPUT
 Return JSON with:
@@ -668,6 +797,62 @@ Return JSON with:
             lines.append(f"  Path: {path}")
 
         return "\n".join(lines)
+
+    def _build_created_files_view(self, created_files: List[Dict], workspace_path: str) -> str:
+        """Build a view of files created by the orchestrator in this conversation."""
+        if not created_files:
+            return f"No files created yet in this conversation.\nWorkspace: {workspace_path}"
+        
+        lines = [f"Workspace: {workspace_path}"]
+        for f in created_files:
+            name = f.get("file_name", "Unknown")
+            ftype = f.get("file_type", "Unknown")
+            created_by = f.get("created_by", "Unknown")
+            size = f.get("size_bytes", 0)
+            size_kb = size / 1024 if size else 0
+            
+            lines.append(f"- {name} ({ftype}, {size_kb:.1f} KB) [Created by: {created_by}]")
+        
+        return "\n".join(lines)
+    
+    def _build_shared_workspace_view(self, shared_files: List[Dict], workspace_path: str) -> str:
+        """Build a view of files in the shared workspace."""
+        if not shared_files:
+            return f"No shared files yet.\nShared workspace: {workspace_path}"
+        
+        lines = [f"Shared workspace: {workspace_path}"]
+        for f in shared_files:
+            name = f.get("file_name", "Unknown")
+            ftype = f.get("file_type", "Unknown")
+            description = f.get("description", "")
+            size = f.get("size_bytes", 0)
+            size_kb = size / 1024 if size else 0
+            
+            lines.append(f"- {name} ({ftype}, {size_kb:.1f} KB)")
+            if description:
+                lines.append(f"  Note: {description}")
+        
+        return "\n".join(lines)
+    
+    def _build_agent_workspaces_view(self) -> str:
+        """Build a view of files in agent workspaces."""
+        try:
+            from .workspace_manager import STORAGE_BASE
+            if not STORAGE_BASE.exists():
+                return "No agent workspaces found."
+            
+            lines = []
+            for agent_dir in STORAGE_BASE.iterdir():
+                if agent_dir.is_dir() and agent_dir.name not in ['orchestrator', 'content', 'system', 'vector_store']:
+                    files = [f.name for f in agent_dir.iterdir() if f.is_file()][:5]  # Limit to 5
+                    if files:
+                        lines.append(f"- {agent_dir.name}:")
+                        for fname in files:
+                            lines.append(f"    - {fname}")
+            
+            return "\n".join(lines) if lines else "No files in agent workspaces."
+        except Exception as e:
+            return f"Could not scan agent workspaces: {e}"
 
     def _build_execution_plan_view(self, state: Dict[str, Any]) -> str:
         """Build a view of the execution plan for complex tasks."""

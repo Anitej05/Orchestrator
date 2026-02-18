@@ -23,9 +23,16 @@ import platform
 import socket
 import re
 
+# Ensure both import styles resolve without requiring external PYTHONPATH.
+BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(BACKEND_DIR)
+for _path in (BACKEND_DIR, PROJECT_ROOT):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
 # Load environment variables from .env file
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(dotenv_path=os.path.join(BACKEND_DIR, ".env"))
 
 # --- Third-party Imports ---
 from fastapi import FastAPI, HTTPException, Depends, status, Query, Response, WebSocket, WebSocketDisconnect, Body, Request
@@ -1054,7 +1061,9 @@ async def execute_orchestration(
         logger.info("📂 EXECUTE_ORCHESTRATION: No files received in this request")
 
     # Build config with task_event_callback and owner if provided
-    config = {"configurable": {"thread_id": thread_id}}
+    # Keep graph recursion budget above Brain.max_iterations so controller-level
+    # safeguards can terminate gracefully before LangGraph hard-recursion errors.
+    config = {"recursion_limit": 80, "configurable": {"thread_id": thread_id}}
     if task_event_callback:
         config["configurable"]["task_event_callback"] = task_event_callback
         logger.info(f"✅ Task event callback registered for real-time streaming")

@@ -8,6 +8,7 @@ import numpy as np
 import requests
 import json
 import ast
+import builtins
 from typing import Dict, Any, Optional, List
 
 logger = logging.getLogger("CodeSandboxService")
@@ -16,10 +17,11 @@ class CodeSandboxService:
     """
     A unified service for executing Python code in a stateful, semi-sandboxed environment.
     This serves as the "Hands" of the new orchestrator, allowing the LLM to write and run code.
+    
+    Thread-safe: Uses custom print capture instead of sys.stdout modification.
     """
     
     SAFE_BUILTINS = {
-        'print': print,
         'len': len,
         'range': range,
         'str': str,
@@ -57,14 +59,22 @@ class CodeSandboxService:
 
     def _get_or_create_session(self, session_id: str) -> Dict[str, Any]:
         if session_id not in self.sessions:
+            output_buffer = io.StringIO()
+            
+            def make_print(buffer):
+                def custom_print(*args, **kwargs):
+                    print(*args, file=buffer, **kwargs)
+                return custom_print
+            
             self.sessions[session_id] = {
                 'globals': {
-                    '__builtins__': self.SAFE_BUILTINS,
+                    '__builtins__': {**self.SAFE_BUILTINS, 'print': make_print(output_buffer)},
                     'pd': pd,
                     'np': np,
                     'requests': requests,
                     'json': json,
                 },
+                'output_buffer': output_buffer,
                 'history': []
             }
         return self.sessions[session_id]
@@ -83,28 +93,25 @@ class CodeSandboxService:
         """
         session = self._get_or_create_session(session_id)
         exec_globals = session['globals']
+        output_buffer = session['output_buffer']
+        
+        # Clear the output buffer for this execution
+        output_buffer.seek(0)
+        output_buffer.truncate(0)
         
         # Inject context variables if provided
         if context_vars:
             exec_globals.update(context_vars)
             
-        # Capture stdout
-        old_stdout = sys.stdout
-        redirected_output = io.StringIO()
-        sys.stdout = redirected_output
-        
         result = None
         error = None
         success = False
         new_vars = []
         
         try:
-            # Execute the code - Standard exec (no AST auto-return)
             exec(code, exec_globals)
-            
             success = True
             
-            # Helper to safely serialize results
             def safe_serialize(obj, depth=0):
                 if depth > 2: return str(obj)
                 if isinstance(obj, (int, float, bool, str, type(None))):
@@ -114,23 +121,20 @@ class CodeSandboxService:
                 if isinstance(obj, dict):
                     return {k: safe_serialize(v, depth+1) for k, v in obj.items() if not k.startswith('_')}
                 if isinstance(obj, list):
-                    return [safe_serialize(i, depth+1) for i in obj[:10]] # TRUNCATE lists
+                    return [safe_serialize(i, depth+1) for i in obj[:10]]
                 return str(obj)
 
-            # Capture "result" variable if it exists (Legacy/Explicit support)
             if 'result' in exec_globals:
                 result = safe_serialize(exec_globals['result'])
 
-            # Identify new variables created (for reporting)
             current_keys = set(exec_globals.keys())
-
+                    
         except Exception as e:
             error = str(e)
             logger.error(f"Sandbox execution failed: {e}\n{traceback.format_exc()}")
-        finally:
-            sys.stdout = old_stdout
-            
-        stdout = redirected_output.getvalue()
+
+        # Get captured output
+        stdout = output_buffer.getvalue()
 
         # FEEDBACK: If code ran but produced no output/result, warn the LLM
         if success and not stdout.strip() and result is None:
