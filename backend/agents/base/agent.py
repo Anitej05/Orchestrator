@@ -27,6 +27,25 @@ from .capability import Capability, CapabilityRegistry, capability
 logger = logging.getLogger(__name__)
 
 
+class _StepFailure(Exception):
+    """Internal exception that carries completed step results from a failed attempt.
+    
+    Used by _execute_single_attempt to communicate which steps succeeded
+    before the failure, so _execute_with_recovery can skip them on retry.
+    """
+
+    def __init__(
+        self,
+        failed_step: int,
+        original_error: Exception,
+        completed_results: list,
+    ):
+        self.failed_step = failed_step
+        self.original_error = original_error
+        self.completed_results = completed_results
+        super().__init__(str(original_error))
+
+
 @dataclass
 class AgentConfig:
     """Configuration for agent behavior."""
@@ -146,6 +165,45 @@ class BaseAgent(ABC):
         self._last_used = time.time()
 
         try:
+            # ── Direct dispatch path ──────────────────────────────────────
+            # When the caller explicitly sets request.action, bypass LLM
+            # planning and call the capability directly with request.payload.
+            # This is used by tests, the orchestrator, and any client that
+            # already knows the exact capability name + parameters.
+            if request.action:
+                capability = self.capability_registry.get(request.action)
+                if capability:
+                    context = ExecutionContext(
+                        thread_id=request.thread_id or "",
+                        user_id=request.user_id or "",
+                        task_id=request.task_id,
+                    )
+                    cap_result = await capability.execute(
+                        agent=self,
+                        params=request.payload or {},
+                        context=context,
+                    )
+                    if cap_result.success:
+                        # Surface metadata (message, canvas_display, etc.) in AgentResponse
+                        meta = cap_result.metadata or {}
+                        return AgentResponse.success(
+                            result=cap_result.data,
+                            summary=meta.get("message", f"{request.action} completed"),
+                            data=meta,
+                            execution_time_ms=(time.time() - start_time) * 1000,
+                        )
+                    else:
+                        return AgentResponse.error(
+                            message=cap_result.error or "Capability failed",
+                            execution_time_ms=(time.time() - start_time) * 1000,
+                        )
+                else:
+                    logger.warning(
+                        f"Action '{request.action}' not found in registry, "
+                        "falling back to LLM planning"
+                    )
+
+            # ── LLM-driven planning path ──────────────────────────────────
             # Execute with recovery
             result = await self._execute_with_recovery(request)
 
@@ -180,19 +238,28 @@ class BaseAgent(ABC):
     async def _execute_with_recovery(self, request: AgentRequest) -> AgentResponse:
         """
         Execute with intelligent error recovery.
+        Tracks completed steps to skip them on retry.
         """
         attempt = 0
         last_error = None
+        completed_results: List[CapabilityResult] = []
 
         while attempt < self.config.max_retries:
             try:
-                # Try normal execution
-                return await self._execute_single_attempt(request, attempt)
+                # Try execution, passing completed_results to skip done steps
+                return await self._execute_single_attempt(
+                    request, attempt, completed_results=completed_results
+                )
 
-            except Exception as e:
+            except _StepFailure as sf:
+                # Preserve results from steps that completed before the failure
+                completed_results = sf.completed_results
                 attempt += 1
-                last_error = e
-                logger.warning(f"Execution attempt {attempt} failed: {e}")
+                last_error = sf.original_error
+                logger.warning(
+                    f"Execution attempt {attempt} failed at step {sf.failed_step}: "
+                    f"{sf.original_error} ({len(completed_results)} steps already completed)"
+                )
 
                 if attempt >= self.config.max_retries:
                     logger.error(f"Max retries ({self.config.max_retries}) exceeded")
@@ -203,9 +270,16 @@ class BaseAgent(ABC):
                     continue
 
                 # LLM analyzes error and plans recovery
-                recovery_plan = await self._llm_plan_recovery(
-                    error=e, request=request, attempt=attempt
-                )
+                try:
+                    recovery_plan = await self._llm_plan_recovery(
+                        error=sf.original_error, request=request, attempt=attempt
+                    )
+                except Exception as recovery_err:
+                    logger.warning(
+                        f"Recovery planning itself failed: {recovery_err}. "
+                        "Falling back to simple retry."
+                    )
+                    continue
 
                 if recovery_plan.should_retry:
                     # Apply fixes and retry
@@ -227,10 +301,21 @@ class BaseAgent(ABC):
                     logger.info(f"Escalating to user: {recovery_plan.user_question}")
                     return AgentResponse.needs_input(
                         question=recovery_plan.user_question,
-                        reasoning=recovery_plan.reasoning,
+                        metadata={"reasoning": recovery_plan.reasoning},
                     )
                 else:
                     # Can't recover
+                    break
+
+            except Exception as e:
+                # Non-step failures (e.g. LLM planning errors) — reset completed
+                completed_results = []
+                attempt += 1
+                last_error = e
+                logger.warning(f"Execution attempt {attempt} failed: {e}")
+
+                if attempt >= self.config.max_retries:
+                    logger.error(f"Max retries ({self.config.max_retries}) exceeded")
                     break
 
         # All retries exhausted
@@ -240,16 +325,21 @@ class BaseAgent(ABC):
         )
 
     async def _execute_single_attempt(
-        self, request: AgentRequest, attempt: int
+        self, request: AgentRequest, attempt: int,
+        completed_results: List[CapabilityResult] = None,
     ) -> AgentResponse:
         """
         Single execution attempt.
+        Skips already-completed steps on retry to avoid redundant work.
         """
+        completed_results = completed_results or []
+        skip_count = len(completed_results)
+
         # Step 1: LLM understands the task
         understanding = await self._llm_understand_task(request)
 
         # Step 2: LLM creates execution plan
-        plan = await self._llm_create_plan(understanding)
+        plan = await self._llm_create_plan(understanding, request)
 
         # Step 3: Execute plan
         context = ExecutionContext(
@@ -258,17 +348,38 @@ class BaseAgent(ABC):
             task_id=request.task_id,
         )
 
-        results = []
+        # Seed context with results from previously completed steps
+        results: List[CapabilityResult] = []
+        for i, prev_result in enumerate(completed_results):
+            results.append(prev_result)
+            context.set(f"step_{i + 1}_result", prev_result)
+
         for step in plan.steps:
+            # Skip steps that already completed successfully in a prior attempt
+            if step.step_number <= skip_count:
+                logger.info(
+                    f"[SKIP] Step {step.step_number}/{len(plan.steps)} already completed, skipping"
+                )
+                continue
+
+            # Enrich step params with outputs from prior steps
+            step = self._enrich_step_params(step, results)
+
             result = await self._execute_step(step, context)
             results.append(result)
 
             # Store result for subsequent steps
             context.set(f"step_{step.step_number}_result", result)
 
-            # Check if step failed
+            # Check if step failed — raise _StepFailure so retry can skip done steps
             if not result.success:
-                raise Exception(f"Step {step.step_number} failed: {result.error}")
+                raise _StepFailure(
+                    failed_step=step.step_number,
+                    original_error=Exception(
+                        f"Step {step.step_number} failed: {result.error}"
+                    ),
+                    completed_results=results[:-1],  # exclude the failed step
+                )
 
         # Step 4: LLM synthesizes final response
         final_response = await self._llm_synthesize_response(
@@ -277,6 +388,53 @@ class BaseAgent(ABC):
 
         return final_response
 
+    def _enrich_step_params(
+        self, step: ExecutionStep, previous_results: List[CapabilityResult]
+    ) -> ExecutionStep:
+        """
+        Inject outputs from previous steps into the current step's parameters.
+        Looks for file_id/file_path in prior step results and threads them forward.
+        """
+        if not previous_results:
+            return step
+
+        # Find the latest file_id produced by a previous step
+        latest_file_id = None
+        latest_file_path = None
+        for prev in reversed(previous_results):
+            if not prev.success:
+                continue
+            data = prev.data if isinstance(prev.data, dict) else {}
+            meta = prev.metadata if isinstance(prev.metadata, dict) else {}
+            # Check data first, then metadata
+            fid = data.get("file_id") or meta.get("file_id")
+            fpath = data.get("file_path") or meta.get("file_path")
+            if fid:
+                latest_file_id = fid
+                latest_file_path = fpath
+                break
+
+        if not latest_file_id:
+            return step
+
+        # Only inject if the step doesn't already have a valid file_id
+        params = dict(step.parameters)
+        current_fid = params.get("file_id")
+
+        # Inject if: no file_id set, or the LLM set a placeholder that likely won't resolve
+        if not current_fid or current_fid != latest_file_id:
+            logger.info(
+                f"[ENRICH] Step {step.step_number}: injecting file_id='{latest_file_id}' "
+                f"(was '{current_fid}')"
+            )
+            params["file_id"] = latest_file_id
+            if latest_file_path:
+                params.setdefault("file_path", latest_file_path)
+
+        # Return a new step with enriched params (ExecutionStep is a dataclass)
+        from dataclasses import replace
+        return replace(step, parameters=params)
+
     async def _llm_understand_task(self, request: AgentRequest) -> Dict[str, Any]:
         """
         Use LLM to understand the task intent and requirements.
@@ -284,6 +442,8 @@ class BaseAgent(ABC):
         capabilities_context = self.capability_registry.to_llm_context()
 
         system_prompt = f"""You are an intelligent agent understanding system.
+You are running LOCALLY on the user's machine with FULL access to the local filesystem.
+You CAN read and write files at any path the user provides. Never say you cannot access local files.
 Analyze the user's request and extract key information.
 
 You have these capabilities available:
@@ -321,25 +481,64 @@ Respond with structured JSON."""
         # Convert Pydantic model to dict
         return response.model_dump()
 
-    async def _llm_create_plan(self, understanding: Dict[str, Any]) -> ExecutionPlan:
+    async def _llm_create_plan(
+        self, understanding: Dict[str, Any], request: AgentRequest = None
+    ) -> ExecutionPlan:
         """
         Use LLM to create execution plan with capabilities.
         """
         capabilities_context = self.capability_registry.to_llm_context()
 
+        # Build session context: tell the LLM what data is already loaded
+        session_context = ""
+        thread_id = (request.thread_id if request else None) or "default"
+        has_loaded_data = False
+        if hasattr(self, "state"):
+            session = None
+            if hasattr(self.state, "get"):
+                session = self.state.get(thread_id)
+            elif hasattr(self.state, "get_or_create"):
+                session = self.state.get_or_create(thread_id)
+            if session and hasattr(session, "dataframes") and session.dataframes:
+                has_loaded_data = True
+                loaded_info = []
+                for fid, df in session.dataframes.items():
+                    loaded_info.append(
+                        f"  - file_id='{fid}', {df.shape[0]} rows × {df.shape[1]} cols, columns: {list(df.columns)}"
+                    )
+                session_context = (
+                    "\n\nALREADY LOADED DATA (thread_id='" + thread_id + "'):\n"
+                    + "\n".join(loaded_info)
+                    + "\n\nIMPORTANT: Do NOT call load_file again for these files. "
+                    "Use the file_id and thread_id directly in your plan parameters."
+                )
+        
+        # CRITICAL FIX: Explicitly tell LLM when no data is loaded
+        if not has_loaded_data:
+            session_context = (
+                "\n\n**NO DATA LOADED YET**\n"
+                "You MUST include a load_file step FIRST before any data processing steps. "
+                "Extract the file path from the user's request and use it in load_file."
+            )
+
         system_prompt = f"""You are an intelligent agent planning system.
+You are running LOCALLY on the user's machine with FULL access to the local filesystem.
+You CAN read and write files at any path. Never ask the user to upload or share files — just use load_file with the path.
 Create a step-by-step plan to accomplish the task using available capabilities.
 
 Guidelines:
 - Break complex tasks into logical steps
 - Each step should use one capability
 - Consider dependencies between steps
-- Include fallback options for critical steps"""
+- Include fallback options for critical steps
+- If data is already loaded, reference it by file_id and thread_id — do NOT re-load it
+- If a file path is mentioned, use it directly with load_file — you have full filesystem access"""
 
         user_prompt = f"""Task Understanding:
 - Intent: {understanding.get("intent")}
 - Entities: {understanding.get("entities")}
 - Complexity: {understanding.get("complexity")}
+{session_context}
 
 Available Capabilities:
 {capabilities_context}
@@ -347,7 +546,7 @@ Available Capabilities:
 Create an execution plan with:
 1. Step-by-step breakdown
 2. Capability to use for each step
-3. Parameters for each capability
+3. Parameters for each capability (include thread_id='{thread_id}' and the correct file_id)
 4. Expected outcome
 5. Fallback strategy
 
@@ -361,7 +560,7 @@ Respond with structured JSON."""
             description: str
             parameters: Dict[str, Any]
             expected_outcome: str
-            fallback_capability: Optional[str] = None
+            fallback_capability: Optional[Any] = None
 
         class PlanCreation(BaseModel):
             reasoning: str
@@ -387,7 +586,13 @@ Respond with structured JSON."""
                     description=s.description,
                     parameters=s.parameters,
                     expected_outcome=s.expected_outcome,
-                    fallback_capability=s.fallback_capability,
+                    fallback_capability=(
+                        s.fallback_capability.get("capability_name")
+                        if isinstance(s.fallback_capability, dict)
+                        else str(s.fallback_capability)
+                        if s.fallback_capability
+                        else None
+                    ),
                 )
                 for s in response.steps
             ],
@@ -410,9 +615,15 @@ Respond with structured JSON."""
 
         logger.debug(f"Executing step {step.step_number}: {step.capability_name}")
 
+        # Ensure thread_id is always present in params (LLM plans often omit it)
+        params = dict(step.parameters)
+        # Use context.thread_id if available, otherwise default to "default"
+        if "thread_id" not in params:
+            params["thread_id"] = context.thread_id if context.thread_id else "default"
+
         # Execute capability
         result = await capability.execute(
-            agent=self, params=step.parameters, context=context
+            agent=self, params=params, context=context
         )
 
         return result
@@ -478,10 +689,18 @@ Respond with structured JSON."""
             temperature=0.3,  # Slightly creative for natural language
         )
 
+        # Collect canvas_display from the last step that produced one
+        canvas = None
+        for r in reversed(results):
+            if r.metadata and r.metadata.get("canvas_display"):
+                canvas = r.metadata["canvas_display"]
+                break
+
         return AgentResponse.success(
             result=response.detailed_result,
             summary=response.summary,
             data=response.key_data,
+            canvas_display=canvas,
             metadata={"next_steps": response.next_steps},
         )
 
@@ -492,13 +711,17 @@ Respond with structured JSON."""
         Use LLM to analyze error and plan recovery strategy.
         """
         system_prompt = """You are an error recovery planning system.
+You are running LOCALLY on the user's machine with FULL access to the local filesystem.
+You CAN read and write files at any path. Never escalate just because a file path was mentioned — you CAN access it.
 Analyze the error and decide the best recovery strategy.
 
 Strategies:
-1. RETRY - Fix parameters and try again (transient errors)
+1. RETRY - Fix parameters and try again (transient errors, wrong params)
 2. ALTERNATE - Use different approach (method doesn't work)
-3. ESCALATE - Ask user for help (ambiguous situation)
-4. FAIL - Cannot recover (critical error)"""
+3. ESCALATE - Ask user for help ONLY if truly ambiguous — NOT for file access issues
+4. FAIL - Cannot recover (critical error)
+
+Prefer RETRY over ESCALATE when the error is about missing data or wrong parameters."""
 
         capabilities_context = self.capability_registry.to_llm_context()
 
@@ -517,7 +740,7 @@ Analyze this error and decide:
 
 Respond with structured JSON."""
 
-        from pydantic import BaseModel, Field
+        from pydantic import BaseModel, Field, model_validator
 
         class RecoveryDecision(BaseModel):
             analysis: str = Field(description="What went wrong")
@@ -525,14 +748,26 @@ Respond with structured JSON."""
             confidence: float = Field(description="Confidence in strategy (0-1)")
             reasoning: str = Field(description="Why this strategy")
             fixes: Optional[Dict[str, Any]] = Field(
+                default=None,
                 description="Parameter adjustments for retry"
             )
-            alternative: Optional[str] = Field(
-                description="Alternative capability for alternate strategy"
+            alternative: Optional[Any] = Field(
+                default=None,
+                description="Alternative capability name for alternate strategy"
             )
-            user_question: Optional[str] = Field(
+            user_question: Optional[Any] = Field(
+                default=None,
                 description="Question for user if escalating"
             )
+
+            @model_validator(mode="after")
+            def coerce_fields(self):
+                """Coerce dict/non-string values to strings for safety."""
+                if self.alternative and not isinstance(self.alternative, str):
+                    self.alternative = str(self.alternative)
+                if self.user_question and not isinstance(self.user_question, str):
+                    self.user_question = str(self.user_question)
+                return self
 
         response = await self.services.inference.generate_structured(
             messages=[

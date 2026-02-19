@@ -54,13 +54,40 @@ class Capability:
             raise ValueError(f"Capability {self.name} has no handler")
 
         try:
-            result = await self.handler(agent, params, context)
+            # If the handler is a bound method (stored via discover_from_agent,
+            # which uses getattr on the live agent instance), self is already
+            # baked in — calling handler(agent, params, context) would pass
+            # agent as an extra first positional arg, causing a TypeError.
+            # Unbound / standalone handlers still need the agent passed explicitly.
+            if hasattr(self.handler, "__self__"):
+                result = await self.handler(params, context)
+            else:
+                result = await self.handler(agent, params, context)
 
             # Normalize result
             if isinstance(result, CapabilityResult):
                 return result
             elif isinstance(result, dict) and "success" in result:
-                return CapabilityResult(**result)
+                # Map dict keys to CapabilityResult fields.
+                # Extra keys (message, canvas_display, file_id, etc.) are
+                # bundled into 'metadata' so CapabilityResult(**) doesn't blow up.
+                known_keys = {"success", "data", "error", "metadata"}
+                cap_kwargs: Dict[str, Any] = {}
+                extra: Dict[str, Any] = {}
+                for k, v in result.items():
+                    if k in known_keys:
+                        cap_kwargs[k] = v
+                    else:
+                        extra[k] = v
+                # Merge extra into metadata
+                if extra:
+                    existing_meta = cap_kwargs.get("metadata") or {}
+                    if isinstance(existing_meta, dict):
+                        existing_meta.update(extra)
+                    else:
+                        existing_meta = extra
+                    cap_kwargs["metadata"] = existing_meta
+                return CapabilityResult(**cap_kwargs)
             else:
                 return CapabilityResult.ok(data=result)
 

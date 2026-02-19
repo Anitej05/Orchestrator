@@ -51,11 +51,12 @@ class InferenceService:
     
     def __init__(self):
         self._initialized = True
-        # Default fallback order - NVIDIA with minimax first (works with improved JSON extraction)
+        # Default provider order: Cerebras first (fastest, free, gpt-oss-120b),
+        # then GROQ, then NVIDIA as last resort.
         self._default_providers = [
+            ProviderType.CEREBRAS,
+            ProviderType.GROQ,
             ProviderType.NVIDIA,
-            ProviderType.GROQ, 
-            ProviderType.CEREBRAS
         ]
         
         # Metrics storage
@@ -243,8 +244,9 @@ class InferenceService:
                 llm = self._get_llm_client(current_provider, model_name, temperature, 4000, json_mode=True)
                 if not llm: continue
                 
-                # Skip with_structured_output for NVIDIA/minimax - use JSON fallback directly
-                # because minimax's structured output returns None but JSON extraction works
+                # Skip with_structured_output for NVIDIA/minimax only — minimax's
+                # structured output returns None but our JSON extraction handles it.
+                # Cerebras and GROQ support with_structured_output natively.
                 use_json_fallback = current_provider == ProviderType.NVIDIA
                 
                 # Use standard LangChain structured output interface (skip for NVIDIA)
@@ -364,7 +366,7 @@ class InferenceService:
                 if not api_key: return None
                 
                 # Model validation: Groq models typically start with llama, mixtral, or gemma
-                model_to_use = model if model and any(x in model.lower() for x in ["llama", "mixtral", "gemma", "gpt"]) else "openai/gpt-oss-120b"
+                model_to_use = model if model and any(x in model.lower() for x in ["llama", "mixtral", "gemma", "gpt", "qwen", "deepseek"]) else "openai/gpt-oss-120b"
                 return ChatGroq(model=model_to_use, api_key=api_key, temperature=temp, max_tokens=max_tokens)
                 
             elif provider == ProviderType.NVIDIA:

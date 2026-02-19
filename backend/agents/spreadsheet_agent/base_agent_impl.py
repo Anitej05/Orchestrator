@@ -242,7 +242,7 @@ class SpreadsheetAgent(BaseAgent):
 
     @capability(
         name="load_file",
-        description="Load a spreadsheet file (CSV, Excel, JSON) into the session",
+        description="Load a spreadsheet file (CSV, Excel) into the session. WARNING: Only use this if the user explicitly asks to load a NEW file. If a file is already loaded, do NOT use this.",
         parameters=[
             ParameterSchema(
                 name="file_path",
@@ -419,6 +419,14 @@ class SpreadsheetAgent(BaseAgent):
         if not file_id:
             file_id = session.get_latest_file_id()
 
+        # CRITICAL FIX: If specified file_id not found, try the latest file
+        # This handles LLM-generated file_ids that don't match UUID-suffixed IDs
+        if file_id and file_id not in session.dataframes:
+            latest = session.get_latest_file_id()
+            if latest and latest in session.dataframes:
+                logger.info(f"[FALLBACK] File '{file_id}' not found in export_file, using latest: '{latest}'")
+                file_id = latest
+
         if not file_id or file_id not in session.dataframes:
             return {"success": False, "error": "No data loaded"}
 
@@ -510,12 +518,22 @@ class SpreadsheetAgent(BaseAgent):
 
         if not file_id:
             file_id = session.get_latest_file_id()
+        
+        # CRITICAL FIX: If specified file_id not found, try the latest file
+        if file_id and file_id not in session.dataframes:
+            latest = session.get_latest_file_id()
+            if latest and latest in session.dataframes:
+                logger.info(f"[FALLBACK] File '{file_id}' not found, using latest: '{latest}'")
+                file_id = latest
 
         if not file_id or file_id not in session.dataframes:
+            available = list(session.dataframes.keys()) if session.dataframes else []
+            logger.error(f"[process_data] No data loaded. Available files: {available}, requested: {params.get('file_id')}")
             return {
                 "success": False,
-                "error": "No data loaded. Please load a file first.",
+                "error": f"No data loaded. Available files: {available}",
             }
+
 
         df = session.dataframes[file_id]
 
@@ -632,6 +650,13 @@ class SpreadsheetAgent(BaseAgent):
         if not file_id:
             file_id = session.get_latest_file_id()
 
+        # CRITICAL FIX: If specified file_id not found, try the latest file
+        if file_id and file_id not in session.dataframes:
+            latest = session.get_latest_file_id()
+            if latest and latest in session.dataframes:
+                logger.info(f"[FALLBACK] File '{file_id}' not found in transform_data, using latest: '{latest}'")
+                file_id = latest
+
         if not file_id or file_id not in session.dataframes:
             return {"success": False, "error": "No data loaded"}
 
@@ -697,6 +722,8 @@ class SpreadsheetAgent(BaseAgent):
                     "<",
                     ">=",
                     "<=",
+                    "in",
+                    "not_in",
                     "contains",
                     "startswith",
                     "endswith",
@@ -737,6 +764,13 @@ class SpreadsheetAgent(BaseAgent):
         if not file_id:
             file_id = session.get_latest_file_id()
 
+        # CRITICAL FIX: If specified file_id not found, try the latest file
+        if file_id and file_id not in session.dataframes:
+            latest = session.get_latest_file_id()
+            if latest and latest in session.dataframes:
+                logger.info(f"[FALLBACK] File '{file_id}' not found in filter_data, using latest: '{latest}'")
+                file_id = latest
+
         if not file_id or file_id not in session.dataframes:
             return {"success": False, "error": "No data loaded"}
 
@@ -767,6 +801,19 @@ class SpreadsheetAgent(BaseAgent):
                 filtered = df[
                     df[col].astype(str).str.contains(str(value), case=False, na=False)
                 ]
+            elif operator == "in":
+                # Support comma-separated or list values for multi-value matching
+                if isinstance(value, list):
+                    match_values = [str(v).strip() for v in value]
+                else:
+                    match_values = [v.strip() for v in str(value).split(",")]
+                filtered = df[df[col].astype(str).isin(match_values)]
+            elif operator == "not_in":
+                if isinstance(value, list):
+                    match_values = [str(v).strip() for v in value]
+                else:
+                    match_values = [v.strip() for v in str(value).split(",")]
+                filtered = df[~df[col].astype(str).isin(match_values)]
             elif operator == "startswith":
                 filtered = df[df[col].astype(str).str.startswith(str(value), na=False)]
             elif operator == "endswith":
@@ -843,6 +890,13 @@ class SpreadsheetAgent(BaseAgent):
         session = self.state.get_or_create(thread_id)
         if not file_id:
             file_id = session.get_latest_file_id()
+
+        # CRITICAL FIX: If specified file_id not found, try the latest file
+        if file_id and file_id not in session.dataframes:
+            latest = session.get_latest_file_id()
+            if latest and latest in session.dataframes:
+                logger.info(f"[FALLBACK] File '{file_id}' not found in sort_data, using latest: '{latest}'")
+                file_id = latest
 
         if not file_id or file_id not in session.dataframes:
             return {"success": False, "error": "No data loaded"}
@@ -944,9 +998,20 @@ class SpreadsheetAgent(BaseAgent):
         session = self.state.get_or_create(thread_id)
         if not file_id:
             file_id = session.get_latest_file_id()
+        
+        # CRITICAL FIX: If specified file_id not found, try the latest file
+        # This handles LLM placeholder file_ids like "sales_data_aggregated_mean"
+        if file_id and file_id not in session.dataframes:
+            latest = session.get_latest_file_id()
+            if latest and latest in session.dataframes:
+                logger.info(f"[FALLBACK] File '{file_id}' not found, using latest: '{latest}'")
+                file_id = latest
 
         if not file_id or file_id not in session.dataframes:
-            return {"success": False, "error": "No data loaded"}
+            available = list(session.dataframes.keys()) if session.dataframes else []
+            logger.error(f"[aggregate_data] No data loaded. Available files: {available}, requested: {params.get('file_id')}")
+            return {"success": False, "error": f"No data loaded. Available files: {available}"}
+
 
         df = session.dataframes[file_id]
 
@@ -1155,6 +1220,13 @@ class SpreadsheetAgent(BaseAgent):
         if not file_id:
             file_id = session.get_latest_file_id()
 
+        # CRITICAL FIX: If specified file_id not found, try the latest file
+        if file_id and file_id not in session.dataframes:
+            latest = session.get_latest_file_id()
+            if latest and latest in session.dataframes:
+                logger.info(f"[FALLBACK] File '{file_id}' not found in add_column, using latest: '{latest}'")
+                file_id = latest
+
         if not file_id or file_id not in session.dataframes:
             return {"success": False, "error": "No data loaded"}
 
@@ -1233,6 +1305,13 @@ class SpreadsheetAgent(BaseAgent):
         session = self.state.get_or_create(thread_id)
         if not file_id:
             file_id = session.get_latest_file_id()
+
+        # CRITICAL FIX: If specified file_id not found, try the latest file
+        if file_id and file_id not in session.dataframes:
+            latest = session.get_latest_file_id()
+            if latest and latest in session.dataframes:
+                logger.info(f"[FALLBACK] File '{file_id}' not found in drop_column, using latest: '{latest}'")
+                file_id = latest
 
         if not file_id or file_id not in session.dataframes:
             return {"success": False, "error": "No data loaded"}
@@ -1313,6 +1392,13 @@ class SpreadsheetAgent(BaseAgent):
         session = self.state.get_or_create(thread_id)
         if not file_id:
             file_id = session.get_latest_file_id()
+
+        # CRITICAL FIX: If specified file_id not found, try the latest file
+        if file_id and file_id not in session.dataframes:
+            latest = session.get_latest_file_id()
+            if latest and latest in session.dataframes:
+                logger.info(f"[FALLBACK] File '{file_id}' not found in rename_column, using latest: '{latest}'")
+                file_id = latest
 
         if not file_id or file_id not in session.dataframes:
             return {"success": False, "error": "No data loaded"}
@@ -1397,6 +1483,13 @@ class SpreadsheetAgent(BaseAgent):
         session = self.state.get_or_create(thread_id)
         if not file_id:
             file_id = session.get_latest_file_id()
+
+        # CRITICAL FIX: If specified file_id not found, try the latest file
+        if file_id and file_id not in session.dataframes:
+            latest = session.get_latest_file_id()
+            if latest and latest in session.dataframes:
+                logger.info(f"[FALLBACK] File '{file_id}' not found in fill_missing, using latest: '{latest}'")
+                file_id = latest
 
         if not file_id or file_id not in session.dataframes:
             return {"success": False, "error": "No data loaded"}
@@ -1491,6 +1584,13 @@ class SpreadsheetAgent(BaseAgent):
         session = self.state.get_or_create(thread_id)
         if not file_id:
             file_id = session.get_latest_file_id()
+
+        # CRITICAL FIX: If specified file_id not found, try the latest file
+        if file_id and file_id not in session.dataframes:
+            latest = session.get_latest_file_id()
+            if latest and latest in session.dataframes:
+                logger.info(f"[FALLBACK] File '{file_id}' not found in get_summary, using latest: '{latest}'")
+                file_id = latest
 
         if not file_id or file_id not in session.dataframes:
             return {"success": False, "error": "No data loaded"}

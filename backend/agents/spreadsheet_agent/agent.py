@@ -160,6 +160,19 @@ class SpreadsheetAgent:
                         file_path = potential_path
                         logger.info(f"[EXTRACT] Found file_path in prompt: {file_path}")
                 
+                # FALLBACK 2a: Extract Windows paths from natural language
+                # Matches paths like: D:\path\to\file.csv or D:/path/to/file.xlsx
+                if not file_path:
+                    # Pattern for Windows absolute paths with drive letter
+                    windows_path_match = re.search(r'([A-Za-z]:[\\/][^\s,;\'"]+\.(?:csv|xlsx?|xls))', prompt, re.IGNORECASE)
+                    if windows_path_match:
+                        potential_path = windows_path_match.group(1)
+                        # Normalize path separators
+                        potential_path = potential_path.replace('/', os.sep).replace('\\', os.sep)
+                        if os.path.exists(potential_path):
+                            file_path = potential_path
+                            logger.info(f"[EXTRACT] Found Windows path in prompt: {file_path}")
+                
                 if not file_path:
                     file_id_match = re.search(r"file_id=['\"]?([^'\")\s]+)['\"]?", prompt)
                     if file_id_match:
@@ -545,6 +558,15 @@ class SpreadsheetAgent:
                 current_df = await self.resolver.resolve_dataframe(params, thread_id, require_data=False)
             except:
                 pass
+            
+            # CRITICAL FIX: If resolver failed, try to get the latest dataframe from session
+            # This handles cases where a previous step created a new file but didn't update current_df
+            if current_df is None:
+                latest_id = session.get_latest_file_id()
+                if latest_id and latest_id in session.dataframes:
+                    current_df = session.dataframes[latest_id]
+                    logger.info(f"[STEP] Using latest session dataframe: {latest_id}, shape: {current_df.shape}")
+
         
         # Route to appropriate handler - SIMPLIFIED ARCHITECTURE
         # Only 3 core actions: load_file, process, export
@@ -564,10 +586,20 @@ class SpreadsheetAgent:
             instruction = params.get('instruction') or params.get('question') or str(params)
             if action not in ['process']:
                 instruction = f"{action}: {instruction}"
+            
+            # CRITICAL FIX: Ensure current_df is passed to _step_process
+            # If current_df is still None after resolution, try one more time with session
+            if current_df is None:
+                latest_id = session.get_latest_file_id()
+                if latest_id and latest_id in session.dataframes:
+                    current_df = session.dataframes[latest_id]
+                    logger.info(f"[STEP FALLBACK] Using session dataframe for {action}: {latest_id}")
+            
             return await self._step_process(
                 {'instruction': instruction},
                 current_df, session, thread_id
             )
+
     
     # ========================================================================
     # STEP HANDLERS
@@ -664,8 +696,15 @@ class SpreadsheetAgent:
         try:
             instruction = params.get('instruction') or params.get('question') or ''
             
+            # CRITICAL FIX: Try to get dataframe from session if not provided
+            # This handles cases where previous steps created new dataframes
             if df is None:
-                return StepResult(action='process', success=False, error="No data loaded")
+                latest_id = session.get_latest_file_id()
+                if latest_id and latest_id in session.dataframes:
+                    df = session.dataframes[latest_id]
+                    logger.info(f"[_step_process] Resolved df from session: {latest_id}, shape: {df.shape}")
+                else:
+                    return StepResult(action='process', success=False, error="No data loaded")
             
             # Build rich context for the LLM
             df_context = await self.client.build_context(df, instruction)
