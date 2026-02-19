@@ -48,8 +48,6 @@ class Agent(Base):
     capabilities = Column(JSON, nullable=True)  # Now nullable - endpoints are the primary source of truth
     price_per_call_usd = Column(Float, nullable=False, default=0.0)
     status = Column(SAEnum(StatusEnum), nullable=False, default=StatusEnum.active, index=True)
-    rating = Column(Float, default=0.0)
-    rating_count = Column(Integer, default=0, nullable=False)
     public_key_pem = Column(Text, nullable=True)  # Optional for MCP agents
     created_at = Column(DateTime, default=datetime.utcnow)  # Track when the agent was created
     
@@ -199,6 +197,44 @@ class AgentCredential(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     agent = relationship("Agent", back_populates="credentials")
+
+
+class UserConnection(Base):
+    """
+    Stores Composio integration connections for users.
+    Each connection represents an authenticated integration (Gmail, Slack, etc.)
+    """
+    __tablename__ = "user_connections"
+
+    id = Column(String, primary_key=True)
+    user_id = Column(String, nullable=False, index=True)
+    app_slug = Column(String, nullable=False, index=True)  # e.g., "gmail", "slack"
+    connection_id = Column(String, nullable=False)  # Encrypted Composio connection ID
+    status = Column(String, default="active")  # active, stale, disconnected
+    auth_timestamp = Column(DateTime, default=datetime.utcnow)
+    last_verified = Column(DateTime, nullable=True)
+    app_metadata = Column(JSON, nullable=True)  # Store connection-specific metadata
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ConnectionLog(Base):
+    """
+    Audit log for connection events (auth, verification, errors).
+    Used for debugging and monitoring integration health.
+    """
+    __tablename__ = "connection_logs"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(String, nullable=False, index=True)
+    app_slug = Column(String, nullable=False, index=True)
+    connection_id = Column(String, nullable=True)
+    event_type = Column(String, nullable=False)  # auth_completed, verification_success, verification_failed, etc.
+    status = Column(String, nullable=False)  # success, error
+    error_message = Column(Text, nullable=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 # ============================================================================

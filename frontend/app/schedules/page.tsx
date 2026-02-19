@@ -3,7 +3,9 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@clerk/nextjs";
-import Navbar from "@/components/navbar";
+import { authFetch } from "@/lib/auth-fetch";
+import { API_BASE_URL } from "@/lib/config";
+import { SidebarInset, SidebarTrigger, useSidebar } from "@/components/ui/sidebar";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -55,10 +57,11 @@ interface Schedule {
   created_at: string;
 }
 
-export default function SchedulesPage() {
+function SchedulesContent() {
   const router = useRouter();
   const { getToken } = useAuth();
   const { toast } = useToast();
+  const { open } = useSidebar();
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [loading, setLoading] = useState(true);
   const [deleteScheduleId, setDeleteScheduleId] = useState<string | null>(null);
@@ -70,13 +73,7 @@ export default function SchedulesPage() {
 
   const loadSchedules = async () => {
     try {
-      const token = await getToken();
-      const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-      const response = await fetch(`${API_URL}/api/schedules`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
+      const response = await authFetch(`${API_BASE_URL}/api/schedules`);
 
       if (!response.ok) throw new Error("Failed to load schedules");
 
@@ -97,19 +94,13 @@ export default function SchedulesPage() {
   const toggleSchedule = async (scheduleId: string, currentActive: boolean) => {
     setActionLoading(scheduleId);
     try {
-      const token = await getToken();
-      const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-      const response = await fetch(
-        `${API_URL}/api/schedules/${scheduleId}`,
-        {
-          method: "PATCH",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ is_active: !currentActive }),
-        }
-      );
+      const response = await authFetch(`${API_BASE_URL}/api/schedules/${scheduleId}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ is_active: !currentActive }),
+      });
 
       if (!response.ok) throw new Error("Failed to update schedule");
 
@@ -136,17 +127,9 @@ export default function SchedulesPage() {
   const deleteSchedule = async (scheduleId: string, workflowId: string) => {
     setActionLoading(scheduleId);
     try {
-      const token = await getToken();
-      const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-      const response = await fetch(
-        `${API_URL}/api/workflows/${workflowId}/schedule/${scheduleId}`,
-        {
-          method: "DELETE",
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        }
-      );
+      const response = await authFetch(`${API_BASE_URL}/api/workflows/${workflowId}/schedule/${scheduleId}`, {
+        method: "DELETE",
+      });
 
       if (!response.ok) throw new Error("Failed to delete schedule");
 
@@ -170,7 +153,6 @@ export default function SchedulesPage() {
   };
 
   const formatCron = (cron: string) => {
-    // Convert cron to human-readable format
     const parts = cron.split(" ");
     if (parts.length !== 5) return cron;
 
@@ -193,7 +175,7 @@ export default function SchedulesPage() {
   const formatDateTime = (dateString: string | null) => {
     if (!dateString) return "Never";
     const date = new Date(dateString);
-    return date.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) + ' IST';
+    return date.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) + " IST";
   };
 
   const getRelativeTime = (dateString: string | null) => {
@@ -216,174 +198,163 @@ export default function SchedulesPage() {
 
   if (loading) {
     return (
-      <>
-        <Navbar />
-        <div className="flex items-center justify-center min-h-screen pt-16">
-          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+      <SidebarInset>
+        <div className="min-h-screen bg-bg-page dark:bg-background text-text-primary flex items-center justify-center">
+          <div className="text-center text-text-secondary">
+            <Loader2 className="h-10 w-10 animate-spin text-brand-teal mx-auto mb-4" />
+            <p>Loading schedules...</p>
+          </div>
         </div>
-      </>
+      </SidebarInset>
     );
   }
 
   return (
-    <>
-      <Navbar />
-      <div className="container mx-auto py-8 px-4 pt-16">
-        <div className="flex items-center justify-between mb-6">
-          <div>
-            <h1 className="text-3xl font-bold tracking-tight">Scheduled Workflows</h1>
-            <p className="text-muted-foreground mt-1">
-            Manage automated workflow executions
-          </p>
-        </div>
-        <Button onClick={() => router.push("/workflows")}>
-          <Calendar className="mr-2 h-4 w-4" />
-          View Workflows
-        </Button>
-      </div>
-
-      {schedules.length === 0 ? (
-        <Card>
-          <CardContent className="flex flex-col items-center justify-center py-12">
-            <AlertCircle className="h-12 w-12 text-muted-foreground mb-4" />
-            <h3 className="text-lg font-semibold mb-2">No scheduled workflows</h3>
-            <p className="text-muted-foreground text-center mb-4">
-              You haven't scheduled any workflows yet. Schedule a workflow to run it
-              automatically.
-            </p>
-            <Button onClick={() => router.push("/workflows")}>
-              Browse Workflows
+      <SidebarInset>
+      <div className="min-h-screen bg-bg-page dark:bg-background text-text-primary">
+        <main className="p-6 space-y-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-3xl font-bold text-brand-teal">Scheduled Workflows</h1>
+              <p className="text-text-secondary mt-1">Manage automated workflow executions</p>
+            </div>
+            <Button variant="outline" onClick={() => router.push("/saved-workflows")}> 
+              <Calendar className="mr-2 h-4 w-4" />
+              View Workflows
             </Button>
-          </CardContent>
-        </Card>
-      ) : (
-        <Card>
-          <CardHeader>
-            <CardTitle>Active Schedules</CardTitle>
-            <CardDescription>
-              {schedules.filter((s) => s.is_active).length} active,{" "}
-              {schedules.filter((s) => !s.is_active).length} paused
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Workflow</TableHead>
-                  <TableHead>Schedule</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Last Run</TableHead>
-                  <TableHead>Next Run</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {schedules.map((schedule) => (
-                  <TableRow key={schedule.schedule_id}>
-                    <TableCell className="font-medium">
-                      {schedule.workflow_name}
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-2">
-                        <Clock className="h-4 w-4 text-muted-foreground" />
-                        <span className="text-sm">{formatCron(schedule.cron_expression)}</span>
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant={schedule.is_active ? "default" : "secondary"}>
-                        {schedule.is_active ? "Active" : "Paused"}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-sm text-muted-foreground">
-                      {formatDateTime(schedule.last_run_at)}
-                    </TableCell>
-                    <TableCell>
-                      {schedule.is_active && schedule.next_run_at ? (
-                        <div className="flex flex-col">
-                          <span className="text-sm">{formatDateTime(schedule.next_run_at)}</span>
-                          <span className="text-xs text-muted-foreground">
-                            {getRelativeTime(schedule.next_run_at)}
-                          </span>
-                        </div>
-                      ) : (
-                        <span className="text-sm text-muted-foreground">-</span>
-                      )}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex items-center justify-end gap-2">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() =>
-                            router.push(`/schedules/${schedule.schedule_id}/executions`)
-                          }
-                          title="View execution history"
-                        >
-                          <History className="h-4 w-4" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() =>
-                            toggleSchedule(schedule.schedule_id, schedule.is_active)
-                          }
-                          disabled={actionLoading === schedule.schedule_id}
-                        >
-                          {actionLoading === schedule.schedule_id ? (
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                          ) : schedule.is_active ? (
-                            <Pause className="h-4 w-4" />
+          </div>
+          {schedules.length === 0 ? (
+            <Card className="ui-card">
+              <CardContent className="flex flex-col items-center justify-center py-12 text-text-secondary">
+                <AlertCircle className="h-12 w-12 text-brand-teal mb-4" />
+                <h3 className="text-lg font-semibold mb-2 text-text-primary">No scheduled workflows</h3>
+                <p className="text-text-secondary text-center mb-4">
+                  You haven't scheduled any workflows yet. Schedule a workflow to run it automatically.
+                </p>
+                <Button onClick={() => router.push("/saved-workflows")}>
+                  Browse Workflows
+                </Button>
+              </CardContent>
+            </Card>
+          ) : (
+            <Card className="ui-card">
+              <CardHeader>
+                <CardTitle className="text-text-primary">Active Schedules</CardTitle>
+                <CardDescription className="text-text-secondary">
+                  {schedules.filter((s) => s.is_active).length} active, {schedules.filter((s) => !s.is_active).length} paused
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="text-text-secondary">Workflow</TableHead>
+                      <TableHead className="text-text-secondary">Schedule</TableHead>
+                      <TableHead className="text-text-secondary">Status</TableHead>
+                      <TableHead className="text-text-secondary">Last Run</TableHead>
+                      <TableHead className="text-text-secondary">Next Run</TableHead>
+                      <TableHead className="text-right text-text-secondary">Actions</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {schedules.map((schedule) => (
+                      <TableRow key={schedule.schedule_id}>
+                        <TableCell className="font-medium text-text-primary">{schedule.workflow_name}</TableCell>
+                        <TableCell>
+                          <div className="flex items-center gap-2 text-text-secondary">
+                            <Clock className="h-4 w-4 text-brand-teal" />
+                            <span className="text-sm">{formatCron(schedule.cron_expression)}</span>
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <Badge className={schedule.is_active ? "bg-status-active/15 text-status-active border border-status-active/30" : "bg-bg-card text-text-secondary border border-border-color"}>
+                            {schedule.is_active ? "Active" : "Paused"}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-sm text-text-secondary">{formatDateTime(schedule.last_run_at)}</TableCell>
+                        <TableCell>
+                          {schedule.is_active && schedule.next_run_at ? (
+                            <div className="flex flex-col text-text-secondary">
+                              <span className="text-sm">{formatDateTime(schedule.next_run_at)}</span>
+                              <span className="text-xs text-text-tertiary">{getRelativeTime(schedule.next_run_at)}</span>
+                            </div>
                           ) : (
-                            <Play className="h-4 w-4" />
+                            <span className="text-sm text-text-tertiary">-</span>
                           )}
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => setDeleteScheduleId(schedule.schedule_id)}
-                          disabled={actionLoading === schedule.schedule_id}
-                        >
-                          <Trash2 className="h-4 w-4 text-destructive" />
-                        </Button>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
-      )}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <div className="flex items-center justify-end gap-2">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => router.push(`/schedules/${schedule.schedule_id}/executions`)}
+                              title="View execution history"
+                            >
+                              <History className="h-4 w-4" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => toggleSchedule(schedule.schedule_id, schedule.is_active)}
+                              disabled={actionLoading === schedule.schedule_id}
+                            >
+                              {actionLoading === schedule.schedule_id ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                              ) : schedule.is_active ? (
+                                <Pause className="h-4 w-4" />
+                              ) : (
+                                <Play className="h-4 w-4" />
+                              )}
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => setDeleteScheduleId(schedule.schedule_id)}
+                              disabled={actionLoading === schedule.schedule_id}
+                            >
+                              <Trash2 className="h-4 w-4 text-status-error" />
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
+          )}
 
-      <AlertDialog
-        open={deleteScheduleId !== null}
-        onOpenChange={() => setDeleteScheduleId(null)}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete schedule?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This will permanently delete the schedule. The workflow itself will not be
-              deleted and can be scheduled again later.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                const schedule = schedules.find((s) => s.schedule_id === deleteScheduleId);
-                if (schedule) {
-                  deleteSchedule(schedule.schedule_id, schedule.workflow_id);
-                }
-              }}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-            >
-              Delete
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+          <AlertDialog open={deleteScheduleId !== null} onOpenChange={() => setDeleteScheduleId(null)}>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete schedule?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This will permanently delete the schedule. The workflow itself will not be deleted and can be scheduled again later.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction
+                  onClick={() => {
+                    const schedule = schedules.find((s) => s.schedule_id === deleteScheduleId);
+                    if (schedule) {
+                      deleteSchedule(schedule.schedule_id, schedule.workflow_id);
+                    }
+                  }}
+                  className="bg-status-error text-white hover:bg-status-error/90"
+                >
+                  Delete
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+        </main>
       </div>
-    </>
+    </SidebarInset>
   );
 }
+
+  export default function SchedulesPage() {
+    return <SchedulesContent />;
+}
+

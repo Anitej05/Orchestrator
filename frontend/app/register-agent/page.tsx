@@ -2,15 +2,14 @@
 
 import { useState } from "react"
 import { useRouter } from "next/navigation"
-import AppSidebar from "@/components/app-sidebar"
-import Navbar from "@/components/navbar"
-import { SidebarProvider, SidebarInset, SidebarTrigger } from "@/components/ui/sidebar"
+import { SidebarInset, SidebarTrigger } from "@/components/ui/sidebar"
 import AgentRegistrationForm from "@/components/agent-registration-form"
 import AgentPreview from "@/components/agent-preview"
 import { Button } from "@/components/ui/button"
 import { useToast } from "@/hooks/use-toast"
 import { ArrowLeft } from "lucide-react"
 import { registerAgent } from "@/lib/api-client"
+import { type Agent, type AgentEndpoint } from "@/lib/types"
 
 interface EndpointDetail {
   endpoint: string
@@ -18,35 +17,31 @@ interface EndpointDetail {
   description?: string
 }
 
-interface AgentRegistrationData {
-  id: string
-  owner_id: string
+interface FormData {
   name: string
-  description: string
+  framework: string
   capabilities: string[]
-  price_per_call_usd: number
-  status: "active" | "inactive" | "deprecated"
   endpoints: EndpointDetail[]
-  rating: number
-  public_key_pem: string
+  description: string
+  successRate: string
+  pricePerCall: string
 }
 
 export default function RegisterAgent() {
   const router = useRouter()
   const { toast } = useToast()
-  const [formData, setFormData] = useState({
+  const [formData, setFormData] = useState<FormData>({
     name: "",
     framework: "",
     capabilities: [] as string[],
     endpoints: [] as EndpointDetail[],
     description: "",
     successRate: "",
-    pricePerCall: "",
+    pricePerCall: ""
   })
   const [isSaving, setIsSaving] = useState(false)
   const [isTesting, setIsTesting] = useState(false)
 
-  // Generate a simple public key for demo purposes
   const generateDemoPublicKey = () => {
     return `-----BEGIN PUBLIC KEY-----
 MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA1234567890abcdefghij
@@ -59,18 +54,11 @@ klmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ
   }
 
   const handleSave = async () => {
-    // Validate required fields
-    if (
-      !formData.name ||
-      !formData.framework ||
-      !formData.description ||
-      !formData.pricePerCall ||
-      formData.endpoints.length === 0
-    ) {
+    if (!formData.name || !formData.framework || !formData.description || !formData.pricePerCall || formData.endpoints.length === 0) {
       toast({
         title: "Validation Error",
         description: "Please fill in all required fields including at least one endpoint.",
-        variant: "destructive",
+        variant: "destructive"
       })
       return
     }
@@ -79,7 +67,7 @@ klmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ
       toast({
         title: "Validation Error",
         description: "Please add at least one capability.",
-        variant: "destructive",
+        variant: "destructive"
       })
       return
     }
@@ -87,24 +75,28 @@ klmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ
     setIsSaving(true)
 
     try {
-      const agentData: AgentRegistrationData = {
+      const agentData: Agent = {
         id: `agent_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-        owner_id: "user_demo", // In a real app, this would come from authentication
+        owner_id: "user_demo",
         name: formData.name,
         description: formData.description,
         capabilities: formData.capabilities,
         price_per_call_usd: Number.parseFloat(formData.pricePerCall),
         status: "active",
-        endpoints: formData.endpoints,
-        rating: formData.successRate ? Number.parseFloat(formData.successRate) / 20 : 4.5, // Convert percentage to 5-star rating
-        public_key_pem: generateDemoPublicKey(),
+        endpoints: formData.endpoints.map((ep: any) => ({
+          endpoint: ep.endpoint,
+          http_method: ep.http_method as "GET" | "POST" | "PUT" | "DELETE",
+          description: ep.description,
+        })),
+        rating: formData.successRate ? Number.parseFloat(formData.successRate) / 20 : 4.5,
+        public_key_pem: generateDemoPublicKey()
       }
 
       await registerAgent(agentData)
 
       toast({
         title: "Agent registered successfully",
-        description: "Your agent has been added to the marketplace.",
+        description: "Your agent has been added to the marketplace."
       })
 
       router.push("/agents")
@@ -113,7 +105,7 @@ klmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ
       toast({
         title: "Registration failed",
         description: error instanceof Error ? error.message : "An error occurred while registering your agent.",
-        variant: "destructive",
+        variant: "destructive"
       })
     } finally {
       setIsSaving(false)
@@ -125,7 +117,7 @@ klmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ
       toast({
         title: "Test Error",
         description: "Please add at least one endpoint to test the agent.",
-        variant: "destructive",
+        variant: "destructive"
       })
       return
     }
@@ -133,18 +125,17 @@ klmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ
     setIsTesting(true)
 
     try {
-      // Simulate testing agent endpoints
       await new Promise((resolve) => setTimeout(resolve, 3000))
 
       toast({
         title: "Test completed successfully",
-        description: `All ${formData.endpoints.length} endpoint(s) are accessible.`,
+        description: `All ${formData.endpoints.length} endpoint(s) are accessible.`
       })
     } catch (error) {
       toast({
         title: "Test failed",
         description: "Unable to connect to your agent endpoints.",
-        variant: "destructive",
+        variant: "destructive"
       })
     } finally {
       setIsTesting(false)
@@ -156,33 +147,25 @@ klmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ
   }
 
   return (
-    <>
-      <Navbar />
-      <SidebarProvider>
-        <AppSidebar />
-        <SidebarInset>
-          <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50 dark:from-gray-900 dark:to-gray-800">
-            {/* Header */}
-            <div className="sticky top-0 z-10 bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm border-b border-gray-200 dark:border-gray-700 px-4 py-3">
-              <div className="flex items-center space-x-4">
-                <SidebarTrigger className="h-8 w-8" />
-                <Button variant="ghost" onClick={() => router.back()}>
-                  <ArrowLeft className="w-4 h-4 mr-2" />
-                  Back
-                </Button>
-              </div>
+    <SidebarInset>
+        <div className="min-h-screen bg-bg-page dark:bg-background text-text-primary">
+          <div className="sticky top-0 z-10 bg-bg-card/90 dark:bg-card/90 backdrop-blur-sm border-b border-border-color px-4 py-3">
+            <div className="flex items-center space-x-4">
+              <SidebarTrigger className="h-8 w-8" />
+              <Button variant="ghost" onClick={() => router.back()} className="text-text-primary">
+                <ArrowLeft className="w-4 h-4 mr-2" />
+                Back
+              </Button>
+            </div>
+          </div>
+
+          <main className="container mx-auto px-4 py-6 space-y-6">
+            <div className="mb-4">
+              <h1 className="text-3xl font-bold text-brand-teal">Register New Agent</h1>
+              <p className="text-text-secondary mt-2">Add your AI agent to the marketplace and start earning from task executions.</p>
             </div>
 
-          <main className="container mx-auto px-4 py-6">
-            <div className="mb-6">
-              <h1 className="text-3xl font-bold text-blue-600 dark:text-blue-400">Register New Agent</h1>
-              <p className="text-gray-600 dark:text-gray-300 mt-2">
-                Add your AI agent to the marketplace and start earning from task executions.
-              </p>
-            </div>
-
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              {/* Registration Form - 2/3 width */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
               <div className="lg:col-span-2">
                 <AgentRegistrationForm
                   formData={formData}
@@ -195,15 +178,13 @@ klmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ
                 />
               </div>
 
-              {/* Live Preview - 1/3 width */}
               <div className="lg:col-span-1">
-                <AgentPreview formData={formData} />
+                <AgentPreview formData={formData as any} />
               </div>
             </div>
           </main>
         </div>
       </SidebarInset>
-    </SidebarProvider>
-    </>
   )
 }
+

@@ -193,6 +193,7 @@ async def continue_task(request: UAPContinueRequest):
     )
 
 
+
 # =============================================================================
 # BASEAGENT INTEGRATION
 # =============================================================================
@@ -223,8 +224,12 @@ except Exception as e:
 # MAIN
 # =============================================================================
 
-if __name__ == "__main__":
+def run_agent() -> None:
     import uvicorn
     uvicorn.run(legacy_app, host="0.0.0.0", port=8090)
+
+
+if __name__ == "__main__":
+    run_agent()
 
 

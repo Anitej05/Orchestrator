@@ -105,7 +105,7 @@ export function PlanApprovalModal({
           <div className="space-y-3">
             {allTasks.map((task, index) => (
               <div
-                key={index}
+                key={`plan-task-${index}-${task.task || ''}`}
                 className="p-4 border rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
               >
                 <div className="flex items-start justify-between mb-2">
@@ -167,3 +167,4 @@ export function PlanApprovalModal({
     </Dialog>
   );
 }
+

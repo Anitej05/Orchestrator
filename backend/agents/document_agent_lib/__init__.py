@@ -744,6 +744,7 @@ async def shutdown_event():
     # Cleanup can be added here if needed
 
 
+<<<<<<< HEAD
 # ============================================================================
 # BASEAGENT INTEGRATION
 # ============================================================================
@@ -768,3 +769,12 @@ except Exception as e:
     import traceback
     traceback.print_exc()
     app = legacy_app  # Fallback to legacy
+=======
+def run_agent() -> None:
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8050)
+
+
+if __name__ == "__main__":
+    run_agent()
+>>>>>>> 7d9846cd986323c77b62c7053f012cdb2e0b4aa3

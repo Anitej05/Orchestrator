@@ -8,6 +8,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Save, Check, Calendar } from "lucide-react";
 import { authFetch } from "@/lib/auth-fetch";
 import { ScheduleWorkflowDialog } from "@/components/schedule-workflow-dialog";
+import { API_BASE_URL } from "@/lib/config";
 
 interface SaveWorkflowButtonProps {
   threadId: string | null;
@@ -29,7 +30,7 @@ export default function SaveWorkflowButton({ threadId, disabled }: SaveWorkflowB
     setSaving(true);
     try {
       const response = await authFetch(
-        `http://localhost:8000/api/workflows?thread_id=${threadId}&name=${encodeURIComponent(name)}&description=${encodeURIComponent(description)}`,
+        `${API_BASE_URL}/api/workflows?thread_id=${threadId}&name=${encodeURIComponent(name)}&description=${encodeURIComponent(description)}`,
         { 
           method: "POST",
           headers: {
@@ -77,7 +78,7 @@ export default function SaveWorkflowButton({ threadId, disabled }: SaveWorkflowB
       }}>
         <DialogTrigger asChild>
           <Button
-            variant="outline"
+            variant="ui-secondary"
             size="sm"
             disabled={disabled || !threadId}
             className="gap-2"
@@ -88,8 +89,8 @@ export default function SaveWorkflowButton({ threadId, disabled }: SaveWorkflowB
         </DialogTrigger>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Save as Workflow</DialogTitle>
-            <DialogDescription>
+            <DialogTitle className="ui-section-header">Save as Workflow</DialogTitle>
+            <DialogDescription className="ui-section-subtitle">
               Save this conversation as a reusable workflow. You can re-run it with different inputs later.
             </DialogDescription>
           </DialogHeader>
@@ -98,8 +99,9 @@ export default function SaveWorkflowButton({ threadId, disabled }: SaveWorkflowB
             <>
               <div className="space-y-4 py-4">
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">Workflow Name *</label>
+                  <label className="ui-metadata-label">Workflow Name *</label>
                   <Input
+                    className="ui-input"
                     placeholder="e.g., Company Research & Outreach"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
@@ -107,8 +109,9 @@ export default function SaveWorkflowButton({ threadId, disabled }: SaveWorkflowB
                   />
                 </div>
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">Description</label>
+                  <label className="ui-metadata-label">Description</label>
                   <Textarea
+                    className="ui-textarea"
                     placeholder="Describe what this workflow does..."
                     value={description}
                     onChange={(e) => setDescription(e.target.value)}
@@ -119,6 +122,7 @@ export default function SaveWorkflowButton({ threadId, disabled }: SaveWorkflowB
               </div>
               <DialogFooter>
                 <Button
+                  variant="ui-primary"
                   onClick={handleSave}
                   disabled={!name.trim() || saving}
                   className="gap-2"
@@ -138,20 +142,20 @@ export default function SaveWorkflowButton({ threadId, disabled }: SaveWorkflowB
             <>
               <div className="py-6 text-center">
                 <div className="flex justify-center mb-4">
-                  <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center">
-                    <Check className="w-6 h-6 text-green-600" />
+                  <div className="w-12 h-12 bg-status-success-light rounded-full flex items-center justify-center">
+                    <Check className="w-6 h-6 text-status-success-dark" />
                   </div>
                 </div>
-                <h3 className="text-lg font-semibold mb-2">Workflow Saved!</h3>
-                <p className="text-sm text-muted-foreground mb-6">
+                <h3 className="ui-section-header mb-2">Workflow Saved!</h3>
+                <p className="ui-section-subtitle mb-6">
                   Your workflow has been saved successfully. Would you like to schedule it to run automatically?
                 </p>
               </div>
               <DialogFooter className="flex gap-2">
-                <Button variant="outline" onClick={handleClose}>
+                <Button variant="ui-secondary" onClick={handleClose}>
                   Close
                 </Button>
-                <Button onClick={handleScheduleNow} className="gap-2">
+                <Button variant="ui-primary" onClick={handleScheduleNow} className="gap-2">
                   <Calendar className="w-4 h-4" />
                   Schedule Now
                 </Button>
@@ -181,3 +185,4 @@ export default function SaveWorkflowButton({ threadId, disabled }: SaveWorkflowB
     </>
   );
 }
+

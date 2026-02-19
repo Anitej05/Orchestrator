@@ -256,7 +256,7 @@ export function CanvasRenderer({
                     <tr className="bg-gray-100 dark:bg-gray-800">
                       {planHeaders.map((header: string, idx: number) => (
                         <th
-                          key={idx}
+                          key={`plan-header-${header || idx}`}
                           className="border border-gray-300 dark:border-gray-600 px-4 py-3 text-left text-xs font-semibold text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-800"
                         >
                           {header}
@@ -405,7 +405,7 @@ export function CanvasRenderer({
                         {/* Column letter headers */}
                         {spreadsheetHeaders.map((_: any, idx: number) => (
                           <th
-                            key={idx}
+                            key={`col-${getColumnLetter(idx)}`}
                             className="bg-gray-200 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 px-1 py-1 text-center text-xs font-medium text-gray-600 dark:text-gray-400 min-w-[80px]"
                           >
                             {getColumnLetter(idx)}
@@ -417,7 +417,7 @@ export function CanvasRenderer({
                         <td className="w-12 bg-gray-200 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 text-center text-xs font-bold text-gray-700 dark:text-gray-300 sticky left-0 z-20">1</td>
                         {spreadsheetHeaders.map((header: any, idx: number) => (
                           <td
-                            key={idx}
+                            key={`header-${header || idx}`}
                             className="border border-gray-300 dark:border-gray-600 px-3 py-2 text-xs font-bold text-gray-900 dark:text-gray-100 bg-green-50 dark:bg-green-900/30"
                           >
                             {header}
@@ -721,7 +721,7 @@ export function CanvasRenderer({
                       <tr>
                         {headers.map((header: any, idx: number) => (
                           <th
-                            key={idx}
+                            key={`json-header-${header || idx}`}
                             className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider border-r border-gray-200 dark:border-gray-700 last:border-r-0"
                           >
                             {header}
@@ -931,3 +931,4 @@ export function CanvasRenderer({
     </div>
   )
 }
+

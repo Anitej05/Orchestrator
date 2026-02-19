@@ -8,6 +8,7 @@ import {
 import {
   uploadFiles as apiUploadFiles,
 } from '@/lib/api-client';
+import { API_BASE_URL } from './config';
 
 // Helper to read a file as a Data URL for image previews
 const readFileAsDataURL = (file: File): Promise<string> => {
@@ -78,13 +79,6 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
   // Real-time task tracking
   task_statuses: {},
   current_executing_task: null,
-  // Omni-Dispatcher fields
-  execution_plan: [],
-  current_phase_id: undefined,
-  action_history: [],
-  insights: {},
-  pending_action_approval: false,
-  pending_action: undefined,
   isLoading: false,
   canvas_data: undefined,
 
@@ -392,7 +386,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
 
         // Use authFetch helper which handles Clerk JWT properly
         const { authFetch } = await import('./auth-fetch');
-        const response = await authFetch(`http://localhost:8000/api/conversations/${cleanThreadId}`);
+        const response = await authFetch(`${API_BASE_URL}/api/conversations/${cleanThreadId}`);
 
         if (!response.ok) {
           if (response.status === 404) {
@@ -703,20 +697,13 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
               let isDuplicate = existingMessagesMap.has(backendMsg.id);
 
               // If not found by ID, check for content-based duplicates
-              // BUT only if the message type is the same and content matches
+              // (in case hash algorithms don't match between frontend and backend)
               if (!isDuplicate) {
-                // Check if we have a message with same content and type
-                const contentMatch = updatedMessages.find((existingMsg: any) =>
+                isDuplicate = updatedMessages.some((existingMsg: any) =>
                   existingMsg.type === backendMsg.type &&
                   existingMsg.content === backendMsg.content
+                  // Don't check timestamp - same content + type = duplicate regardless of time
                 );
-
-                if (contentMatch) {
-                  // Stricter deduplication: if content matches and type matches, it's likely a duplicate
-                  // especially for assistant messages which shouldn't be repeated identically
-                  isDuplicate = true;
-                  console.log(`Deduplicated by content match:`, backendMsg.content?.substring(0, 30));
-                }
               }
 
               if (!isDuplicate) {
@@ -724,19 +711,16 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
                 console.log(`Adding new message from backend: id=${backendMsg.id}, type=${backendMsg.type}, content=${backendMsg.content?.substring(0, 50)}`);
                 updatedMessages.push(backendMsg);
               } else {
-                // Message exists - update specifically if it's an assistant message to ensure we get the latest content
+                // Message exists - skip or update
+                console.log(`Skipping duplicate message: id=${backendMsg.id}, type=${backendMsg.type}, content=${backendMsg.content?.substring(0, 50)}`);
+                // Optionally update the existing message with backend data
                 const existingMsg = existingMessagesMap.get(backendMsg.id) ||
                   updatedMessages.find((msg: any) =>
                     msg.type === backendMsg.type &&
                     msg.content === backendMsg.content
                   );
-
                 if (existingMsg) {
-                  // Always update content for assistant messages to capture streaming/final updates
-                  if (backendMsg.type === 'assistant') {
-                    console.log(`Updating existing assistant message: id=${existingMsg.id}`);
-                    Object.assign(existingMsg, backendMsg);
-                  }
+                  Object.assign(existingMsg, backendMsg);
                 }
               }
             });
@@ -749,6 +733,19 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
             });
           }
         }
+
+        // Final deduplication pass - ensure no duplicate message IDs in the final array
+        // This handles edge cases where multiple WebSocket events might have added the same message
+        const seenIds = new Set<string>();
+        updatedMessages = updatedMessages.filter((msg: any) => {
+          if (!msg.id) return true; // Keep messages without IDs (shouldn't happen, but safe)
+          if (seenIds.has(msg.id)) {
+            console.warn(`Removing duplicate message with ID: ${msg.id}`);
+            return false; // Skip duplicate
+          }
+          seenIds.add(msg.id);
+          return true;
+        });
 
         return {
           ...state,

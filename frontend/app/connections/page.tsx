@@ -1,418 +1,618 @@
 "use client"
 
-import { useState, useEffect } from "react"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Input } from "@/components/ui/input"
-import { Button } from "@/components/ui/button"
+import { useEffect, useState } from "react"
+import { SidebarInset } from "@/components/ui/sidebar"
 import { Badge } from "@/components/ui/badge"
-import { Label } from "@/components/ui/label"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { Alert, AlertDescription } from "@/components/ui/alert"
-import { Loader2, Plus, Link as LinkIcon, Trash2, CheckCircle2, AlertCircle, Plug, Key, Eye, EyeOff, Shield, Save } from "lucide-react"
+import { Button } from "@/components/ui/button"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Loader2, AlertCircle, CheckCircle2, BookOpen, Mail, RefreshCw, Pause, Play } from "lucide-react"
 import { useUser } from "@clerk/nextjs"
 import { useToast } from "@/hooks/use-toast"
+import { authFetch } from "@/lib/auth-fetch"
 
-interface ConnectionInfo {
-  agent_id: string
-  name: string
-  description: string | null
-  url: string | null
-  tool_count: number
-  tools: string[]
-  created_at: string | null
-}
-
-interface Integration {
-  id: string
-  name: string
-  description: string
-  type: string
-  url: string
-  auth_mode: string
-  fields?: Array<{
-    key: string
-    label: string
-    type: string
-    help: string
-  }>
-  icon?: string
-}
-
-export default function ConnectionsPage() {
+function ConnectionsContent() {
   const { user } = useUser()
   const { toast } = useToast()
   
-  const [url, setUrl] = useState("")
-  const [status, setStatus] = useState<"idle" | "probing" | "auth_needed" | "connecting" | "success">("idle")
-  const [authFields, setAuthFields] = useState<Array<{ key: string; label: string; type: string; help: string }>>([])
-  const [credentials, setCredentials] = useState<Record<string, string>>({})
-  const [connections, setConnections] = useState<ConnectionInfo[]>([])
-  const [integrations, setIntegrations] = useState<Integration[]>([])
-  const [loading, setLoading] = useState(true)
-  const [selectedIntegration, setSelectedIntegration] = useState<Integration | null>(null)
+  // Integration connections state (multi-app support)
+  const [integrationStatus, setIntegrationStatus] = useState<Record<string, "unknown" | "connected" | "disconnected" | "disabled" | "pending" | "error">>({
+    "zohobooks": "unknown", 
+    "gmail": "unknown"
+  })
+  const [integrationLoading, setIntegrationLoading] = useState<Record<string, boolean>>({"zohobooks": false, "gmail": false})
+  const [integrationConnectionId, setIntegrationConnectionId] = useState<Record<string, string | null>>({"zohobooks": null, "gmail": null})
+  const [integrationError, setIntegrationError] = useState<Record<string, string | null>>({"zohobooks": null, "gmail": null})
+  const [troubleshootingHint, setTroubleshootingHint] = useState<Record<string, string | null>>({"zohobooks": null, "gmail": null})
 
   const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 
-  // Load connections and integrations on mount
   useEffect(() => {
     if (user) {
-      loadConnections()
-      loadIntegrations()
+      loadIntegrationStatus()
     }
   }, [user])
 
-  const loadConnections = async () => {
+  const loadIntegrationStatus = async () => {
+    if (!user?.id) return
+    
     try {
-      const response = await fetch(`${API_BASE}/api/connect/list?user_id=${user?.id}`)
-      if (response.ok) {
-        const data = await response.json()
-        setConnections(data)
+      const response = await authFetch(`${API_BASE}/api/integrations/status/${user.id}`)
+      const data = await response.json()
+      
+      if (data.success) {
+        const statusMap: Record<string, "connected" | "disconnected" | "disabled" | "pending"> = {}
+        const connectionIdMap: Record<string, string | null> = {}
+        const errorMap: Record<string, string | null> = {}
+        const hintMap: Record<string, string | null> = {}
+        
+        data.all_toolkits?.forEach((toolkit: any) => {
+          if (toolkit.db_status === "disabled") {
+            statusMap[toolkit.slug] = "disabled"
+          } else if (toolkit.db_status === "active") {
+            statusMap[toolkit.slug] = "connected"
+          } else if (toolkit.db_status === "INITIATED") {
+            statusMap[toolkit.slug] = "pending"
+          } else if (toolkit.is_connected) {
+            statusMap[toolkit.slug] = "connected"
+          } else {
+            statusMap[toolkit.slug] = "disconnected"
+          }
+
+          connectionIdMap[toolkit.slug] = toolkit.db_connection_id || toolkit.connected_account_id || null
+          errorMap[toolkit.slug] = toolkit.error || null
+          hintMap[toolkit.slug] = toolkit.troubleshooting || null
+        })
+        
+        setIntegrationStatus(statusMap)
+        setIntegrationConnectionId(connectionIdMap)
+        setIntegrationError(errorMap)
+        setTroubleshootingHint(hintMap)
+      } else {
+        setIntegrationError({"zohobooks": data.error || "Failed to check status", "gmail": data.error || "Failed to check status"})
       }
     } catch (error) {
-      console.error("Failed to load connections:", error)
-    } finally {
-      setLoading(false)
+      console.error("Error checking integration status:", error)
+      setIntegrationError({"zohobooks": "Failed to check connection status", "gmail": "Failed to check connection status"})
+      setIntegrationStatus({"zohobooks": "error", "gmail": "error"})
     }
   }
 
-  const loadIntegrations = async () => {
-    try {
-      const response = await fetch(`${API_BASE}/api/connect/integrations`)
-      if (response.ok) {
-        const data = await response.json()
-        setIntegrations(data)
-      }
-    } catch (error) {
-      console.error("Failed to load integrations:", error)
-    }
-  }
-
-  const handleProbe = async () => {
-    if (!url) {
+  const handleIntegrationConnect = async (appSlug: string) => {
+    if (!user?.id) {
       toast({
         title: "Error",
-        description: "Please enter a URL",
+        description: "User not authenticated",
         variant: "destructive"
       })
       return
     }
 
-    setStatus("probing")
+    setIntegrationLoading(prev => ({...prev, [appSlug]: true}))
     try {
-      const response = await fetch(`${API_BASE}/api/connect/probe`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url })
-      })
-
-      const data = await response.json()
-
-      if (data.status === "auth_required") {
-        setStatus("auth_needed")
-        // Determine fields based on probe result
-        if (data.type === "api_key") {
-          setAuthFields([{
-            key: data.header || "Authorization",
-            label: "API Key",
-            type: "password",
-            help: "Enter your API key for authentication"
-          }])
-        }
-      } else if (data.status === "open") {
-        // No auth needed, connect directly
-        handleConnect({})
-      } else {
-        toast({
-          title: "Connection Failed",
-          description: data.message || "Could not connect to server",
-          variant: "destructive"
-        })
-        setStatus("idle")
-      }
-    } catch (error) {
-      toast({
-        title: "Error",
-        description: "Failed to probe server",
-        variant: "destructive"
-      })
-      setStatus("idle")
-    }
-  }
-
-  const handleConnect = async (creds: Record<string, string>) => {
-    setStatus("connecting")
-    try {
-      const response = await fetch(`${API_BASE}/api/connect/ingest`, {
+      const response = await authFetch(`${API_BASE}/api/integrations/auth/start/${user.id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          url,
-          credentials: creds,
-          user_id: user?.id
+          app_slug: appSlug,
+          callback_url: `${window.location.origin}/connections`
         })
       })
-
       const data = await response.json()
 
-      if (data.status === "success") {
-        setStatus("success")
+      if (data.success && data.redirect_url) {
+        // Open OAuth in popup window
+        const popup = window.open(data.redirect_url, "_blank", "width=600,height=700")
+        
         toast({
-          title: "Success",
-          description: `Connected to ${data.agent_name} with ${data.tool_count} tools`
+          title: "Connecting",
+          description: `Complete authentication in the popup window`
         })
         
-        // Reset form and reload connections
-        setTimeout(() => {
-          setStatus("idle")
-          setUrl("")
-          setCredentials({})
-          setAuthFields([])
-          setSelectedIntegration(null)
-          loadConnections()
-        }, 2000)
-      } else {
-        toast({
-          title: "Connection Failed",
-          description: data.message || "Failed to connect",
-          variant: "destructive"
-        })
-        setStatus("idle")
-      }
-    } catch (error) {
-      toast({
-        title: "Error",
-        description: "Failed to connect to server",
-        variant: "destructive"
-      })
-      setStatus("idle")
-    }
-  }
-
-  const handleDelete = async (agentId: string) => {
-    try {
-      const response = await fetch(`${API_BASE}/api/connect/${agentId}?user_id=${user?.id}`, {
-        method: "DELETE"
-      })
-
-      if (response.ok) {
-        toast({
-          title: "Success",
-          description: "Connection deleted"
-        })
-        loadConnections()
+        // Poll for connection status every 3 seconds
+        let pollCount = 0
+        const maxPolls = 20 // 1 minute total
+        
+        const pollInterval = setInterval(async () => {
+          pollCount++
+          
+          // First, sync from Composio to ensure we have the latest status
+          try {
+            await authFetch(`${API_BASE}/api/integrations/sync/${user.id}`, {
+              method: "POST"
+            })
+          } catch (syncError) {
+            console.error("Sync failed:", syncError)
+          }
+          
+          // Then check if connection is established
+          const statusResponse = await authFetch(`${API_BASE}/api/integrations/status/${user.id}/${appSlug}`)
+          if (statusResponse.ok) {
+            const statusData = await statusResponse.json()
+            
+            if (statusData.connected_apps && statusData.connected_apps.includes(appSlug)) {
+              // Success!
+              clearInterval(pollInterval)
+              if (popup && !popup.closed) popup.close()
+              
+              setIntegrationStatus(prev => ({...prev, [appSlug]: "connected"}))
+              setIntegrationLoading(prev => ({...prev, [appSlug]: false}))
+              
+              toast({
+                title: "Connected!",
+                description: `Successfully connected to ${appSlug}`
+              })
+              
+              loadIntegrationStatus() // Refresh full status
+              return
+            }
+          }
+          
+          // Check if popup was closed manually
+          if (popup && popup.closed) {
+            clearInterval(pollInterval)
+            setIntegrationLoading(prev => ({...prev, [appSlug]: false}))
+            
+            // Do one final sync and check in case it succeeded
+            try {
+              await authFetch(`${API_BASE}/api/integrations/sync/${user.id}`, {
+                method: "POST"
+              })
+            } catch (syncError) {
+              console.error("Final sync failed:", syncError)
+            }
+            loadIntegrationStatus()
+          }
+          
+          // Timeout after max polls
+          if (pollCount >= maxPolls) {
+            clearInterval(pollInterval)
+            setIntegrationLoading(prev => ({...prev, [appSlug]: false}))
+            
+            toast({
+              title: "Timeout",
+              description: "Connection took too long. Please check status manually.",
+              variant: "destructive"
+            })
+          }
+        }, 3000) // Poll every 3 seconds
       } else {
         toast({
           title: "Error",
-          description: "Failed to delete connection",
+          description: data.error || "Failed to get connection URL",
           variant: "destructive"
         })
       }
     } catch (error) {
       toast({
         title: "Error",
-        description: "Failed to delete connection",
+        description: "Failed to initiate connection",
         variant: "destructive"
       })
+    } finally {
+      setIntegrationLoading(prev => ({...prev, [appSlug]: false}))
     }
   }
 
-  const selectIntegration = (integration: Integration) => {
-    setSelectedIntegration(integration)
-    if (integration.url) {
-      setUrl(integration.url)
-    }
-    if (integration.fields) {
-      setAuthFields(integration.fields)
-      setStatus("auth_needed")
+  const handleIntegrationDisconnect = async (appSlug: string) => {
+    if (!user?.id) return
+
+    setIntegrationLoading(prev => ({...prev, [appSlug]: true}))
+    try {
+      const response = await authFetch(`${API_BASE}/api/integrations/disconnect/${user.id}/${appSlug}`, {
+        method: "DELETE"
+      })
+      const data = await response.json()
+
+      if (data.success) {
+        toast({
+          title: "Success",
+          description: `${appSlug} disconnected`
+        })
+        setIntegrationStatus(prev => ({...prev, [appSlug]: "disconnected"}))
+        setIntegrationConnectionId(prev => ({...prev, [appSlug]: null}))
+        setIntegrationError(prev => ({...prev, [appSlug]: null}))
+        setTroubleshootingHint(prev => ({...prev, [appSlug]: null}))
+      } else {
+        toast({
+          title: "Error",
+          description: data.error || "Failed to disconnect",
+          variant: "destructive"
+        })
+        if (data.troubleshooting) {
+          setTroubleshootingHint(prev => ({...prev, [appSlug]: data.troubleshooting}))
+        }
+      }
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to disconnect",
+        variant: "destructive"
+      })
+    } finally {
+      setIntegrationLoading(prev => ({...prev, [appSlug]: false}))
     }
   }
+
+  const handleIntegrationRefresh = async (appSlug: string) => {
+    if (!user?.id) return
+
+    setIntegrationLoading(prev => ({...prev, [appSlug]: true}))
+    try {
+      const response = await authFetch(`${API_BASE}/api/integrations/refresh/${user.id}/${appSlug}`, {
+        method: "POST"
+      })
+      const data = await response.json()
+
+      if (data.success) {
+        toast({
+          title: "Success",
+          description: `${appSlug} connection refreshed`
+        })
+        loadIntegrationStatus()
+      } else {
+        toast({
+          title: "Error",
+          description: data.error || "Failed to refresh connection",
+          variant: "destructive"
+        })
+        if (data.troubleshooting) {
+          setTroubleshootingHint(prev => ({...prev, [appSlug]: data.troubleshooting}))
+        }
+      }
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to refresh connection",
+        variant: "destructive"
+      })
+    } finally {
+      setIntegrationLoading(prev => ({...prev, [appSlug]: false}))
+    }
+  }
+
+  const handleIntegrationDisable = async (appSlug: string) => {
+    if (!user?.id) return
+
+    setIntegrationLoading(prev => ({...prev, [appSlug]: true}))
+    try {
+      const response = await authFetch(`${API_BASE}/api/integrations/disable/${user.id}/${appSlug}`, {
+        method: "POST"
+      })
+      const data = await response.json()
+
+      if (data.success) {
+        toast({
+          title: "Success",
+          description: `${appSlug} connection paused`
+        })
+        setIntegrationStatus(prev => ({...prev, [appSlug]: "disabled"}))
+      } else {
+        toast({
+          title: "Error",
+          description: data.error || "Failed to disable connection",
+          variant: "destructive"
+        })
+        if (data.troubleshooting) {
+          setTroubleshootingHint(prev => ({...prev, [appSlug]: data.troubleshooting}))
+        }
+      }
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to disable connection",
+        variant: "destructive"
+      })
+    } finally {
+      setIntegrationLoading(prev => ({...prev, [appSlug]: false}))
+    }
+  }
+
+  const handleIntegrationEnable = async (appSlug: string) => {
+    if (!user?.id) return
+
+    setIntegrationLoading(prev => ({...prev, [appSlug]: true}))
+    try {
+      const response = await authFetch(`${API_BASE}/api/integrations/enable/${user.id}/${appSlug}`, {
+        method: "POST"
+      })
+      const data = await response.json()
+
+      if (data.success) {
+        toast({
+          title: "Success",
+          description: `${appSlug} connection resumed`
+        })
+        setIntegrationStatus(prev => ({...prev, [appSlug]: "connected"}))
+      } else {
+        toast({
+          title: "Error",
+          description: data.error || "Failed to enable connection",
+          variant: "destructive"
+        })
+        if (data.troubleshooting) {
+          setTroubleshootingHint(prev => ({...prev, [appSlug]: data.troubleshooting}))
+        }
+      }
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to enable connection",
+        variant: "destructive"
+      })
+    } finally {
+      setIntegrationLoading(prev => ({...prev, [appSlug]: false}))
+    }
+  }
+
+
 
   return (
-    <div className="container mx-auto p-8 max-w-6xl">
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold mb-2">Connections</h1>
-        <p className="text-muted-foreground">
-          Connect to MCP servers to extend your agent capabilities
-        </p>
-      </div>
-
-      {/* Quick Connect Templates */}
-      <Card className="mb-8">
-        <CardHeader>
-          <CardTitle>Quick Connect</CardTitle>
-          <CardDescription>Connect to popular services with one click</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {integrations.map((integration) => (
-              <Card
-                key={integration.id}
-                className="cursor-pointer hover:border-primary transition-colors"
-                onClick={() => selectIntegration(integration)}
-              >
-                <CardContent className="pt-6">
-                  <div className="flex items-start gap-3">
-                    <div className="p-2 bg-primary/10 rounded-lg">
-                      <Plug className="h-5 w-5 text-primary" />
-                    </div>
-                    <div className="flex-1">
-                      <h3 className="font-semibold mb-1">{integration.name}</h3>
-                      <p className="text-sm text-muted-foreground">{integration.description}</p>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            ))}
+    <SidebarInset>
+      <div className="min-h-screen bg-bg-page dark:bg-background text-text-primary">
+        <main className="p-6 space-y-6">
+          <div>
+            <h1 className="text-2xl font-semibold text-brand-teal">Connections</h1>
+            <p className="text-text-secondary text-sm">Connect to MCP servers to extend your agent capabilities</p>
           </div>
-        </CardContent>
-      </Card>
-
-      {/* Add Connection Card */}
-      <Card className="mb-8">
-        <CardHeader>
-          <CardTitle>Add New Connection</CardTitle>
-          <CardDescription>
-            {selectedIntegration
-              ? `Connecting to ${selectedIntegration.name}`
-              : "Enter an MCP server URL to connect"}
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="space-y-4">
-            <div className="flex gap-4">
-              <Input
-                placeholder="Enter MCP Server URL (e.g., https://mcp.example.com)"
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                disabled={status !== "idle"}
-              />
-              <Button
-                onClick={handleProbe}
-                disabled={status === "probing" || !url}
-              >
-                {status === "probing" ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  "Detect"
-                )}
-              </Button>
-            </div>
-
-            {/* Dynamic Auth Form */}
-            {status === "auth_needed" && (
-              <div className="p-4 bg-muted rounded-lg space-y-4">
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <AlertCircle className="h-4 w-4" />
-                  <span>This server requires authentication</span>
-                </div>
-                
-                {authFields.map((field) => (
-                  <div key={field.key} className="space-y-2">
-                    <label className="text-sm font-medium">{field.label}</label>
-                    <Input
-                      type={field.type}
-                      placeholder={field.help}
-                      onChange={(e) =>
-                        setCredentials({ ...credentials, [field.key]: e.target.value })
-                      }
-                    />
-                    <p className="text-xs text-muted-foreground">{field.help}</p>
-                  </div>
-                ))}
-                
-                <Button
-                  className="w-full"
-                  onClick={() => handleConnect(credentials)}
-                  disabled={status === "connecting"}
-                >
-                  {status === "connecting" ? (
-                    <>
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      Connecting...
-                    </>
-                  ) : (
-                    "Connect & Save"
-                  )}
-                </Button>
-              </div>
-            )}
-
-            {status === "success" && (
-              <div className="flex items-center gap-2 p-4 bg-green-50 dark:bg-green-950 text-green-700 dark:text-green-300 rounded-lg">
-                <CheckCircle2 className="h-5 w-5" />
-                <span className="font-medium">Successfully connected!</span>
-              </div>
-            )}
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Existing Connections */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Your Connections</CardTitle>
-          <CardDescription>Manage your connected MCP servers</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {loading ? (
-            <div className="flex items-center justify-center py-8">
-              <Loader2 className="h-6 w-6 animate-spin" />
-            </div>
-          ) : connections.length === 0 ? (
-            <div className="text-center py-8 text-muted-foreground">
-              <Plug className="h-12 w-12 mx-auto mb-4 opacity-50" />
-              <p>No connections yet. Add your first connection above.</p>
-            </div>
-          ) : (
-            <div className="space-y-4">
-              {connections.map((conn) => (
-                <Card key={conn.agent_id}>
+          <Card className="ui-card">
+            <CardHeader>
+              <CardTitle className="text-text-primary">Connected Applications</CardTitle>
+              <CardDescription className="text-text-secondary">Manage OAuth connections for external services</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Zoho Books Card */}
+                <Card className="ui-card border-l-4 border-l-brand-teal">
                   <CardContent className="pt-6">
-                    <div className="flex items-start justify-between">
-                      <div className="flex-1">
-                        <div className="flex items-center gap-2 mb-2">
-                          <h3 className="font-semibold">{conn.name}</h3>
-                          <Badge variant="secondary">{conn.tool_count} tools</Badge>
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="flex items-start gap-3 flex-1">
+                        <div className="p-2 rounded-lg bg-brand-teal/10 text-brand-teal">
+                          <BookOpen className="h-5 w-5" />
                         </div>
-                        {conn.description && (
-                          <p className="text-sm text-muted-foreground mb-2">
-                            {conn.description}
+                        <div className="flex-1 space-y-2">
+                          <div className="flex items-center gap-2">
+                            <h3 className="font-semibold text-text-primary">Zoho Books</h3>
+                            {integrationLoading["zohobooks"] ? (
+                              <Loader2 className="h-4 w-4 animate-spin text-text-secondary" />
+                            ) : (integrationStatus["zohobooks"] ?? "disconnected") === "connected" ? (
+                              <Badge className="bg-status-success/15 text-status-success border border-status-success/30">
+                                <CheckCircle2 className="h-3 w-3 mr-1" />
+                                Connected
+                              </Badge>
+                            ) : (integrationStatus["zohobooks"] ?? "disconnected") === "disabled" ? (
+                              <Badge className="bg-yellow-500/15 text-yellow-600 border border-yellow-500/30">
+                                <Pause className="h-3 w-3 mr-1" />
+                                Paused
+                              </Badge>
+                            ) : (integrationStatus["zohobooks"] ?? "disconnected") === "pending" ? (
+                              <Badge className="bg-status-warning/15 text-status-warning border border-status-warning/30">
+                                <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                                Connecting
+                              </Badge>
+                            ) : (integrationStatus["zohobooks"] ?? "disconnected") === "disconnected" ? (
+                              <Badge variant="outline" className="border-border-color text-text-secondary">
+                                Not Connected
+                              </Badge>
+                            ) : (integrationStatus["zohobooks"] ?? "disconnected") === "error" ? (
+                              <Badge className="bg-status-error/15 text-status-error border border-status-error/30">
+                                <AlertCircle className="h-3 w-3 mr-1" />
+                                Error
+                              </Badge>
+                            ) : null}
+                          </div>
+                          <p className="text-sm text-text-secondary">
+                            Create, list, update, and send invoices
                           </p>
-                        )}
-                        {conn.url && (
-                          <p className="text-xs text-muted-foreground flex items-center gap-1">
-                            <LinkIcon className="h-3 w-3" />
-                            {conn.url}
-                          </p>
-                        )}
-                        <div className="flex flex-wrap gap-1 mt-2">
-                          {conn.tools.slice(0, 5).map((tool) => (
-                            <Badge key={tool} variant="outline" className="text-xs">
-                              {tool}
-                            </Badge>
-                          ))}
-                          {conn.tools.length > 5 && (
-                            <Badge variant="outline" className="text-xs">
-                              +{conn.tools.length - 5} more
-                            </Badge>
+                          {integrationError["zohobooks"] && (
+                            <p className="text-xs text-status-error">{integrationError["zohobooks"]}</p>
+                          )}
+                          {troubleshootingHint["zohobooks"] && (
+                            <p className="text-xs text-blue-600 dark:text-blue-400">💡 {troubleshootingHint["zohobooks"]}</p>
+                          )}
+                          {integrationConnectionId["zohobooks"] && (
+                            <p className="text-xs text-text-secondary">ID: {integrationConnectionId["zohobooks"]}</p>
                           )}
                         </div>
                       </div>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => handleDelete(conn.agent_id)}
-                      >
-                        <Trash2 className="h-4 w-4 text-destructive" />
-                      </Button>
+                      <div className="flex gap-2">
+                        {(integrationStatus["zohobooks"] ?? "disconnected") === "connected" ? (
+                          <>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => handleIntegrationRefresh("zohobooks")}
+                              disabled={integrationLoading["zohobooks"]}
+                              title="Refresh connection"
+                            >
+                              <RefreshCw className="h-4 w-4" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => handleIntegrationDisable("zohobooks")}
+                              disabled={integrationLoading["zohobooks"]}
+                              title="Pause connection"
+                            >
+                              <Pause className="h-4 w-4" />
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => handleIntegrationDisconnect("zohobooks")}
+                              disabled={integrationLoading["zohobooks"]}
+                            >
+                              {integrationLoading["zohobooks"] ? <Loader2 className="h-4 w-4 animate-spin" /> : "Disconnect"}
+                            </Button>
+                          </>
+                        ) : (integrationStatus["zohobooks"] ?? "disconnected") === "disabled" ? (
+                          <>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => handleIntegrationEnable("zohobooks")}
+                              disabled={integrationLoading["zohobooks"]}
+                              title="Resume connection"
+                            >
+                              <Play className="h-4 w-4" />
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => handleIntegrationDisconnect("zohobooks")}
+                              disabled={integrationLoading["zohobooks"]}
+                            >
+                              {integrationLoading["zohobooks"] ? <Loader2 className="h-4 w-4 animate-spin" /> : "Disconnect"}
+                            </Button>
+                          </>
+                        ) : (
+                          <Button
+                            size="sm"
+                            onClick={() => handleIntegrationConnect("zohobooks")}
+                            disabled={integrationLoading["zohobooks"]}
+                          >
+                            {integrationLoading["zohobooks"] ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+                            Connect
+                          </Button>
+                        )}
+                      </div>
                     </div>
                   </CardContent>
                 </Card>
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
-    </div>
+
+                {/* Gmail Card */}
+                <Card className="ui-card border-l-4 border-l-brand-teal">
+                  <CardContent className="pt-6">
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="flex items-start gap-3 flex-1">
+                        <div className="p-2 rounded-lg bg-brand-teal/10 text-brand-teal">
+                          <Mail className="h-5 w-5" />
+                        </div>
+                        <div className="flex-1 space-y-2">
+                          <div className="flex items-center gap-2">
+                            <h3 className="font-semibold text-text-primary">Gmail</h3>
+                            {integrationLoading["gmail"] ? (
+                              <Loader2 className="h-4 w-4 animate-spin text-text-secondary" />
+                            ) : (integrationStatus["gmail"] ?? "disconnected") === "connected" ? (
+                              <Badge className="bg-status-success/15 text-status-success border border-status-success/30">
+                                <CheckCircle2 className="h-3 w-3 mr-1" />
+                                Connected
+                              </Badge>
+                            ) : (integrationStatus["gmail"] ?? "disconnected") === "disabled" ? (
+                              <Badge className="bg-yellow-500/15 text-yellow-600 border border-yellow-500/30">
+                                <Pause className="h-3 w-3 mr-1" />
+                                Paused
+                              </Badge>
+                            ) : (integrationStatus["gmail"] ?? "disconnected") === "pending" ? (
+                              <Badge className="bg-status-warning/15 text-status-warning border border-status-warning/30">
+                                <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                                Connecting
+                              </Badge>
+                            ) : (integrationStatus["gmail"] ?? "disconnected") === "disconnected" ? (
+                              <Badge variant="outline" className="border-border-color text-text-secondary">
+                                Not Connected
+                              </Badge>
+                            ) : (integrationStatus["gmail"] ?? "disconnected") === "error" ? (
+                              <Badge className="bg-status-error/15 text-status-error border border-status-error/30">
+                                <AlertCircle className="h-3 w-3 mr-1" />
+                                Error
+                              </Badge>
+                            ) : null}
+                          </div>
+                          <p className="text-sm text-text-secondary">
+                            Send emails and manage inbox
+                          </p>
+                          {integrationError["gmail"] && (
+                            <p className="text-xs text-status-error">{integrationError["gmail"]}</p>
+                          )}
+                          {troubleshootingHint["gmail"] && (
+                            <p className="text-xs text-blue-600 dark:text-blue-400">💡 {troubleshootingHint["gmail"]}</p>
+                          )}
+                          {integrationConnectionId["gmail"] && (
+                            <p className="text-xs text-text-secondary">ID: {integrationConnectionId["gmail"]}</p>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex gap-2">
+                        {(integrationStatus["gmail"] ?? "disconnected") === "connected" ? (
+                          <>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => handleIntegrationRefresh("gmail")}
+                              disabled={integrationLoading["gmail"]}
+                              title="Refresh connection"
+                            >
+                              <RefreshCw className="h-4 w-4" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => handleIntegrationDisable("gmail")}
+                              disabled={integrationLoading["gmail"]}
+                              title="Pause connection"
+                            >
+                              <Pause className="h-4 w-4" />
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => handleIntegrationDisconnect("gmail")}
+                              disabled={integrationLoading["gmail"]}
+                            >
+                              {integrationLoading["gmail"] ? <Loader2 className="h-4 w-4 animate-spin" /> : "Disconnect"}
+                            </Button>
+                          </>
+                        ) : (integrationStatus["gmail"] ?? "disconnected") === "disabled" ? (
+                          <>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => handleIntegrationEnable("gmail")}
+                              disabled={integrationLoading["gmail"]}
+                              title="Resume connection"
+                            >
+                              <Play className="h-4 w-4" />
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => handleIntegrationDisconnect("gmail")}
+                              disabled={integrationLoading["gmail"]}
+                            >
+                              {integrationLoading["gmail"] ? <Loader2 className="h-4 w-4 animate-spin" /> : "Disconnect"}
+                            </Button>
+                          </>
+                        ) : (
+                          <Button
+                            size="sm"
+                            onClick={() => handleIntegrationConnect("gmail")}
+                            disabled={integrationLoading["gmail"]}
+                          >
+                            {integrationLoading["gmail"] ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+                            Connect
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+            </CardContent>
+          </Card>
+
+
+        </main>
+      </div>
+    </SidebarInset>
   )
 }
+
+export default function ConnectionsPage() {
+  return (
+    <>
+      <ConnectionsContent />
+    </>
+  )
+}
+
+

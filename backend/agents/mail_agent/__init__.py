@@ -4,6 +4,7 @@ Mail Agent - Modularized package for Gmail integration.
 Supports both legacy FastAPI app and new BaseAgent architecture.
 """
 
+<<<<<<< HEAD
 import os
 import sys
 
@@ -70,3 +71,16 @@ __all__ = [
     'gmail_client',
     'AGENT_DEFINITION',
 ]
+=======
+from .config import AGENT_DEFINITION, COMPOSIO_API_KEY, MCP_URL, CONNECTION_ID
+from .client import GmailClient, gmail_client
+from .agent import app as mail_app
+
+def run_agent() -> None:
+    import uvicorn
+    uvicorn.run(mail_app, host="0.0.0.0", port=8040)
+
+
+if __name__ == "__main__":
+    run_agent()
+>>>>>>> 7d9846cd986323c77b62c7053f012cdb2e0b4aa3

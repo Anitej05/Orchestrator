@@ -1,10 +1,8 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import AppSidebar from "@/components/app-sidebar"
 import AgentGrid from "@/components/agent-grid"
-import Navbar from "@/components/navbar"
-import { SidebarProvider, SidebarInset, SidebarTrigger, useSidebar } from "@/components/ui/sidebar"
+import { SidebarInset, useSidebar } from "@/components/ui/sidebar"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Search } from "lucide-react"
@@ -105,79 +103,64 @@ function AgentsContent() {
   const filteredAgents = getAgentsByCategory(selectedCategory)
 
   return (
-    <SidebarInset className={!open ? "ml-16" : ""}>
-          <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50 dark:from-gray-900 dark:to-gray-800">
-            {/* Header */}
-            <div className="bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm border-b dark:border-gray-700 px-6 py-4">
-              <div className="flex items-center space-x-4">
-                <SidebarTrigger />
-              </div>
+    <SidebarInset>
+      <div className="min-h-screen bg-bg-page dark:bg-background text-text-primary">
+        {/* Main Content */}
+        <main className="p-6">
+          {/* Title Section */}
+          <div className="mb-6">
+            <h1 className="text-3xl font-bold text-brand-teal">Agent Directory</h1>
+            <p className="text-text-secondary mt-2">
+              Browse and discover AI agents for your orchestration workflows.
+            </p>
+          </div>
+
+          {/* Search and Category Filter */}
+          <div className="flex flex-col sm:flex-row gap-4 mb-6">
+            {/* Search */}
+            <div className="relative flex-1 max-w-md">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-text-tertiary w-4 h-4" />
+              <Input
+                placeholder="Search agents..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="pl-10 ui-input"
+              />
             </div>
 
-          {/* Main Content */}
-          <main className="p-6">
-            {/* Title Section */}
-            <div className="mb-6">
-              <h1 className="text-3xl font-bold text-blue-600 dark:text-blue-400">Agent Directory</h1>
-              <p className="text-gray-600 dark:text-gray-300 mt-2">
-                Browse and discover AI agents for your orchestration workflows.
-              </p>
-            </div>
+            {/* Category Dropdown */}
+            <Select value={selectedCategory} onValueChange={setSelectedCategory}>
+              <SelectTrigger className="w-full sm:w-[200px]">
+                <SelectValue placeholder="Select category" />
+              </SelectTrigger>
+              <SelectContent>
+                {categories.map((category) => (
+                  <SelectItem key={category} value={category}>
+                    {category}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
 
-            {/* Search and Category Filter */}
-            <div className="flex flex-col sm:flex-row gap-4 mb-6">
-              {/* Search */}
-              <div className="relative flex-1 max-w-md">
-                <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
-                <Input
-                  placeholder="Search agents..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="pl-10"
-                />
-              </div>
+          {/* Results Count */}
+          <div className="mb-4 text-sm text-text-secondary">
+            {loading ? "Loading agents..." : (
+              <>
+                {filteredAgents.length} agent{filteredAgents.length !== 1 ? "s" : ""}
+                {selectedCategory !== "All" && ` in ${selectedCategory}`}
+              </>
+            )}
+          </div>
 
-              {/* Category Dropdown */}
-              <Select value={selectedCategory} onValueChange={setSelectedCategory}>
-                <SelectTrigger className="w-full sm:w-[200px]">
-                  <SelectValue placeholder="Select category" />
-                </SelectTrigger>
-                <SelectContent>
-                  {categories.map((category) => (
-                    <SelectItem key={category} value={category}>
-                      {category}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            {/* Results Count */}
-            <div className="mb-4 text-sm text-gray-600 dark:text-gray-400">
-              {loading ? "Loading agents..." : (
-                <>
-                  {filteredAgents.length} agent{filteredAgents.length !== 1 ? "s" : ""}
-                  {selectedCategory !== "All" && ` in ${selectedCategory}`}
-                </>
-              )}
-            </div>
-
-            {/* Agent Grid */}
-            <AgentGrid agents={filteredAgents} searchQuery={searchQuery} selectedCapability="All" />
-          </main>
-        </div>
-      </SidebarInset>
+          {/* Agent Grid */}
+          <AgentGrid agents={filteredAgents} searchQuery={searchQuery} selectedCapability="All" />
+        </main>
+      </div>
+    </SidebarInset>
   )
 }
 
 export default function AgentsPage() {
-  return (
-    <>
-      <Navbar />
-      <SidebarProvider>
-        <AppSidebar />
-        <AgentsContent />
-      </SidebarProvider>
-    </>
-  )
+  return <AgentsContent />
 }

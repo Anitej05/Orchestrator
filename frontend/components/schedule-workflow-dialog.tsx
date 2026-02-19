@@ -2,6 +2,8 @@
 
 import { useState, useEffect } from "react";
 import { useAuth } from "@clerk/nextjs";
+import { authFetch } from "@/lib/auth-fetch";
+import { API_BASE_URL } from "@/lib/config";
 import {
   Dialog,
   DialogContent,
@@ -177,16 +179,13 @@ export function ScheduleWorkflowDialog({
 
     setLoading(true);
     try {
-      const token = await getToken();
       const template = inputTemplate.trim() && inputTemplate.trim() !== "{}" ? JSON.parse(inputTemplate) : {};
-      const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
-      const response = await fetch(
-        `${API_URL}/api/workflows/${workflowId}/schedule`,
+      const response = await authFetch(
+        `${API_BASE_URL}/api/workflows/${workflowId}/schedule`,
         {
           method: "POST",
           headers: {
-            Authorization: `Bearer ${token}`,
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
@@ -380,7 +379,7 @@ export function ScheduleWorkflowDialog({
               </Label>
               <div className="bg-muted p-3 rounded-md space-y-1">
                 {nextRuns.map((run, idx) => (
-                  <div key={idx} className="flex items-center gap-2 text-sm">
+                  <div key={`run-${idx}-${run}`} className="flex items-center gap-2 text-sm">
                     <Clock className="h-3 w-3 text-muted-foreground" />
                     <span>{run}</span>
                     {idx === 0 && (
@@ -445,3 +444,4 @@ export function ScheduleWorkflowDialog({
     </Dialog>
   );
 }
+

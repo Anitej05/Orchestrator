@@ -1,80 +1,277 @@
 @import 'tailwindcss';
 @import 'tw-animate-css';
 
+@config '../tailwind.config.ts';
+@source '../app/**/*.{js,ts,jsx,tsx,mdx}';
+@source '../components/**/*.{js,ts,jsx,tsx,mdx}';
+@source '../hooks/**/*.{js,ts,jsx,tsx,mdx}';
+@source '../lib/**/*.{js,ts,jsx,tsx,mdx}';
+@source '../styles/**/*.{css}';
+
 @custom-variant dark (&:is(.dark *));
 
+/* ================================================================
+   MINIMALISTIC SCROLLBAR STYLING
+   ================================================================ */
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.15) transparent;
+}
+
+/* Dark mode scrollbar */
+.dark * {
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+}
+
+/* Chrome, Edge, Safari */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 3px;
+  transition: background 0.3s ease;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+/* ================================================================
+   ROOT VARIABLES - LIGHT MODE
+   Royal Blue Design System
+   ================================================================ */
 :root {
-  --background: oklch(1 0 0);
+  /* Base font size */
+  --font-size: 16px;
+  
+  /* Core colors - Soft blue-gray theme */
+  --background: #F8F9FC;
   --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
+  
+  /* Card colors - Pure white on blue-gray */
+  --card: #FFFFFF;
   --card-foreground: oklch(0.145 0 0);
+  
+  /* Popover colors */
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --destructive-foreground: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
+  
+  /* Primary colors - Royal Blue #2C4BA8 */
+  --primary: var(--color-brand-primary);
+  --primary-foreground: #FFFFFF;
+  
+  /* Secondary colors - Subtle blue-gray */
+  --secondary: oklch(0.975 0.004 264);
+  --secondary-foreground: oklch(0.20 0 0);
+  
+  /* Muted colors */
+  --muted: oklch(0.975 0.004 264);
+  --muted-foreground: #64748B;
+  
+  /* Accent colors - Light lavender-blue */
+  --accent: oklch(0.94 0.015 264);
+  --accent-foreground: oklch(0.15 0 0);
+  
+  /* Destructive colors */
+  --destructive: #dc2626;
+  --destructive-foreground: #ffffff;
+  
+  /* Border and input */
+  --border: oklch(0.93 0.006 264);
+  --input: transparent;
+  --input-background: oklch(0.975 0.004 264);
+  
+  /* Switch background */
+  --switch-background: oklch(0.78 0.02 264);
+  
+  /* Font weights */
+  --font-weight-medium: 500;
+  --font-weight-normal: 400;
+  
+  /* Ring and success - Royal Blue theme */
+  --ring: var(--color-brand-primary);
+  --success: var(--color-brand-primary);
+  
+  /* Chart colors - Blue spectrum */
+  --chart-1: oklch(0.42 0.16 264);
+  --chart-2: oklch(0.60 0.14 240);
+  --chart-3: oklch(0.68 0.14 264);
+  --chart-4: oklch(0.70 0.18 280);
+  --chart-5: oklch(0.65 0.12 250);
+  
+  /* Border radius */
   --radius: 0.625rem;
+  
+  /* Sidebar colors - Royal Blue accent */
   --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --sidebar-primary: var(--color-brand-primary);
+  --sidebar-primary-foreground: var(--primary-foreground);
+  --sidebar-accent: oklch(0.95 0.02 264);
+  --sidebar-accent-foreground: oklch(0.22 0 0);
+  --sidebar-border: oklch(0.91 0.01 264);
+  --sidebar-ring: var(--color-brand-primary);
+
+  /* Orbimesh Brand Colors - Royal Blue Primary */
+  --color-brand-primary: #2C4BA8;
+  --color-brand-primary-hover: #1E3A8A;
+  --color-brand-primary-light: #EEF2FF;
+
+  /* Status Colors - Success (Keep green for semantic clarity) */
+  --color-status-success: #10B981;
+  --color-status-success-light: #ECFDF5;
+  --color-status-success-border: #D1FAE5;
+  --color-status-success-dark: #059669;
+
+  /* Status Colors - Active (Now sky blue to match royal blue family) */
+  --color-status-active: #3B82F6;
+  --color-status-active-light: #DBEAFE;
+  --color-status-active-border: #BFDBFE;
+  --color-status-active-dark: #1D4ED8;
+
+  /* Status Colors - Pending (Keep amber for warnings) */
+  --color-status-pending: #F59E0B;
+  --color-status-pending-light: #FEF3C7;
+  --color-status-pending-dark: #D97706;
+
+  /* Status Colors - Error (Keep red for destructive actions) */
+  --color-status-error: #EF4444;
+  --color-status-error-light: #FEE2E2;
+
+  /* Orbimesh Text Colors */
+  --color-text-primary: #0F172A;
+  --color-text-secondary: #1E293B;
+  --color-text-tertiary: #64748B;
+  --color-text-disabled: #94A3B8;
+
+  /* Orbimesh Background Colors */
+  --color-bg-page: #F8F9FC;
+  --color-bg-card: #FFFFFF;
+  --color-bg-subtle: #F8F9FC;
+  --color-bg-hover: #EEF2FF;
+
+  /* Orbimesh Border Colors */
+  --color-border-light: #F1F5F9;
+  --color-border-DEFAULT: #E2E8F0;
+  --color-border-medium: #CBD5E1;
+
+  /* Orbimesh Border Radius */
+  --radius-orbimesh-sm: 4px;
+  --radius-orbimesh-md: 6px;
+  --radius-orbimesh-lg: 8px;
+  --radius-orbimesh-xl: 12px;
 }
 
+/* ================================================================
+   DARK MODE VARIABLES
+   Royal Blue Dark Theme
+   ================================================================ */
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.145 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.145 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.985 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.396 0.141 25.723);
-  --destructive-foreground: oklch(0.637 0.237 25.331);
-  --border: oklch(0.269 0 0);
-  --input: oklch(0.269 0 0);
-  --ring: oklch(0.439 0 0);
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(0.269 0 0);
-  --sidebar-ring: oklch(0.439 0 0);
+  /* Core colors - Deep dark with blue undertones */
+  --background: oklch(0.15 0 0);
+  --foreground: oklch(0.98 0 0);
+  
+  /* Card colors - Elevated dark surfaces */
+  --card: oklch(0.18 0 0);
+  --card-foreground: oklch(0.98 0 0);
+  
+  /* Popover colors */
+  --popover: oklch(0.16 0 0);
+  --popover-foreground: oklch(0.98 0 0);
+  
+  /* Primary colors - Bright blue for contrast */
+  --primary: oklch(0.58 0.18 264);
+  --primary-foreground: oklch(1 0 0);
+  
+  /* Secondary colors - Blue-tinted dark */
+  --secondary: oklch(0.28 0.06 264);
+  --secondary-foreground: oklch(0.95 0 0);
+  
+  /* Muted colors */
+  --muted: oklch(0.24 0.01 264);
+  --muted-foreground: oklch(0.68 0 0);
+  
+  /* Accent colors - Medium blue */
+  --accent: oklch(0.35 0.10 264);
+  --accent-foreground: oklch(0.98 0 0);
+  
+  /* Destructive colors */
+  --destructive: oklch(0.50 0.20 25);
+  --destructive-foreground: oklch(0.98 0 0);
+  
+  /* Border and input */
+  --border: oklch(0.26 0.01 264);
+  --input: oklch(0.24 0.01 264);
+  --input-background: oklch(0.20 0.01 264);
+  
+  /* Switch background */
+  --switch-background: oklch(0.78 0.02 264);
+  
+  /* Ring and success - Bright blue */
+  --ring: var(--color-brand-primary);
+  --success: var(--color-brand-primary);
+  
+  /* Chart colors - Vibrant blue spectrum */
+  --chart-1: oklch(0.58 0.18 264);
+  --chart-2: oklch(0.68 0.16 240);
+  --chart-3: oklch(0.74 0.16 264);
+  --chart-4: oklch(0.66 0.20 280);
+  --chart-5: oklch(0.70 0.14 250);
+  
+  /* Sidebar colors - Dark with blue accents */
+  --sidebar: oklch(0.18 0 0);
+  --sidebar-foreground: oklch(0.98 0 0);
+  --sidebar-primary: var(--color-brand-primary);
+  --sidebar-primary-foreground: var(--primary-foreground);
+  --sidebar-accent: oklch(0.26 0.06 264);
+  --sidebar-accent-foreground: oklch(0.95 0 0);
+  --sidebar-border: oklch(0.24 0.01 264);
+  --sidebar-ring: var(--color-brand-primary);
+
+  /* Orbimesh Brand Colors - Dark Mode (aliases to dark core tokens) */
+  --color-brand-primary: var(--primary);
+  --color-brand-primary-hover: var(--accent);
+  --color-brand-primary-light: var(--secondary);
+  
+  /* Orbimesh Text Colors - Dark Mode */
+  --color-text-primary: #F1F5F9;
+  --color-text-secondary: #E2E8F0;
+  --color-text-tertiary: #94A3B8;
+  --color-text-disabled: #64748B;
+  
+  /* Orbimesh Background Colors - Dark Mode */
+  --color-bg-page: oklch(0.15 0 0);
+  --color-bg-card: oklch(0.18 0 0);
+  --color-bg-subtle: oklch(0.20 0 0);
+  --color-bg-hover: oklch(0.25 0.04 264);
+  
+  /* Orbimesh Border Colors - Dark Mode */
+  --color-border-light: oklch(0.22 0.01 264);
+  --color-border-DEFAULT: oklch(0.26 0.01 264);
+  --color-border-medium: oklch(0.30 0.02 264);
 }
 
+/* ================================================================
+   THEME TOKENS - TAILWIND INTEGRATION
+   ================================================================ */
 @theme inline {
+  /* Core theme colors */
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -93,16 +290,25 @@
   --color-destructive-foreground: var(--destructive-foreground);
   --color-border: var(--border);
   --color-input: var(--input);
+  --color-input-background: var(--input-background);
+  --color-switch-background: var(--switch-background);
   --color-ring: var(--ring);
+  --color-success: var(--success);
+  
+  /* Chart colors */
   --color-chart-1: var(--chart-1);
   --color-chart-2: var(--chart-2);
   --color-chart-3: var(--chart-3);
   --color-chart-4: var(--chart-4);
   --color-chart-5: var(--chart-5);
+  
+  /* Border radius tokens */
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+  
+  /* Sidebar tokens */
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar-primary: var(--sidebar-primary);
@@ -113,11 +319,532 @@
   --color-sidebar-ring: var(--sidebar-ring);
 }
 
+/* ================================================================
+   BASE LAYER - GLOBAL RESETS
+   ================================================================ */
 @layer base {
   * {
     @apply border-border outline-ring/50;
   }
+
   body {
     @apply bg-background text-foreground;
   }
+
+  html {
+    font-size: var(--font-size);
+  }
+
+  /* Typography Base Styles */
+  h1 {
+    font-size: var(--text-2xl);
+    font-weight: var(--font-weight-medium);
+    line-height: 1.5;
+  }
+
+  h2 {
+    font-size: var(--text-xl);
+    font-weight: var(--font-weight-medium);
+    line-height: 1.5;
+  }
+
+  h3 {
+    font-size: var(--text-lg);
+    font-weight: var(--font-weight-medium);
+    line-height: 1.5;
+  }
+
+  h4 {
+    font-size: var(--text-base);
+    font-weight: var(--font-weight-medium);
+    line-height: 1.5;
+  }
+
+  label {
+    font-size: var(--text-base);
+    font-weight: var(--font-weight-medium);
+    line-height: 1.5;
+  }
+
+  button {
+    font-size: var(--text-base);
+    font-weight: var(--font-weight-medium);
+    line-height: 1.5;
+  }
+
+  input {
+    font-size: var(--text-base);
+    font-weight: var(--font-weight-normal);
+    line-height: 1.5;
+  }
+}
+
+/* ================================================================
+   COMPONENT LAYER - REUSABLE UI COMPONENTS
+   ================================================================ */
+@layer components {
+  /* ================================================================
+     MESSAGE BUBBLES - Conversation Panel
+     ================================================================ */
+  .ui-user-bubble {
+    @apply bg-brand-primary-light text-text-primary font-orbimesh-semibold text-orbimesh-user rounded-orbimesh-xl p-orbimesh-md max-w-orbimesh-message ml-auto;
+  }
+  
+  .ui-agent-bubble {
+    @apply text-text-secondary font-orbimesh-regular text-orbimesh-agent mb-orbimesh-2xl;
+  }
+  
+  .ui-system-bubble {
+    @apply bg-status-pending-light text-status-pending-dark font-orbimesh-medium text-orbimesh-agent rounded-orbimesh-sm p-orbimesh-md max-w-[90%] mx-auto text-center;
+  }
+
+  /* ================================================================
+     TYPOGRAPHY COMPONENTS
+     ================================================================ */
+  .ui-h2 {
+    @apply text-text-primary font-orbimesh-semibold text-orbimesh-h2;
+  }
+  
+  .ui-h3 {
+    @apply text-text-secondary font-orbimesh-semibold text-orbimesh-h3;
+  }
+  
+  .ui-task-name {
+    @apply text-text-primary font-orbimesh-semibold text-orbimesh-task-name;
+  }
+  
+  .ui-task-description {
+    @apply text-text-secondary font-orbimesh-regular text-orbimesh-task-description;
+  }
+  
+  .ui-metadata-label {
+    @apply text-text-tertiary font-orbimesh-medium text-orbimesh-metadata-label;
+  }
+  
+  .ui-metadata-value {
+    @apply text-text-secondary font-orbimesh-regular text-orbimesh-metadata-value;
+  }
+  
+  .ui-metadata-mono {
+    @apply font-orbimesh-mono text-text-secondary text-orbimesh-metadata-mono;
+  }
+  
+  .ui-section-header {
+    @apply text-text-primary font-orbimesh-semibold text-orbimesh-section-header;
+  }
+  
+  .ui-section-subtitle {
+    @apply text-text-secondary font-orbimesh-regular text-orbimesh-section-subtitle;
+  }
+  
+  .ui-file-name {
+    @apply text-text-primary font-orbimesh-medium text-orbimesh-file-name;
+  }
+  
+  .ui-file-meta {
+    @apply text-text-tertiary font-orbimesh-regular text-orbimesh-file-meta;
+  }
+
+  /* ================================================================
+     TASK CARDS - Component Matrix
+     ================================================================ */
+  .ui-task-completed {
+    @apply bg-status-success-light border-l-4 border-l-status-success border border-status-success-border rounded-orbimesh-lg p-ui-card-padding;
+  }
+  
+  .ui-task-active {
+    @apply bg-status-active-light border-l-4 border-l-status-active border border-status-active-border rounded-orbimesh-lg p-ui-card-padding;
+  }
+  
+  .ui-task-pending {
+    @apply bg-bg-card border border-border-color border-l-4 border-l-border-color-medium rounded-orbimesh-lg p-ui-card-padding;
+  }
+
+  /* ================================================================
+     STATUS BADGES
+     ================================================================ */
+  .ui-badge-active {
+    @apply bg-status-active-light text-status-active-dark border-status-active font-orbimesh-medium text-orbimesh-badge px-orbimesh-sm py-orbimesh-xs rounded-orbimesh-sm;
+  }
+  
+  .ui-badge-complete {
+    @apply bg-status-success-border text-status-success-dark border-status-success font-orbimesh-medium text-orbimesh-badge px-orbimesh-sm py-orbimesh-xs rounded-orbimesh-sm;
+  }
+  
+  .ui-badge-pending {
+    @apply bg-status-pending-light text-status-pending-dark border-status-pending font-orbimesh-medium text-orbimesh-badge px-orbimesh-sm py-orbimesh-xs rounded-orbimesh-sm;
+  }
+
+  /* ================================================================
+     BUTTONS
+     ================================================================ */
+  .ui-button-primary {
+    @apply bg-brand-primary text-white hover:bg-brand-primary-hover font-orbimesh-medium px-ui-button-padding-x py-ui-button-padding-y rounded-orbimesh-sm transition-colors shadow-sm hover:shadow-md;
+  }
+  
+  .ui-button-secondary {
+    @apply border border-border-color bg-bg-card text-text-secondary hover:bg-bg-hover hover:border-brand-primary font-orbimesh-medium px-ui-button-padding-x py-ui-button-padding-y rounded-orbimesh-sm transition-all;
+  }
+
+  /* ================================================================
+     CARDS
+     ================================================================ */
+  .ui-card {
+    @apply bg-bg-card border border-border-color rounded-orbimesh-lg shadow-sm;
+  }
+  
+  .ui-card-hover {
+    @apply bg-bg-card border border-border-color rounded-orbimesh-lg shadow-sm hover:shadow-md hover:border-brand-primary transition-all duration-200;
+  }
+
+  /* ================================================================
+     LAYOUT CONTAINERS
+     ================================================================ */
+  .ui-conversation-container {
+    @apply max-w-orbimesh-conversation mx-auto p-orbimesh-container;
+  }
+  
+  .ui-right-panel {
+    @apply w-orbimesh-panel bg-bg-card shadow-orbimesh-panel border-l border-border-color;
+  }
+  
+  .ui-tab-content {
+    @apply p-orbimesh-tab-content;
+  }
+
+  /* ================================================================
+     TABS
+     ================================================================ */
+  .ui-tab-active {
+    @apply text-brand-primary border-b-2 border-b-brand-primary font-orbimesh-medium text-orbimesh-tab;
+  }
+  
+  .ui-tab-inactive {
+    @apply text-text-tertiary font-orbimesh-medium text-orbimesh-tab hover:text-text-secondary transition-colors;
+  }
+
+  /* ================================================================
+     FORM INPUTS
+     ================================================================ */
+  .ui-input {
+    @apply border border-border-color bg-bg-card text-text-secondary rounded-orbimesh-sm px-orbimesh-md py-orbimesh-sm focus:border-brand-primary focus:ring-2 focus:ring-brand-primary/20 transition-all;
+  }
+  
+  .ui-textarea {
+    @apply border border-border-color bg-bg-card text-text-secondary rounded-orbimesh-sm px-orbimesh-md py-orbimesh-sm focus:border-brand-primary focus:ring-2 focus:ring-brand-primary/20 transition-all min-h-[80px] resize-y;
+  }
+
+  /* ================================================================
+     NAVIGATION
+     ================================================================ */
+  .ui-nav-brand {
+    @apply text-brand-primary font-orbimesh-semibold text-lg;
+  }
+  
+  .ui-nav-link {
+    @apply text-text-tertiary hover:text-brand-primary font-orbimesh-medium transition-colors;
+  }
+
+  /* ================================================================
+     METADATA ITEMS
+     ================================================================ */
+  .ui-metadata-item {
+    @apply bg-bg-subtle border border-border-color-light rounded-orbimesh-sm p-orbimesh-metadata-item flex justify-between items-center;
+  }
+
+  /* ================================================================
+     CITATIONS
+     ================================================================ */
+  .ui-citation {
+    @apply bg-brand-primary-light hover:bg-brand-primary/10 text-brand-primary font-orbimesh-medium text-orbimesh-citation px-orbimesh-sm py-orbimesh-xs rounded-orbimesh-sm transition-colors cursor-pointer;
+  }
+
+  /* ================================================================
+     CODE BLOCKS
+     ================================================================ */
+  .ui-code-block {
+    @apply bg-bg-page border border-border-color rounded-orbimesh-md p-orbimesh-md font-orbimesh-mono text-orbimesh-code text-text-secondary overflow-x-auto;
+  }
+
+  /* ================================================================
+     MARKDOWN CONTENT STYLES
+     ================================================================ */
+  
+  /* Base container */
+  .ui-markdown-content {
+    @apply font-orbimesh-regular text-orbimesh-agent leading-orbimesh-body text-text-secondary;
+  }
+
+  /* Headings */
+  .ui-markdown-h1 {
+    @apply font-orbimesh-semibold text-[24px] leading-orbimesh-heading text-text-primary mt-[32px] mb-[16px] border-b border-border-color pb-2;
+  }
+
+  .ui-markdown-h2 {
+    @apply font-orbimesh-semibold text-orbimesh-h2 leading-orbimesh-heading text-text-primary mt-[24px] mb-[12px];
+  }
+
+  .ui-markdown-h3 {
+    @apply font-orbimesh-semibold text-orbimesh-h3 leading-orbimesh-heading text-text-secondary mt-[20px] mb-[10px];
+  }
+
+  .ui-markdown-h4 {
+    @apply font-orbimesh-semibold text-[14px] leading-orbimesh-heading text-text-secondary mt-[16px] mb-[8px];
+  }
+
+  .ui-markdown-h5,
+  .ui-markdown-h6 {
+    @apply font-orbimesh-semibold text-[13px] leading-orbimesh-small text-text-tertiary mt-[12px] mb-[6px];
+  }
+
+  /* Paragraphs */
+  .ui-markdown-paragraph {
+    @apply mb-[16px] leading-orbimesh-body text-text-secondary;
+  }
+
+  .ui-markdown-paragraph:last-child {
+    @apply mb-0;
+  }
+
+  /* Lists */
+  .ui-markdown-ul {
+    @apply my-[16px] ml-[20px] space-y-[8px] list-disc;
+  }
+
+  .ui-markdown-ol {
+    @apply my-[16px] ml-[20px] space-y-[8px] list-decimal;
+  }
+
+  .ui-markdown-li {
+    @apply text-text-secondary leading-orbimesh-body;
+  }
+
+  .ui-markdown-li::marker {
+    @apply text-text-tertiary;
+  }
+
+  /* Code - Inline and Blocks */
+  .ui-markdown-code-inline {
+    @apply font-mono text-orbimesh-code bg-bg-page text-text-primary rounded-orbimesh-sm px-[6px] py-[2px] border border-border-color-light;
+  }
+
+  .ui-markdown-code-block-wrapper {
+    @apply my-[16px];
+  }
+
+  .ui-markdown-code-language-label {
+    @apply bg-bg-card text-text-tertiary text-[11px] px-3 py-1.5 rounded-t-orbimesh-md border-b border-border-color font-mono;
+  }
+
+  .ui-markdown-code-block {
+    @apply font-mono text-orbimesh-code bg-bg-page text-text-primary p-[12px] rounded-orbimesh-md border border-border-color overflow-x-auto leading-orbimesh-small;
+  }
+
+  .ui-markdown-code-block-with-label {
+    @apply rounded-t-none;
+  }
+
+  /* Links */
+  .ui-markdown-link {
+    @apply text-brand-primary hover:text-brand-primary-hover font-orbimesh-medium hover:underline underline-offset-2 transition-colors;
+  }
+
+  /* Blockquotes */
+  .ui-markdown-blockquote {
+    @apply border-l-[4px] border-brand-primary/30 pl-[16px] py-[8px] my-[16px] italic text-text-tertiary bg-brand-primary-light rounded-r-orbimesh-md;
+  }
+
+  /* Horizontal Rule */
+  .ui-markdown-hr {
+    @apply my-[24px] border-border-color;
+  }
+
+  /* Strong/Bold */
+  .ui-markdown-strong {
+    @apply font-orbimesh-semibold text-text-primary;
+  }
+
+  /* Emphasis/Italic */
+  .ui-markdown-em {
+    @apply italic text-text-secondary;
+  }
+
+  /* Tables */
+  .ui-markdown-table-wrapper {
+    @apply overflow-x-auto my-[16px] rounded-orbimesh-lg border border-border-color;
+  }
+
+  .ui-markdown-table {
+    @apply table-auto w-full;
+  }
+
+  .ui-markdown-thead {
+    @apply bg-bg-page border-b border-border-color;
+  }
+
+  .ui-markdown-tbody {
+    @apply divide-y divide-border-color-light;
+  }
+
+  .ui-markdown-tr {
+    @apply hover:bg-bg-hover transition-colors;
+  }
+
+  .ui-markdown-th {
+    @apply px-4 py-3 text-left font-orbimesh-semibold text-text-primary text-[13px];
+  }
+
+  .ui-markdown-td {
+    @apply px-4 py-3 text-text-secondary text-[13px];
+  }
+
+  /* Images */
+  .ui-markdown-img {
+    @apply rounded-orbimesh-lg my-[16px] max-w-full h-auto shadow-md;
+  }
+}
+
+/* ================================================================
+   CUSTOM TOGGLE SWITCH (Planning Mode)
+   ================================================================ */
+.planning-mode-switch {
+  /* switch */
+  --switch-width: 30px;
+  --switch-height: 16px;
+  --switch-bg: rgb(131, 131, 131);
+  --switch-checked-bg: rgb(13, 148, 136); /* brand-teal */
+  --switch-offset: calc((var(--switch-height) - var(--circle-diameter)) / 2);
+  --switch-transition: all .2s cubic-bezier(0.27, 0.2, 0.25, 1.51);
+  /* circle */
+  --circle-diameter: 12px;
+  --circle-bg: #fff;
+  --circle-shadow: 1px 1px 2px rgba(146, 146, 146, 0.45);
+  --circle-checked-shadow: -1px 1px 2px rgba(163, 163, 163, 0.45);
+  --circle-transition: var(--switch-transition);
+  /* icon */
+  --icon-transition: all .2s cubic-bezier(0.27, 0.2, 0.25, 1.51);
+  --icon-cross-color: var(--switch-bg);
+  --icon-cross-size: 4px;
+  --icon-checkmark-color: var(--switch-checked-bg);
+  --icon-checkmark-size: 6px;
+  /* effect line */
+  --effect-width: calc(var(--circle-diameter) / 2);
+  --effect-height: calc(var(--effect-width) / 2 - 1px);
+  --effect-bg: var(--circle-bg);
+  --effect-border-radius: 1px;
+  --effect-transition: all .2s ease-in-out;
+}
+
+.planning-mode-switch input {
+  display: none;
+}
+
+.planning-mode-switch {
+  display: inline-block;
+}
+
+.planning-mode-switch svg {
+  -webkit-transition: var(--icon-transition);
+  -o-transition: var(--icon-transition);
+  transition: var(--icon-transition);
+  position: absolute;
+  height: auto;
+}
+
+.planning-mode-switch .checkmark {
+  width: var(--icon-checkmark-size);
+  color: var(--icon-checkmark-color);
+  -webkit-transform: scale(0);
+  -ms-transform: scale(0);
+  transform: scale(0);
+}
+
+.planning-mode-switch .cross {
+  width: var(--icon-cross-size);
+  color: var(--icon-cross-color);
+}
+
+.planning-mode-switch .slider {
+  -webkit-box-sizing: border-box;
+  box-sizing: border-box;
+  width: var(--switch-width);
+  height: var(--switch-height);
+  background: var(--switch-bg);
+  border-radius: 999px;
+  display: -webkit-box;
+  display: -ms-flexbox;
+  display: flex;
+  -webkit-box-align: center;
+  -ms-flex-align: center;
+  align-items: center;
+  position: relative;
+  -webkit-transition: var(--switch-transition);
+  -o-transition: var(--switch-transition);
+  transition: var(--switch-transition);
+  cursor: pointer;
+}
+
+.planning-mode-switch .circle {
+  width: var(--circle-diameter);
+  height: var(--circle-diameter);
+  background: var(--circle-bg);
+  border-radius: inherit;
+  -webkit-box-shadow: var(--circle-shadow);
+  box-shadow: var(--circle-shadow);
+  display: -webkit-box;
+  display: -ms-flexbox;
+  display: flex;
+  -webkit-box-align: center;
+  -ms-flex-align: center;
+  align-items: center;
+  -webkit-box-pack: center;
+  -ms-flex-pack: center;
+  justify-content: center;
+  -webkit-transition: var(--circle-transition);
+  -o-transition: var(--circle-transition);
+  transition: var(--circle-transition);
+  z-index: 1;
+  position: absolute;
+  left: var(--switch-offset);
+}
+
+.planning-mode-switch .slider::before {
+  content: "";
+  position: absolute;
+  width: var(--effect-width);
+  height: var(--effect-height);
+  left: calc(var(--switch-offset) + (var(--effect-width) / 2));
+  background: var(--effect-bg);
+  border-radius: var(--effect-border-radius);
+  -webkit-transition: var(--effect-transition);
+  -o-transition: var(--effect-transition);
+  transition: var(--effect-transition);
+}
+
+/* actions */
+
+.planning-mode-switch input:checked + .slider {
+  background: var(--switch-checked-bg);
+}
+
+.planning-mode-switch input:checked + .slider .checkmark {
+  -webkit-transform: scale(1);
+  -ms-transform: scale(1);
+  transform: scale(1);
+}
+
+.planning-mode-switch input:checked + .slider .cross {
+  -webkit-transform: scale(0);
+  -ms-transform: scale(0);
+  transform: scale(0);
+}
+
+.planning-mode-switch input:checked + .slider::before {
+  left: calc(100% - var(--effect-width) - (var(--effect-width) / 2) - var(--switch-offset));
+}
+
+.planning-mode-switch input:checked + .slider .circle {
+  left: calc(100% - var(--circle-diameter) - var(--switch-offset));
+  -webkit-box-shadow: var(--circle-checked-shadow);
+  box-shadow: var(--circle-checked-shadow);
 }

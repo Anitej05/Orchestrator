@@ -2,6 +2,8 @@
 
 import { useState, useEffect } from "react";
 import { useAuth } from "@clerk/nextjs";
+import { authFetch } from "@/lib/auth-fetch";
+import { API_BASE_URL } from "@/lib/config";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -59,12 +61,7 @@ export default function CredentialsPage() {
 
   const loadCredentialsStatus = async () => {
     try {
-      const token = await getToken();
-      const response = await fetch("http://localhost:8000/api/credentials/status", {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
+      const response = await authFetch(`${API_BASE_URL}/api/credentials/status`);
 
       if (!response.ok) throw new Error("Failed to load credentials");
 
@@ -83,7 +80,6 @@ export default function CredentialsPage() {
     setMessage(null);
 
     try {
-      const token = await getToken();
       const agent = agents.find((a) => a.agent_id === agentId);
       if (!agent) return;
 
@@ -93,11 +89,10 @@ export default function CredentialsPage() {
         value: credentials[field.name] || "",
       }));
 
-      const response = await fetch(`http://localhost:8000/api/credentials/${agentId}`, {
+      const response = await authFetch(`${API_BASE_URL}/api/credentials/${agentId}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
           agent_id: agentId,
@@ -127,12 +122,8 @@ export default function CredentialsPage() {
     if (!confirm("Are you sure you want to delete these credentials?")) return;
 
     try {
-      const token = await getToken();
-      const response = await fetch(`http://localhost:8000/api/credentials/${agentId}`, {
+      const response = await authFetch(`${API_BASE_URL}/api/credentials/${agentId}`, {
         method: "DELETE",
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
       });
 
       if (!response.ok) throw new Error("Failed to delete credentials");
@@ -388,3 +379,4 @@ function AgentCredentialCard({
     </Card>
   );
 }
+

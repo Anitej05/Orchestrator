@@ -1,6 +1,5 @@
 import { Badge } from "@/components/ui/badge"
 import { Star, DollarSign, Zap, ExternalLink } from "lucide-react"
-import { StarRating } from "@/components/ui/star-rating"
 import type { AgentEndpoint } from "@/lib/types"
 
 interface FormData {
@@ -66,7 +65,6 @@ export default function AgentPreview({ formData }: AgentPreviewProps) {
 
         {/* Metrics */}
         <div className="flex items-center justify-between mb-4">
-          <StarRating currentRating={Number.parseFloat(displayRating)} readonly={true} size="sm" />
           <div className="flex items-center space-x-1">
             <DollarSign className="w-4 h-4 text-blue-500" />
             <span className="text-sm font-medium">${displayPrice}</span>
@@ -111,3 +109,4 @@ export default function AgentPreview({ formData }: AgentPreviewProps) {
     </div>
   )
 }
+

@@ -292,6 +292,7 @@ class AgentRegistryService:
             skills = self._load_skill_configs()
             for agent_id, skill_config in skills.items():
                 if agent_id not in seen_ids:
+<<<<<<< HEAD
                     catalog.append(
                         {
                             "id": agent_id,
@@ -305,6 +306,18 @@ class AgentRegistryService:
                             "connection_config": {
                                 "base_url": f"http://{skill_config['host']}:{skill_config['port']}"
                             },
+=======
+                    catalog.append({
+                        "id": agent_id,
+                        "name": skill_config['name'],
+                        "description": skill_config['description'],
+                        "capabilities": [],
+                        "price_per_call_usd": None,
+                        "endpoints": [],  # UAP: endpoints are standardized, no need to list
+                        "type": "http_rest",
+                        "connection_config": {
+                            "base_url": f"http://{skill_config['host']}:{skill_config['port']}"
+>>>>>>> 7d9846cd986323c77b62c7053f012cdb2e0b4aa3
                         }
                     )
 
@@ -346,7 +359,6 @@ class AgentRegistryService:
                     "name": skill["name"],
                     "description": skill["description"],
                     "capabilities": [],
-                    "rating": None,
                     "price_per_call_usd": None,
                     "endpoints": [],
                     "type": "http_rest",
@@ -452,7 +464,6 @@ class AgentRegistryService:
             "name": agent.name,
             "description": agent.description,
             "capabilities": agent.capabilities,
-            "rating": agent.rating,
             "price_per_call_usd": agent.price_per_call_usd,
             "endpoints": endpoints_info,
             "type": agent.agent_type,

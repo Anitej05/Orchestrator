@@ -45,19 +45,8 @@ export interface ConversationStatus {
   task_agent_pairs: TaskAgentPair[];
 }
 
-export type TaskStatusType = 'pending' | 'in_progress' | 'completed' | 'failed';
-
-export interface TaskItem {
-  id: string;
-  description: string;
-  status: TaskStatusType;
-  result?: string;
-  code_snippet?: string;
-  priority?: string;
-}
-
 export interface TaskStatus {
-  status: TaskStatusType;
+  status: 'pending' | 'running' | 'completed' | 'failed';
   taskName: string;
   taskDescription?: string;
   agentName?: string;
@@ -82,9 +71,6 @@ export interface ConversationState {
   metadata?: any;
   uploaded_files?: FileObject[];
   plan?: any[];
-  // NEW: Dynamic To-Do List
-  todo_list?: TaskItem[];
-
   // Original prompt for pre-seeded workflows
   original_prompt?: string;
   // Real-time task execution tracking
@@ -114,36 +100,6 @@ export interface ConversationState {
     agent_name: string;
     canvas_display: any;
   };
-
-  // --- OMNI-DISPATCHER FIELDS ---
-  // Human-in-the-Loop (Action Approval)
-  pending_action_approval?: boolean;
-  pending_action?: {
-    action_type: string;
-    resource_id: string;
-    approval_reason: string;
-    payload: any;
-  };
-
-  // Execution Plan (Phases)
-  execution_plan?: Array<{
-    phase_id: string;
-    name: string;
-    goal: string;
-    status: 'pending' | 'in_progress' | 'completed' | 'skipped';
-    goal_verified?: string;
-  }>;
-  current_phase_id?: string;
-
-  // Action History & Insights
-  action_history?: Array<{
-    action_type: string;
-    resource_id: string;
-    success: boolean;
-    result_summary: string;
-    timestamp?: number;
-  }>;
-  insights?: Record<string, string>;
 }
 
 export interface Attachment {

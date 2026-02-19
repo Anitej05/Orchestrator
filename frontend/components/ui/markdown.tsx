@@ -1,4 +1,5 @@
 // Project_Frontend_Copy/components/ui/markdown.tsx
+'use client';
 
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -11,11 +12,15 @@ interface MarkdownProps {
 }
 
 /**
- * A component to render markdown content.
- * It supports GitHub Flavored Markdown (GFM) for tables and allows raw HTML.
- * @param {MarkdownProps} props The props for the component.
- * @param {string} props.content The markdown string to render.
- * @returns {JSX.Element} The rendered markdown content.
+ * Markdown renderer following Brand.md conversation formatting specs.
+ * Renders assistant responses with Orbimesh design system styling.
+ * 
+ * Brand.md compliance:
+ * - Typography: Inter Regular 15px body, Inter Semibold headings
+ * - Colors: Teal (#0D9488) for links/citations, Slate palette for text
+ * - Spacing: 16px paragraphs, 8px list items, 24px H2 margins
+ * - Code: JetBrains Mono 14px, #F8FAFC backgrounds
+ * - Citations: [1] format with .ui-citation styling
  */
 const Markdown: FC<MarkdownProps> = ({ content }) => {
   // Check if content contains HTML that should not be processed by Markdown
@@ -29,36 +34,63 @@ const Markdown: FC<MarkdownProps> = ({ content }) => {
   if (containsHtml) {
     // For HTML content, render as plain text to avoid React parsing issues
     return (
-      <div className="whitespace-pre-wrap font-mono text-sm">
+      <div className="whitespace-pre-wrap font-mono text-[14px] text-text-secondary">
         {content}
       </div>
     );
   }
 
+  const extractText = (child: React.ReactNode): string => {
+    if (typeof child === 'string') return child;
+    if (Array.isArray(child)) return child.map(extractText).join('');
+    if (React.isValidElement(child)) return extractText((child.props as any).children);
+    return '';
+  };
+
+  const isLikelyCodeBlock = (text: string) => {
+    const lines = text.split('\n').filter((line) => line.trim().length > 0);
+    if (lines.length < 3) return false;
+
+    const codeIndicators = [/^#include\b/, /;\s*$/, /\{\s*$/, /\}\s*$/, /\bint\b|\bvoid\b|\bclass\b|\breturn\b/];
+    const indicatorHits = lines.reduce((count, line) => {
+      const trimmed = line.trim();
+      return count + (codeIndicators.some((rx) => rx.test(trimmed)) ? 1 : 0);
+    }, 0);
+
+    return indicatorHits >= 2;
+  };
+
+  if (isLikelyCodeBlock(content)) {
+    return (
+      <pre className="ui-markdown-code-block whitespace-pre-wrap">
+        {content}
+      </pre>
+    );
+  }
+
   return (
-    <div className="prose prose-sm dark:prose-invert max-w-none">
+    <div className="ui-markdown-content max-w-none">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkBreaks]}
-        rehypePlugins={[rehypeRaw]}
         components={{
           // Headings
           h1: ({ node, ...props }) => (
-            <h1 className="text-2xl font-bold mt-6 mb-4 text-gray-900 dark:text-gray-100 border-b border-gray-200 dark:border-gray-700 pb-2" {...props} />
+            <h1 className="ui-markdown-h1" {...props} />
           ),
           h2: ({ node, ...props }) => (
-            <h2 className="text-xl font-bold mt-5 mb-3 text-gray-900 dark:text-gray-100" {...props} />
+            <h2 className="ui-markdown-h2" {...props} />
           ),
           h3: ({ node, ...props }) => (
-            <h3 className="text-lg font-semibold mt-4 mb-2 text-gray-900 dark:text-gray-100" {...props} />
+            <h3 className="ui-markdown-h3" {...props} />
           ),
           h4: ({ node, ...props }) => (
-            <h4 className="text-base font-semibold mt-3 mb-2 text-gray-900 dark:text-gray-100" {...props} />
+            <h4 className="ui-markdown-h4" {...props} />
           ),
           h5: ({ node, ...props }) => (
-            <h5 className="text-sm font-semibold mt-2 mb-1 text-gray-900 dark:text-gray-100" {...props} />
+            <h5 className="ui-markdown-h5" {...props} />
           ),
           h6: ({ node, ...props }) => (
-            <h6 className="text-sm font-semibold mt-2 mb-1 text-gray-700 dark:text-gray-300" {...props} />
+            <h6 className="ui-markdown-h6" {...props} />
           ),
 
           // Paragraphs - check for block-level children to avoid nesting errors
@@ -81,73 +113,79 @@ const Markdown: FC<MarkdownProps> = ({ content }) => {
 
             // If it has block descendants, render as div to avoid HTML nesting errors
             if (hasBlockDescendant(node)) {
-              return <div className="my-3 leading-relaxed text-gray-800 dark:text-gray-200" {...props}>{children}</div>;
+              return <div className="ui-markdown-paragraph" {...props}>{children}</div>;
             }
 
-            return <p className="my-3 leading-relaxed text-gray-800 dark:text-gray-200" {...props}>{children}</p>;
+            return <p className="ui-markdown-paragraph" {...props}>{children}</p>;
           },
 
           // Lists
           ul: ({ node, ...props }) => (
-            <ul className="my-3 ml-6 space-y-2 list-disc marker:text-gray-500 dark:marker:text-gray-400" {...props} />
+            <ul className="ui-markdown-ul" {...props} />
           ),
           ol: ({ node, ...props }) => (
-            <ol className="my-3 ml-6 space-y-2 list-decimal marker:text-gray-500 dark:marker:text-gray-400" {...props} />
+            <ol className="ui-markdown-ol" {...props} />
           ),
           li: ({ node, ...props }) => (
-            <li className="text-gray-800 dark:text-gray-200 leading-relaxed" {...props} />
+            <li className="ui-markdown-li" {...props} />
           ),
 
           // Links
-          a: ({ node, ...props }) => (
-            <a
-              className="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 underline underline-offset-2 transition-colors"
-              target="_blank"
-              rel="noopener noreferrer"
-              {...props}
-            />
-          ),
+          a: ({ node, children, ...props }) => {
+            const text = extractText(children).trim();
+            const isCitation = /^\[\d+\]$/.test(text);
+            return (
+              <a
+                className={isCitation ? "ui-citation" : "ui-markdown-link"}
+                target="_blank"
+                rel="noopener noreferrer"
+                {...props}
+              >
+                {children}
+              </a>
+            );
+          },
 
           // Blockquotes
           blockquote: ({ node, ...props }) => (
-            <blockquote className="border-l-4 border-gray-300 dark:border-gray-600 pl-4 py-2 my-4 italic text-gray-700 dark:text-gray-300 bg-gray-50 dark:bg-gray-800/50 rounded-r" {...props} />
+            <blockquote className="ui-markdown-blockquote" {...props} />
           ),
 
           // Horizontal rule
           hr: ({ node, ...props }) => (
-            <hr className="my-6 border-gray-300 dark:border-gray-700" {...props} />
+            <hr className="ui-markdown-hr" {...props} />
           ),
 
           // Strong/Bold
           strong: ({ node, ...props }) => (
-            <strong className="font-bold text-gray-900 dark:text-gray-100" {...props} />
+            <strong className="ui-markdown-strong" {...props} />
           ),
 
           // Emphasis/Italic
           em: ({ node, ...props }) => (
-            <em className="italic text-gray-800 dark:text-gray-200" {...props} />
+            <em className="ui-markdown-em" {...props} />
           ),
 
           // Tables
           table: ({ node, ...props }) => (
-            <div className="overflow-x-auto my-4 rounded-lg border border-gray-200 dark:border-gray-700">
-              <table className="table-auto w-full" {...props} />
+            <div className="ui-markdown-table-wrapper">
+              <table className="ui-markdown-table" {...props} />
             </div>
           ),
           thead: ({ node, ...props }) => (
-            <thead className="bg-gray-100 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700" {...props} />
+            <thead className="ui-markdown-thead" {...props} />
           ),
           tbody: ({ node, ...props }) => (
-            <tbody className="divide-y divide-gray-200 dark:divide-gray-700" {...props} />
+            <tbody className="ui-markdown-tbody" {...props} />
           ),
           tr: ({ node, ...props }) => (
-            <tr className="hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors" {...props} />
+            <tr className="ui-markdown-tr" {...props} />
           ),
           th: ({ node, ...props }) => (
-            <th className="px-4 py-3 text-left font-semibold text-gray-900 dark:text-gray-100 text-sm" {...props} />
+            <th className="ui-markdown-th" {...props} />
           ),
           td: ({ node, ...props }) => (
-            <td className="px-4 py-3 text-gray-800 dark:text-gray-200 text-sm" {...props} />
+            <td className="ui-markdown-td" {...props} />
           ),
 
           // Images
@@ -157,7 +195,7 @@ const Markdown: FC<MarkdownProps> = ({ content }) => {
             }
             return (
               <img
-                className="rounded-lg my-4 max-w-full h-auto shadow-md"
+                className="ui-markdown-img"
                 {...props}
               />
             );
@@ -174,13 +212,16 @@ const Markdown: FC<MarkdownProps> = ({ content }) => {
             const language = className.replace('language-', '');
 
             return (
-              <div className="my-4 rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700">
+              <div className="ui-markdown-code-block-wrapper">
                 {language && (
-                  <div className="bg-gray-100 dark:bg-gray-800 px-4 py-2 text-xs font-mono text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700 font-semibold uppercase tracking-wider flex items-center justify-between">
+                  <div className="ui-markdown-code-language-label">
                     <span>{language}</span>
                   </div>
                 )}
-                <pre className={`overflow-x-auto p-4 bg-gray-50 dark:bg-gray-950 text-sm leading-relaxed text-gray-800 dark:text-gray-100 ${!language ? 'rounded-lg' : ''}`} {...props}>
+                <pre
+                  className={`ui-markdown-code-block ${language ? 'ui-markdown-code-block-with-label' : ''}`}
+                  {...props}
+                >
                   {children}
                 </pre>
               </div>
@@ -206,7 +247,7 @@ const Markdown: FC<MarkdownProps> = ({ content }) => {
             // However, we can use a trick: standard inline code usually doesn't have className="language-xyz".
 
             if (isBlock) {
-              return <code className={`${className} font-mono text-sm`} {...props}>{children}</code>
+              return <code className={`${className} font-mono text-[14px]`} {...props}>{children}</code>
             }
 
             // For no-language code (inline OR generic block), apply inline styles.
@@ -217,7 +258,7 @@ const Markdown: FC<MarkdownProps> = ({ content }) => {
 
             return (
               <code
-                className={`bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100 rounded px-1.5 py-0.5 text-sm font-mono border border-gray-200 dark:border-gray-700 ${className || ''}`}
+                className={`ui-markdown-code-inline ${className || ''}`}
                 {...props}
               >
                 {children}
