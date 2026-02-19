@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 class AgentServer:
     """
     HTTP server wrapper for any BaseAgent.
-    Provides /health and /execute endpoints.
+    Provides /health, /execute, /capabilities, and /metrics endpoints.
     """
     
     def __init__(
@@ -119,6 +119,19 @@ class AgentServer:
                 "agent_name": self.agent_name,
                 "capabilities": self.agent.get_capabilities_info()
             }
+        
+        @self.app.get("/metrics")
+        async def metrics():
+            """Get agent metrics and telemetry."""
+            if self.agent is None:
+                return {
+                    "agent_id": self.agent_id,
+                    "agent_name": self.agent_name,
+                    "status": "not_initialized",
+                    "metrics": {}
+                }
+            
+            return await self.agent.get_metrics()
     
     def run(self, host: str = "0.0.0.0", port: int = 8000, log_level: str = "info"):
         """Run the server."""

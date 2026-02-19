@@ -574,3 +574,45 @@ Respond with structured JSON."""
             cap.to_dict() 
             for cap in self.capability_registry.list_all()
         ]
+    
+    async def get_metrics(self) -> Dict[str, Any]:
+        """
+        Get agent metrics and telemetry.
+        Override in subclass for agent-specific metrics.
+        """
+        import time
+        
+        uptime_seconds = 0
+        if self._spawn_time:
+            uptime_seconds = time.time() - self._spawn_time
+        
+        metrics = {
+            "agent_id": self.agent_id,
+            "agent_name": self.agent_name,
+            "status": self.status.value,
+            "initialized": self._initialized,
+            "uptime_seconds": uptime_seconds,
+            "capabilities_count": len(self.capability_registry.list_all()),
+            "execution_history_count": len(self.execution_history),
+        }
+        
+        # Add telemetry metrics if available
+        if self.config.enable_telemetry and self.services.telemetry:
+            try:
+                telemetry_metrics = await self.services.telemetry.get_agent_metrics(
+                    agent_name=self.agent_name
+                )
+                metrics["telemetry"] = telemetry_metrics
+            except Exception:
+                metrics["telemetry"] = {"error": "Failed to retrieve telemetry"}
+        
+        # Allow subclasses to add custom metrics
+        custom_metrics = await self._get_custom_metrics()
+        if custom_metrics:
+            metrics["custom"] = custom_metrics
+        
+        return metrics
+    
+    async def _get_custom_metrics(self) -> Optional[Dict[str, Any]]:
+        """Override in subclass to provide custom metrics."""
+        return None

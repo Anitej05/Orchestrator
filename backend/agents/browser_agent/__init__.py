@@ -194,11 +194,37 @@ async def continue_task(request: UAPContinueRequest):
 
 
 # =============================================================================
+# BASEAGENT INTEGRATION
+# =============================================================================
+
+# Legacy app for backwards compatibility
+legacy_app = app
+
+# New BaseAgent implementation
+try:
+    from .base_agent_impl import BrowserAgent as BaseBrowserAgent
+    from backend.agents.base.server import create_agent_server
+    
+    _server = create_agent_server(
+        agent_class=BaseBrowserAgent,
+        agent_id="browser_agent",
+        agent_name="Browser Automation Agent"
+    )
+    app = _server.app  # Export BaseAgent app as primary
+    
+except Exception as e:
+    print(f"WARNING: BaseAgent BrowserAgent failed to initialize: {e}", file=sys.stderr)
+    import traceback
+    traceback.print_exc()
+    app = legacy_app  # Fallback to legacy
+
+
+# =============================================================================
 # MAIN
 # =============================================================================
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8090)
+    uvicorn.run(legacy_app, host="0.0.0.0", port=8090)
 
 

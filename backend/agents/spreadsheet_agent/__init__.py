@@ -2,7 +2,7 @@
 Spreadsheet Agent v3.0
 
 Unified spreadsheet operations with LLM-powered task decomposition.
-Only 4 endpoints: /execute, /continue, /health, /files
+Supports both legacy FastAPI app and new BaseAgent architecture.
 """
 
 import os
@@ -10,23 +10,17 @@ import sys
 from pathlib import Path
 
 # ==================== ROBUST PATH HANDLING ====================
-# Allow running this script directly or as a package
 PACKAGE_DIR = Path(__file__).parent.absolute()
 AGENTS_DIR = PACKAGE_DIR.parent
 BACKEND_DIR = AGENTS_DIR.parent
 PROJECT_ROOT = BACKEND_DIR.parent
 
-# Ensure correct paths in sys.path
-# Order: PROJECT_ROOT > BACKEND_DIR > AGENTS_DIR > PACKAGE_DIR
 for path in [str(PROJECT_ROOT), str(BACKEND_DIR), str(AGENTS_DIR), str(PACKAGE_DIR)]:
     if path not in sys.path:
         sys.path.insert(0, path)
 
-
 import logging
 from typing import Optional, Dict, Any, Union
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 
 from .config import AGENT_PORT, AGENT_VERSION, logger
 from .agent_schemas import (
@@ -35,6 +29,24 @@ from .agent_schemas import (
 )
 from .agent import spreadsheet_agent
 from .state import session_state
+
+# Legacy FastAPI app (maintain backwards compatibility)
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+
+legacy_app = FastAPI(
+    title="Spreadsheet Agent",
+    version=AGENT_VERSION,
+    description="Unified spreadsheet operations with LLM-powered task decomposition"
+)
+
+legacy_app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ============================================================================
 # FASTAPI APP
@@ -60,20 +72,20 @@ app.add_middleware(
 # ENDPOINTS
 # ============================================================================
 
-@app.get("/", response_model=HealthResponse)
+@legacy_app.get("/", response_model=HealthResponse)
 async def root():
     """Root endpoint."""
     return HealthResponse()
 
 
-@app.get("/health", response_model=HealthResponse)
+@legacy_app.get("/health", response_model=HealthResponse)
 async def health():
     """Health check with stats."""
     stats = session_state.get_stats()
     return HealthResponse(cache_stats=stats)
 
 
-@app.post("/execute", response_model=ExecuteResponse)
+@legacy_app.post("/execute", response_model=ExecuteResponse)
 async def execute(
     # Form fields for flexibility
     prompt: Optional[str] = Form(None),
@@ -321,7 +333,7 @@ async def startup():
     logger.info("Endpoints: /execute, /continue, /health, /files")
 
 
-@app.on_event("shutdown")
+@legacy_app.on_event("shutdown")
 async def shutdown():
     """Cleanup on shutdown."""
     logger.info("Spreadsheet Agent shutting down")
@@ -332,9 +344,32 @@ async def shutdown():
 
 
 # ============================================================================
+# BASEAGENT INTEGRATION
+# ============================================================================
+
+# New BaseAgent implementation
+try:
+    from .base_agent_impl import SpreadsheetAgent as BaseSpreadsheetAgent
+    from backend.agents.base.server import create_agent_server
+    
+    _server = create_agent_server(
+        agent_class=BaseSpreadsheetAgent,
+        agent_id="spreadsheet_agent",
+        agent_name="Spreadsheet Agent"
+    )
+    app = _server.app  # Export BaseAgent app as primary
+    
+except Exception as e:
+    print(f"WARNING: BaseAgent SpreadsheetAgent failed to initialize: {e}", file=sys.stderr)
+    import traceback
+    traceback.print_exc()
+    app = legacy_app  # Fallback to legacy
+
+
+# ============================================================================
 # FOR RUNNING DIRECTLY
 # ============================================================================
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=AGENT_PORT)
+    uvicorn.run(legacy_app, host="0.0.0.0", port=AGENT_PORT)

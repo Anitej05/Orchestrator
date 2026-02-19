@@ -742,3 +742,29 @@ async def shutdown_event():
     """Cleanup on shutdown."""
     logger.info("Document Agent shutting down...")
     # Cleanup can be added here if needed
+
+
+# ============================================================================
+# BASEAGENT INTEGRATION
+# ============================================================================
+
+# New BaseAgent implementation (exports app as legacy for backwards compatibility)
+legacy_app = app
+
+# Try to initialize BaseAgent server
+try:
+    from .base_agent_impl import DocumentAgent as BaseDocumentAgent
+    from backend.agents.base.server import create_agent_server
+    
+    _server = create_agent_server(
+        agent_class=BaseDocumentAgent,
+        agent_id="document_agent",
+        agent_name="Document Agent"
+    )
+    app = _server.app  # Export BaseAgent app as primary
+    
+except Exception as e:
+    print(f"WARNING: BaseAgent DocumentAgent failed to initialize: {e}", file=sys.stderr)
+    import traceback
+    traceback.print_exc()
+    app = legacy_app  # Fallback to legacy

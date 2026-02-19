@@ -1,6 +1,6 @@
 {
-  "client_id": "DUMMY",
-  "client_secret": "DUMMY",
+  "client_id": "YOUR_CLIENT_ID",
+  "client_secret": "YOUR_CLIENT_SECRET",
   "api_domain": "https://www.zohoapis.in",
-  "organization_id": "DUMMY"
+  "organization_id": "YOUR_ORG_ID"
 }

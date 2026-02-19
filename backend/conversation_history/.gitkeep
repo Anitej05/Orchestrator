@@ -1,2 +1,3 @@
-# This file ensures the conversation_history directory is tracked by git
-# All conversation files in this directory are ignored via .gitignore
+# This file is used to keep the directory in git
+# The conversation_history directory stores conversation history JSON files
+# JSON files in this directory are gitignored but the directory itself is kept
