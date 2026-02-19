@@ -8,10 +8,8 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional, Callable, Set
 from dataclasses import dataclass, field
 
-from .types import (
-    CapabilityType, ParameterSchema, ExecutionContext, 
-    CapabilityResult, AgentServices
-)
+from .types import CapabilityType, ParameterSchema, ExecutionContext, CapabilityResult
+from .services import AgentServices
 
 logger = logging.getLogger(__name__)
 
@@ -21,15 +19,16 @@ class Capability:
     """
     A capability that an agent can perform.
     """
+
     name: str
     description: str
     capability_type: CapabilityType = CapabilityType.SIMPLE
     parameters: List[ParameterSchema] = field(default_factory=list)
     handler: Optional[Callable] = None
-    
+
     # For compound capabilities
-    internal_tools: Optional[Dict[str, 'Capability']] = None
-    
+    internal_tools: Optional[Dict[str, "Capability"]] = None
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for LLM context."""
         return {
@@ -41,21 +40,22 @@ class Capability:
                     "name": p.name,
                     "type": p.type,
                     "description": p.description,
-                    "required": p.required
+                    "required": p.required,
                 }
                 for p in self.parameters
-            ]
+            ],
         }
-    
-    async def execute(self, agent: Any, params: Dict[str, Any], 
-                      context: ExecutionContext) -> CapabilityResult:
+
+    async def execute(
+        self, agent: Any, params: Dict[str, Any], context: ExecutionContext
+    ) -> CapabilityResult:
         """Execute this capability."""
         if self.handler is None:
             raise ValueError(f"Capability {self.name} has no handler")
-        
+
         try:
             result = await self.handler(agent, params, context)
-            
+
             # Normalize result
             if isinstance(result, CapabilityResult):
                 return result
@@ -63,7 +63,7 @@ class Capability:
                 return CapabilityResult(**result)
             else:
                 return CapabilityResult.ok(data=result)
-                
+
         except Exception as e:
             logger.error(f"Capability {self.name} failed: {e}")
             return CapabilityResult.fail(error=str(e))
@@ -71,15 +71,20 @@ class Capability:
 
 class SimpleCapability(Capability):
     """A simple, single-operation capability."""
-    
-    def __init__(self, name: str, description: str, 
-                 handler: Callable, parameters: List[ParameterSchema] = None):
+
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        handler: Callable,
+        parameters: List[ParameterSchema] = None,
+    ):
         super().__init__(
             name=name,
             description=description,
             capability_type=CapabilityType.SIMPLE,
             parameters=parameters or [],
-            handler=handler
+            handler=handler,
         )
 
 
@@ -88,37 +93,41 @@ class CompoundCapability(Capability):
     A compound capability with internal tools.
     LLM decides which internal tools to use.
     """
-    
-    def __init__(self, name: str, description: str,
-                 internal_tools: Dict[str, Capability] = None):
+
+    def __init__(
+        self, name: str, description: str, internal_tools: Dict[str, Capability] = None
+    ):
         super().__init__(
             name=name,
             description=description,
             capability_type=CapabilityType.COMPOUND,
-            internal_tools=internal_tools or {}
+            internal_tools=internal_tools or {},
         )
-    
+
     def add_tool(self, name: str, capability: Capability):
         """Add an internal tool."""
         self.internal_tools[name] = capability
-    
-    async def execute(self, agent: Any, params: Dict[str, Any],
-                      context: ExecutionContext) -> CapabilityResult:
+
+    async def execute(
+        self, agent: Any, params: Dict[str, Any], context: ExecutionContext
+    ) -> CapabilityResult:
         """
         Execute compound capability.
         LLM decides which internal tools to use.
         """
         from langchain_core.messages import HumanMessage
-        
+
         # LLM plans internal tool sequence
-        tools_description = "\n".join([
-            f"- {name}: {cap.description}"
-            for name, cap in self.internal_tools.items()
-        ])
-        
+        tools_description = "\n".join(
+            [
+                f"- {name}: {cap.description}"
+                for name, cap in self.internal_tools.items()
+            ]
+        )
+
         prompt = f"""You are orchestrating a compound capability: {self.name}
 
-Task: {params.get('task', 'Perform the capability')}
+Task: {params.get("task", "Perform the capability")}
 
 Available internal tools:
 {tools_description}
@@ -130,50 +139,53 @@ For each step, specify:
 3. Expected outcome
 
 Be efficient - use only the tools necessary."""
-        
+
         # Get LLM to plan
         response = await agent.services.inference.generate_structured(
             messages=[HumanMessage(content=prompt)],
-            schema=Dict  # Should define a proper schema
+            schema=Dict,  # Should define a proper schema
         )
-        
+
         # Execute planned steps
         results = []
         for step in response.get("steps", []):
             tool_name = step.get("tool")
             tool_params = step.get("params", {})
-            
+
             if tool_name in self.internal_tools:
                 tool = self.internal_tools[tool_name]
                 result = await tool.execute(agent, tool_params, context)
                 results.append(result)
-                
+
                 # Store result in context for next tools
                 context.set(f"tool_{tool_name}_result", result)
             else:
                 return CapabilityResult.fail(
                     error=f"Unknown internal tool: {tool_name}"
                 )
-        
+
         # Aggregate results
         return CapabilityResult.ok(
-            data={"results": results},
-            metadata={"tools_used": len(results)}
+            data={"results": results}, metadata={"tools_used": len(results)}
         )
 
 
-def capability(name: str, description: str, 
-               parameters: List[ParameterSchema] = None,
-               mode: str = "simple"):
+def capability(
+    name: str,
+    description: str,
+    parameters: List[ParameterSchema] = None,
+    mode: str = "simple",
+):
     """
     Decorator to register a method as a capability.
-    
+
     Usage:
         @capability(name="read_csv", description="Load CSV file")
         async def read_csv(self, params, context):
             # Implementation
             pass
     """
+
     def decorator(func):
         func._is_capability = True
         func._capability_name = name
@@ -181,28 +193,29 @@ def capability(name: str, description: str,
         func._capability_parameters = parameters or []
         func._capability_mode = mode
         return func
+
     return decorator
 
 
 class CapabilityRegistry:
     """Registry for managing agent capabilities."""
-    
+
     def __init__(self):
         self._capabilities: Dict[str, Capability] = {}
-    
+
     def register(self, capability: Capability):
         """Register a capability."""
         self._capabilities[capability.name] = capability
         logger.debug(f"Registered capability: {capability.name}")
-    
+
     def get(self, name: str) -> Optional[Capability]:
         """Get a capability by name."""
         return self._capabilities.get(name)
-    
+
     def list_all(self) -> List[Capability]:
         """List all registered capabilities."""
         return list(self._capabilities.values())
-    
+
     def to_llm_context(self) -> str:
         """Generate context string for LLM."""
         lines = ["Available Capabilities:"]
@@ -216,7 +229,7 @@ class CapabilityRegistry:
                     req = "(required)" if param.required else "(optional)"
                     lines.append(f"    - {param.name}: {param.type} {req}")
         return "\n".join(lines)
-    
+
     def discover_from_agent(self, agent_instance: Any):
         """
         Auto-discover capabilities from an agent instance.
@@ -224,13 +237,13 @@ class CapabilityRegistry:
         """
         for attr_name in dir(agent_instance):
             attr = getattr(agent_instance, attr_name)
-            if callable(attr) and hasattr(attr, '_is_capability'):
+            if callable(attr) and hasattr(attr, "_is_capability"):
                 # Create capability from decorated method
                 cap = Capability(
                     name=attr._capability_name,
                     description=attr._capability_description,
                     handler=attr,
-                    parameters=attr._capability_parameters
+                    parameters=attr._capability_parameters,
                 )
                 self.register(cap)
                 logger.debug(f"Discovered capability from agent: {cap.name}")

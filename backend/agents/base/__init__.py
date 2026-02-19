@@ -8,7 +8,6 @@ from .types import (
     AgentStatus,
     AgentRequest,
     AgentResponse,
-    AgentConfig,
     ExecutionContext,
     ExecutionPlan,
     ExecutionStep,
@@ -31,7 +30,7 @@ from .capability import (
 )
 
 # Base Agent
-from .agent import BaseAgent
+from .agent import BaseAgent, AgentConfig
 
 # Server
 from .server import AgentServer, create_agent_server
@@ -49,21 +48,17 @@ __all__ = [
     "RecoveryPlan",
     "ParameterSchema",
     "CapabilityType",
-    
     # Services
     "AgentServices",
     "get_services",
-    
     # Capabilities
     "Capability",
     "SimpleCapability",
     "CompoundCapability",
     "CapabilityRegistry",
     "capability",
-    
     # Base Agent
     "BaseAgent",
-    
     # Server
     "AgentServer",
     "create_agent_server",
