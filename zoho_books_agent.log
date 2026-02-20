@@ -1,0 +1,9 @@
+INFO:ContentManagementService:ContentManagementService initialized with 0 items
+INFO:ContentManagementService:ContentManagementService initialized with 0 items
+INFO:backend.agents.utils.agent_file_manager:AgentFileManager connected to ContentManagementService
+INFO:backend.agents.utils.agent_file_manager:AgentFileManager initialized for zoho_books_agent at /home/clawuser/Orchestrator/storage/zoho_books_agent
+INFO:     Started server process [20545]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8060 (Press CTRL+C to quit)
+INFO:     127.0.0.1:60980 - "GET /health HTTP/1.1" 200 OK

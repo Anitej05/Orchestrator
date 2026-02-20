@@ -628,51 +628,6 @@ class DocumentAgent:
     async def _process_single_file_safe(self, file_path: str, query: str) -> Dict[str, Any]:
         """Thread-safe processing of a single file (Async Wrapper)."""
         return await self._analyze_single_file(AnalyzeDocumentRequest(query=query), file_path)
-        start_time = time.time()
-        result = {
-            'file_path': file_path,
-            'success': False,
-            'answer': None,
-            'error': None,
-            'processing_time': None
-        }
-
-        try:
-            # Check cache first
-            cache_key = f"{file_path}:{query}"
-            cached = self._get_cached_result(cache_key)
-            if cached and cached.get('success'):
-                result.update({
-                    'success': True,
-                    'answer': cached.get('answer'),
-                    'processing_time': time.time() - start_time
-                })
-                return result
-
-            # Extract and analyze
-            content, _ = extract_document_content(file_path)
-            self.metrics["llm_calls"]["analyze"] += 1
-            self.metrics["llm_calls"]["total"] += 1
-            answer = self.llm_client.analyze_document_with_query(content, query)
-            
-            result.update({
-                'success': True,
-                'answer': answer,
-                'processing_time': time.time() - start_time
-            })
-
-            # Cache successful result
-            self._cache_result(cache_key, {'success': True, 'answer': answer})
-
-        except Exception as e:
-            logger.error(f"File processing error for {file_path}: {e}")
-            result.update({
-                'success': False,
-                'error': str(e),
-                'processing_time': time.time() - start_time
-            })
-
-        return result
 
     def _get_cached_result(self, cache_key: str) -> Optional[Dict[str, Any]]:
         """Thread-safe cache retrieval with hit/miss tracking."""
@@ -1091,8 +1046,6 @@ class DocumentAgent:
                 'versions': [],
                 'current_version': -1
             }
-
-    # ========== DATA EXTRACTION ==========
 
     # ========== DATA EXTRACTION ==========
 

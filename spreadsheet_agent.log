@@ -1,0 +1,34 @@
+INFO:spreadsheet_agent.state:SessionState initialized
+INFO:backend.utils.key_manager:Loaded 1 Cerebras API key from environment (CEREBRAS_API_KEY)
+INFO:ContentManagementService:ContentManagementService initialized with 0 items
+INFO:backend.agents.utils.agent_file_manager:AgentFileManager connected to ContentManagementService
+INFO:backend.agents.utils.agent_file_manager:AgentFileManager initialized for spreadsheet_agent at /home/clawuser/Orchestrator/storage/spreadsheet_agent
+INFO:spreadsheet_agent.llm:LLMClient initialized (Delegating to Unified InferenceService)
+INFO:ContentManagementService:ContentManagementService initialized with 0 items
+INFO:spreadsheet_agent.agent:SpreadsheetAgent initialized
+INFO:     Started server process [20546]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:9000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:58340 - "GET /health HTTP/1.1" 200 OK
+INFO:backend.agents.base.server:Lazy initializing agent: Spreadsheet Agent
+INFO:backend.agents.base.agent:BaseAgent initialized: Spreadsheet Agent (spreadsheet_agent)
+INFO:backend.agents.base.agent:Initializing agent: Spreadsheet Agent
+INFO:agents.spreadsheet_agent:Initializing Spreadsheet Agent resources...
+INFO:ContentManagementService:ContentManagementService initialized with 0 items
+INFO:backend.agents.utils.agent_file_manager:AgentFileManager connected to ContentManagementService
+INFO:backend.agents.utils.agent_file_manager:AgentFileManager initialized for spreadsheet_agent at /home/clawuser/Orchestrator/storage/spreadsheet_agent
+INFO:spreadsheet_agent.llm:LLMClient initialized (Delegating to Unified InferenceService)
+INFO:agents.spreadsheet_agent:Spreadsheet Agent resources initialized
+INFO:backend.agents.base.agent:Agent Spreadsheet Agent ready
+INFO:InferenceService:🤖 Inference (Structured): Using ProviderType.NVIDIA
+/home/clawuser/Orchestrator/backend/venv/lib/python3.13/site-packages/langchain_nvidia_ai_endpoints/_common.py:243: UserWarning: Found minimaxai/minimax-m2.1 in available_models, but type is unknown and inference may fail.
+  warnings.warn(
+/home/clawuser/Orchestrator/backend/venv/lib/python3.13/site-packages/langchain_nvidia_ai_endpoints/chat_models.py:670: UserWarning: Reasoning content was parsed from <think> tags in model output. The tags are currently preserved in the content but will be removed in a future version. The reasoning is available in additional_kwargs['reasoning_content'] and in the reasoning content block in content_blocks. Use reasoning_content instead of parsing tags manually.
+  parsed_response = self._custom_postprocess(
+INFO:InferenceService:✅ JSON extracted successfully from ProviderType.NVIDIA
+INFO:InferenceService:🤖 Inference (Structured): Using ProviderType.NVIDIA
+INFO:InferenceService:✅ JSON extracted successfully from ProviderType.NVIDIA
+ERROR:backend.agents.base.capability:Capability process_data failed: SpreadsheetAgent.process_data() takes 3 positional arguments but 4 were given
+WARNING:backend.agents.base.agent:Execution attempt 1 failed: Step 1 failed: SpreadsheetAgent.process_data() takes 3 positional arguments but 4 were given
+INFO:InferenceService:🤖 Inference (Structured): Using ProviderType.NVIDIA

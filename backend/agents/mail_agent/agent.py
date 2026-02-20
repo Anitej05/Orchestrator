@@ -9,10 +9,6 @@ from fastapi import FastAPI, HTTPException
 from typing import Optional, Dict, Any
 import logging
 
-<<<<<<< HEAD
-# Only import lightweight dependencies at startup
-from .config import logger
-=======
 from .config import COMPOSIO_API_KEY, CONNECTION_ID, logger
 from .agent_schemas import (
     GmailRequest, SendEmailRequest, GmailResponse,
@@ -25,7 +21,6 @@ from .client import gmail_client
 from .llm import llm_client
 from .memory import agent_memory
 from agents.utils.agent_file_manager import FileStatus
->>>>>>> 7d9846cd986323c77b62c7053f012cdb2e0b4aa3
 
 # Create FastAPI app immediately (lightweight)
 app = FastAPI(title="Mail Agent")

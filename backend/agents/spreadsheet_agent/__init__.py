@@ -15,14 +15,10 @@ AGENTS_DIR = PACKAGE_DIR.parent
 BACKEND_DIR = AGENTS_DIR.parent
 PROJECT_ROOT = BACKEND_DIR.parent
 
-<<<<<<< HEAD
-for path in [str(PROJECT_ROOT), str(BACKEND_DIR), str(AGENTS_DIR), str(PACKAGE_DIR)]:
-=======
 # Ensure correct paths in sys.path
 # PROJECT_ROOT for `from backend.X` imports, BACKEND_DIR for `from services.X`, `from utils.X`
 # NOTE: Do NOT add AGENTS_DIR — it causes `agents/utils/` to shadow `backend/utils/`
 for path in [str(PROJECT_ROOT), str(BACKEND_DIR)]:
->>>>>>> 7d9846cd986323c77b62c7053f012cdb2e0b4aa3
     if path not in sys.path:
         sys.path.insert(0, path)
 
@@ -379,12 +375,8 @@ except Exception as e:
 
 def run_agent() -> None:
     import uvicorn
-<<<<<<< HEAD
-    uvicorn.run(legacy_app, host="0.0.0.0", port=AGENT_PORT)
-=======
     uvicorn.run(app, host="0.0.0.0", port=AGENT_PORT)
 
 
 if __name__ == "__main__":
     run_agent()
->>>>>>> 7d9846cd986323c77b62c7053f012cdb2e0b4aa3
