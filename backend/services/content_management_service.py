@@ -276,8 +276,7 @@ class ContentManagementService:
     CHUNK_SIZE_CHARS = CHUNK_SIZE_TOKENS * CHARS_PER_TOKEN_EST
     
     # Models
-    # Models
-    MODEL_HELPER = "llama-3.3-70b"  # For Map phase
+    MODEL_HELPER = "gpt-oss-120b"  # For Map phase (same model across all providers)
     MODEL_GENERATOR = "gpt-oss-120b" # For Reduce phase
     
     def __init__(self, storage_dir: str = "storage/content"):

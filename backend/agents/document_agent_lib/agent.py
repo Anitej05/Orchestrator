@@ -1119,9 +1119,16 @@ class DocumentAgent:
             )
             
             # 2. Extract Data (Using Strategy)
+            extraction_query = {
+                "text": "Extract and summarize the key text content of this document",
+                "tables": "Extract all tables and tabular data from this document",
+                "structured": "Extract all structured data including titles, sections, key points, dates, names, and important information"
+            }.get(request.extraction_type, "Extract key information from this document")
+            
             proc_result = await self.service.process_large_content(
                 content_id=meta.id,
                 task_type=ProcessingTaskType.EXTRACT,
+                query=extraction_query,
                 strategy=ProcessingStrategy.DATA_EXTRACTION
             )
             

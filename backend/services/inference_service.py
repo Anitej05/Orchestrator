@@ -51,8 +51,7 @@ class InferenceService:
     
     def __init__(self):
         self._initialized = True
-        # Default provider order: Cerebras first (fastest, free, gpt-oss-120b),
-        # then GROQ, then NVIDIA as last resort.
+        # Provider order explicitly as: cerebras -> groq -> nvidia
         self._default_providers = [
             ProviderType.CEREBRAS,
             ProviderType.GROQ,

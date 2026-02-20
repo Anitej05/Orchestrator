@@ -744,7 +744,6 @@ async def shutdown_event():
     # Cleanup can be added here if needed
 
 
-<<<<<<< HEAD
 # ============================================================================
 # BASEAGENT INTEGRATION
 # ============================================================================
@@ -762,19 +761,17 @@ try:
         agent_id="document_agent",
         agent_name="Document Agent"
     )
-    app = _server.app  # Export BaseAgent app as primary
-    
 except Exception as e:
     print(f"WARNING: BaseAgent DocumentAgent failed to initialize: {e}", file=sys.stderr)
     import traceback
     traceback.print_exc()
-    app = legacy_app  # Fallback to legacy
-=======
+
+# Always use legacy_app to preserve custom endpoints
+app = legacy_app
+
 def run_agent() -> None:
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8050)
 
-
 if __name__ == "__main__":
     run_agent()
->>>>>>> 7d9846cd986323c77b62c7053f012cdb2e0b4aa3
