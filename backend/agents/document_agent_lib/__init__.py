@@ -11,6 +11,7 @@ import logging
 import os
 import asyncio
 from dotenv import load_dotenv
+from pathlib import Path
 from aiofiles import open as aio_open
 from fastapi import File, UploadFile
 from typing import List, Dict, Optional
@@ -43,12 +44,15 @@ from .planner import DocumentPlanner
 __all__ = ["DocumentAgent", "app"]
 from .state import DialogueStateManager
 
-# Load environment variables
-load_dotenv()
-
-# Configure logging
+# Configure logging FIRST
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Load environment variables from backend/.env
+BACKEND_ENV = Path(__file__).resolve().parents[2] / ".env"
+load_dotenv(BACKEND_ENV)
+if BACKEND_ENV.exists():
+    logger.info(f"Loaded environment from {BACKEND_ENV}")
 
 # Check required API keys
 if not os.getenv('CEREBRAS_API_KEY'):
@@ -484,6 +488,20 @@ async def execute(message: backend_schemas.OrchestratorMessage):
         logger.info(f"📍 Planned Action: {action}, Params: {payload.keys()}")
 
     if action == "/create":
+        # Validate required fields with helpful error messages
+        if not payload.get("content"):
+            return backend_schemas.AgentResponse(
+                status=backend_schemas.AgentResponseStatus.ERROR,
+                error="Missing required field 'content' for /create action. Please provide the document content.",
+                context={"task_id": task_id, "required_fields": ["content", "file_name"]},
+            )
+        if not payload.get("file_name"):
+            return backend_schemas.AgentResponse(
+                status=backend_schemas.AgentResponseStatus.ERROR,
+                error="Missing required field 'file_name' for /create action. Please provide the name for the document file.",
+                context={"task_id": task_id, "required_fields": ["content", "file_name"]},
+            )
+
         req = CreateDocumentRequest(**payload)
         result = await agent.create_document(req)
         
@@ -504,6 +522,14 @@ async def execute(message: backend_schemas.OrchestratorMessage):
         )
 
     if action == "/display":
+        # Validate required fields with helpful error messages
+        if not payload.get("file_path"):
+            return backend_schemas.AgentResponse(
+                status=backend_schemas.AgentResponseStatus.ERROR,
+                error="Missing required field 'file_path' for /display action. Please provide the path to the document to display.",
+                context={"task_id": task_id, "required_fields": ["file_path"]},
+            )
+
         req = DisplayDocumentRequest(**payload)
         result = await agent.display_document(req.file_path)
         
@@ -524,6 +550,20 @@ async def execute(message: backend_schemas.OrchestratorMessage):
         )
 
     if action == "/edit":
+        # Validate required fields with helpful error messages
+        if not payload.get("file_path"):
+            return backend_schemas.AgentResponse(
+                status=backend_schemas.AgentResponseStatus.ERROR,
+                error="Missing required field 'file_path' for /edit action. Please provide the path to the document to edit.",
+                context={"task_id": task_id, "required_fields": ["file_path", "instruction"]},
+            )
+        if not payload.get("instruction"):
+            return backend_schemas.AgentResponse(
+                status=backend_schemas.AgentResponseStatus.ERROR,
+                error="Missing required field 'instruction' for /edit action. Please provide the editing instruction describing what changes to make.",
+                context={"task_id": task_id, "required_fields": ["file_path", "instruction"]},
+            )
+
         edit_req = EditDocumentRequest(**payload)
         result = await agent.edit_document(edit_req)
         if result.get("status") == backend_schemas.AgentResponseStatus.NEEDS_INPUT.value:
@@ -562,6 +602,20 @@ async def execute(message: backend_schemas.OrchestratorMessage):
         if "instruction" in payload and "query" not in payload:
             logger.info("Mapping payload 'instruction' to 'query'")
             payload["query"] = payload["instruction"]
+
+        # Validate required fields with helpful error messages
+        if not payload.get("file_path"):
+            return backend_schemas.AgentResponse(
+                status=backend_schemas.AgentResponseStatus.ERROR,
+                error="Missing required field 'file_path' for /analyze action. Please provide the path to the document to analyze.",
+                context={"task_id": task_id, "required_fields": ["file_path", "query"]},
+            )
+        if not payload.get("query"):
+            return backend_schemas.AgentResponse(
+                status=backend_schemas.AgentResponseStatus.ERROR,
+                error="Missing required field 'query' for /analyze action. Please provide the question to answer about the document.",
+                context={"task_id": task_id, "required_fields": ["file_path", "query"]},
+            )
 
         req = AnalyzeDocumentRequest(**payload)
         result = await agent.analyze_document(req)

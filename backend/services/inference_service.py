@@ -365,7 +365,8 @@ class InferenceService:
                 if not api_key: return None
                 
                 # Model validation: Groq models typically start with llama, mixtral, or gemma
-                model_to_use = model if model and any(x in model.lower() for x in ["llama", "mixtral", "gemma", "gpt", "qwen", "deepseek"]) else "openai/gpt-oss-120b"
+                # Use llama-3.3-70b-versatile as default (fast and capable)
+                model_to_use = model if model and any(x in model.lower() for x in ["llama", "mixtral", "gemma", "gpt", "qwen", "deepseek"]) else "llama-3.3-70b-versatile"
                 return ChatGroq(model=model_to_use, api_key=api_key, temperature=temp, max_tokens=max_tokens)
                 
             elif provider == ProviderType.NVIDIA:

@@ -813,13 +813,16 @@ class DocumentAgent:
                 risk.setdefault('risk_signals', []).append('risky_action_types')
 
             if not validation.get('valid', False):
+                # Log the actual plan and issues for debugging
+                logger.error(f"Edit plan validation failed. Plan: {plan}, Issues: {validation.get('issues', [])}")
                 return {
                     'success': False,
                     'message': 'Edit plan validation failed',
                     'status': LocalAgentResponseStatus.ERROR.value,
                     'risk_assessment': risk,
                     'phase_trace': phase_trace,
-                    'errors': validation.get('issues', [])
+                    'errors': validation.get('issues', []),
+                    'debug_plan': plan  # Include the plan for debugging
                 }
 
             # Approval gating: pause if risk is high unless auto_approve is set

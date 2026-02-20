@@ -37,11 +37,34 @@ class KeyManager:
     If all keys are limited, waits for the one with the shortest remaining cooldown.
     """
     def __init__(self, keys: Optional[List[str]] = None):
-        self._keys = keys or load_keys_from_env()
+        self._keys: List[str] = []
+        self._key_cycle = None
+        self._key_cooldowns: Dict[str, float] = {}
+        self._current_key: Optional[str] = None
+        self._initialized = False
+        
+        # Initialize if keys provided or try to load from env
+        if keys:
+            self._initialize(keys)
+        else:
+            # Lazy initialization - will load on first use
+            self._try_init_from_env()
+    
+    def _try_init_from_env(self) -> bool:
+        """Try to initialize from environment variables."""
+        keys = load_keys_from_env()
+        if keys:
+            self._initialize(keys)
+            return True
+        return False
+    
+    def _initialize(self, keys: List[str]) -> None:
+        """Initialize with the given keys."""
+        self._keys = keys
         self._key_cycle = cycle(self._keys)
-        # Map key -> Unix timestamp when it becomes available
-        self._key_cooldowns: Dict[str, float] = {k: 0.0 for k in self._keys}
+        self._key_cooldowns = {k: 0.0 for k in self._keys}
         self._current_key = next(self._key_cycle) if self._keys else None
+        self._initialized = True
         
     def get_current_key(self) -> Optional[str]:
         """Get the currently active key if available, otherwise find best."""
@@ -68,6 +91,15 @@ class KeyManager:
         """
         now = time.time()
         
+        # Try to initialize from env if not done yet (lazy loading after .env is loaded)
+        if not self._initialized:
+            self._try_init_from_env()
+        
+        # Handle case where no keys are configured
+        if not self._keys:
+            logger.warning("No Cerebras API keys configured")
+            return None
+        
         # 1. Try to find an immediately available key
         # Check all keys to be fair (simple search)
         for key in self._keys:
@@ -78,6 +110,8 @@ class KeyManager:
                 
         # 2. If we are here, ALL keys are limited.
         # Find the one with the minimum wait time.
+        if not self._key_cooldowns:
+            return None
         min_expiry = min(self._key_cooldowns.values())
         wait_time = min_expiry - now
         

@@ -161,12 +161,21 @@ Respond in JSON format:
 
         try:
             # Use the agent's LLM service for planning
-            response = await self.llm_service.generate(
-                prompt=planning_prompt,
+            from langchain_core.messages import HumanMessage, SystemMessage
+            response = await self.services.inference.generate(
+                messages=[HumanMessage(content=planning_prompt)],
                 temperature=0.3,
-                response_format={"type": "json_object"},
             )
-            return json.loads(response)
+            # Try to parse JSON from response
+            try:
+                return json.loads(response)
+            except json.JSONDecodeError:
+                # Try to extract JSON from the response
+                import re
+                json_match = re.search(r'\{.*\}', response, re.DOTALL)
+                if json_match:
+                    return json.loads(json_match.group())
+                raise
         except Exception as e:
             logger.error(f"Planning failed: {e}")
             # Fallback to simple single-step plan
@@ -214,10 +223,10 @@ Respond in JSON format:
         self, description: str, request: AgentRequest
     ) -> Dict:
         """Execute a reasoning/analysis step."""
-        response = await self.llm_service.generate(
-            prompt=description,
+        from langchain_core.messages import HumanMessage
+        response = await self.services.inference.generate(
+            messages=[HumanMessage(content=description)],
             temperature=0.7,
-            context=request.payload.get("context", {}),
         )
 
         return {
@@ -229,6 +238,7 @@ Respond in JSON format:
 
     async def _execute_code_step(self, description: str, request: AgentRequest) -> Dict:
         """Execute a code generation step."""
+        from langchain_core.messages import HumanMessage
         # Generate code
         code_prompt = f"""Write Python code to accomplish the following:
 
@@ -242,7 +252,10 @@ Requirements:
 
 Provide the code in a code block."""
 
-        response = await self.llm_service.generate(prompt=code_prompt, temperature=0.3)
+        response = await self.services.inference.generate(
+            messages=[HumanMessage(content=code_prompt)], 
+            temperature=0.3
+        )
 
         # Extract code from response
         code = self._extract_code(response)
@@ -251,16 +264,19 @@ Provide the code in a code block."""
         try:
             from backend.services.code_sandbox_service import code_sandbox
 
-            execution_result = await code_sandbox.execute(
-                code=code, user_id=request.user_id, thread_id=request.thread_id
+            # Use thread_id as session_id for persistent state
+            session_id = request.thread_id or "default"
+            execution_result = code_sandbox.execute_code(
+                code=code, session_id=session_id
             )
 
             return {
                 "step_number": 1,
-                "success": execution_result.get("status") == "completed",
+                "success": execution_result.get("success", False),
                 "code": code,
                 "result": execution_result.get("result"),
-                "output": execution_result.get("output"),
+                "output": execution_result.get("stdout"),
+                "error": execution_result.get("error"),
                 "type": "code",
             }
         except Exception as e:
@@ -295,8 +311,9 @@ Provide the code in a code block."""
             logger.warning(f"Web search failed, falling back to LLM: {e}")
 
         # Fallback to LLM knowledge
-        response = await self.llm_service.generate(
-            prompt=f"Research and provide comprehensive information about: {description}",
+        from langchain_core.messages import HumanMessage
+        response = await self.services.inference.generate(
+            messages=[HumanMessage(content=f"Research and provide comprehensive information about: {description}")],
             temperature=0.5,
         )
 
@@ -312,8 +329,9 @@ Provide the code in a code block."""
         self, description: str, request: AgentRequest
     ) -> Dict:
         """Execute a creative writing step."""
-        response = await self.llm_service.generate(
-            prompt=description,
+        from langchain_core.messages import HumanMessage
+        response = await self.services.inference.generate(
+            messages=[HumanMessage(content=description)],
             temperature=0.8,  # Higher creativity
             max_tokens=2000,
         )
@@ -329,6 +347,7 @@ Provide the code in a code block."""
         self, step: Dict, step_result: Dict, request: AgentRequest
     ) -> Optional[Dict]:
         """Attempt to recover from a failed step."""
+        from langchain_core.messages import HumanMessage
         logger.info(f"Attempting recovery for step {step.get('step_number')}")
 
         recovery_prompt = f"""The following step failed:
@@ -339,8 +358,9 @@ Suggest an alternative approach or workaround.
 Be concise and practical."""
 
         try:
-            recovery_suggestion = await self.llm_service.generate(
-                prompt=recovery_prompt, temperature=0.4
+            recovery_suggestion = await self.services.inference.generate(
+                messages=[HumanMessage(content=recovery_prompt)], 
+                temperature=0.4
             )
 
             # Create recovery step
@@ -360,6 +380,7 @@ Be concise and practical."""
         self, original_prompt: str, results: List[Dict]
     ) -> str:
         """Synthesize final response from all step results."""
+        from langchain_core.messages import HumanMessage
         if len(results) == 1:
             return results[0].get("result", "Task completed")
 
@@ -374,8 +395,9 @@ Provide a comprehensive but concise response that addresses the original task.
 Highlight key findings, code outputs, or insights where relevant."""
 
         try:
-            response = await self.llm_service.generate(
-                prompt=synthesis_prompt, temperature=0.5
+            response = await self.services.inference.generate(
+                messages=[HumanMessage(content=synthesis_prompt)], 
+                temperature=0.5
             )
             return response
         except Exception as e:
@@ -387,6 +409,7 @@ Highlight key findings, code outputs, or insights where relevant."""
 
     async def _analyze_content(self, request: AgentRequest) -> Dict[str, Any]:
         """Analyze content and provide insights."""
+        from langchain_core.messages import HumanMessage
         prompt = request.prompt
 
         analysis_prompt = f"""Analyze the following content and provide insights:
@@ -399,8 +422,9 @@ Provide:
 3. Insights or implications
 4. Recommendations (if applicable)"""
 
-        response = await self.llm_service.generate(
-            prompt=analysis_prompt, temperature=0.4
+        response = await self.services.inference.generate(
+            messages=[HumanMessage(content=analysis_prompt)], 
+            temperature=0.4
         )
 
         return {"result": response, "type": "analysis", "success": True}
@@ -447,6 +471,7 @@ Provide:
 
     async def _solve_problem(self, request: AgentRequest) -> Dict[str, Any]:
         """Solve a complex problem."""
+        from langchain_core.messages import HumanMessage
         prompt = request.prompt
 
         problem_solving_prompt = f"""Solve the following problem step by step:
@@ -462,8 +487,9 @@ Approach:
 
 Show your work and reasoning clearly."""
 
-        response = await self.llm_service.generate(
-            prompt=problem_solving_prompt, temperature=0.5
+        response = await self.services.inference.generate(
+            messages=[HumanMessage(content=problem_solving_prompt)], 
+            temperature=0.5
         )
 
         return {"result": response, "type": "problem_solving", "success": True}
