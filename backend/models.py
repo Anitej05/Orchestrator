@@ -199,42 +199,8 @@ class AgentCredential(Base):
     agent = relationship("Agent", back_populates="credentials")
 
 
-class UserConnection(Base):
-    """
-    Stores Composio integration connections for users.
-    Each connection represents an authenticated integration (Gmail, Slack, etc.)
-    """
-    __tablename__ = "user_connections"
-
-    id = Column(String, primary_key=True)
-    user_id = Column(String, nullable=False, index=True)
-    app_slug = Column(String, nullable=False, index=True)  # e.g., "gmail", "slack"
-    connection_id = Column(String, nullable=False)  # Encrypted Composio connection ID
-    status = Column(String, default="active")  # active, stale, disconnected
-    auth_timestamp = Column(DateTime, default=datetime.utcnow)
-    last_verified = Column(DateTime, nullable=True)
-    app_metadata = Column(JSON, nullable=True)  # Store connection-specific metadata
-    
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-
-class ConnectionLog(Base):
-    """
-    Audit log for connection events (auth, verification, errors).
-    Used for debugging and monitoring integration health.
-    """
-    __tablename__ = "connection_logs"
-
-    id = Column(Integer, primary_key=True)
-    user_id = Column(String, nullable=False, index=True)
-    app_slug = Column(String, nullable=False, index=True)
-    connection_id = Column(String, nullable=True)
-    event_type = Column(String, nullable=False)  # auth_completed, verification_success, verification_failed, etc.
-    status = Column(String, nullable=False)  # success, error
-    error_message = Column(Text, nullable=True)
-    
-    created_at = Column(DateTime, default=datetime.utcnow)
+# NOTE: UserConnection and ConnectionLog models removed — tables dropped in migration e7a71c4bf948.
+# composio_auth.py still references them but is dead code (Composio integration deprecated).
 
 
 # ============================================================================

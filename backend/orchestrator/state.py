@@ -123,3 +123,17 @@ class State(TypedDict):
     shared_files: Annotated[List[Dict], overwrite_reducer]
     # Path to shared workspace
     shared_workspace: Annotated[str, overwrite_reducer]
+
+    # --- CANVAS REGISTRY ---
+    # Full canvas registry state (replaces old has_canvas/canvas_type/etc)
+    canvas_registry: Annotated[Optional[Dict], overwrite_reducer]
+    active_canvas_id: Annotated[Optional[str], overwrite_reducer]
+    # Backward compat — populated from active canvas
+    has_canvas: Annotated[bool, overwrite_reducer]
+    canvas_type: Annotated[Optional[str], overwrite_reducer]
+    canvas_content: Annotated[Optional[str], overwrite_reducer]
+    canvas_data: Annotated[Optional[Dict], overwrite_reducer]
+    canvas_title: Annotated[Optional[str], overwrite_reducer]
+    browser_view: Annotated[Optional[str], overwrite_reducer]
+    plan_view: Annotated[Optional[Any], overwrite_reducer]
+    current_view: Annotated[Optional[str], overwrite_reducer]

@@ -1,6 +1,10 @@
 from typing import Dict, Any, Optional, List, Union, Literal
 from pydantic import ValidationError
 from backend.schemas import CanvasDisplay, StandardAgentResponse
+from services.canvas_templates import (
+    get_template, list_templates, get_template_ids,
+    validate_template_data, get_canvas_type_for_template, CANVAS_TEMPLATES
+)
 import logging
 
 logger = logging.getLogger("CanvasService")
@@ -116,6 +120,126 @@ class CanvasService:
             canvas_title=title,
             canvas_data={"file_path": file_path}
         )
+
+    # --- TEMPLATE-BASED BUILDERS ---
+
+    @staticmethod
+    def build_from_template(
+        template_id: str,
+        data: Dict[str, Any],
+        title: Optional[str] = None,
+        requires_confirmation: Optional[bool] = None,
+        confirmation_message: Optional[str] = None,
+    ) -> Optional[CanvasDisplay]:
+        """
+        Build a canvas from a predefined template.
+
+        1. Looks up the template in the registry
+        2. Validates data against the template's data_schema
+        3. Returns a CanvasDisplay with template_id attached
+
+        Args:
+            template_id: Template to use (e.g., 'chart_bar', 'spreadsheet_viewer')
+            data: Structured data matching the template's data_schema
+            title: Override the default title
+            requires_confirmation: Override the template's confirmation setting
+            confirmation_message: Override the template's confirmation message
+        """
+        template = get_template(template_id)
+        if not template:
+            logger.error(f"❌ Unknown canvas template: {template_id}")
+            return None
+
+        # Validate data
+        is_valid, error = validate_template_data(template_id, data)
+        if not is_valid:
+            logger.warning(f"⚠️ Template validation: {error}")
+            # Proceed anyway — soft validation
+
+        # Determine settings
+        config = template.get("default_config", {})
+        canvas_type = template["canvas_type"]
+
+        confirm = requires_confirmation
+        if confirm is None:
+            confirm = config.get("requires_confirmation", False)
+
+        confirm_msg = confirmation_message
+        if confirm_msg is None:
+            confirm_msg = config.get("confirmation_message")
+
+        # Attach template_id into canvas_data so frontend knows which template rendered it
+        enriched_data = {**data, "template_id": template_id}
+
+        return CanvasDisplay(
+            canvas_type=canvas_type,
+            canvas_data=enriched_data,
+            canvas_title=title or template.get("display_name"),
+            requires_confirmation=confirm,
+            confirmation_message=confirm_msg,
+        )
+
+    @staticmethod
+    def build_chart(
+        chart_type: Literal["bar", "line", "pie"],
+        labels: List[str],
+        datasets: Optional[List[Dict[str, Any]]] = None,
+        values: Optional[List[float]] = None,
+        title: Optional[str] = None,
+        x_label: Optional[str] = None,
+        y_label: Optional[str] = None,
+    ) -> Optional[CanvasDisplay]:
+        """
+        Build a chart canvas using predefined chart templates.
+
+        For bar/line charts: provide labels + datasets
+        For pie charts: provide labels + values
+        """
+        template_id = f"chart_{chart_type}"
+
+        if chart_type == "pie":
+            if not values:
+                logger.error("Pie chart requires 'values'")
+                return None
+            data = {"labels": labels, "values": values, "title": title or "Pie Chart"}
+        else:
+            if not datasets:
+                logger.error(f"{chart_type} chart requires 'datasets'")
+                return None
+            data = {
+                "labels": labels,
+                "datasets": datasets,
+                "title": title or f"{chart_type.title()} Chart",
+                "chart_subtype": chart_type,
+            }
+            if x_label:
+                data["x_label"] = x_label
+            if y_label:
+                data["y_label"] = y_label
+
+        return CanvasService.build_from_template(template_id, data, title=title)
+
+    @staticmethod
+    def build_code_view(
+        code: str,
+        language: str = "python",
+        filename: Optional[str] = None,
+        title: Optional[str] = None,
+    ) -> CanvasDisplay:
+        """Build a syntax-highlighted code viewer canvas."""
+        return CanvasService.build_from_template(
+            "code_viewer",
+            {"code": code, "language": language, "filename": filename},
+            title=title or f"Code: {filename or language}",
+        )
+
+    @staticmethod
+    def get_available_templates(
+        category: Optional[str] = None,
+        agent: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """List available canvas templates, optionally filtered."""
+        return list_templates(category=category, agent=agent)
 
     # --- EXTRACTION METHODS (Parse agent results) ---
 

@@ -180,7 +180,7 @@ class BaseAgent(ABC):
                     )
                     cap_result = await capability.execute(
                         agent=self,
-                        params=request.payload or {},
+                        params={**{"prompt": request.prompt}, **(request.payload or {})},
                         context=context,
                     )
                     if cap_result.success:
@@ -513,8 +513,10 @@ Respond with structured JSON."""
                     "Use the file_id and thread_id directly in your plan parameters."
                 )
         
+        has_load_file = "load_file" in [cap.name for cap in self.capability_registry.list_all()]
+        
         # CRITICAL FIX: Explicitly tell LLM when no data is loaded
-        if not has_loaded_data:
+        if not has_loaded_data and has_load_file:
             session_context = (
                 "\n\n**NO DATA LOADED YET**\n"
                 "You MUST include a load_file step FIRST before any data processing steps. "

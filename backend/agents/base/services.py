@@ -78,7 +78,10 @@ class AgentServices:
         if self._file_manager is None:
             from backend.agents.utils.agent_file_manager import AgentFileManager
 
-            self._file_manager = AgentFileManager()
+            self._file_manager = AgentFileManager(
+                agent_id="default_agent",
+                storage_dir="storage/default_agent",
+            )
         return self._file_manager
 
     def initialize_essential(self):

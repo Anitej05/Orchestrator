@@ -77,6 +77,9 @@ class Capability:
                 for k, v in result.items():
                     if k in known_keys:
                         cap_kwargs[k] = v
+                    elif k == "result" and "data" not in result:
+                        # "result" is a common alias for "data" in capability returns
+                        cap_kwargs["data"] = v
                     else:
                         extra[k] = v
                 # Merge extra into metadata

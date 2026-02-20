@@ -26,6 +26,7 @@ from backend.services.telemetry_service import telemetry_service
 from backend.services.code_sandbox_service import code_sandbox
 from backend.services.terminal_service import terminal_service
 from backend.services.credential_service import get_credentials_for_headers
+from services.canvas_service import CanvasService
 from database import SessionLocal
 
 logger = logging.getLogger(__name__)
@@ -134,12 +135,21 @@ class Hands:
                 logger.info(f"📝 Python created {len(new_files)} new file(s): {[f.file_name for f in new_files]}")
         elif action_type == "skip" or action_type == "finish":
             # Return a valid result object even for skip/finish to ensure state consistency
+            if action_type == "finish":
+                user_response = decision_dict.get("user_response", "")
+                output_dict = {"message": user_response}
+                # Auto-detect canvas from user_response content
+                canvas = self._auto_detect_canvas_from_text(user_response)
+                if canvas:
+                    output_dict["canvas_display"] = canvas
+                    logger.info(f"🎨 Hands: Auto-detected canvas in finish response")
+            else:
+                output_dict = {"skipped": True}
+
             result = ActionResult(
                 action_id=f"{action_type}_{int(time.time())}",
                 success=True,
-                output={"message": decision_dict.get("user_response")}
-                if action_type == "finish"
-                else {"skipped": True},
+                output=output_dict,
                 execution_time_ms=(time.time() - start_time) * 1000,
             )
             return self._update_state_with_result(state, result, config)
@@ -493,10 +503,64 @@ os.chdir(r'{workspace_path}')
         else:
             output = "No output"
 
+        output_dict = {"result": output, "code": code}
+
+        # Auto-detect canvas for created files (.xlsx, .csv) in workspace
+        try:
+            workspace_manager = get_workspace_manager(thread_id)
+            workspace_path = workspace_manager.get_workspace_path()
+            import glob as glob_mod
+            for pattern in ["*.xlsx", "*.csv"]:
+                for fpath in glob_mod.glob(str(workspace_path / pattern)):
+                    from pathlib import Path
+                    p = Path(fpath)
+                    if p.suffix == ".csv":
+                        import csv, io
+                        content = p.read_text(encoding="utf-8", errors="replace")
+                        reader = csv.reader(io.StringIO(content))
+                        rows_all = list(reader)
+                        if rows_all:
+                            canvas = CanvasService.build_from_template(
+                                "spreadsheet_viewer",
+                                {"headers": rows_all[0], "rows": rows_all[1:50], "filename": p.name,
+                                 "metadata": {"rows_total": len(rows_all)-1, "rows_shown": min(49, len(rows_all)-1)}},
+                                title=p.name,
+                            )
+                            if canvas:
+                                output_dict["canvas_display"] = canvas.model_dump()
+                                logger.info(f"🎨 Hands: Auto-canvas for CSV {p.name}")
+                                break
+                    elif p.suffix == ".xlsx":
+                        try:
+                            import openpyxl
+                            wb = openpyxl.load_workbook(fpath, read_only=True)
+                            ws = wb.active
+                            rows_all = list(ws.iter_rows(values_only=True))
+                            wb.close()
+                            if rows_all:
+                                headers = [str(h) if h else "" for h in rows_all[0]]
+                                data_rows = [[str(c) if c is not None else "" for c in r] for r in rows_all[1:51]]
+                                canvas = CanvasService.build_from_template(
+                                    "spreadsheet_viewer",
+                                    {"headers": headers, "rows": data_rows, "filename": p.name,
+                                     "metadata": {"rows_total": len(rows_all)-1, "rows_shown": min(50, len(rows_all)-1)}},
+                                    title=p.name,
+                                )
+                                if canvas:
+                                    output_dict["canvas_display"] = canvas.model_dump()
+                                    logger.info(f"🎨 Hands: Auto-canvas for XLSX {p.name}")
+                                    break
+                        except Exception as e:
+                            logger.debug(f"Could not read xlsx {fpath}: {e}")
+                if "canvas_display" in output_dict:
+                    break
+        except Exception as e:
+            logger.debug(f"Auto-canvas file detection skipped: {e}")
+
         return ActionResult(
             action_id="python",
             success=success,
-            output=output,
+            output=output_dict,
             error_message=result.get("error") if not success else None,
             execution_time_ms=(time.time() - start_time) * 1000,
         )
@@ -556,66 +620,79 @@ os.chdir(r'{workspace_path}')
             "shared_workspace": str(shared_manager.get_workspace_path()),
         }
 
-        # SOTA: Extract Canvas Data from Standard Response (UAP v2)
-        # This Bubbles up the canvas display to the top-level state so main.py can see it
-        # Handle both dict and Pydantic object responses
+        # === CANVAS REGISTRY: Extract and register canvases from agent responses ===
         output = result.output
-        std_response = None
+        canvas = None
 
+        # Path 1: StandardResponse V2 — standard_response.canvas_display
+        std_response = None
         if isinstance(output, dict) and "standard_response" in output:
-            # Dict format
             std_response = output.get("standard_response")
         elif hasattr(output, "standard_response") and output.standard_response:
-            # Pydantic object format (AgentResponse, etc.)
             std_response = output.standard_response
 
         if std_response:
-            # Handle both dict and Pydantic object for std_response
             if isinstance(std_response, dict) and "canvas_display" in std_response:
                 canvas = std_response["canvas_display"]
             elif (
                 hasattr(std_response, "canvas_display") and std_response.canvas_display
             ):
                 canvas = std_response.canvas_display
-            else:
-                canvas = None
 
+        # Path 2: Direct canvas_display on output dict (Universal Agent, etc.)
+        if not canvas and isinstance(output, dict) and "canvas_display" in output:
+            canvas = output["canvas_display"]
             if canvas:
-                logger.info(f"🎨 Hands: Extracting canvas display from agent response")
-                updates["has_canvas"] = True
-                updates["canvas_type"] = (
-                    canvas.get("canvas_type")
-                    if isinstance(canvas, dict)
-                    else canvas.canvas_type
-                )
-                updates["canvas_content"] = (
-                    canvas.get("canvas_content")
-                    if isinstance(canvas, dict)
-                    else canvas.canvas_content
-                )
-                updates["canvas_data"] = (
-                    canvas.get("canvas_data")
-                    if isinstance(canvas, dict)
-                    else canvas.canvas_data
-                )
-                updates["canvas_title"] = (
-                    canvas.get("heading") or canvas.get("canvas_title")
-                    if isinstance(canvas, dict)
-                    else (canvas.canvas_title or getattr(canvas, "heading", None))
-                )
+                logger.info(f"🎨 Hands: Found direct canvas_display in result output")
 
-                # For browser view specifically
-                canvas_type = updates["canvas_type"]
-                if canvas_type == "html":
-                    updates["browser_view"] = updates["canvas_content"]
-                    updates["current_view"] = "browser"
-                elif canvas_type == "plan_graph":
-                    updates["plan_view"] = updates["canvas_data"]
-                    updates["current_view"] = "plan"
-                elif canvas_type == "email_preview":
-                    updates["current_view"] = "browser"
-                elif canvas_type == "spreadsheet":
-                    updates["current_view"] = "spreadsheet"
+        # Path 3: Nested in output.result dict
+        if not canvas and isinstance(output, dict):
+            nested_result = output.get("result")
+            if isinstance(nested_result, dict) and "canvas_display" in nested_result:
+                canvas = nested_result["canvas_display"]
+                if canvas:
+                    logger.info(f"🎨 Hands: Found canvas_display in nested result")
+
+        if canvas:
+            logger.info(f"🎨 Hands: Registering canvas in Canvas Registry")
+            c_type = canvas.get("canvas_type") if isinstance(canvas, dict) else canvas.canvas_type
+            c_content = canvas.get("canvas_content") if isinstance(canvas, dict) else canvas.canvas_content
+            c_data = canvas.get("canvas_data") if isinstance(canvas, dict) else canvas.canvas_data
+            c_title = (
+                (canvas.get("heading") or canvas.get("canvas_title"))
+                if isinstance(canvas, dict)
+                else (canvas.canvas_title or getattr(canvas, "heading", None))
+            )
+            c_confirm = (
+                canvas.get("requires_confirmation", False)
+                if isinstance(canvas, dict)
+                else getattr(canvas, "requires_confirmation", False)
+            )
+            c_confirm_msg = (
+                canvas.get("confirmation_message")
+                if isinstance(canvas, dict)
+                else getattr(canvas, "confirmation_message", None)
+            )
+            source_agent = decision_dict.get("resource_id") or action_type
+            canvas_id = f"{source_agent}_{c_type}_{int(time.time())}"
+
+            from backend.services.canvas_registry import get_canvas_registry
+            registry = get_canvas_registry(thread_id)
+            registry.register_sync(
+                canvas_id=canvas_id,
+                canvas_type=c_type or "unknown",
+                source_agent=source_agent,
+                canvas_data=c_data,
+                canvas_content=c_content,
+                canvas_title=c_title,
+                requires_confirmation=c_confirm,
+                confirmation_message=c_confirm_msg,
+            )
+            registry_state = registry.get_registry_state()
+            updates["canvas_registry"] = registry_state.model_dump()
+            updates["active_canvas_id"] = registry.get_active_id()
+            compat = registry.get_backward_compat_fields()
+            updates.update(compat)
 
         if not result.success:
             failure_count = state.get("failure_count", 0) + 1
@@ -879,3 +956,56 @@ os.chdir(r'{workspace_path}')
             return json.dumps(output, default=str)[:max_length]
 
         return str(output)[:max_length]
+
+    def _auto_detect_canvas_from_text(self, text: str) -> dict | None:
+        """
+        Auto-detect structured content in text and return a canvas_display dict.
+        
+        Detection rules (in priority order):
+        1. Code block with 5+ lines → code_viewer canvas
+        2. Long markdown (500+ chars) with headers → document_viewer canvas
+        
+        Returns canvas_display dict or None.
+        """
+        import re
+
+        if not text or not isinstance(text, str):
+            return None
+
+        try:
+            # 1. Code block detection — look for ```lang\n...``` with 5+ lines
+            code_match = re.search(r'```(\w+)?\n(.*?)```', text, re.DOTALL)
+            if code_match:
+                lang = code_match.group(1) or 'python'
+                code = code_match.group(2).strip()
+                if code and code.count('\n') >= 4:
+                    canvas = CanvasService.build_from_template(
+                        "code_viewer",
+                        {"code": code, "language": lang},
+                        title=f"Code ({lang})",
+                    )
+                    if canvas:
+                        return canvas.model_dump()
+
+            # 2. Long markdown with structure → document_viewer
+            has_headers = bool(re.search(r'^##?\s+', text, re.MULTILINE))
+            has_tables = '|---' in text or '| ---' in text
+            is_long = len(text) > 500
+
+            if is_long and (has_headers or has_tables):
+                # Extract a title from the first header
+                title_match = re.search(r'^#\s+(.+)', text, re.MULTILINE)
+                title = title_match.group(1).strip() if title_match else "Document"
+                canvas = CanvasService.build_from_template(
+                    "document_viewer",
+                    {"content": text, "title": title, "status": "created"},
+                    title=title,
+                )
+                if canvas:
+                    return canvas.model_dump()
+
+        except Exception as e:
+            logger.debug(f"Auto-detect canvas failed (non-fatal): {e}")
+
+        return None
+

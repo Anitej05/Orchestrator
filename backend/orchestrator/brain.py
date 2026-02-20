@@ -956,6 +956,7 @@ Return JSON with:
             ).model_dump(),
         }
 
+
     def _apply_decision_to_state(
         self, state: Dict[str, Any], decision: BrainDecision
     ) -> Dict[str, Any]:
@@ -1095,6 +1096,72 @@ Return JSON with:
         # Handle finish
         if decision.action_type == "finish":
             updates["final_response"] = decision.user_response or "Task complete."
+
+            # === CANVAS AUTO-DETECT for finish responses ===
+            # When Brain finishes directly (bypassing Hands), detect structured content
+            # and register canvas in the Canvas Registry
+            user_resp = decision.user_response or ""
+            if len(user_resp) > 300:
+                try:
+                    import re
+                    from services.canvas_service import CanvasService
+                    from backend.services.canvas_registry import get_canvas_registry
+
+                    thread_id = (
+                        state.get("thread_id")
+                        or state.get("configurable", {}).get("thread_id", "default")
+                    )
+
+                    canvas_obj = None
+
+                    # 1. Code block detection (5+ lines)
+                    code_match = re.search(r'```(\w+)?\n(.*?)```', user_resp, re.DOTALL)
+                    if code_match:
+                        lang = code_match.group(1) or 'python'
+                        code = code_match.group(2).strip()
+                        if code and code.count('\n') >= 4:
+                            canvas_obj = CanvasService.build_from_template(
+                                "code_viewer",
+                                {"code": code, "language": lang},
+                                title=f"Code ({lang})",
+                            )
+
+                    # 2. Long markdown with structure → document_viewer
+                    if not canvas_obj:
+                        has_headers = bool(re.search(r'^##?\s+', user_resp, re.MULTILINE))
+                        has_tables = '|---' in user_resp or '| ---' in user_resp
+                        if has_headers or has_tables:
+                            title_match = re.search(r'^#\s+(.+)', user_resp, re.MULTILINE)
+                            title = title_match.group(1).strip() if title_match else "Document"
+                            canvas_obj = CanvasService.build_from_template(
+                                "document_viewer",
+                                {"content": user_resp, "title": title, "status": "created"},
+                                title=title,
+                            )
+
+                    # Register canvas in registry
+                    if canvas_obj:
+                        canvas_dict = canvas_obj.model_dump()
+                        registry = get_canvas_registry(thread_id)
+                        import time as _time
+                        c_type = canvas_dict.get("canvas_type", "document")
+                        canvas_id = f"brain_finish_{c_type}_{int(_time.time())}"
+                        registry.register_sync(
+                            canvas_id=canvas_id,
+                            canvas_type=c_type,
+                            source_agent="brain",
+                            canvas_data=canvas_dict.get("canvas_data"),
+                            canvas_content=canvas_dict.get("canvas_content"),
+                            canvas_title=canvas_dict.get("canvas_title"),
+                        )
+                        compat = registry.get_backward_compat_fields()
+                        updates.update(compat)
+                        updates["canvas_registry"] = registry.get_registry_state().model_dump()
+                        updates["active_canvas_id"] = registry.get_active_id()
+                        logger.info(f"🎨 Brain: Auto-canvas registered for finish response (type={c_type})")
+
+                except Exception as e:
+                    logger.debug(f"Canvas auto-detect in finish skipped: {e}")
 
             # CRITICAL: Append the final response to the message history so it appears in the chat
             # The 'messages' key in State triggers add_messages reducer which appends to the list

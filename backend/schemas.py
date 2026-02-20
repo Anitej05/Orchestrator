@@ -249,7 +249,7 @@ class CanvasDisplay(BaseModel):
     1. Structured data (preferred): Send canvas_data, frontend templates it
     2. Custom HTML (when needed): Send canvas_content with raw HTML
     """
-    canvas_type: Literal['email_preview', 'spreadsheet', 'document', 'pdf', 'image', 'json', 'html', 'markdown'] = Field(
+    canvas_type: Literal['email_preview', 'spreadsheet', 'spreadsheet_plan', 'document', 'pdf', 'image', 'json', 'html', 'markdown', 'chart', 'code'] = Field(
         ...,
         description="Type of content being displayed in canvas"
     )
@@ -315,6 +315,44 @@ class CanvasDisplay(BaseModel):
                 "confirmation_message": "Please review the email before sending"
             }
         }
+
+
+class CanvasEntry(BaseModel):
+    """A single registered canvas in the Canvas Registry."""
+    canvas_id: str = Field(..., description="Unique canvas ID (e.g., 'spreadsheet_1684329')")
+    canvas_type: str = Field(..., description="Type: email_preview, spreadsheet, document, pdf, image, json, html, markdown")
+    canvas_data: Optional[Dict[str, Any]] = Field(None, description="Structured data (preferred)")
+    canvas_content: Optional[str] = Field(None, description="Raw HTML/markdown content")
+    canvas_title: Optional[str] = Field(None, description="Display title")
+    source_agent: str = Field(default="unknown", description="Agent that created this canvas")
+    priority: int = Field(default=0, description="Higher = more important (confirmation=100, result=50, preview=10)")
+    version: int = Field(default=1, description="Auto-incremented on update")
+    created_at: str = Field(default="", description="ISO timestamp")
+    updated_at: str = Field(default="", description="ISO timestamp")
+    requires_confirmation: bool = Field(default=False)
+    confirmation_message: Optional[str] = None
+    linked_file_id: Optional[str] = Field(None, description="Link to AgentFileManager file")
+    status: str = Field(default="active", description="active, archived, dismissed")
+    tags: List[str] = Field(default_factory=list)
+
+
+class CanvasRegistryState(BaseModel):
+    """Full registry state sent to frontend in API responses."""
+    canvases: Dict[str, CanvasEntry] = Field(default_factory=dict, description="canvas_id -> CanvasEntry")
+    active_canvas_id: Optional[str] = Field(None, description="Currently focused canvas")
+    canvas_order: List[str] = Field(default_factory=list, description="Display order by priority/time")
+
+
+class CanvasTemplate(BaseModel):
+    """Schema describing a predefined canvas template (for API responses)."""
+    template_id: str = Field(..., description="Unique template identifier")
+    canvas_type: str = Field(..., description="Canvas type this template renders")
+    display_name: str = Field(..., description="Human-readable name")
+    description: str = Field("", description="What this template is for")
+    category: str = Field("", description="Template category (data, document, visualization, etc.)")
+    data_schema: Dict[str, Any] = Field(default_factory=dict, description="JSON Schema of expected data")
+    default_config: Dict[str, Any] = Field(default_factory=dict, description="Default rendering config")
+    agent_hints: List[str] = Field(default_factory=list, description="Agents that commonly use this")
 
 
 class StandardAgentResponse(BaseModel):
@@ -384,11 +422,14 @@ class ProcessResponse(BaseModel):
     final_response: Optional[str] = None
     pending_user_input: bool = False
     question_for_user: Optional[str] = None
-    # Canvas fields
+    # Canvas Registry (NEW)
+    canvas_registry: Optional[CanvasRegistryState] = None
+    active_canvas_id: Optional[str] = None
+    # Canvas fields (DEPRECATED — kept for backward compat, populated from active canvas)
     has_canvas: bool = False
     canvas_content: Optional[str] = None
     canvas_type: Optional[str] = None
-    canvas_data: Optional[Dict[str, Any]] = None # Added V2 structured data support
+    canvas_data: Optional[Dict[str, Any]] = None
     browser_view: Optional[str] = None
     plan_view: Optional[str] = None
     current_view: Optional[str] = None

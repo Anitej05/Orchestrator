@@ -12,8 +12,8 @@ import re
 import yaml
 from typing import List, Dict, Optional, Any
 from sqlalchemy.orm import Session, joinedload
-from models import Agent, AgentEndpoint, AgentCapability, StatusEnum
-from database import SessionLocal
+from models import Agent, AgentEndpoint, AgentCapability, StatusEnum, AgentType
+from database import SessionLocal, Base, engine
 import json
 from pathlib import Path
 
@@ -26,6 +26,7 @@ AGENT_DIRS = [
     "browser_agent",
     "document_agent_lib",
     "zoho_books",
+    "universal_agent",
 ]
 
 # Standardized agent aliases mapping for consistent naming across the orchestrator
@@ -59,6 +60,11 @@ AGENT_ALIASES = {
     "zoho_books": "Zoho Books Agent",
     "accounting": "Zoho Books Agent",
     "invoice": "Zoho Books Agent",
+    # Universal agent aliases
+    "universal": "Universal Agent",
+    "universal_agent": "Universal Agent",
+    "general": "Universal Agent",
+    "general_agent": "Universal Agent",
 }
 
 
@@ -303,7 +309,7 @@ class AgentRegistryService:
                         "connection_config": {
                             "base_url": f"http://{skill_config['host']}:{skill_config['port']}"
                         }
-                    )
+                    })
 
             return catalog
         except Exception as e:
@@ -454,6 +460,139 @@ class AgentRegistryService:
             "connection_config": agent.connection_config,
         }
 
+    # =================================================================
+    # DB SYNC (consolidated from manage.py)
+    # =================================================================
+
+    @staticmethod
+    def create_tables():
+        """Create all database tables if they don't exist."""
+        logger.info("Creating database tables...")
+        Base.metadata.create_all(bind=engine)
+        logger.info("✅ All tables created successfully")
+
+    def sync_skill_entries(self, verbose: bool = True) -> Dict[str, Any]:
+        """
+        Sync all SKILL.md files to the agents table.
+        Creates minimal agent entries (UAP uses fixed endpoints).
+
+        Returns:
+            dict with added, updated, unchanged counts and errors list
+        """
+        if verbose:
+            logger.info("=" * 60)
+            logger.info("UAP Skill Sync: Starting...")
+            logger.info("=" * 60)
+
+        self.create_tables()
+
+        added_count = 0
+        updated_count = 0
+        unchanged_count = 0
+        errors = []
+
+        backend_dir = Path(__file__).resolve().parents[1]
+        agents_dir = backend_dir / "agents"
+
+        for agent_subdir in AGENT_DIRS:
+            skill_path = agents_dir / agent_subdir / "SKILL.md"
+
+            if not skill_path.exists():
+                if verbose:
+                    logger.warning(f"⚠️  No SKILL.md found in {agent_subdir}")
+                continue
+
+            try:
+                skill_config = parse_skill_md(skill_path)
+                if not skill_config:
+                    errors.append(f"Failed to parse {skill_path}")
+                    continue
+
+                agent_id = skill_config["id"]
+                agent_name = skill_config["name"]
+
+                with SessionLocal() as db:
+                    db_agent = db.query(Agent).get(agent_id)
+
+                    if db_agent is None:
+                        if verbose:
+                            logger.info(f"➕ Adding from SKILL.md: {agent_name}")
+
+                        db_agent = Agent(
+                            id=agent_id,
+                            owner_id="orbimesh",
+                            name=agent_name,
+                            description=skill_config["description"],
+                            capabilities=[],
+                            price_per_call_usd=0.0,
+                            status=StatusEnum.active,
+                            agent_type=AgentType.HTTP_REST.value,
+                            connection_config={
+                                "base_url": f"http://{skill_config['host']}:{skill_config['port']}"
+                            },
+                            requires_credentials=False,
+                        )
+                        db.add(db_agent)
+                        db.commit()
+                        added_count += 1
+                    else:
+                        new_url = f"http://{skill_config['host']}:{skill_config['port']}"
+                        current_url = (db_agent.connection_config or {}).get("base_url", "")
+
+                        if (
+                            db_agent.name != agent_name
+                            or db_agent.description != skill_config["description"]
+                            or current_url != new_url
+                        ):
+                            if verbose:
+                                logger.info(f"🔄 Updating from SKILL.md: {agent_name}")
+                            db_agent.name = agent_name
+                            db_agent.description = skill_config["description"]
+                            db_agent.connection_config = {"base_url": new_url}
+                            db.commit()
+                            updated_count += 1
+                        else:
+                            if verbose:
+                                logger.info(f"✅ Up-to-date (SKILL.md): {agent_name}")
+                            unchanged_count += 1
+
+            except Exception as e:
+                error_msg = f"Failed to sync {agent_subdir}: {str(e)}"
+                logger.error(f"❌ {error_msg}")
+                errors.append(error_msg)
+
+        if verbose:
+            logger.info("=" * 60)
+            logger.info("UAP Skill Sync: Complete")
+            logger.info("=" * 60)
+            logger.info(f"➕ New agents added: {added_count}")
+            logger.info(f"🔄 Agents updated: {updated_count}")
+            logger.info(f"✅ Agents unchanged: {unchanged_count}")
+            if errors:
+                logger.error(f"❌ Errors: {len(errors)}")
+            logger.info("=" * 60)
+
+        # Invalidate cache after sync so runtime picks up new agents
+        self._skill_cache = {}
+
+        return {
+            "added": added_count,
+            "updated": updated_count,
+            "unchanged": unchanged_count,
+            "errors": errors,
+        }
+
 
 # Global singleton
 agent_registry = AgentRegistryService()
+
+
+# Module-level convenience functions for clean imports
+def create_tables():
+    """Create all database tables."""
+    AgentRegistryService.create_tables()
+
+
+def sync_skill_entries(verbose: bool = True) -> Dict[str, Any]:
+    """Sync SKILL.md files to DB. Delegates to the global singleton."""
+    return agent_registry.sync_skill_entries(verbose=verbose)

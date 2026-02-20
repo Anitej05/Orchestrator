@@ -85,7 +85,7 @@ async def lifespan(app: FastAPI):
     # Create database tables if they don't exist
     try:
         logger.info("🔧 Ensuring database tables exist...")
-        from manage import create_tables
+        from services.agent_registry_service import create_tables
         create_tables()
         logger.info("✅ Database tables ready")
     except Exception as e:
@@ -93,7 +93,7 @@ async def lifespan(app: FastAPI):
     
     # Sync agent definitions from SKILL.md files (UAP) to database
     try:
-        from manage import sync_skill_entries
+        from services.agent_registry_service import sync_skill_entries
         logger.info("Syncing SKILL.md agent definitions to database...")
         result = sync_skill_entries(verbose=True)
         if result.get('errors'):
@@ -236,11 +236,16 @@ conversations_router.set_shared_state(conversation_store, store_lock)
 # workflows_router needs access to checkpointer
 workflows_router.set_checkpointer(checkpointer)
 
-app.include_router(files_router.router)
+# NOTE: files_router, workflows_router, and dashboard_router are NOT included here
+# because their routes are already defined inline in main.py (with additional logic).
+# Including them would cause Duplicate Operation ID warnings.
+# TODO: Migrate inline routes to routers and re-enable these includes.
+# app.include_router(files_router.router)
+# app.include_router(workflows_router.router)
+# app.include_router(dashboard_router.router)
+
 app.include_router(agents_router.router)
 app.include_router(conversations_router.router)
-app.include_router(workflows_router.router)
-app.include_router(dashboard_router.router)
 
 
 # --- Static Files for Screenshots ---
@@ -1281,7 +1286,10 @@ async def execute_orchestration(
             "canvas_requires_confirmation": current_conversation.get("canvas_requires_confirmation", False),
             "canvas_confirmation_message": current_conversation.get("canvas_confirmation_message"),
 
-            # Preserve current canvas payload so the UI remains consistent
+            # Preserve Canvas Registry state across turns
+            "canvas_registry": current_conversation.get("canvas_registry"),
+            "active_canvas_id": current_conversation.get("active_canvas_id"),
+            # Backward compat canvas fields
             "has_canvas": current_conversation.get("has_canvas", False),
             "canvas_type": current_conversation.get("canvas_type"),
             "canvas_content": current_conversation.get("canvas_content"),
@@ -1771,12 +1779,31 @@ async def find_agents(request: ProcessRequest):
 
         logger.info(f"Successfully processed request for thread_id: {thread_id}")
 
-        # Check if there's canvas data from browser agent
-        canvas_data = {}
+        # Get Canvas Registry state for this thread
+        from backend.services.canvas_registry import get_canvas_registry
+        canvas_registry = get_canvas_registry(thread_id)
+
+        # Also merge any live canvas updates (e.g., from browser agent WebSocket)
         with canvas_lock:
             if thread_id in live_canvas_updates:
-                canvas_data = live_canvas_updates[thread_id]
-                logger.info(f"📊 Including canvas data in response for thread {thread_id}")
+                live_data = live_canvas_updates[thread_id]
+                if live_data.get('has_canvas'):
+                    canvas_registry.register_sync(
+                        canvas_id=f"live_{thread_id}_{int(time.time())}",
+                        canvas_type=live_data.get('canvas_type', 'html'),
+                        source_agent="browser_agent",
+                        canvas_data=live_data.get('canvas_data'),
+                        canvas_content=live_data.get('canvas_content'),
+                    )
+                logger.info(f"📊 Merged live canvas data for thread {thread_id}")
+
+        # Build registry state and backward-compat fields
+        registry_state = canvas_registry.get_registry_state()
+        compat = canvas_registry.get_backward_compat_fields()
+
+        # Also check final_state for registry (from Hands)
+        state_registry = final_state.get('canvas_registry')
+        state_active = final_state.get('active_canvas_id')
 
         return ProcessResponse(
             message="Successfully processed the request.",
@@ -1785,13 +1812,17 @@ async def find_agents(request: ProcessRequest):
             final_response=final_response_str,
             pending_user_input=False,
             question_for_user=None,
-            has_canvas=canvas_data.get('has_canvas') or final_state.get('has_canvas', False),
-            canvas_content=canvas_data.get('canvas_content') or final_state.get('canvas_content'),
-            canvas_type=canvas_data.get('canvas_type') or final_state.get('canvas_type'),
-            canvas_data=canvas_data.get('canvas_data') or final_state.get('canvas_data'), # Support V2 data from state
-            browser_view=canvas_data.get('browser_view'),
-            plan_view=canvas_data.get('plan_view'),
-            current_view=canvas_data.get('current_view', 'browser'),
+            # Canvas Registry (NEW)
+            canvas_registry=registry_state if registry_state.canvases else None,
+            active_canvas_id=canvas_registry.get_active_id() or state_active,
+            # Backward compat fields
+            has_canvas=compat.get('has_canvas') or final_state.get('has_canvas', False),
+            canvas_content=compat.get('canvas_content') or final_state.get('canvas_content'),
+            canvas_type=compat.get('canvas_type') or final_state.get('canvas_type'),
+            canvas_data=compat.get('canvas_data') or final_state.get('canvas_data'),
+            browser_view=compat.get('browser_view'),
+            plan_view=compat.get('plan_view'),
+            current_view=compat.get('current_view', 'browser'),
             # Omni-Dispatcher fields
             execution_plan=final_state.get('execution_plan'),
             action_history=final_state.get('action_history'),
@@ -1850,12 +1881,24 @@ async def continue_conversation(user_response: UserResponse):
 
         logger.info(f"Successfully continued conversation for thread_id: {user_response.thread_id}")
 
-        # Check if there's canvas data from browser agent
-        canvas_data = {}
+        # Get Canvas Registry state
+        from backend.services.canvas_registry import get_canvas_registry
+        canvas_registry = get_canvas_registry(user_response.thread_id)
+
         with canvas_lock:
             if user_response.thread_id in live_canvas_updates:
-                canvas_data = live_canvas_updates[user_response.thread_id]
-                logger.info(f"📊 Including canvas data in continue response for thread {user_response.thread_id}")
+                live_data = live_canvas_updates[user_response.thread_id]
+                if live_data.get('has_canvas'):
+                    canvas_registry.register_sync(
+                        canvas_id=f"live_{user_response.thread_id}_{int(time.time())}",
+                        canvas_type=live_data.get('canvas_type', 'html'),
+                        source_agent="browser_agent",
+                        canvas_data=live_data.get('canvas_data'),
+                        canvas_content=live_data.get('canvas_content'),
+                    )
+
+        registry_state = canvas_registry.get_registry_state()
+        compat = canvas_registry.get_backward_compat_fields()
 
         return ProcessResponse(
             message="Successfully processed the continued conversation.",
@@ -1864,17 +1907,79 @@ async def continue_conversation(user_response: UserResponse):
             final_response=final_response_str,
             pending_user_input=False,
             question_for_user=None,
-            has_canvas=canvas_data.get('has_canvas', False),
-            canvas_content=canvas_data.get('canvas_content'),
-            canvas_type=canvas_data.get('canvas_type'),
-            browser_view=canvas_data.get('browser_view'),
-            plan_view=canvas_data.get('plan_view'),
-            current_view=canvas_data.get('current_view', 'browser')
+            canvas_registry=registry_state if registry_state.canvases else None,
+            active_canvas_id=canvas_registry.get_active_id(),
+            has_canvas=compat.get('has_canvas', False),
+            canvas_content=compat.get('canvas_content'),
+            canvas_type=compat.get('canvas_type'),
+            canvas_data=compat.get('canvas_data'),
+            browser_view=compat.get('browser_view'),
+            plan_view=compat.get('plan_view'),
+            current_view=compat.get('current_view', 'browser')
         )
 
     except Exception as e:
         logger.error(f"An unexpected error occurred during conversation continuation for thread_id {user_response.thread_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {e}")
+
+# ============================================================================
+# CANVAS REGISTRY API ENDPOINTS
+# ============================================================================
+
+class CanvasFocusRequest(BaseModel):
+    thread_id: str
+    canvas_id: str
+
+class CanvasDismissRequest(BaseModel):
+    thread_id: str
+    canvas_id: str
+
+@app.get("/api/canvas/templates", tags=["Canvas"])
+async def list_canvas_templates(category: str = None, agent: str = None):
+    """List all predefined canvas templates with their data schemas."""
+    from services.canvas_templates import list_templates
+    templates = list_templates(category=category, agent=agent)
+    return {"templates": templates, "count": len(templates)}
+
+@app.get("/api/canvas/{thread_id}", tags=["Canvas"])
+async def get_canvas_registry_state(thread_id: str):
+    """Get the full Canvas Registry state for a thread."""
+    from backend.services.canvas_registry import get_canvas_registry
+    registry = get_canvas_registry(thread_id)
+    state = registry.get_registry_state()
+    return {
+        "thread_id": thread_id,
+        "registry": state.model_dump(),
+        "backward_compat": registry.get_backward_compat_fields(),
+    }
+
+@app.post("/api/canvas/focus", tags=["Canvas"])
+async def set_canvas_focus(request: CanvasFocusRequest):
+    """Set the active (focused) canvas for a thread."""
+    from backend.services.canvas_registry import get_canvas_registry
+    registry = get_canvas_registry(request.thread_id)
+    success = await registry.set_active(request.canvas_id)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Canvas '{request.canvas_id}' not found or not active")
+    return {
+        "success": True,
+        "active_canvas_id": request.canvas_id,
+        "registry": registry.get_registry_state().model_dump(),
+    }
+
+@app.post("/api/canvas/dismiss", tags=["Canvas"])
+async def dismiss_canvas(request: CanvasDismissRequest):
+    """Dismiss a canvas (hide it without deleting)."""
+    from backend.services.canvas_registry import get_canvas_registry
+    registry = get_canvas_registry(request.thread_id)
+    success = await registry.dismiss(request.canvas_id)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Canvas '{request.canvas_id}' not found")
+    return {
+        "success": True,
+        "dismissed_canvas_id": request.canvas_id,
+        "registry": registry.get_registry_state().model_dump(),
+    }
 
 # ============================================================================
 # WEBSOCKET SCREENSHOT RELAY ENDPOINT

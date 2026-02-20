@@ -45,16 +45,46 @@ class CodeSandboxService:
         'Exception': Exception,
         'ValueError': ValueError,
         'TypeError': TypeError,
+        'RuntimeError': RuntimeError,
+        'KeyError': KeyError,
+        'IndexError': IndexError,
+        'AttributeError': AttributeError,
+        'OSError': OSError,
+        'IOError': IOError,
+        'StopIteration': StopIteration,
+        'NotImplementedError': NotImplementedError,
         'map': map,
         'filter': filter,
         'any': any,
         'all': all,
         'open': open,
         '__import__': __import__,
+        '__build_class__': __build_class__,
+        'getattr': getattr,
+        'setattr': setattr,
+        'hasattr': hasattr,
+        'delattr': delattr,
+        'issubclass': issubclass,
+        'super': super,
+        'property': property,
+        'classmethod': classmethod,
+        'staticmethod': staticmethod,
+        'vars': vars,
+        'dir': dir,
+        'repr': repr,
+        'id': id,
+        'hash': hash,
+        'bytes': bytes,
+        'bytearray': bytearray,
     }
 
     def __init__(self):
         self.sessions: Dict[str, Dict[str, Any]] = {}
+        try:
+            import nest_asyncio
+            nest_asyncio.apply()
+        except ImportError:
+            logger.warning("nest_asyncio not installed, async code execution might fail if event loop is already running.")
         logger.info("CodeSandboxService initialized")
 
     def _get_or_create_session(self, session_id: str) -> Dict[str, Any]:
@@ -102,6 +132,9 @@ class CodeSandboxService:
         # Inject context variables if provided
         if context_vars:
             exec_globals.update(context_vars)
+            
+        if '__name__' not in exec_globals:
+            exec_globals['__name__'] = '__main__'
             
         result = None
         error = None

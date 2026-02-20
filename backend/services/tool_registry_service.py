@@ -102,12 +102,12 @@ class ToolRegistryService:
         # Mapping of Category -> Python Module
         # We assume standard locations, but this could be dynamic
         modules_to_load = [
-            ("finance", "tools.finance_tools"),
-            ("news", "tools.news_tools"),
-            ("wiki", "tools.wiki_tools"),
-            ("search", "tools.search_tools"),
-            ("image", "tools.image_tools"),
-            ("creation", "tools.creation_tools"), 
+            ("finance", "backend.tools.finance_tools"),
+            ("news", "backend.tools.news_tools"),
+            ("wiki", "backend.tools.wiki_tools"),
+            ("search", "backend.tools.search_tools"),
+            ("image", "backend.tools.image_tools"),
+            ("creation", "backend.tools.creation_tools"), 
         ]
 
         for cat, mod_name in modules_to_load:
@@ -135,7 +135,7 @@ class ToolRegistryService:
                                     
                 # Specialized loading for some tools that might need instantiation
                 if cat == "creation":
-                    from tools.creation_tools import CreateDocumentTool, CreateSpreadsheetTool
+                    from backend.tools.creation_tools import CreateDocumentTool, CreateSpreadsheetTool
                     # Manually map creation tools if not found by name
                     # (definitions usually use snake_case function names, classes might differ)
                     if "create_document" in self._tools:

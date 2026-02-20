@@ -484,11 +484,6 @@ class AgentFileManager:
             self._save_registry()
             logger.info(f"[FILE_MANAGER_DEBUG] Registry saved. Total entries: {len(self._registry)}, New file_id: {file_id}")
             
-            # Register
-            self._registry[file_id] = metadata
-            self._save_registry()
-            logger.info(f"[FILE_MANAGER_DEBUG] Registry saved. Total entries: {len(self._registry)}, New file_id: {file_id}")
-            
             # CMS Sync
             if self.cms:
                 try:

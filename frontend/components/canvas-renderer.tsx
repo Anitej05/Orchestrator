@@ -3,11 +3,15 @@
 
 import { useState } from 'react'
 import Markdown from '@/components/ui/markdown'
-import { FileText, Table, Mail, FileCode, Image as ImageIcon, File, Undo2, Redo2, History, Download } from 'lucide-react'
+import { FileText, Table, Mail, FileCode, Image as ImageIcon, File, Undo2, Redo2, History, Download, BarChart3, Code2, Copy, Check } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import {
+  BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
+  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer
+} from 'recharts'
 
 interface CanvasRendererProps {
-  canvasType: 'html' | 'markdown' | 'pdf' | 'spreadsheet' | 'spreadsheet_plan' | 'email_preview' | 'document' | 'image' | 'json'
+  canvasType: 'html' | 'markdown' | 'pdf' | 'spreadsheet' | 'spreadsheet_plan' | 'email_preview' | 'document' | 'image' | 'json' | 'chart' | 'code'
   canvasContent?: string  // For legacy HTML/markdown content
   canvasData?: Record<string, any>  // For structured data (preferred)
   canvasTitle?: string
@@ -36,6 +40,7 @@ export function CanvasRenderer({
   onShowHistory
 }: CanvasRendererProps) {
   const [imageError, setImageError] = useState(false)
+  const [codeCopied, setCodeCopied] = useState(false)
 
   // NEW: Support for parsing JSON content into structured data (useful for historical messages)
   let effectiveData = canvasData
@@ -622,6 +627,148 @@ export function CanvasRenderer({
         default:
           // Fallback to content rendering
           break
+
+        case 'chart': {
+          // Chart rendering using Recharts
+          const chartTitle = effectiveData.title || 'Chart'
+          const chartLabels = effectiveData.labels || []
+          const chartDatasets = effectiveData.datasets || []
+          const chartValues = effectiveData.values || []
+          const chartSubtype = effectiveData.chart_subtype || effectiveData.template_id?.replace('chart_', '') || 'bar'
+          const defaultColors = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16']
+
+          // Determine chart type from template_id or chart_subtype
+          const isPie = chartSubtype === 'pie'
+          const isLine = chartSubtype === 'line'
+
+          if (isPie) {
+            // Pie chart data format
+            const pieData = chartLabels.map((label: string, i: number) => ({
+              name: label,
+              value: chartValues[i] || 0,
+            }))
+
+            return (
+              <div className="flex flex-col h-full bg-white dark:bg-gray-900">
+                <div className="bg-gradient-to-r from-purple-600 to-pink-500 px-4 py-3 flex items-center gap-3">
+                  <BarChart3 className="w-5 h-5 text-white" />
+                  <h3 className="text-white font-semibold text-sm">{chartTitle}</h3>
+                </div>
+                <div className="flex-1 p-6">
+                  <ResponsiveContainer width="100%" height={400}>
+                    <PieChart>
+                      <Pie
+                        data={pieData}
+                        cx="50%"
+                        cy="50%"
+                        outerRadius={150}
+                        innerRadius={effectiveData.donut ? 80 : 0}
+                        dataKey="value"
+                        label={({ name, percent }: any) => `${name} (${(percent * 100).toFixed(0)}%)`}
+                      >
+                        {pieData.map((_: any, index: number) => (
+                          <Cell key={`cell-${index}`} fill={defaultColors[index % defaultColors.length]} />
+                        ))}
+                      </Pie>
+                      <Tooltip />
+                      <Legend />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            )
+          }
+
+          // Bar or Line chart
+          const chartData = chartLabels.map((label: string, i: number) => {
+            const point: any = { name: label }
+            chartDatasets.forEach((ds: any, dsIdx: number) => {
+              point[ds.label || `Series ${dsIdx + 1}`] = ds.data?.[i] || 0
+            })
+            return point
+          })
+
+          const ChartComponent = isLine ? LineChart : BarChart
+
+          return (
+            <div className="flex flex-col h-full bg-white dark:bg-gray-900">
+              <div className="bg-gradient-to-r from-blue-600 to-indigo-500 px-4 py-3 flex items-center gap-3">
+                <BarChart3 className="w-5 h-5 text-white" />
+                <h3 className="text-white font-semibold text-sm">{chartTitle}</h3>
+              </div>
+              <div className="flex-1 p-6">
+                <ResponsiveContainer width="100%" height={400}>
+                  <ChartComponent data={chartData}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                    <XAxis dataKey="name" tick={{ fontSize: 12 }} label={effectiveData.x_label ? { value: effectiveData.x_label, position: 'insideBottom', offset: -5 } : undefined} />
+                    <YAxis tick={{ fontSize: 12 }} label={effectiveData.y_label ? { value: effectiveData.y_label, angle: -90, position: 'insideLeft' } : undefined} />
+                    <Tooltip />
+                    <Legend />
+                    {chartDatasets.map((ds: any, dsIdx: number) => {
+                      const color = ds.color || defaultColors[dsIdx % defaultColors.length]
+                      const key = ds.label || `Series ${dsIdx + 1}`
+                      return isLine
+                        ? <Line key={key} type="monotone" dataKey={key} stroke={color} strokeWidth={2} dot={{ r: 4 }} />
+                        : <Bar key={key} dataKey={key} fill={color} radius={[4, 4, 0, 0]} />
+                    })}
+                  </ChartComponent>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          )
+        }
+
+        case 'code': {
+          // Code viewer with syntax highlighting placeholder and copy button
+          const codeContent = effectiveData.code || ''
+          const codeLanguage = effectiveData.language || 'text'
+          const codeFilename = effectiveData.filename || ''
+
+          const handleCopy = () => {
+            navigator.clipboard.writeText(codeContent)
+            setCodeCopied(true)
+            setTimeout(() => setCodeCopied(false), 2000)
+          }
+
+          return (
+            <div className="flex flex-col h-full bg-gray-900">
+              <div className="bg-gradient-to-r from-gray-700 to-gray-600 px-4 py-3 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <Code2 className="w-5 h-5 text-white" />
+                  <div>
+                    <h3 className="text-white font-semibold text-sm">
+                      {codeFilename || `Code (${codeLanguage})`}
+                    </h3>
+                    <span className="text-xs text-gray-300">{codeLanguage}</span>
+                  </div>
+                </div>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={handleCopy}
+                  className="bg-white/20 hover:bg-white/30 text-white border-0 text-xs"
+                >
+                  {codeCopied ? <Check className="w-3 h-3 mr-1" /> : <Copy className="w-3 h-3 mr-1" />}
+                  {codeCopied ? 'Copied!' : 'Copy'}
+                </Button>
+              </div>
+              <div className="flex-1 overflow-auto">
+                <pre className="p-4 text-sm font-mono text-gray-100 leading-relaxed">
+                  <code>
+                    {codeContent.split('\n').map((line: string, i: number) => (
+                      <div key={i} className="flex hover:bg-gray-800/50">
+                        <span className="select-none text-gray-500 text-right w-12 pr-4 flex-shrink-0">
+                          {i + 1}
+                        </span>
+                        <span className="flex-1">{line}</span>
+                      </div>
+                    ))}
+                  </code>
+                </pre>
+              </div>
+            </div>
+          )
+        }
       }
     }
 
@@ -856,6 +1003,10 @@ export function CanvasRenderer({
         return <FileText className="w-5 h-5" />
       case 'json':
         return <FileCode className="w-5 h-5" />
+      case 'chart':
+        return <BarChart3 className="w-5 h-5" />
+      case 'code':
+        return <Code2 className="w-5 h-5" />
       case 'image':
         return <ImageIcon className="w-5 h-5" />
       default:
