@@ -1596,6 +1596,42 @@ Respond with JSON ONLY:
             }
         )
         
+        # === SECTION 4: LLM-DRIVEN CANVAS for extracted data ===
+        try:
+            from backend.services.canvas_service import CanvasService as _CS
+            import asyncio
+            
+            canvas_input = summary
+            if self.memory.extracted_data:
+                canvas_input += "\n\nExtracted Data:\n" + json.dumps(
+                    {k: v for k, v in list(self.memory.extracted_data.items())[:20]},
+                    default=str, indent=2
+                )[:2000]
+            
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # Schedule async canvas decision
+                async def _get_canvas():
+                    return await _CS.decide_canvas_llm(
+                        output=canvas_input[:3000],
+                        agent_name="browser_agent",
+                        capability_name="browse",
+                    )
+                future = asyncio.ensure_future(_get_canvas())
+                # Can't await here since _build_final_result is sync
+                # Attach canvas_display as a separate post-processing step
+                result._pending_canvas = future
+            else:
+                display = loop.run_until_complete(_CS.decide_canvas_llm(
+                    output=canvas_input[:3000],
+                    agent_name="browser_agent",
+                    capability_name="browse",
+                ))
+                if display:
+                    result.canvas_display = display.model_dump() if hasattr(display, "model_dump") else display.dict()
+        except Exception as e:
+            logger.debug(f"Browser agent canvas decision skipped: {e}")
+        
         logger.info(f"📊 Final Result: {success_count}/{total_tasks} subtasks, {len(self.memory.extracted_data)} data items")
         
         # Debug logging (not in response)

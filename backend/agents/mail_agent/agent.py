@@ -265,6 +265,24 @@ async def execute(request: Dict[str, Any]):
                     last_canvas = r["result"]["canvas_display"]
                     break
             
+            # Dynamic canvas: if no explicit canvas, let LLM decide
+            if not last_canvas:
+                combined_text = "\n".join(
+                    str(r.get("result", "")) for r in results if r.get("result")
+                )
+                if combined_text and len(combined_text) > 30:
+                    try:
+                        display = await CanvasService.decide_canvas_llm(
+                            output=combined_text[:3000],
+                            agent_name="mail_agent",
+                            capability_name="email_operations",
+                            primary_canvas_type="email_preview",
+                        )
+                        if display:
+                            last_canvas = display.model_dump() if hasattr(display, "model_dump") else display.dict()
+                    except Exception as e:
+                        logger.debug(f"LLM canvas for mail agent failed: {e}")
+            
             return AgentResponse(
                 status=AgentResponseStatus.COMPLETE,
                 result={"results": results},

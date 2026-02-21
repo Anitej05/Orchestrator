@@ -236,6 +236,29 @@ class SpreadsheetAgent(BaseAgent):
                 },
             }
 
+    async def _resolve_canvas_dynamic(
+        self, output: str, capability_name: str = "", primary_canvas: Dict = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        LLM-driven canvas decision for non-tabular outputs.
+        For tabular data, _build_canvas() is still the primary.
+        This handles: aggregated summaries → charts, text answers → markdown, etc.
+        """
+        if not CANVAS_AVAILABLE or not output or len(output) < 30:
+            return primary_canvas
+        try:
+            display = await CanvasService.decide_canvas_llm(
+                output=output[:3000],
+                agent_name="spreadsheet_agent",
+                capability_name=capability_name,
+                primary_canvas_type="spreadsheet",
+            )
+            if display:
+                return display.model_dump() if hasattr(display, "model_dump") else display.dict()
+        except Exception as e:
+            logger.debug(f"LLM dynamic canvas failed: {e}")
+        return primary_canvas
+
     # ========================================================================
     # CAPABILITIES - File Operations
     # ========================================================================

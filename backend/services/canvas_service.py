@@ -234,6 +234,52 @@ class CanvasService:
         )
 
     @staticmethod
+    def build_code_diff_view(
+        diffs: List[Dict[str, str]],
+        summary: str = "",
+        files_modified: Optional[List[str]] = None,
+        terminal_log: Optional[str] = None,
+        tests_passed: Optional[bool] = None,
+        requires_confirmation: bool = True,
+        confirmation_message: str = "Apply these code changes?",
+        title: Optional[str] = None,
+    ) -> Optional[CanvasDisplay]:
+        """
+        Build a code diff viewer canvas for the coding agent.
+
+        Args:
+            diffs: List of {"file": path, "diff": unified_diff, "language": lang, "status": "modified"|"created"|"deleted"}
+            summary: Natural language summary of changes
+            files_modified: List of file paths that were modified
+            terminal_log: Terminal output from the coding task
+            tests_passed: Whether tests passed (None if not run)
+            requires_confirmation: Whether user must approve before applying
+            confirmation_message: Approval button text
+            title: Optional canvas title override
+        """
+        file_count = len(diffs)
+        auto_title = title or f"Code Changes ({file_count} file{'s' if file_count != 1 else ''})"
+
+        data = {
+            "diffs": diffs,
+            "summary": summary,
+            "files_modified": files_modified or [d.get("file", "") for d in diffs],
+            "file_count": file_count,
+        }
+        if terminal_log:
+            data["terminal_log"] = terminal_log
+        if tests_passed is not None:
+            data["tests_passed"] = tests_passed
+
+        return CanvasService.build_from_template(
+            "code_diff_viewer",
+            data,
+            title=auto_title,
+            requires_confirmation=requires_confirmation,
+            confirmation_message=confirmation_message,
+        )
+
+    @staticmethod
     def get_available_templates(
         category: Optional[str] = None,
         agent: Optional[str] = None,
@@ -337,3 +383,87 @@ class CanvasService:
                 return None
 
         return None
+
+    # --- LLM-POWERED CANVAS DECISION ---
+
+    @staticmethod
+    async def decide_canvas_llm(
+        output: str,
+        agent_name: str,
+        capability_name: str = "",
+        file_changes: Optional[List[Dict[str, Any]]] = None,
+        files_modified: Optional[List[str]] = None,
+        primary_canvas_type: Optional[str] = None,
+    ) -> Optional["CanvasDisplay"]:
+        """
+        LLM-powered canvas decision. Analyzes agent output and picks the
+        best canvas type, template, and content dynamically.
+
+        All agents should call this method for dynamic canvas support.
+
+        Args:
+            output: Raw agent output text
+            agent_name: e.g. "spreadsheet_agent", "coding_agent"
+            capability_name: e.g. "code_task", "load_file"
+            file_changes: For coding agents — list of {file, diff, status} dicts
+            files_modified: List of modified file paths
+            primary_canvas_type: Agent's default type (LLM can override if better)
+
+        Returns:
+            Validated CanvasDisplay or None on failure
+        """
+        try:
+            from services.canvas_llm import decide_canvas as _llm_decide
+        except ImportError:
+            try:
+                from backend.services.canvas_llm import decide_canvas as _llm_decide
+            except ImportError:
+                logger.warning("canvas_llm module not available — skipping LLM canvas decision")
+                return None
+
+        try:
+            templates = get_template_ids()
+        except Exception:
+            templates = []
+
+        decision = await _llm_decide(
+            output=output,
+            agent_name=agent_name,
+            capability_name=capability_name,
+            file_changes=file_changes,
+            files_modified=files_modified,
+            available_templates=templates,
+            primary_canvas_type=primary_canvas_type,
+        )
+
+        # Convert to CanvasDisplay
+        try:
+            # Try template first
+            if decision.template_id:
+                display = CanvasService.build_from_template(
+                    template_id=decision.template_id,
+                    data=decision.canvas_data or {},
+                    title=decision.canvas_title,
+                    requires_confirmation=decision.requires_confirmation,
+                    confirmation_message=decision.confirmation_message,
+                )
+                if display:
+                    return display
+
+            # Direct CanvasDisplay
+            kwargs = {
+                "canvas_type": decision.canvas_type,
+                "canvas_title": decision.canvas_title,
+                "requires_confirmation": decision.requires_confirmation,
+                "confirmation_message": decision.confirmation_message,
+            }
+            if decision.canvas_content:
+                kwargs["canvas_content"] = decision.canvas_content
+            if decision.canvas_data:
+                kwargs["canvas_data"] = decision.canvas_data
+
+            return CanvasDisplay(**kwargs)
+
+        except Exception as e:
+            logger.warning(f"Failed to build CanvasDisplay from LLM decision: {e}")
+            return None

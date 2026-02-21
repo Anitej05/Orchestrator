@@ -1,0 +1,768 @@
+"""
+Artifact Store — Persistent Knowledge & Experience System
+
+Captures, stores, retrieves, and distills knowledge from orchestrator interactions.
+Gets smarter over time as more tasks are completed.
+
+Artifact Types:
+    - task_result: Completed task outputs with metadata
+    - knowledge: Distilled learnings (agent patterns, error recovery, tips)
+    - playbook: Reusable multi-step workflows
+    - profile: User preferences and behavioral patterns
+
+Storage:
+    storage/artifacts/{user_id}/
+    ├── manifest.json       # Index with metadata + tags
+    ├── tasks/              # Task result markdown files
+    ├── knowledge/          # Knowledge markdown files
+    ├── playbooks/          # Playbook markdown files
+    └── profile.json        # User preference accumulation
+"""
+
+import json
+import logging
+import re
+import time
+import hashlib
+from collections import Counter
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger("ArtifactStore")
+
+# Base storage path
+STORAGE_BASE = Path(__file__).parent.parent / "storage"
+ARTIFACTS_BASE = STORAGE_BASE / "artifacts"
+
+
+# =============================================================================
+# MANIFEST ENTRY
+# =============================================================================
+
+class ArtifactEntry:
+    """Metadata for a single artifact in the manifest."""
+
+    def __init__(
+        self,
+        artifact_id: str,
+        artifact_type: str,  # task_result, knowledge, playbook
+        tags: List[str],
+        summary: str,
+        file_path: str,
+        created: str = None,
+        last_used: str = None,
+        use_count: int = 0,
+        relevance_decay: float = 0.95,
+        source_objective: str = "",
+        source_agent: str = "",
+    ):
+        self.artifact_id = artifact_id
+        self.artifact_type = artifact_type
+        self.tags = tags
+        self.summary = summary
+        self.file_path = file_path
+        self.created = created or datetime.now().isoformat()
+        self.last_used = last_used or self.created
+        self.use_count = use_count
+        self.relevance_decay = relevance_decay
+        self.source_objective = source_objective
+        self.source_agent = source_agent
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "artifact_id": self.artifact_id,
+            "artifact_type": self.artifact_type,
+            "tags": self.tags,
+            "summary": self.summary,
+            "file_path": self.file_path,
+            "created": self.created,
+            "last_used": self.last_used,
+            "use_count": self.use_count,
+            "relevance_decay": self.relevance_decay,
+            "source_objective": self.source_objective,
+            "source_agent": self.source_agent,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ArtifactEntry":
+        return cls(**data)
+
+
+# =============================================================================
+# RELEVANCE SCORER
+# =============================================================================
+
+def _extract_keywords(text: str) -> List[str]:
+    """Extract meaningful keywords from text (simple tokenizer)."""
+    # Lowercase, split on non-alphanumeric, filter stopwords + short tokens
+    stopwords = {
+        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+        "have", "has", "had", "do", "does", "did", "will", "would", "could",
+        "should", "may", "might", "shall", "can", "need", "dare", "ought",
+        "used", "to", "of", "in", "for", "on", "with", "at", "by", "from",
+        "as", "into", "through", "during", "before", "after", "above",
+        "below", "between", "out", "off", "over", "under", "again",
+        "further", "then", "once", "and", "but", "or", "nor", "not", "so",
+        "yet", "both", "each", "few", "more", "most", "other", "some",
+        "such", "no", "only", "own", "same", "than", "too", "very",
+        "just", "because", "if", "when", "while", "where", "how", "what",
+        "which", "who", "whom", "this", "that", "these", "those", "am",
+        "it", "its", "my", "me", "we", "us", "you", "your", "he", "she",
+        "they", "them", "his", "her", "all", "also", "about", "up",
+        "i", "create", "make", "get", "use", "write", "please",
+    }
+    tokens = re.findall(r"[a-z0-9_]+", text.lower())
+    return [t for t in tokens if len(t) > 2 and t not in stopwords]
+
+
+def score_relevance(
+    entry: ArtifactEntry,
+    query_keywords: List[str],
+    now: float = None,
+) -> float:
+    """
+    Score an artifact's relevance to a query.
+    
+    Formula: (tag_overlap × 3) + (keyword_match × 2) + (recency × 1) - (decay × age_days)
+    """
+    now = now or time.time()
+
+    # Tag overlap
+    tag_set = set(t.lower() for t in entry.tags)
+    query_set = set(query_keywords)
+    tag_overlap = len(tag_set & query_set)
+
+    # Keyword match (summary vs query)
+    summary_kw = set(_extract_keywords(entry.summary))
+    keyword_match = len(summary_kw & query_set)
+
+    # Objective match (bonus if original objective is similar)
+    obj_kw = set(_extract_keywords(entry.source_objective))
+    obj_match = len(obj_kw & query_set) * 0.5
+
+    # Recency (days since last use, capped at 90)
+    try:
+        last_used_ts = datetime.fromisoformat(entry.last_used).timestamp()
+    except (ValueError, TypeError):
+        last_used_ts = now - 86400 * 30  # Default to 30 days ago
+    age_days = (now - last_used_ts) / 86400
+    recency = max(0, 1.0 - (age_days / 90))  # 0 to 1, decays over 90 days
+
+    # Use count bonus (diminishing returns)
+    use_bonus = min(entry.use_count * 0.2, 1.0)
+
+    # Combined score
+    score = (
+        tag_overlap * 3.0
+        + keyword_match * 2.0
+        + obj_match * 1.5
+        + recency * 1.0
+        + use_bonus
+        - (1.0 - entry.relevance_decay) * age_days * 0.1
+    )
+
+    return max(0, score)
+
+
+# =============================================================================
+# ARTIFACT STORE
+# =============================================================================
+
+class ArtifactStore:
+    """
+    Persistent artifact storage for a single user.
+    
+    Usage:
+        store = ArtifactStore("user123")
+        await store.capture_from_task(history_entry, state)
+        relevant = store.retrieve_relevant("analyze csv data", top_k=3)
+    """
+
+    def __init__(self, user_id: str = "default"):
+        self.user_id = user_id
+        self.base_path = ARTIFACTS_BASE / user_id
+        self.manifest_path = self.base_path / "manifest.json"
+        self.profile_path = self.base_path / "profile.json"
+
+        # Ensure directories
+        for subdir in ["tasks", "knowledge", "playbooks"]:
+            (self.base_path / subdir).mkdir(parents=True, exist_ok=True)
+
+        # Load manifest
+        self.manifest: List[ArtifactEntry] = self._load_manifest()
+        self.profile: Dict[str, Any] = self._load_profile()
+
+    # ---- Persistence ----
+
+    def _load_manifest(self) -> List[ArtifactEntry]:
+        if self.manifest_path.exists():
+            try:
+                data = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+                return [ArtifactEntry.from_dict(e) for e in data]
+            except Exception as e:
+                logger.warning(f"Failed to load manifest: {e}")
+        return []
+
+    def _save_manifest(self):
+        """Persist manifest to disk."""
+        try:
+            self.manifest_path.write_text(
+                json.dumps(
+                    [e.to_dict() for e in self.manifest],
+                    indent=2,
+                    default=str,
+                ),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.error(f"Failed to save manifest: {e}")
+
+    def _load_profile(self) -> Dict[str, Any]:
+        if self.profile_path.exists():
+            try:
+                return json.loads(self.profile_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        return {
+            "user_id": self.user_id,
+            "preferred_canvas_types": [],
+            "preferred_agents": {},
+            "behavioral_notes": [],
+            "total_tasks_completed": 0,
+            "total_conversations": 0,
+        }
+
+    def _save_profile(self):
+        try:
+            self.profile_path.write_text(
+                json.dumps(self.profile, indent=2, default=str),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.error(f"Failed to save profile: {e}")
+
+    # ---- Artifact ID Generation ----
+
+    def _make_id(self, content: str, prefix: str = "art") -> str:
+        h = hashlib.md5(content.encode()).hexdigest()[:8]
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return f"{prefix}_{ts}_{h}"
+
+    # ---- Capture Methods ----
+
+    async def capture_from_task(
+        self,
+        action_entry: Dict[str, Any],
+        state: Dict[str, Any],
+        objective: str = "",
+    ):
+        """
+        Auto-capture artifacts from a completed task execution.
+        
+        Decides what's worth storing based on quality thresholds.
+        """
+        action_type = action_entry.get("action_type", "")
+        resource_id = action_entry.get("resource_id", "")
+        success = action_entry.get("success", False)
+        result_summary = action_entry.get("result_summary", "")
+        instruction = action_entry.get("instruction", "")
+        exec_time = action_entry.get("execution_time_ms", 0)
+
+        # Skip trivial results
+        if len(result_summary) < 30 and action_type != "agent":
+            return
+
+        # 1. Capture task result (if substantial)
+        if success and len(result_summary) > 50:
+            await self._capture_task_result(
+                action_type=action_type,
+                resource_id=resource_id,
+                instruction=instruction,
+                result_summary=result_summary,
+                objective=objective,
+                exec_time=exec_time,
+            )
+
+        # 2. Capture routing knowledge (which resource worked)
+        if success and action_type in ("agent", "tool"):
+            self._capture_routing_knowledge(
+                action_type=action_type,
+                resource_id=resource_id,
+                instruction=instruction,
+                objective=objective,
+            )
+
+        # 3. Capture error patterns (what went wrong)
+        if not success:
+            error_msg = action_entry.get("error_message", "")
+            self._capture_error_pattern(
+                action_type=action_type,
+                resource_id=resource_id,
+                instruction=instruction,
+                error_msg=error_msg,
+                objective=objective,
+            )
+
+    async def _capture_task_result(
+        self,
+        action_type: str,
+        resource_id: str,
+        instruction: str,
+        result_summary: str,
+        objective: str,
+        exec_time: float,
+    ):
+        """Store a meaningful task result as a markdown artifact."""
+        tags = _extract_keywords(instruction)[:8]
+        if resource_id:
+            tags.append(resource_id.lower().replace(" ", "_"))
+        tags.append(action_type)
+
+        artifact_id = self._make_id(instruction + result_summary, "task")
+        filename = f"{artifact_id}.md"
+        file_path = self.base_path / "tasks" / filename
+
+        content = f"""---
+type: task_result
+tags: {json.dumps(tags)}
+created: {datetime.now().isoformat()}
+action_type: {action_type}
+resource: {resource_id or 'direct'}
+execution_time_ms: {exec_time:.0f}
+---
+# Task Result: {instruction[:80]}
+
+**Objective:** {objective[:200]}
+
+**Action:** {action_type} → {resource_id or 'direct'}
+
+**Result:**
+{result_summary[:1500]}
+"""
+        file_path.write_text(content, encoding="utf-8")
+
+        entry = ArtifactEntry(
+            artifact_id=artifact_id,
+            artifact_type="task_result",
+            tags=tags,
+            summary=f"{action_type}({resource_id}): {result_summary[:100]}",
+            file_path=str(file_path),
+            source_objective=objective[:200],
+            source_agent=resource_id,
+        )
+        self.manifest.append(entry)
+        self._save_manifest()
+
+        logger.info(f"Captured task result: {artifact_id}")
+
+    def _capture_routing_knowledge(
+        self,
+        action_type: str,
+        resource_id: str,
+        instruction: str,
+        objective: str,
+    ):
+        """Record which resource successfully handled which task type."""
+        # Update or create routing knowledge artifact
+        routing_id = "routing_patterns"
+        routing_path = self.base_path / "knowledge" / "routing_patterns.md"
+
+        # Load existing patterns or start fresh
+        patterns: Dict[str, Dict[str, int]] = {}
+        if routing_path.exists():
+            try:
+                text = routing_path.read_text(encoding="utf-8")
+                # Extract JSON block from markdown
+                match = re.search(r"```json\n(.+?)\n```", text, re.DOTALL)
+                if match:
+                    patterns = json.loads(match.group(1))
+            except Exception:
+                pass
+
+        # Record this successful routing
+        key = f"{action_type}:{resource_id}" if resource_id else action_type
+        task_keywords = _extract_keywords(instruction)[:5]
+        task_label = " ".join(task_keywords) if task_keywords else instruction[:50]
+
+        if key not in patterns:
+            patterns[key] = {}
+        patterns[key][task_label] = patterns[key].get(task_label, 0) + 1
+
+        # Write updated patterns
+        content = f"""---
+type: knowledge
+tags: [routing, agent_selection, resource_selection]
+created: {datetime.now().isoformat()}
+---
+# Agent/Resource Routing Patterns
+
+Accumulated patterns of which resources successfully handle which task types.
+
+```json
+{json.dumps(patterns, indent=2)}
+```
+
+## Summary
+"""
+        for resource, tasks in patterns.items():
+            content += f"\n### {resource}\n"
+            for task_desc, count in sorted(tasks.items(), key=lambda x: -x[1])[:5]:
+                content += f"- {task_desc} ({count}x)\n"
+
+        routing_path.write_text(content, encoding="utf-8")
+
+        # Ensure manifest entry exists
+        existing = next(
+            (e for e in self.manifest if e.artifact_id == routing_id), None
+        )
+        if existing:
+            existing.last_used = datetime.now().isoformat()
+            existing.use_count += 1
+        else:
+            self.manifest.append(ArtifactEntry(
+                artifact_id=routing_id,
+                artifact_type="knowledge",
+                tags=["routing", "agent_selection", "resource_selection"],
+                summary="Which resources work best for which task types",
+                file_path=str(routing_path),
+            ))
+        self._save_manifest()
+
+    def _capture_error_pattern(
+        self,
+        action_type: str,
+        resource_id: str,
+        instruction: str,
+        error_msg: str,
+        objective: str,
+    ):
+        """Record error patterns for avoidance in future tasks."""
+        error_path = self.base_path / "knowledge" / "error_patterns.md"
+
+        # Load existing
+        errors: List[Dict] = []
+        if error_path.exists():
+            try:
+                text = error_path.read_text(encoding="utf-8")
+                match = re.search(r"```json\n(.+?)\n```", text, re.DOTALL)
+                if match:
+                    errors = json.loads(match.group(1))
+            except Exception:
+                pass
+
+        # Add new error (cap at 50 entries)
+        errors.append({
+            "action": f"{action_type}:{resource_id}",
+            "instruction": instruction[:100],
+            "error": error_msg[:200],
+            "when": datetime.now().isoformat(),
+        })
+        errors = errors[-50:]
+
+        content = f"""---
+type: knowledge
+tags: [errors, debugging, avoidance]
+created: {datetime.now().isoformat()}
+---
+# Error Patterns (Avoid These)
+
+```json
+{json.dumps(errors, indent=2)}
+```
+"""
+        error_path.write_text(content, encoding="utf-8")
+
+        existing = next(
+            (e for e in self.manifest if e.artifact_id == "error_patterns"), None
+        )
+        if existing:
+            existing.last_used = datetime.now().isoformat()
+            existing.use_count += 1
+        else:
+            self.manifest.append(ArtifactEntry(
+                artifact_id="error_patterns",
+                artifact_type="knowledge",
+                tags=["errors", "debugging", "avoidance"],
+                summary="Known error patterns to avoid",
+                file_path=str(error_path),
+            ))
+        self._save_manifest()
+
+    def capture_knowledge(
+        self,
+        key: str,
+        value: str,
+        tags: List[str] = None,
+        objective: str = "",
+    ):
+        """Manually store a knowledge artifact."""
+        artifact_id = self._make_id(key + value, "know")
+        filename = f"{artifact_id}.md"
+        file_path = self.base_path / "knowledge" / filename
+
+        all_tags = list(set((tags or []) + _extract_keywords(key)[:5]))
+
+        content = f"""---
+type: knowledge
+tags: {json.dumps(all_tags)}
+created: {datetime.now().isoformat()}
+---
+# {key}
+
+{value}
+"""
+        file_path.write_text(content, encoding="utf-8")
+
+        entry = ArtifactEntry(
+            artifact_id=artifact_id,
+            artifact_type="knowledge",
+            tags=all_tags,
+            summary=f"{key}: {value[:100]}",
+            file_path=str(file_path),
+            source_objective=objective[:200],
+        )
+        self.manifest.append(entry)
+        self._save_manifest()
+        logger.info(f"Captured knowledge: {artifact_id}")
+
+    def capture_playbook(
+        self,
+        name: str,
+        objective: str,
+        steps: List[Dict[str, Any]],
+        outcome: str = "",
+    ):
+        """Store a reusable multi-step workflow pattern."""
+        artifact_id = self._make_id(name + objective, "play")
+        filename = f"{artifact_id}.md"
+        file_path = self.base_path / "playbooks" / filename
+
+        tags = _extract_keywords(objective)[:8] + ["workflow", "playbook"]
+
+        content = f"""---
+type: playbook
+tags: {json.dumps(tags)}
+created: {datetime.now().isoformat()}
+steps: {len(steps)}
+---
+# Playbook: {name}
+
+**Objective:** {objective[:300]}
+
+**Outcome:** {outcome[:200]}
+
+## Steps
+
+"""
+        for i, step in enumerate(steps, 1):
+            action = step.get("action_type", "unknown")
+            resource = step.get("resource_id", "")
+            instr = step.get("instruction", "")
+            success = "ok" if step.get("success") else "err"
+            content += f"{i}. `{action}` → `{resource}` [{success}]\n   {instr[:100]}\n\n"
+
+        file_path.write_text(content, encoding="utf-8")
+
+        entry = ArtifactEntry(
+            artifact_id=artifact_id,
+            artifact_type="playbook",
+            tags=tags,
+            summary=f"Playbook: {name} ({len(steps)} steps)",
+            file_path=str(file_path),
+            source_objective=objective[:200],
+        )
+        self.manifest.append(entry)
+        self._save_manifest()
+        logger.info(f"Captured playbook: {artifact_id} ({len(steps)} steps)")
+
+    # ---- Retrieval ----
+
+    def retrieve_relevant(
+        self,
+        query: str,
+        top_k: int = 3,
+        max_tokens: int = 2000,
+        artifact_type: str = None,
+    ) -> str:
+        """
+        Retrieve the most relevant artifacts for a query.
+        
+        Returns a formatted string ready for Brain prompt injection.
+        """
+        if not self.manifest:
+            return ""
+
+        query_keywords = _extract_keywords(query)
+        if not query_keywords:
+            return ""
+
+        now = time.time()
+
+        # Score and rank all artifacts
+        scored: List[Tuple[float, ArtifactEntry]] = []
+        for entry in self.manifest:
+            if artifact_type and entry.artifact_type != artifact_type:
+                continue
+            s = score_relevance(entry, query_keywords, now)
+            if s > 0.5:  # Minimum relevance threshold
+                scored.append((s, entry))
+
+        scored.sort(key=lambda x: -x[0])
+        top = scored[:top_k]
+
+        if not top:
+            return ""
+
+        # Build context string within token budget
+        parts = []
+        tokens_used = 0
+        char_budget = max_tokens * 4  # ~4 chars per token
+
+        for score, entry in top:
+            # Read artifact content
+            try:
+                content = Path(entry.file_path).read_text(encoding="utf-8")
+                # Strip YAML frontmatter for prompt
+                content = re.sub(
+                    r"^---\n.+?\n---\n", "", content, flags=re.DOTALL
+                ).strip()
+            except Exception:
+                content = entry.summary
+
+            # Truncate if needed
+            remaining = char_budget - tokens_used * 4
+            if len(content) > remaining:
+                content = content[:remaining] + "..."
+
+            # Format as context block
+            type_label = {
+                "task_result": "Past Result",
+                "knowledge": "Learning",
+                "playbook": "Playbook",
+            }.get(entry.artifact_type, entry.artifact_type)
+
+            parts.append(
+                f"### [{type_label}] {entry.summary[:80]} (score: {score:.1f})\n{content}"
+            )
+            tokens_used += len(content) // 4
+
+            # Update usage stats
+            entry.last_used = datetime.now().isoformat()
+            entry.use_count += 1
+
+            if tokens_used >= max_tokens:
+                break
+
+        self._save_manifest()
+
+        return "\n\n".join(parts) if parts else ""
+
+    def get_user_profile_prompt(self) -> str:
+        """Get user profile as a prompt-friendly string."""
+        if not self.profile:
+            return "No profile data yet."
+
+        parts = []
+        if self.profile.get("preferred_agents"):
+            agents = self.profile["preferred_agents"]
+            top_agents = sorted(agents.items(), key=lambda x: -x[1])[:5]
+            parts.append(
+                "**Preferred agents:** "
+                + ", ".join(f"{a} ({c}x)" for a, c in top_agents)
+            )
+
+        if self.profile.get("behavioral_notes"):
+            notes = self.profile["behavioral_notes"][-3:]  # Last 3 notes
+            parts.append("**Notes:** " + "; ".join(notes))
+
+        stats = f"Tasks completed: {self.profile.get('total_tasks_completed', 0)}"
+        parts.append(stats)
+
+        return "\n".join(parts) if parts else "New user — no history."
+
+    # ---- Distillation ----
+
+    async def distill_conversation(
+        self,
+        action_history: List[Dict],
+        insights: Dict[str, str],
+        objective: str,
+        success: bool,
+    ):
+        """
+        Called at conversation end. Distills the session into reusable artifacts.
+        
+        1. Multi-step workflows → playbooks
+        2. Insights → knowledge
+        3. Agent usage → profile update
+        """
+        if not action_history:
+            return
+
+        # 1. Create playbook if multi-step (3+ actions)
+        if len(action_history) >= 3 and success:
+            name = objective[:60].strip()
+            self.capture_playbook(
+                name=name,
+                objective=objective,
+                steps=action_history,
+                outcome="Completed successfully",
+            )
+            logger.info(f"Distilled playbook from {len(action_history)}-step conversation")
+
+        # 2. Store non-trivial insights as knowledge
+        for key, value in insights.items():
+            if len(value) > 20:  # Skip trivial insights
+                self.capture_knowledge(
+                    key=key,
+                    value=value,
+                    tags=_extract_keywords(value)[:5],
+                    objective=objective,
+                )
+
+        # 3. Update user profile
+        self.profile["total_tasks_completed"] = self.profile.get(
+            "total_tasks_completed", 0
+        ) + len(action_history)
+        self.profile["total_conversations"] = self.profile.get(
+            "total_conversations", 0
+        ) + 1
+
+        # Track agent usage
+        agent_counts = self.profile.get("preferred_agents", {})
+        for entry in action_history:
+            if entry.get("action_type") == "agent":
+                agent = entry.get("resource_id", "")
+                if agent:
+                    agent_counts[agent] = agent_counts.get(agent, 0) + 1
+        self.profile["preferred_agents"] = agent_counts
+
+        self._save_profile()
+        logger.info("Conversation distilled into artifacts")
+
+    # ---- Stats ----
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get artifact store statistics."""
+        type_counts = Counter(e.artifact_type for e in self.manifest)
+        return {
+            "total_artifacts": len(self.manifest),
+            "by_type": dict(type_counts),
+            "total_tasks_completed": self.profile.get("total_tasks_completed", 0),
+            "total_conversations": self.profile.get("total_conversations", 0),
+        }
+
+
+# =============================================================================
+# SINGLETON
+# =============================================================================
+
+_stores: Dict[str, ArtifactStore] = {}
+
+
+def get_artifact_store(user_id: str = "default") -> ArtifactStore:
+    """Get or create an artifact store for a user."""
+    if user_id not in _stores:
+        _stores[user_id] = ArtifactStore(user_id)
+    return _stores[user_id]

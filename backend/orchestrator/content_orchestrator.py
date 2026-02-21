@@ -749,6 +749,29 @@ class ContentOrchestratorHooks:
         """Called after loading conversation. Expands content."""
         return await expand_state_from_saved(state)
 
+    @staticmethod
+    async def on_conversation_end(
+        state: Dict[str, Any],
+        thread_id: str,
+        user_id: str = "default",
+    ) -> None:
+        """
+        Called when a conversation completes.
+        Distills the session into reusable knowledge artifacts.
+        """
+        try:
+            from backend.orchestrator.artifact_store import get_artifact_store
+            store = get_artifact_store(user_id)
+            await store.distill_conversation(
+                action_history=state.get("action_history", []),
+                insights=state.get("insights", {}),
+                objective=state.get("original_prompt", ""),
+                success=state.get("final_response") is not None,
+            )
+            logger.info(f"Conversation {thread_id} distilled into artifacts")
+        except Exception as e:
+            logger.warning(f"Failed to distill conversation: {e}")
+
 
 def _generate_result_summary(result: Dict[str, Any]) -> str:
     """Generate a brief summary of a task result"""

@@ -52,6 +52,8 @@ class PortPool:
         "zoho_books": 8060,
         "universal": 8070,
         "universal_agent": 8070,
+        "coding": 8080,
+        "coding_agent": 8080,
     }
 
     DYNAMIC_RANGE = (9001, 9100)  # Ports 9001-9100 for dynamic allocation
@@ -114,6 +116,7 @@ class ProcessManager:
     AGENT_MODULE_MAP = {
         "browser": "agents.browser_agent",
         "browser_agent": "agents.browser_agent",
+        "browser_automation_agent": "agents.browser_agent",
         "spreadsheet": "agents.spreadsheet_agent",
         "spreadsheet_agent": "agents.spreadsheet_agent",
         "mail": "agents.mail_agent",
@@ -123,6 +126,8 @@ class ProcessManager:
         "zoho_books": "agents.zoho_books",
         "universal": "agents.universal_agent",
         "universal_agent": "agents.universal_agent",
+        "coding": "agents.coding_agent",
+        "coding_agent": "agents.coding_agent",
     }
 
     # Special cases: agents that don't use __init__.py pattern

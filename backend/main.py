@@ -32,7 +32,7 @@ for _path in (BACKEND_DIR, PROJECT_ROOT):
 
 # Load environment variables from .env file
 from dotenv import load_dotenv
-load_dotenv(dotenv_path=os.path.join(BACKEND_DIR, ".env"))
+load_dotenv(dotenv_path=os.path.join(BACKEND_DIR, ".env"), override=True)
 
 # --- Third-party Imports ---
 from fastapi import FastAPI, HTTPException, Depends, status, Query, Response, WebSocket, WebSocketDisconnect, Body, Request
@@ -1487,6 +1487,15 @@ async def execute_orchestration(
             logger.error(f"Failed to save plan file for thread {thread_id}: {e}")
 
         logger.info(f"Orchestration completed for thread_id: {thread_id}")
+
+        # === ARTIFACT DISTILLATION: Distill learnings from this conversation ===
+        try:
+            from backend.orchestrator.content_orchestrator import hooks as content_hooks
+            user_id = final_state.get("user_id", "default")
+            await content_hooks.on_conversation_end(final_state, thread_id, user_id)
+        except Exception as e:
+            logger.debug(f"Artifact distillation skipped: {e}")
+
         return final_state
 
     except Exception as e:

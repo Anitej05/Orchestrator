@@ -27,6 +27,7 @@ AGENT_DIRS = [
     "document_agent_lib",
     "zoho_books",
     "universal_agent",
+    "coding_agent",
 ]
 
 # Standardized agent aliases mapping for consistent naming across the orchestrator
@@ -65,6 +66,13 @@ AGENT_ALIASES = {
     "universal_agent": "Universal Agent",
     "general": "Universal Agent",
     "general_agent": "Universal Agent",
+    # Coding agent aliases
+    "coding": "Coding Agent",
+    "coding_agent": "Coding Agent",
+    "code": "Coding Agent",
+    "developer": "Coding Agent",
+    "opencode": "Coding Agent",
+    "coder": "Coding Agent",
 }
 
 

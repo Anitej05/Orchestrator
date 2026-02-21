@@ -279,8 +279,12 @@ class ContentManagementService:
     MODEL_HELPER = "gpt-oss-120b"  # For Map phase (same model across all providers)
     MODEL_GENERATOR = "gpt-oss-120b" # For Reduce phase
     
-    def __init__(self, storage_dir: str = "storage/content"):
+    def __init__(self, storage_dir: str = None):
         self._registry: Dict[str, UnifiedContentMetadata] = {}
+        # Use absolute path based on BACKEND dir to avoid CWD issues
+        if storage_dir is None:
+            backend_dir = Path(__file__).parent.parent.resolve()  # services -> backend
+            storage_dir = str(backend_dir / "storage" / "content")
         self._registry_path = Path(storage_dir) / "content_registry.json"
         self._registry_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()

@@ -9,6 +9,7 @@ Hands is stateless - it takes an action and parameters, executes, returns result
 
 import logging
 import json
+import os
 import time
 import asyncio
 from typing import Dict, Any, Optional, List
@@ -128,7 +129,7 @@ class Hands:
             if new_files:
                 logger.info(f"📝 Terminal created {len(new_files)} new file(s): {[f.file_name for f in new_files]}")
         elif action_type == "python":
-            result = await self._execute_python(payload, start_time, thread_id)
+            result = await self._execute_python(payload, start_time, thread_id, state)
             # Scan for files created by Python code
             new_files = workspace_manager.scan_for_new_files(created_by="python")
             if new_files:
@@ -162,6 +163,8 @@ class Hands:
             )
 
         # Post-process through CMS hooks if success
+        # IMPORTANT: Save raw output BEFORE CMS compression replaces it with _content_ref
+        raw_output = result.output  # Preserve uncompressed data
         if result.success and result.output:
             processed_output = await hooks.on_task_complete(
                 resource_id or action_type,
@@ -169,6 +172,9 @@ class Hands:
                 thread_id,
             )
             result.output = processed_output
+        
+        # Attach raw output for downstream use (e.g., Python sandbox injection)
+        result._raw_output = raw_output
 
         return self._update_state_with_result(state, result, config)
 
@@ -454,7 +460,7 @@ class Hands:
         )
 
     async def _execute_python(
-        self, payload: Dict[str, Any], start_time: float, thread_id: str = "default"
+        self, payload: Dict[str, Any], start_time: float, thread_id: str = "default", state: Dict[str, Any] = None
     ) -> ActionResult:
         """Execute Python code in the sandbox, tracking any created files."""
         code = payload.get("code", "")
@@ -472,6 +478,43 @@ class Hands:
         workspace_manager = get_workspace_manager(thread_id)
         workspace_path = str(workspace_manager.get_workspace_path())
         
+        # === INJECT TOOL RESULTS FROM ACTION HISTORY ===
+        # Collect results from previous tool/agent actions so Python code can access them
+        tool_results = {}
+        if state:
+            action_history = state.get("action_history", [])
+            for entry in action_history:
+                if entry.get("success") and entry.get("action_type") in ("tool", "agent"):
+                    resource_id = entry.get("resource_id", "unknown")
+                    # Use result_raw (uncompressed) if available, fall back to result_full
+                    # result_raw has actual data; result_full may contain _content_ref from CMS
+                    result_data = entry.get("result_raw", entry.get("result_full", entry.get("result_summary", "")))
+                    
+                    # Extract the actual data from the result dict
+                    if isinstance(result_data, dict):
+                        # Tool results are usually wrapped: {'result': {...actual data...}}
+                        actual = result_data.get("result", result_data)
+                        tool_results[resource_id] = actual
+                    else:
+                        tool_results[resource_id] = result_data
+                        # Try to parse JSON string
+                        if isinstance(result_data, str) and result_data.strip().startswith('{'):
+                            try:
+                                tool_results[resource_id] = json.loads(result_data)
+                            except:
+                                pass
+            
+            # Save tool results as JSON files in workspace for file-based access
+            if tool_results:
+                for tool_name, data in tool_results.items():
+                    safe_name = tool_name.replace('/', '_').replace('\\', '_')
+                    filepath = os.path.join(workspace_path, f"{safe_name}_result.json")
+                    try:
+                        with open(filepath, 'w', encoding='utf-8') as f:
+                            json.dump(data, f, indent=2, default=str)
+                    except:
+                        pass
+        
         # Modify code to ensure it saves to workspace directory
         # Add workspace path context at the beginning of code
         modified_code = f"""
@@ -481,10 +524,13 @@ os.chdir(r'{workspace_path}')
 {code}
 """
 
+        # Inject tool_results as context variables into the sandbox
+        context_vars = {"tool_results": tool_results} if tool_results else None
+
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
             None, 
-            lambda: code_sandbox.execute_code(modified_code, session_id=session_id)
+            lambda: code_sandbox.execute_code(modified_code, session_id=session_id, context_vars=context_vars)
         )
 
         success = result.get("success", False)
@@ -580,21 +626,58 @@ os.chdir(r'{workspace_path}')
         thread_id = (config or {}).get("configurable", {}).get("thread_id", "default")
         user_id = state.get("user_id", "default")
 
-        # Generate result summary (first 500 chars of string representation)
-        result_summary = self._generate_result_summary(result.output)
+        # Generate result summary from RAW output (before CMS compression)
+        # CRITICAL: result.output may be CMS-compressed (_content_ref), which makes
+        # the summary opaque to the Brain. Using raw output ensures the Brain can
+        # actually see what each action returned, preventing blind repetition loops.
+        raw_output = getattr(result, '_raw_output', result.output)
+        result_summary = self._generate_result_summary(raw_output)
 
         # Create action history entry for FULL context awareness
+        # For Python actions, extract a meaningful label from the code
+        resource_id = decision_dict.get("resource_id")
+        instruction = json.dumps(decision_dict.get("payload", {}))[:200]
+        if action_type == "python" and not resource_id:
+            code = (decision_dict.get("payload") or {}).get("code", "")
+            # Extract meaningful label: first comment, or first line of real code
+            resource_id = "code"
+            for line in code.splitlines():
+                line = line.strip()
+                if line.startswith("#"):
+                    resource_id = line[1:].strip()[:50]
+                    break
+                elif line and not line.startswith("import ") and not line.startswith("from "):
+                    resource_id = line[:50]
+                    break
+            # Show first 150 chars of actual code as instruction (more useful than JSON)
+            instruction = code[:150]
+        
         history_entry = {
             "iteration": iteration,
             "action_type": action_type,
-            "resource_id": decision_dict.get("resource_id"),
-            "instruction": json.dumps(decision_dict.get("payload", {}))[:200],
+            "resource_id": resource_id,
+            "instruction": instruction,
             "success": result.success,
             "result_summary": result_summary,
-            "result_full": result.output,  # Full result preserved
+            "result_full": result.output,  # CMS-compressed version for Brain context
+            "result_raw": raw_output,  # Uncompressed version for Python sandbox
             "timestamp": time.time(),
             "execution_time_ms": result.execution_time_ms,
         }
+
+        # === ARTIFACT CAPTURE: Record learnings from this execution ===
+        try:
+            from .artifact_store import get_artifact_store
+            artifact_store = get_artifact_store(user_id)
+            import asyncio
+            # Use fire-and-forget to avoid blocking the main pipeline
+            asyncio.ensure_future(artifact_store.capture_from_task(
+                action_entry=history_entry,
+                state=state,
+                objective=state.get("original_prompt", ""),
+            ))
+        except Exception as e:
+            logger.debug(f"Artifact capture skipped: {e}")
 
         existing_action_history = list(state.get("action_history", []))
         
@@ -949,7 +1032,7 @@ os.chdir(r'{workspace_path}')
                 if (
                     key in output and key != "standard_response"
                 ):  # Avoid recursing into standard_response
-                    val = str(output[key])[:200]
+                    val = str(output[key])[:400]
                     summary_parts.append(f"{key}: {val}")
             if summary_parts:
                 return "; ".join(summary_parts)[:max_length]

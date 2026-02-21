@@ -680,11 +680,24 @@ class DocumentAgent:
                 )
             else:
                 content, _ = extract_document_content(file_path)
-                canvas_display = {
-                    'canvas_type': 'text',
-                    'content': content[:5000],
-                    'file_name': Path(file_path).name
-                }
+                # LLM-driven canvas decision for non-PDF/DOCX files
+                canvas_display = None
+                try:
+                    display = await CanvasService.decide_canvas_llm(
+                        output=content[:3000],
+                        agent_name="document_agent",
+                        capability_name="display_document",
+                    )
+                    if display:
+                        canvas_display = display.model_dump() if hasattr(display, "model_dump") else display.dict()
+                except Exception as e:
+                    logger.debug(f"LLM canvas decision failed for display: {e}")
+                if not canvas_display:
+                    canvas_display = {
+                        'canvas_type': 'markdown',
+                        'canvas_content': content[:5000],
+                        'canvas_title': Path(file_path).name
+                    }
 
             return {
                 'success': True,

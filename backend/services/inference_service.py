@@ -176,47 +176,61 @@ class InferenceService:
         input_len_estimate = 0 # Difficult to estimate with images
         
         for current_provider in provider_order:
-            try:
-                logger.info(f"🤖 Inference: Using {current_provider} (Priority: {priority}, Vision: {bool(images)})")
-                
-                llm = self._get_llm_client(current_provider, model_name, temperature, max_tokens, json_mode)
-                if not llm:
-                    logger.warning(f"⏩ Skipping {current_provider} (Not configured/No Key)")
-                    continue
-                
-                start_time = time.time()
-                response = await llm.ainvoke(messages)
-                duration = time.time() - start_time
-                
-                content = response.content
-                
-                # Update Metrics
-                self._update_metrics(current_provider, input_len_estimate, len(content))
-                logger.info(f"✅ Inference Success: {current_provider} ({duration:.2f}s)")
-                
-                # Post-processing
-                if strip_think_tags:
-                    content = self._strip_think_tags(content)
-                
-                if strip_markdown or json_mode:
-                    content = self._strip_markdown(content)
-                
-                # Cache Result
-                if use_cache:
-                    if len(self._cache) >= self._cache_size:
-                        first_key = next(iter(self._cache))
-                        self._cache.pop(first_key)
-                    self._cache[cache_key] = content
-                
-                return content
-                
-            except Exception as e:
-                logger.error(f"❌ Inference Failed with {current_provider}: {e}")
-                self._update_metrics(current_provider, 0, 0, is_error=True)
-                last_error = e
-                
-                if not fallback_enabled:
-                    raise e
+            from backend.utils.key_manager import key_manager, report_rate_limit
+            max_attempts = len(key_manager._keys) if current_provider == ProviderType.CEREBRAS and key_manager._keys else 1
+            
+            for attempt in range(max_attempts):
+                try:
+                    logger.info(f"🤖 Inference: Using {current_provider} (Priority: {priority}, Vision: {bool(images)}, Attempt: {attempt+1}/{max_attempts})")
+                    
+                    llm = self._get_llm_client(current_provider, model_name, temperature, max_tokens, json_mode)
+                    if not llm:
+                        logger.warning(f"⏩ Skipping {current_provider} (Not configured/No Key)")
+                        break # No point in retrying if no client
+                    
+                    start_time = time.time()
+                    response = await llm.ainvoke(messages)
+                    duration = time.time() - start_time
+                    
+                    content = response.content
+                    
+                    # Update Metrics
+                    self._update_metrics(current_provider, input_len_estimate, len(content))
+                    logger.info(f"✅ Inference Success: {current_provider} ({duration:.2f}s)")
+                    
+                    # Post-processing
+                    if strip_think_tags:
+                        content = self._strip_think_tags(content)
+                    
+                    if strip_markdown or json_mode:
+                        content = self._strip_markdown(content)
+                    
+                    # Cache Result
+                    if use_cache:
+                        if len(self._cache) >= self._cache_size:
+                            first_key = next(iter(self._cache))
+                            self._cache.pop(first_key)
+                        self._cache[cache_key] = content
+                    
+                    return content
+                    
+                except Exception as e:
+                    logger.error(f"❌ Inference Failed with {current_provider}: {e}")
+                    self._update_metrics(current_provider, 0, 0, is_error=True)
+                    last_error = e
+                    
+                    # Handle 429 Quota / Rate Limits for Key Rotation
+                    e_str = str(e).lower()
+                    if current_provider == ProviderType.CEREBRAS and ("429" in e_str or "quota" in e_str or "rate limit" in e_str):
+                        if key_manager._current_key:
+                            report_rate_limit(key_manager._current_key)
+                        if attempt < max_attempts - 1:
+                            logger.warning(f"🔄 Retrying {current_provider} with a different key...")
+                            continue # Try next attempt within this provider
+                    
+                    if not fallback_enabled:
+                        raise e
+                    break # Break inner loop, try next provider
                     
         raise Exception(f"All inference providers failed. Last error: {last_error}")
 
@@ -238,106 +252,122 @@ class InferenceService:
         input_char_len = sum(len(m.content) for m in messages)
         
         for current_provider in provider_order:
-            try:
-                logger.info(f"🤖 Inference (Structured): Using {current_provider}")
-                llm = self._get_llm_client(current_provider, model_name, temperature, 4000, json_mode=True)
-                if not llm: continue
-                
-                # Skip with_structured_output for NVIDIA/minimax only — minimax's
-                # structured output returns None but our JSON extraction handles it.
-                # Cerebras and GROQ support with_structured_output natively.
-                use_json_fallback = current_provider == ProviderType.NVIDIA
-                
-                # Use standard LangChain structured output interface (skip for NVIDIA)
-                if not use_json_fallback and hasattr(llm, "with_structured_output"):
-                    structured_llm = llm.with_structured_output(schema)
-                    result = await structured_llm.ainvoke(messages)
-                    
-                    if result:
-                        # Update Metrics (Rough estimate for structured obj)
-                        self._update_metrics(current_provider, input_char_len, 500) 
-                        return result
-                    else:
-                        logger.warning(f"⚠️ {current_provider} returned None for structured output, trying fallback...")
-                
-                # Fallback implementation (always try for NVIDIA, or when structured output fails)
-                formatted_messages = list(messages)
-                schema_json = schema.model_json_schema()
-                instruction = f"\n\nRespond with valid JSON that matches this schema:\n{schema_json}\n\nIMPORTANT: Output ONLY the JSON object, no other text."
-                
-                if isinstance(formatted_messages[-1], HumanMessage):
-                    formatted_messages[-1].content += instruction
-                else:
-                    formatted_messages.append(HumanMessage(content=instruction))
-                
-                response = await llm.ainvoke(formatted_messages)
-                content = self._strip_think_tags(response.content)
-                content = self._strip_markdown(content)
-                
-                self._update_metrics(current_provider, input_char_len, len(content))
-                
-                # Parse JSON
-                import json
+            from backend.utils.key_manager import key_manager, report_rate_limit
+            max_attempts = len(key_manager._keys) if current_provider == ProviderType.CEREBRAS and key_manager._keys else 1
+            
+            for attempt in range(max_attempts):
                 try:
-                    # Clean the content - strip thinking tags first
-                    cleaned_content = self._strip_think_tags(content)
-                    cleaned_content = self._strip_markdown(cleaned_content)
+                    logger.info(f"🤖 Inference (Structured): Using {current_provider} (Attempt: {attempt+1}/{max_attempts})")
+                    llm = self._get_llm_client(current_provider, model_name, temperature, 4000, json_mode=True)
+                    if not llm: 
+                        break # Break inner loop if no client
                     
-                    # Robust JSON extraction - handles minimax thinking tags
-                    def extract_json(text):
-                        if not isinstance(text, str):
+                    # Skip with_structured_output for NVIDIA/minimax only — minimax's
+                    # structured output returns None but our JSON extraction handles it.
+                    # Cerebras and GROQ support with_structured_output natively.
+                    use_json_fallback = current_provider == ProviderType.NVIDIA
+                    
+                    # Use standard LangChain structured output interface (skip for NVIDIA)
+                    if not use_json_fallback and hasattr(llm, "with_structured_output"):
+                        structured_llm = llm.with_structured_output(schema)
+                        result = await structured_llm.ainvoke(messages)
+                        
+                        if result:
+                            # Update Metrics (Rough estimate for structured obj)
+                            self._update_metrics(current_provider, input_char_len, 500) 
+                            return result
+                        else:
+                            logger.warning(f"⚠️ {current_provider} returned None for structured output, trying fallback...")
+                    
+                    # Fallback implementation (always try for NVIDIA, or when structured output fails)
+                    formatted_messages = list(messages)
+                    schema_json = schema.model_json_schema()
+                    instruction = f"\n\nRespond with valid JSON that matches this schema:\n{schema_json}\n\nIMPORTANT: Output ONLY the JSON object, no other text."
+                    
+                    if isinstance(formatted_messages[-1], HumanMessage):
+                        formatted_messages[-1].content += instruction
+                    else:
+                        formatted_messages.append(HumanMessage(content=instruction))
+                    
+                    response = await llm.ainvoke(formatted_messages)
+                    content = self._strip_think_tags(response.content)
+                    content = self._strip_markdown(content)
+                    
+                    self._update_metrics(current_provider, input_char_len, len(content))
+                    
+                    # Parse JSON
+                    import json
+                    try:
+                        # Clean the content - strip thinking tags first
+                        cleaned_content = self._strip_think_tags(content)
+                        cleaned_content = self._strip_markdown(cleaned_content)
+                        
+                        # Robust JSON extraction - handles minimax thinking tags
+                        def extract_json(text):
+                            if not isinstance(text, str):
+                                return None
+                            
+                            # Additional tag stripping for minimax formats
+                            import re
+                            tag_patterns = [
+                                r'<\|thinking\|>.*?</\|thinking\|>',
+                                r'<\|thought\|>.*?</\|thought\|>',
+                                r'<thinking>.*?</thinking>',
+                                r'<thought>.*?</thought>',
+                                r'【.*?】',  # Chinese brackets
+                            ]
+                            for p in tag_patterns:
+                                text = re.sub(p, '', text, flags=re.DOTALL | re.IGNORECASE)
+                            
+                            # Find the outermost JSON object using brace counting
+                            start_idx = text.find('{')
+                            if start_idx == -1:
+                                return None
+                            
+                            text_from_start = text[start_idx:]
+                            depth = 0
+                            for i, c in enumerate(text_from_start):
+                                if c == '{':
+                                    depth += 1
+                                elif c == '}':
+                                    depth -= 1
+                                    if depth == 0:
+                                        json_str = text_from_start[:i+1]
+                                        try:
+                                            return json.loads(json_str)
+                                        except:
+                                            continue
                             return None
-                        
-                        # Additional tag stripping for minimax formats
-                        import re
-                        tag_patterns = [
-                            r'<\|thinking\|>.*?</\|thinking\|>',
-                            r'<\|thought\|>.*?</\|thought\|>',
-                            r'<thinking>.*?</thinking>',
-                            r'<thought>.*?</thought>',
-                            r'【.*?】',  # Chinese brackets
-                        ]
-                        for p in tag_patterns:
-                            text = re.sub(p, '', text, flags=re.DOTALL | re.IGNORECASE)
-                        
-                        # Find the outermost JSON object using brace counting
-                        start_idx = text.find('{')
-                        if start_idx == -1:
-                            return None
-                        
-                        text_from_start = text[start_idx:]
-                        depth = 0
-                        for i, c in enumerate(text_from_start):
-                            if c == '{':
-                                depth += 1
-                            elif c == '}':
-                                depth -= 1
-                                if depth == 0:
-                                    json_str = text_from_start[:i+1]
-                                    try:
-                                        return json.loads(json_str)
-                                    except:
-                                        continue
-                        return None
-
-                    data = extract_json(cleaned_content)
-                    if data is not None:
-                        logger.info(f"✅ JSON extracted successfully from {current_provider}")
+    
+                        data = extract_json(cleaned_content)
+                        if data is not None:
+                            logger.info(f"✅ JSON extracted successfully from {current_provider}")
+                            return schema.model_validate(data)
+                            
+                        # Fallback to direct loads
+                        data = json.loads(cleaned_content)
                         return schema.model_validate(data)
-                        
-                    # Fallback to direct loads
-                    data = json.loads(cleaned_content)
-                    return schema.model_validate(data)
-                except Exception as parse_error:
-                    logger.warning(f"JSON Parse Error on {current_provider}: {parse_error}. Content snippet: {content[:200]}...")
-                    last_error = parse_error
-                    continue # Try next provider
-
-            except Exception as e:
-                logger.error(f"❌ Structured Inference Failed with {current_provider}: {e}")
-                self._update_metrics(current_provider, input_char_len, 0, is_error=True)
-                last_error = e
-                if not fallback_enabled: raise e
+                    except Exception as parse_error:
+                        logger.warning(f"JSON Parse Error on {current_provider}: {parse_error}. Content snippet: {content[:200]}...")
+                        last_error = parse_error
+                        break # Try next provider (JSON parse error usually means model capability issue, not transient rate limit)
+    
+                except Exception as e:
+                    logger.error(f"❌ Structured Inference Failed with {current_provider}: {e}")
+                    self._update_metrics(current_provider, input_char_len, 0, is_error=True)
+                    last_error = e
+                    
+                    # Handle Rate Limits / Quotas for Key Rotation
+                    e_str = str(e).lower()
+                    if current_provider == ProviderType.CEREBRAS and ("429" in e_str or "quota" in e_str or "rate limit" in e_str):
+                        if key_manager._current_key:
+                            report_rate_limit(key_manager._current_key)
+                        if attempt < max_attempts - 1:
+                            logger.warning(f"🔄 Retrying structured output on {current_provider} with a different key...")
+                            continue # Try next attempt
+                    
+                    if not fallback_enabled: raise e
+                    break # Break inner loop, try next provider
         
         raise Exception(f"All structural inference providers failed. Last error: {last_error}")
 
@@ -358,7 +388,8 @@ class InferenceService:
                 
                 # Model validation: Cerebras only supports their specific models
                 model_to_use = model if model and ("gpt-oss" in model or "llama" in model.lower()) else "gpt-oss-120b" 
-                return ChatCerebras(model=model_to_use, api_key=api_key, temperature=temp, max_tokens=max_tokens)
+                # Add max_retries=0 to force fast failure so our key rotation loop can handle 429s instantly
+                return ChatCerebras(model=model_to_use, api_key=api_key, temperature=temp, max_tokens=max_tokens, max_retries=0)
                 
             elif provider == ProviderType.GROQ:
                 api_key = os.getenv("GROQ_API_KEY")
@@ -367,7 +398,7 @@ class InferenceService:
                 # Model validation: Groq models typically start with llama, mixtral, or gemma
                 # Use llama-3.3-70b-versatile as default (fast and capable)
                 model_to_use = model if model and any(x in model.lower() for x in ["llama", "mixtral", "gemma", "gpt", "qwen", "deepseek"]) else "llama-3.3-70b-versatile"
-                return ChatGroq(model=model_to_use, api_key=api_key, temperature=temp, max_tokens=max_tokens)
+                return ChatGroq(model=model_to_use, api_key=api_key, temperature=temp, max_tokens=max_tokens, max_retries=0)
                 
             elif provider == ProviderType.NVIDIA:
                 api_key = os.getenv("NVIDIA_API_KEY")
@@ -382,7 +413,8 @@ class InferenceService:
                     model=model_to_use, 
                     api_key=api_key, 
                     temperature=temp, 
-                    max_tokens=max_tokens
+                    max_tokens=max_tokens,
+                    max_retries=0
                 )
             
             elif provider == ProviderType.OPENAI: # Also handles OLLAMA via OpenAI compatibility
@@ -392,7 +424,7 @@ class InferenceService:
                  model_to_use = model or "llama3.2-vision"
                  
                  from langchain_openai import ChatOpenAI
-                 return ChatOpenAI(base_url=base_url, api_key=api_key, model=model_to_use, temperature=temp, max_tokens=max_tokens)
+                 return ChatOpenAI(base_url=base_url, api_key=api_key, model=model_to_use, temperature=temp, max_tokens=max_tokens, max_retries=0)
 
         except Exception as e:
             logger.error(f"Failed to initialize {provider} client: {e}")

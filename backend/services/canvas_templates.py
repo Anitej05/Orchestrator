@@ -294,7 +294,47 @@ CANVAS_TEMPLATES: Dict[str, Dict[str, Any]] = {
             "enable_copy": True,
             "theme": "dark",
         },
-        "agent_hints": ["universal_agent"],
+        "agent_hints": ["universal_agent", "coding_agent"],
+    },
+
+    "code_diff_viewer": {
+        "template_id": "code_diff_viewer",
+        "canvas_type": "code",
+        "display_name": "Code Diff Viewer",
+        "description": "Multi-file diff viewer with syntax highlighting, terminal log, and apply/reject buttons for coding agent output",
+        "category": "technical",
+        "data_schema": {
+            "required": ["diffs"],
+            "properties": {
+                "diffs": {
+                    "type": "array",
+                    "description": "Array of file diffs",
+                    "items": {
+                        "type": "object",
+                        "required": ["file", "diff"],
+                        "properties": {
+                            "file": {"type": "string", "description": "File path"},
+                            "diff": {"type": "string", "description": "Unified diff text"},
+                            "language": {"type": "string", "description": "Language for syntax highlighting"},
+                            "status": {"type": "string", "enum": ["modified", "created", "deleted"]},
+                        }
+                    }
+                },
+                "terminal_log": {"type": "string", "description": "Terminal output log from the coding task"},
+                "summary": {"type": "string", "description": "Natural language summary of changes"},
+                "files_modified": {"type": "array", "items": {"type": "string"}, "description": "List of modified file paths"},
+                "file_count": {"type": "integer", "description": "Total number of files changed"},
+                "tests_passed": {"type": "boolean", "description": "Whether tests passed after changes (null if not run)"},
+            }
+        },
+        "default_config": {
+            "show_line_numbers": True,
+            "enable_copy": True,
+            "theme": "dark",
+            "requires_confirmation": True,
+            "confirmation_message": "Apply these code changes?",
+        },
+        "agent_hints": ["coding_agent"],
     },
 
     "json_tree": {
@@ -312,7 +352,7 @@ CANVAS_TEMPLATES: Dict[str, Dict[str, Any]] = {
             }
         },
         "default_config": {"enable_copy": True, "enable_search": True},
-        "agent_hints": ["universal_agent", "browser_agent"],
+        "agent_hints": ["universal_agent", "browser_agent", "coding_agent"],
     },
 
     # ------------------------------------------------------------------

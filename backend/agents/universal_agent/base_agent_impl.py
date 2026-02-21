@@ -500,7 +500,7 @@ class UniversalAgent(BaseAgent):
         }
 
         # Enrich with canvas if applicable
-        result = self._enrich_with_canvas(result, prompt)
+        result = await self._resolve_canvas_dynamic(result, prompt, "execute_task")
         return result
 
     async def _plan_task(self, prompt: str, payload: Dict) -> Dict:
@@ -654,7 +654,7 @@ Provide the code in a code block."""
             sandbox_stdout = execution_result.get("stdout", "")
             has_real_output = sandbox_stdout and "[SYSTEM WARNING]" not in sandbox_stdout
 
-            return self._enrich_with_canvas({
+            return await self._resolve_canvas_dynamic({
                 "step_number": 1,
                 "success": True,
                 "code": code,
@@ -662,17 +662,17 @@ Provide the code in a code block."""
                 "output": sandbox_stdout,
                 "error": execution_result.get("error"),
                 "type": "code",
-            }, description)
+            }, description, "generate_code")
         except Exception as e:
             # Sandbox failed, but we still have the generated code
-            return self._enrich_with_canvas({
+            return await self._resolve_canvas_dynamic({
                 "step_number": 1,
                 "success": True,
                 "code": code,
                 "result": code,
                 "error": f"Code sandbox error (code still generated): {str(e)}",
                 "type": "code",
-            }, description)
+            }, description, "generate_code")
 
     async def _execute_research_step(
         self, description: str, request: AgentRequest
@@ -895,9 +895,9 @@ Provide:
             temperature=0.4
         )
 
-        return self._enrich_with_canvas(
+        return await self._resolve_canvas_dynamic(
             {"result": response, "type": "analysis", "success": True},
-            prompt,
+            prompt, "analyze",
         )
 
     async def _generate_code(self, request: AgentRequest) -> Dict[str, Any]:
@@ -938,9 +938,9 @@ Provide:
 
     async def _creative_writing(self, request: AgentRequest) -> Dict[str, Any]:
         """Generate creative writing."""
-        return self._enrich_with_canvas(
+        return await self._resolve_canvas_dynamic(
             await self._execute_writing_step(request.prompt, request),
-            request.prompt,
+            request.prompt, "creative_write",
         )
 
     async def _solve_problem(self, request: AgentRequest) -> Dict[str, Any]:
@@ -966,9 +966,9 @@ Show your work and reasoning clearly."""
             temperature=0.5
         )
 
-        return self._enrich_with_canvas(
+        return await self._resolve_canvas_dynamic(
             {"result": response, "type": "problem_solving", "success": True},
-            prompt,
+            prompt, "solve_problem",
         )
 
     def _extract_code(self, response: str) -> str:
@@ -988,57 +988,57 @@ Show your work and reasoning clearly."""
         return response.strip()
 
     # -----------------------------------------------------------------------
-    # Canvas Enrichment
+    # Canvas — LLM-driven via shared CanvasService.decide_canvas_llm()
     # -----------------------------------------------------------------------
-    def _enrich_with_canvas(self, result: Dict[str, Any], prompt: str = "") -> Dict[str, Any]:
+    async def _resolve_canvas_dynamic(self, result: Dict[str, Any], prompt: str = "", capability: str = "") -> Dict[str, Any]:
         """
-        Auto-detect result content and attach an appropriate canvas_display.
-
-        Detection rules:
-        1. Code output → code_viewer template
-        2. Long structured text → document_viewer
-        3. Results already having canvas_display → pass through
+        LLM-driven canvas selection. Replaces hardcoded file-type detection.
+        Falls back to simple template matching if LLM unavailable.
         """
         # Already has canvas
         if result.get("canvas_display"):
             return result
 
         text = result.get("result", "")
-        if not isinstance(text, str):
+        if not isinstance(text, str) or len(text) < 20:
             return result
 
-        result_type = result.get("type", "")
-
         try:
-            # 1. Code output detection
+            display = await CanvasService.decide_canvas_llm(
+                output=text[:3000],
+                agent_name="universal_agent",
+                capability_name=capability or result.get("type", "execute_task"),
+            )
+            if display:
+                result["canvas_display"] = display.model_dump() if hasattr(display, "model_dump") else display.dict()
+                return result
+        except Exception as e:
+            logger.debug(f"LLM canvas decision failed (non-fatal): {e}")
+
+        # Fallback: old template-based detection
+        result_type = result.get("type", "")
+        try:
             if result_type == "code" or "```" in text:
                 code = self._extract_code(text)
                 if code and len(code) > 30:
-                    # Detect language from code block markers
                     import re
                     lang_match = re.search(r'```(\w+)', text)
                     lang = lang_match.group(1) if lang_match else 'python'
                     canvas = CanvasService.build_from_template(
-                        "code_viewer",
-                        {"code": code, "language": lang},
-                        title=f"Generated Code ({lang})",
+                        "code_viewer", {"code": code, "language": lang}, title=f"Generated Code ({lang})",
                     )
                     if canvas:
                         result["canvas_display"] = canvas.model_dump()
                         return result
 
-            # 2. Long analysis/writing → document viewer
-            if result_type in ("analysis", "creative_writing", "problem_solving", "research"):
-                if len(text) > 500:
-                    canvas = CanvasService.build_from_template(
-                        "document_viewer",
-                        {"content": text, "title": prompt[:80] if prompt else "Result", "status": "created"},
-                        title=result_type.replace('_', ' ').title(),
-                    )
-                    if canvas:
-                        result["canvas_display"] = canvas.model_dump()
-                        return result
-
+            if result_type in ("analysis", "creative_writing", "problem_solving", "research") and len(text) > 500:
+                canvas = CanvasService.build_from_template(
+                    "document_viewer",
+                    {"content": text, "title": prompt[:80] if prompt else "Result", "status": "created"},
+                    title=result_type.replace('_', ' ').title(),
+                )
+                if canvas:
+                    result["canvas_display"] = canvas.model_dump()
         except Exception as e:
             logger.warning(f"Canvas enrichment failed (non-fatal): {e}")
 

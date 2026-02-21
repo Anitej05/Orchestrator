@@ -100,7 +100,7 @@ class Brain:
 
     def __init__(self):
         self.max_failures = 3
-        self.max_iterations = 25
+        self.max_iterations = 15
 
     async def think(
         self, state: Dict[str, Any], config: Optional[RunnableConfig] = None
@@ -130,9 +130,41 @@ class Brain:
         # Extract insights from last execution if significant
         updated_insights = self._extract_insights_from_last_action(state, insights)
 
-        decision = await self._make_decision(
-            state, config, memory, updated_insights, action_history
-        )
+        decision = None
+        try:
+            decision = await self._make_decision(
+                state, config, memory, updated_insights, action_history
+            )
+        except Exception as e:
+            logger.error(f"🧠 Brain: All inference providers failed: {e}")
+            # Force a finish with whatever results are available
+            action_history = state.get("action_history", [])
+            # Gather any results from previous actions
+            collected_results = []
+            for entry in action_history:
+                if entry.get("success") and entry.get("result_summary"):
+                    collected_results.append(entry["result_summary"][:200])
+            
+            if collected_results:
+                summary = "\n\n".join(collected_results)
+                decision = {
+                    "action_type": "finish",
+                    "user_response": f"Here are the results gathered so far:\n\n{summary}\n\n(Note: LLM providers were temporarily unavailable, so processing could not continue.)",
+                    "reasoning": f"All inference providers failed: {str(e)[:100]}",
+                }
+            else:
+                # Increment failure count and try again next iteration
+                return {
+                    "failure_count": failure_count + 1,
+                    "iteration_count": iteration_count + 1,
+                }
+        
+        if decision is None:
+            return {
+                "failure_count": failure_count + 1,
+                "iteration_count": iteration_count + 1,
+            }
+        
         decision = self._apply_stagnation_guard(state, decision)
 
         updates = self._apply_decision_to_state(state, decision)
@@ -209,6 +241,7 @@ class Brain:
         optimized_context = get_optimized_llm_context(state, thread_id)
         history_str = optimized_context.get("context", "No history available.")
 
+        iteration_count = state.get("iteration_count", 0)
         todo_preview = self._build_todo_preview(state.get("todo_list", []))
 
         # Build FULL action history view (never compressed)
@@ -227,6 +260,22 @@ class Brain:
 
         # Build uploaded files view (NEW)
         files_str = self._build_uploaded_files_view(state.get("uploaded_files", []))
+
+        # === ARTIFACT RETRIEVAL: Pull relevant past experience ===
+        artifacts_str = ""
+        user_profile_str = "New user - no history."
+        try:
+            from .artifact_store import get_artifact_store
+            user_id = state.get("user_id", "default")
+            artifact_store = get_artifact_store(user_id)
+            artifacts_str = artifact_store.retrieve_relevant(
+                query=state.get("original_prompt", ""),
+                top_k=3,
+                max_tokens=2000,
+            )
+            user_profile_str = artifact_store.get_user_profile_prompt()
+        except Exception as e:
+            logger.debug(f"Artifact retrieval skipped: {e}")
 
         prompt = f"""You are the Brain of an intelligent orchestrator. achieve the objective by managing tasks and selecting the best resource for each.
 
@@ -279,22 +328,17 @@ You are a helpful, intelligent, and expressive AI assistant.
 ## COMPLETE ACTION HISTORY (all actions with results)
 {action_history_str}
 
-## SELF-CHECK: Am I Making Progress?
-**Review your action history above and ask:**
+## SELF-CHECK: REVIEW BEFORE EVERY DECISION
+**Before choosing your next action, reflect on your progress:**
 
-1. **Repetition Check**: Have I performed similar actions multiple times with similar results?
-   - Example: Multiple web searches about the same topic with same results
-   - Example: Running Python code multiple times with minor tweaks getting same output
-   - **If YES → STOP and finish with what you have**
-
-2. **Diminishing Returns Check**: Is each new action providing significantly less new information?
-   - First search: 10 new facts → Second search: 2 new facts → Third search: 0 new facts
-   - **If YES → STOP, you have sufficient information**
-
-3. **Completion Check**: Did the previous action already produce what the user asked for?
-   - User asked for "analysis" and you have analysis results
-   - User asked for "prediction" and you have prediction output
-   - **If YES → STOP and return the results**
+1. **Review your action history above.** What have you already accomplished? What data do you already have?
+2. **Avoid redundancy.** If a tool already returned the data you need, use that data — don't call it again with a similar query.
+3. **Progress toward the goal.** Each action should bring you meaningfully closer to completing the user's request. If you have all the information needed, move to the next step (e.g., from research → Python → finish).
+4. **Know when to finish.** Once you've gathered the data, processed it, and created any requested outputs (CSV, analysis, etc.), present the results to the user with action_type='finish'.
+5. **Handle errors gracefully.** If a tool or agent fails, try a different approach or work with what you have. Don't repeat the same failing action.
+6. **Be efficient.** The user values results, not exhaustive retries. One good search is better than five similar ones.
+7. **NEVER repeat the same action.** If you already called python to read a file, DO NOT call python again to read the same file. The result is in your action history above.
+8. **Iteration awareness.** You are on iteration {iteration_count}/{self.max_iterations}. If you're past iteration 8, you MUST prioritize finishing over gathering more data.
 
 ## CONVERSATION HISTORY (Recent interactions)
 {conversation_history_str}
@@ -308,54 +352,72 @@ You are a helpful, intelligent, and expressive AI assistant.
 
 ## CONSECUTIVE FAILURES: {state.get("failure_count", 0)}
 
-## AVAILABLE RESOURCES
-AGENTS (specialized, for complex domain work):
-{agent_skills_context or agent_list or "None"}
+## RELEVANT EXPERIENCE (from past interactions)
+{artifacts_str or 'No relevant past experience.'}
 
-**QUICK REFERENCE - Use these exact names:**
-- Browser Automation Agent (ID: browser_automation_agent) → Web navigation, scraping, forms
-- Spreadsheet Agent (ID: spreadsheet_agent) → CSV, Excel, data analysis  
-- Mail Agent (ID: mail_agent) → Email, Gmail, messages
-- Document Agent (ID: document_agent) → PDF, Word, text documents
-- Zoho Books Agent (ID: zoho_books_agent) → Invoicing, accounting, finance
+## USER PROFILE
+{user_profile_str}
 
-TOOLS (fast, direct functions - PREFER over agents when both qualify):
-{tool_list or "None"}
+## RESOURCE SELECTION — PICK THE RIGHT ACTION TYPE
 
-## TOOL USE GUIDELINES
-1. **Explicit Requests**: If the user asks to "run code", "use python", "search", or "use [AgentName]", you **MUST** prioritize that action type.
-2. **Contextual Logic**: If the objective requires calculation, data processing, or current time/date, use **PYTHON** or **TERMINAL**. Do not guess.
-3. **No unnecessary planning**: If the task is simple and can be solved with a single tool/agent call, DO NOT create a complex plan. Just execute.
+**CRITICAL RULES (read FIRST):**
+- If the user says "create a file/CSV/JSON" or "run/write code" → you MUST use action_type='python'. Do NOT write code inside user_response.
+- If the user says "use the browser" or "go to [website]" → you MUST use action_type='agent' with Browser Automation Agent.
+- If the user says "send email" or "check email" → you MUST use action_type='agent' with Mail Agent.
+- Code in user_response is **NOT EXECUTED**. Only action_type='python' executes code.
+- Files are **NOT CREATED** by finish. Only action_type='python' or 'terminal' can create files.
 
-AGENT: Delegate to a specialized agent.
-  - Use action_type='agent', resource_id='<Agent Name>' (use exact names from AVAILABLE RESOURCES)
-  - Payload must include:
-    - 'prompt': A clear, natural language description of what you want the agent to do.
-  - **DO NOT** specify technical `action` endpoints unless absolutely necessary. The agent will plan its own actions.
-  
-  **Agent Selection Guide:**
-  - **Browser Automation Agent**: Navigation, scraping, forms, any website interaction
-  - **Spreadsheet Agent**: CSV, Excel, data analysis, tables, charts
-  - **Mail Agent**: Email, Gmail, messages, drafts
-  - **Document Agent**: PDF, Word, text documents
-  - **Zoho Books Agent**: Invoicing, accounting, finance
-  
-  - Example: {{"action_type": "agent", "resource_id": "Browser Automation Agent", "payload": {{"prompt": "Go to example.com and extract all product prices."}}}}
-  - Example: {{"action_type": "agent", "resource_id": "Spreadsheet Agent", "payload": {{"prompt": "Calculate the average revenue per region from this CSV."}}}}
-  - Example: {{"action_type": "agent", "resource_id": "Document Agent", "payload": {{"prompt": "Summarize this PDF document."}}}}
-  - Example: {{"action_type": "agent", "resource_id": "Mail Agent", "payload": {{"prompt": "Find emails from John about the project."}}}}
-  - Example: {{"action_type": "agent", "resource_id": "Zoho Books Agent", "payload": {{"prompt": "Show me all unpaid invoices."}}}}
+**Choose the action type that matches the CURRENT STEP of the task:**
 
-PYTHON: Execute Python code directly in sandbox.
-  - Use action_type='python' when user asks to: run code, calculate, compute, process data, parse, convert, generate.
-  - **YOU MUST GENERATE THE CODE**. The user will not provide it.
-  - **Output**: The output of your code (stdout) and the value of the variable `result` (if assigned) will be returned.
-  - Provide: payload.code (the full, valid Python code to execute)
-  - Example: {{"action_type": "python", "payload": {{"code": "print(2 + 2)"}}}}
-  - The sandbox has access to: pandas, numpy, json, datetime, re, math, statistics.
-  - PREFER PYTHON over agents for quick calculations and data processing.
+1. **TOOL** — Need external data? (web search, news, finance, wiki lookup)
+   → action_type='tool', resource_id='tool_name', payload={{...}}
+   Available tools:
+{tool_list or '   None'}
 
-TERMINAL: Shell commands (ls, cat, grep, etc.).
+2. **PYTHON** — Need to compute, process, create files, or execute code?
+   → action_type='python', payload={{"code": "your_python_code_here"}}
+   ✅ Generate CSV/JSON/files, calculations, data processing, parsing, charting
+   ✅ YOU write the code. Sandbox has: pandas, numpy, json, datetime, re, math, statistics, csv, os
+   ✅ Files created in the sandbox persist and are tracked automatically
+   ✅ **DATA ACCESS**: A `tool_results` dict is pre-loaded with data from previous tool/agent calls.
+      - Keys are tool names (e.g., `tool_results['get_stock_quote']`), values are the result data.
+      - Also available as JSON files: `<tool_name>_result.json` in the workspace directory.
+      - Example: `data = tool_results.get('get_stock_quote', {{}})` or `json.load(open('get_stock_quote_result.json'))`
+   ⚠️ If the task says "create a CSV" or "write a file" → you MUST use python, NOT finish
+
+3. **AGENT** — Need a specialized external system?
+   → action_type='agent', resource_id='<Agent Name>', payload={{"prompt": "..."}}
+   Use agents when the task requires:
+   - **Browser access**: web navigation, scraping, form filling → Browser Automation Agent
+   - **Email/Gmail access**: read, send, search emails → Mail Agent
+   - **Uploaded file parsing**: .xlsx/.csv analysis, PDF/DOCX OCR → SpreadsheetAgent / Document Agent
+   - **Accounting system**: invoices, payments, Zoho → Zoho Books Agent
+
+   **Available agents:**
+{agent_skills_context or agent_list or '   None'}
+
+   ❌ NEVER spawn SpreadsheetAgent just to create a CSV — use Python
+   ❌ NEVER spawn DocumentAgent to write markdown — use Python
+   ✅ DO use SpreadsheetAgent when user uploaded .xlsx that needs pivot/analysis
+   ✅ DO use Browser Automation Agent when you need to navigate real websites
+
+4. **TERMINAL** — Need a shell command? (dir, type, findstr, system info)
+   → action_type='terminal', payload={{"command": "..."}}
+   ⚠️ This is a WINDOWS system. Use `dir` not `ls`, `type` not `cat`, `findstr` not `grep`
+
+5. **FINISH** — Have you completed ALL steps the user asked for?
+   → action_type='finish', user_response='your comprehensive answer'
+   ⚠️ ONLY use finish when ALL subtasks are done
+   ⚠️ If user asked to "create a file" and you haven't created it yet → DO NOT finish
+   ⚠️ If user asked to "use Python" and you haven't executed code yet → DO NOT finish
+   ✅ Use finish to summarize results AFTER tools/python/agents have done the work
+
+## MULTI-STEP TASK RULES
+- If task has multiple parts (e.g., "search, then code, then display"):
+  → Execute each part in order: tool → python → finish
+  → Do NOT skip ahead to finish after just the first part
+- If task needs multiple independent steps → Use action_type='parallel'
+- If task needs sequential phases → Use action_type='plan'
 
 ## ADVANCED ACTION TYPES
 
@@ -621,13 +683,38 @@ Return JSON with:
         for entry in entries_to_show:
             status = "✅" if entry.get("success") else "❌"
             action_type = entry.get("action_type", "?")
-            resource = entry.get("resource_id", "")
+            resource = entry.get("resource_id") or ""
             result = entry.get("result_summary", "No result")
             iteration = entry.get("iteration", 0)
+            instruction = entry.get("instruction", "")
 
-            lines.append(f"[Step {iteration}] {status} {action_type}:{resource}")
-            # Limit result length for token budget
-            lines.append(f"   Result: {result[:200]}")
+            # Show action type with resource (avoid ":None" or ":" suffix)
+            label = f"{action_type}:{resource}" if resource else action_type
+            lines.append(f"[Step {iteration}] {status} {label}")
+            # Show what was requested (helps Brain detect its own repetition)
+            if instruction:
+                lines.append(f"   Code/Instruction: {instruction[:150]}")
+            # Result truncation: 400 chars for data-heavy types, 200 for others
+            max_result_len = 400 if action_type in ("tool", "python", "agent") else 200
+            lines.append(f"   Result: {result[:max_result_len]}")
+
+        # === REDUNDANCY DETECTION ===
+        # Count repeated action patterns to warn the Brain
+        from collections import Counter
+        action_patterns = []
+        for entry in action_history:
+            a_type = entry.get("action_type", "")
+            a_resource = entry.get("resource_id", "")
+            action_patterns.append(f"{a_type}:{a_resource}")
+        
+        pattern_counts = Counter(action_patterns)
+        repeated = {k: v for k, v in pattern_counts.items() if v >= 3}
+        if repeated:
+            lines.append("")
+            lines.append("⚠️ REDUNDANCY WARNING: You are repeating actions!")
+            for pattern, count in repeated.items():
+                lines.append(f"   → {pattern} called {count} times. STOP repeating this.")
+            lines.append("   → Use the data you already have, or call 'finish' now.")
 
         return "\n".join(lines)
 
