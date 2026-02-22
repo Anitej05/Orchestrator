@@ -7,6 +7,7 @@ Replaces the always-running agent model with on-demand spawning.
 
 import asyncio
 import logging
+import os
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -620,6 +621,3 @@ def get_agent_manager() -> AgentManager:
     if _agent_manager is None:
         _agent_manager = AgentManager()
     return _agent_manager
-
-
-import os  # Added for environment variable access

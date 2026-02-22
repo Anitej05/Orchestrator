@@ -773,7 +773,7 @@ class BrowserAgent:
                 current_site = ""
                 try:
                     current_site = page_content.get('url', '').split('/')[2] if page_content.get('url') else ""
-                except:
+                except Exception:
                     pass
                 
                 # Pass full task description for semantic retrieval

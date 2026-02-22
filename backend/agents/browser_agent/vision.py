@@ -61,7 +61,7 @@ class VisionClient:
             # Try to get a good font
             try:
                 font = ImageFont.truetype("arial.ttf", 12)
-            except:
+            except Exception:
                 font = ImageFont.load_default()
             
             mark_mapping = {}

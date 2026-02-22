@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException, Depends, Request, Body, Query
 from sqlalchemy.orm import Session
 
-from database import SessionLocal
+from database import SessionLocal, get_db
 from models import Workflow, WorkflowExecution, WorkflowSchedule, WorkflowWebhook, UserThread
 from backend.schemas import PlanResponse
 
@@ -25,24 +25,12 @@ logger = logging.getLogger("uvicorn.error")
 
 CONVERSATION_HISTORY_DIR = "conversation_history"
 
-
-# --- Shared State (will be injected from main.py) ---
 checkpointer = None
 
 
 def set_checkpointer(cp):
-    """Called by main.py to inject the shared checkpointer."""
     global checkpointer
     checkpointer = cp
-
-
-# --- Database Dependency ---
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 
 # --- Models ---

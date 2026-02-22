@@ -11,22 +11,13 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException, Depends, Request
 from sqlalchemy.orm import Session
 
-from database import SessionLocal
+from database import get_db
 from models import UserThread, Workflow, Agent, StatusEnum
 
 router = APIRouter(prefix="/api/metrics", tags=["Dashboard"])
 logger = logging.getLogger("uvicorn.error")
 
 CONVERSATION_HISTORY_DIR = "conversation_history"
-
-
-# --- Database Dependency ---
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 
 @router.get("/dashboard")

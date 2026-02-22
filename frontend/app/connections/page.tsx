@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useState, useRef, useCallback } from "react"
 import { SidebarInset } from "@/components/ui/sidebar"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -13,6 +13,7 @@ import { authFetch } from "@/lib/auth-fetch"
 function ConnectionsContent() {
   const { user } = useUser()
   const { toast } = useToast()
+  const pollIntervalRef = useRef<NodeJS.Timeout | null>(null)
   
   // Integration connections state (multi-app support)
   const [integrationStatus, setIntegrationStatus] = useState<Record<string, "unknown" | "connected" | "disconnected" | "disabled" | "pending" | "error">>({
@@ -31,6 +32,14 @@ function ConnectionsContent() {
       loadIntegrationStatus()
     }
   }, [user])
+
+  useEffect(() => {
+    return () => {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current)
+      }
+    }
+  }, [])
 
   const loadIntegrationStatus = async () => {
     if (!user?.id) return
@@ -108,14 +117,12 @@ function ConnectionsContent() {
           description: `Complete authentication in the popup window`
         })
         
-        // Poll for connection status every 3 seconds
         let pollCount = 0
-        const maxPolls = 20 // 1 minute total
+        const maxPolls = 20
         
-        const pollInterval = setInterval(async () => {
+        pollIntervalRef.current = setInterval(async () => {
           pollCount++
           
-          // First, sync from Composio to ensure we have the latest status
           try {
             await authFetch(`${API_BASE}/api/integrations/sync/${user.id}`, {
               method: "POST"
@@ -124,14 +131,12 @@ function ConnectionsContent() {
             console.error("Sync failed:", syncError)
           }
           
-          // Then check if connection is established
           const statusResponse = await authFetch(`${API_BASE}/api/integrations/status/${user.id}/${appSlug}`)
           if (statusResponse.ok) {
             const statusData = await statusResponse.json()
             
             if (statusData.connected_apps && statusData.connected_apps.includes(appSlug)) {
-              // Success!
-              clearInterval(pollInterval)
+              if (pollIntervalRef.current) clearInterval(pollIntervalRef.current)
               if (popup && !popup.closed) popup.close()
               
               setIntegrationStatus(prev => ({...prev, [appSlug]: "connected"}))
@@ -142,17 +147,15 @@ function ConnectionsContent() {
                 description: `Successfully connected to ${appSlug}`
               })
               
-              loadIntegrationStatus() // Refresh full status
+              loadIntegrationStatus()
               return
             }
           }
           
-          // Check if popup was closed manually
           if (popup && popup.closed) {
-            clearInterval(pollInterval)
+            if (pollIntervalRef.current) clearInterval(pollIntervalRef.current)
             setIntegrationLoading(prev => ({...prev, [appSlug]: false}))
             
-            // Do one final sync and check in case it succeeded
             try {
               await authFetch(`${API_BASE}/api/integrations/sync/${user.id}`, {
                 method: "POST"
@@ -163,9 +166,8 @@ function ConnectionsContent() {
             loadIntegrationStatus()
           }
           
-          // Timeout after max polls
           if (pollCount >= maxPolls) {
-            clearInterval(pollInterval)
+            if (pollIntervalRef.current) clearInterval(pollIntervalRef.current)
             setIntegrationLoading(prev => ({...prev, [appSlug]: false}))
             
             toast({
@@ -174,7 +176,7 @@ function ConnectionsContent() {
               variant: "destructive"
             })
           }
-        }, 3000) // Poll every 3 seconds
+        }, 3000)
       } else {
         toast({
           title: "Error",

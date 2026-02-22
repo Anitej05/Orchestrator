@@ -48,7 +48,7 @@ import httpx
 
 # --- Local Application Imports ---
 CONVERSATION_HISTORY_DIR = "conversation_history"
-from database import SessionLocal
+from database import SessionLocal, get_db
 from models import Agent, StatusEnum, AgentCapability, AgentEndpoint, EndpointParameter, Workflow, WorkflowExecution, UserThread, WorkflowSchedule, WorkflowWebhook, AgentType
 from backend.schemas import AgentCard, ProcessRequest, ProcessResponse, PlanResponse, FileObject, ActionApprovalRequest, ActionRejectRequest
 from backend.orchestrator.graph import ForceJsonSerializer, create_graph_with_checkpointer, create_execution_subgraph, messages_from_dict, messages_to_dict, serialize_complex_object
@@ -771,14 +771,6 @@ class UpdateScheduleRequest(BaseModel):
     final_response: Optional[str] = None
     task_agent_pairs: Optional[List[Dict]] = None
     error_message: Optional[str] = None
-
-# --- Database Dependency ---
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 # --- Agent Server Startup ---
 def is_port_in_use(port: int) -> bool:
