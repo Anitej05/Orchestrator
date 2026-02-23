@@ -19,7 +19,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 import httpx
 
-from schemas import FileObject
+from backend.schemas import FileObject
 
 # CMS Integration
 import sys
@@ -34,7 +34,7 @@ backend_root = Path(__file__).parent.parent.parent.resolve()
 if str(backend_root) not in sys.path:
     sys.path.insert(0, str(backend_root))
 
-from services.content_management_service import (
+from backend.services.content_management_service import (
     ContentManagementService,
     ContentSource,
     ContentType,
@@ -119,7 +119,7 @@ class FileProcessor:
         
         # Create vector store (runs in thread pool)
         # Import here to avoid circular dependency
-        from orchestrator.nodes.utils import get_hf_embeddings
+        from backend.orchestrator.nodes.utils import get_hf_embeddings
         
         vector_store = await asyncio.to_thread(
             FAISS.from_documents,

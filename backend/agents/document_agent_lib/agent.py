@@ -54,7 +54,7 @@ try:
     backend_path = str(Path(__file__).parent.parent.parent)
     if backend_path not in sys.path:
         sys.path.insert(0, backend_path)
-    from utils.metrics_display import display_execution_metrics, display_session_metrics
+    from backend.utils.metrics_display import display_execution_metrics, display_session_metrics
 except ImportError:
     # If that fails, use importlib to load directly
     import importlib.util
@@ -67,7 +67,7 @@ except ImportError:
     display_session_metrics = metrics_module.display_session_metrics
 
 # Import Content Management Service
-from services.content_management_service import (
+from backend.services.content_management_service import (
     ContentManagementService,
     ContentType,
     ContentSource,
@@ -75,7 +75,7 @@ from services.content_management_service import (
     ContentPriority,
     ProcessingTaskType
 )
-from services.canvas_service import CanvasService
+from backend.services.canvas_service import CanvasService
 
 logger = logging.getLogger(__name__)
 
@@ -628,51 +628,6 @@ class DocumentAgent:
     async def _process_single_file_safe(self, file_path: str, query: str) -> Dict[str, Any]:
         """Thread-safe processing of a single file (Async Wrapper)."""
         return await self._analyze_single_file(AnalyzeDocumentRequest(query=query), file_path)
-        start_time = time.time()
-        result = {
-            'file_path': file_path,
-            'success': False,
-            'answer': None,
-            'error': None,
-            'processing_time': None
-        }
-
-        try:
-            # Check cache first
-            cache_key = f"{file_path}:{query}"
-            cached = self._get_cached_result(cache_key)
-            if cached and cached.get('success'):
-                result.update({
-                    'success': True,
-                    'answer': cached.get('answer'),
-                    'processing_time': time.time() - start_time
-                })
-                return result
-
-            # Extract and analyze
-            content, _ = extract_document_content(file_path)
-            self.metrics["llm_calls"]["analyze"] += 1
-            self.metrics["llm_calls"]["total"] += 1
-            answer = self.llm_client.analyze_document_with_query(content, query)
-            
-            result.update({
-                'success': True,
-                'answer': answer,
-                'processing_time': time.time() - start_time
-            })
-
-            # Cache successful result
-            self._cache_result(cache_key, {'success': True, 'answer': answer})
-
-        except Exception as e:
-            logger.error(f"File processing error for {file_path}: {e}")
-            result.update({
-                'success': False,
-                'error': str(e),
-                'processing_time': time.time() - start_time
-            })
-
-        return result
 
     def _get_cached_result(self, cache_key: str) -> Optional[Dict[str, Any]]:
         """Thread-safe cache retrieval with hit/miss tracking."""
@@ -725,11 +680,24 @@ class DocumentAgent:
                 )
             else:
                 content, _ = extract_document_content(file_path)
-                canvas_display = {
-                    'canvas_type': 'text',
-                    'content': content[:5000],
-                    'file_name': Path(file_path).name
-                }
+                # LLM-driven canvas decision for non-PDF/DOCX files
+                canvas_display = None
+                try:
+                    display = await CanvasService.decide_canvas_llm(
+                        output=content[:3000],
+                        agent_name="document_agent",
+                        capability_name="display_document",
+                    )
+                    if display:
+                        canvas_display = display.model_dump() if hasattr(display, "model_dump") else display.dict()
+                except Exception as e:
+                    logger.debug(f"LLM canvas decision failed for display: {e}")
+                if not canvas_display:
+                    canvas_display = {
+                        'canvas_type': 'markdown',
+                        'canvas_content': content[:5000],
+                        'canvas_title': Path(file_path).name
+                    }
 
             return {
                 'success': True,
@@ -858,13 +826,16 @@ class DocumentAgent:
                 risk.setdefault('risk_signals', []).append('risky_action_types')
 
             if not validation.get('valid', False):
+                # Log the actual plan and issues for debugging
+                logger.error(f"Edit plan validation failed. Plan: {plan}, Issues: {validation.get('issues', [])}")
                 return {
                     'success': False,
                     'message': 'Edit plan validation failed',
                     'status': LocalAgentResponseStatus.ERROR.value,
                     'risk_assessment': risk,
                     'phase_trace': phase_trace,
-                    'errors': validation.get('issues', [])
+                    'errors': validation.get('issues', []),
+                    'debug_plan': plan  # Include the plan for debugging
                 }
 
             # Approval gating: pause if risk is high unless auto_approve is set
@@ -1094,8 +1065,6 @@ class DocumentAgent:
 
     # ========== DATA EXTRACTION ==========
 
-    # ========== DATA EXTRACTION ==========
-
     async def extract_data(self, request: ExtractDataRequest) -> Dict[str, Any]:
         """Extract structured data from document using ContentManagementService."""
         try:
@@ -1119,9 +1088,16 @@ class DocumentAgent:
             )
             
             # 2. Extract Data (Using Strategy)
+            extraction_query = {
+                "text": "Extract and summarize the key text content of this document",
+                "tables": "Extract all tables and tabular data from this document",
+                "structured": "Extract all structured data including titles, sections, key points, dates, names, and important information"
+            }.get(request.extraction_type, "Extract key information from this document")
+            
             proc_result = await self.service.process_large_content(
                 content_id=meta.id,
                 task_type=ProcessingTaskType.EXTRACT,
+                query=extraction_query,
                 strategy=ProcessingStrategy.DATA_EXTRACTION
             )
             

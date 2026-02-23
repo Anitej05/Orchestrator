@@ -103,9 +103,6 @@ def should_continue(state: Dict[str, Any]) -> str:
     if decision.get("action_type") == "finish":
         return "finish"
 
-    if state.get("final_response"):
-        return "finish"
-
     return "continue"
 
 
@@ -135,6 +132,9 @@ def omni_route_condition(state: Dict[str, Any]) -> str:
     """
     Conditional routing for the OMNI-DISPATCHER graph.
     Routes: "hands" | "approval" | "finish" | "brain"
+    
+    Routing is based on the Brain's decision.
+    The Brain sees full action results (not CMS-compressed) so it can self-regulate.
     """
     # Check for pending approval first
     if state.get("pending_approval"):
@@ -142,13 +142,11 @@ def omni_route_condition(state: Dict[str, Any]) -> str:
     
     decision = state.get("decision") or {}
     action_type = decision.get("action_type", "")
-    final_res = state.get("final_response")
 
-    if action_type == "finish" or final_res:
+    if action_type == "finish":
         return "finish"
     
     # Skip action should loop back to Brain for another thinking cycle
-    # This happens during initialization when todo_list is being set up
     if action_type == "skip":
         return "brain"
 

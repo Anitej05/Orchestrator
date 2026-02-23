@@ -22,7 +22,7 @@ from agents.utils.agent_file_manager import AgentFileManager, FileType, FileStat
 logger = logging.getLogger(__name__)
 
 # CMS Integration for query_page_content
-from services.content_management_service import (
+from backend.services.content_management_service import (
     ContentManagementService, 
     ProcessingTaskType,
     ProcessingStrategy
@@ -1018,7 +1018,7 @@ class ActionExecutor:
         if not source:
             try:
                 source = page.url
-            except:
+            except Exception:
                 source = "unknown"
         
         # VALIDATION: Check if value exists in PAGE CONTENT that LLM saw (not live page)
@@ -1538,10 +1538,9 @@ class ActionExecutor:
         notes = params.get('notes', '')
         
         if not site:
-            # Try to extract from current URL
             try:
                 site = page.url.split('/')[2]
-            except:
+            except Exception:
                 return ActionResult(
                     success=False,
                     action="save_credential",
@@ -1582,10 +1581,9 @@ class ActionExecutor:
         site = params.get('site', '')
         
         if not site:
-            # Try to extract from current URL
             try:
                 site = page.url.split('/')[2]
-            except:
+            except Exception:
                 return ActionResult(
                     success=False,
                     action="get_credential",

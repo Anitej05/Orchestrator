@@ -199,21 +199,27 @@ class AgentCredential(Base):
     agent = relationship("Agent", back_populates="credentials")
 
 
+# ============================================================================
+# INTEGRATIONS / COMPOSIO OAUTH TABLES
+# ============================================================================
+
 class UserConnection(Base):
     """
-    Stores Composio integration connections for users.
-    Each connection represents an authenticated integration (Gmail, Slack, etc.)
+    Stores OAuth connection metadata for external services (Composio).
+    Links users to external app connections (Gmail, Zoho Books, etc.)
     """
     __tablename__ = "user_connections"
-
+    
     id = Column(String, primary_key=True)
-    user_id = Column(String, nullable=False, index=True)
-    app_slug = Column(String, nullable=False, index=True)  # e.g., "gmail", "slack"
-    connection_id = Column(String, nullable=False)  # Encrypted Composio connection ID
-    status = Column(String, default="active")  # active, stale, disconnected
-    auth_timestamp = Column(DateTime, default=datetime.utcnow)
+    user_id = Column(String(255), nullable=False, index=True)
+    app_slug = Column(String(100), nullable=False, index=True)  # 'gmail', 'zohobooks', etc.
+    connection_id = Column(Text, nullable=True)  # Encrypted Composio connection ID
+    status = Column(String(50), default='initiated')  # 'initiated', 'active', 'expired', 'error'
+    
+    # Connection metadata
+    app_metadata = Column(JSON, nullable=True)  # Store app-specific data
+    auth_timestamp = Column(DateTime, nullable=True)
     last_verified = Column(DateTime, nullable=True)
-    app_metadata = Column(JSON, nullable=True)  # Store connection-specific metadata
     
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -221,20 +227,20 @@ class UserConnection(Base):
 
 class ConnectionLog(Base):
     """
-    Audit log for connection events (auth, verification, errors).
-    Used for debugging and monitoring integration health.
+    Audit log for OAuth connection events.
+    Tracks auth attempts, refreshes, errors, etc.
     """
     __tablename__ = "connection_logs"
-
-    id = Column(Integer, primary_key=True)
-    user_id = Column(String, nullable=False, index=True)
-    app_slug = Column(String, nullable=False, index=True)
-    connection_id = Column(String, nullable=True)
-    event_type = Column(String, nullable=False)  # auth_completed, verification_success, verification_failed, etc.
-    status = Column(String, nullable=False)  # success, error
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(255), nullable=False, index=True)
+    app_slug = Column(String(100), nullable=False)
+    connection_id = Column(String(255), nullable=True)
+    event_type = Column(String(50), nullable=False)  # 'auth_started', 'auth_completed', 'refresh', etc.
+    status = Column(String(50), nullable=False)  # 'success', 'error'
     error_message = Column(Text, nullable=True)
     
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 
 # ============================================================================

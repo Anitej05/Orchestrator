@@ -11,7 +11,7 @@ import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 
 # Load environment variables
-load_dotenv()
+load_dotenv(override=True)
 
 def print_step(message):
     """Print formatted step message"""

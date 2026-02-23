@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from typing import Dict, List, Optional
 from database import get_db
-from services.mcp_service import (
+from backend.services.mcp_service import (
     probe_mcp_url,
     ingest_mcp_agent,
     list_user_connections,

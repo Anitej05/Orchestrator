@@ -10,7 +10,7 @@ backend_root = Path(__file__).parent.parent.parent.resolve()
 if str(backend_root) not in sys.path:
     sys.path.insert(0, str(backend_root))
 
-from services.inference_service import inference_service
+from backend.services.inference_service import inference_service
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,8 @@ class DocumentPlanner:
         """
         logger.info(f"Planning for prompt: {prompt}")
         
+        from langchain_core.messages import HumanMessage, SystemMessage
+        
         system_prompt = """You are the Planner for a Document Agent.
 Your goal is to map a user's natural language request to one of the following actions:
 
@@ -58,11 +60,14 @@ If the request is ambiguous, default to `/analyze` with the full prompt as query
 
         try:
             # Use structured output for reliability
+            messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=prompt)
+            ]
+            
             plan = await self.inference.generate_structured(
-                prompt=prompt,
-                response_model=DocumentPlan,
-                system_prompt=system_prompt,
-                model=self.model_id,
+                messages=messages,
+                schema=DocumentPlan,
                 temperature=0.1
             )
             

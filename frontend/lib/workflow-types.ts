@@ -19,7 +19,7 @@ export type WorkflowEventType =
   | 'stream_chunk'
   | string; // Allow other node types
 
-export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed';
+export type TaskExecutionStatus = 'pending' | 'running' | 'completed' | 'failed';
 
 export interface WorkflowTask {
   taskId: string;
@@ -27,7 +27,7 @@ export interface WorkflowTask {
   taskDescription: string;
   agentName: string;
   agentId: string;
-  status: TaskStatus;
+  status: TaskExecutionStatus;
   startTime?: number;
   endTime?: number;
   executionTime?: number;

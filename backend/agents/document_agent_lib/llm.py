@@ -47,7 +47,9 @@ class DocumentLLMClient:
             response = await inference_service.generate(
                 messages=[HumanMessage(content=prompt)],
                 priority=InferencePriority.QUALITY,
-                strip_markdown=True
+                strip_markdown=True,
+                max_tokens=8000,  # Increased for complex multi-part edits
+                temperature=0.3   # Lower temperature for more deterministic JSON output
             )
             return self._parse_edit_response(response)
 
@@ -218,7 +220,7 @@ Provide response in JSON format:
 }}"""
 
     def _parse_edit_response(self, response: str) -> Dict[str, Any]:
-        """Parse LLM response into structured actions."""
+        """Parse LLM response into structured actions with robust error handling."""
         try:
             # Clean the response - remove markdown code blocks
             cleaned = response.strip()
@@ -228,31 +230,103 @@ Provide response in JSON format:
             elif '```' in cleaned:
                 cleaned = re.sub(r'```\s*', '', cleaned)
             
-            # Try to extract JSON from response
-            json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', cleaned, re.DOTALL)
-            if json_match:
-                json_str = json_match.group()
-                # Remove any trailing commas before closing braces
-                json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
-                return json.loads(json_str)
+            # Method 1: Try to find complete JSON using brace counting
+            def extract_complete_json(text: str) -> Optional[str]:
+                """Extract complete JSON object using brace counting."""
+                start_idx = text.find('{')
+                if start_idx == -1:
+                    return None
+                
+                depth = 0
+                in_string = False
+                escape_next = False
+                
+                for i, char in enumerate(text[start_idx:], start_idx):
+                    if escape_next:
+                        escape_next = False
+                        continue
+                    if char == '\\' and in_string:
+                        escape_next = True
+                        continue
+                    if char == '"' and not escape_next:
+                        in_string = not in_string
+                    elif not in_string:
+                        if char == '{':
+                            depth += 1
+                        elif char == '}':
+                            depth -= 1
+                            if depth == 0:
+                                return text[start_idx:i+1]
+                return None
             
-            # If no JSON found, try the entire cleaned response
+            # Try complete JSON extraction first
+            json_str = extract_complete_json(cleaned)
+            if json_str:
+                # Remove trailing commas before closing braces/brackets
+                json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
+                try:
+                    return json.loads(json_str)
+                except json.JSONDecodeError as e:
+                    logger.warning(f"JSON decode failed for extracted JSON: {e}")
+            
+            # Method 2: Try the entire cleaned response
             try:
                 return json.loads(cleaned)
-            except:
+            except json.JSONDecodeError:
                 pass
             
-            # Fallback: return raw response
-            logger.warning(f"Could not parse JSON, using fallback. Response: {response[:200]}")
+            # Method 3: Handle truncated JSON - try to complete it
+            if cleaned.startswith('{') and not cleaned.endswith('}'):
+                logger.warning("Detected truncated JSON response, attempting recovery")
+                # Count open braces/brackets and try to close them
+                open_braces = cleaned.count('{') - cleaned.count('}')
+                open_brackets = cleaned.count('[') - cleaned.count(']')
+                
+                # Try to close the JSON
+                recovered = cleaned
+                # Remove any trailing incomplete content (partial strings, etc.)
+                # Find last complete value
+                last_complete = max(
+                    cleaned.rfind('",'),
+                    cleaned.rfind('"],'),
+                    cleaned.rfind('true,'),
+                    cleaned.rfind('false,'),
+                    cleaned.rfind('null,'),
+                    cleaned.rfind('},')
+                )
+                if last_complete > 0:
+                    recovered = cleaned[:last_complete+1]
+                    # Recount braces/brackets
+                    open_braces = recovered.count('{') - recovered.count('}')
+                    open_brackets = recovered.count('[') - recovered.count(']')
+                
+                # Close open structures
+                recovered = recovered.rstrip(',')  # Remove trailing comma
+                for _ in range(open_brackets):
+                    recovered += ']'
+                for _ in range(open_braces):
+                    recovered += '}'
+                
+                try:
+                    result = json.loads(recovered)
+                    logger.info("Successfully recovered truncated JSON")
+                    return result
+                except json.JSONDecodeError:
+                    pass
+            
+            # Fallback: return raw response with empty actions
+            logger.warning(f"Could not parse JSON, using fallback. Response length: {len(response)}")
             return {
                 'success': True,
                 'actions': [],
-                'reasoning': response
+                'reasoning': response,
+                'parse_warning': 'Could not parse structured actions from LLM response'
             }
         except Exception as e:
-            logger.error(f"Failed to parse response: {e}. Response: {response[:200]}")
+            logger.error(f"Failed to parse response: {e}. Response length: {len(response)}")
             return {
                 'success': False,
                 'error': f'Failed to parse LLM response: {str(e)}',
-                'actions': []
+                'actions': [],
+                'raw_response': response[:500] if response else None
             }

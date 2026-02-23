@@ -7,9 +7,9 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any
 from pydantic import BaseModel
-from database import SessionLocal
+from database import get_db
 from models import Agent, AgentCredential
-from utils.encryption import encrypt, decrypt
+from backend.utils.encryption import encrypt, decrypt
 from auth import get_current_user_id
 import logging
 
@@ -17,7 +17,6 @@ logger = logging.getLogger("uvicorn.error")
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
 
-# Pydantic models
 class CredentialFieldValue(BaseModel):
     field_name: str
     value: str
@@ -39,13 +38,6 @@ class CredentialStatus(BaseModel):
 
 class AgentCredentialResponse(BaseModel):
     agents: List[CredentialStatus]
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 @router.get("/status", response_model=AgentCredentialResponse)
 async def get_credentials_status(

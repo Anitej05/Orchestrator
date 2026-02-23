@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException, Depends, Request
 from sqlalchemy.orm import Session
 
-from database import SessionLocal
+from database import get_db
 from models import UserThread
 
 router = APIRouter(tags=["Conversations"])
@@ -22,26 +22,14 @@ logger = logging.getLogger("uvicorn.error")
 
 CONVERSATION_HISTORY_DIR = "conversation_history"
 
-# --- Shared State (will be passed from main.py) ---
-# These will be injected via dependency injection or module-level assignment
 conversation_store: Dict[str, Dict[str, Any]] = {}
 store_lock = Lock()
 
 
 def set_shared_state(conv_store: Dict, lock: Lock):
-    """Called by main.py to inject shared state."""
     global conversation_store, store_lock
     conversation_store = conv_store
     store_lock = lock
-
-
-# --- Database Dependency ---
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 
 # --- Models ---

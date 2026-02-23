@@ -15,10 +15,10 @@ from .llm import llm_client
 
 # Standardized file manager import
 try:
-    from agents.utils.agent_file_manager import AgentFileManager, FileType, FileStatus
+    from backend.agents.utils.agent_file_manager import AgentFileManager, FileType, FileStatus
 except ImportError:
     try:
-        from utils.agent_file_manager import AgentFileManager, FileType, FileStatus
+        from backend.utils.agent_file_manager import AgentFileManager, FileType, FileStatus
     except ImportError:
         logger.error("Failed to import agent_file_manager from any location")
         raise

@@ -69,23 +69,47 @@ export function useWebSocketManager({
       };
 
       ws.current.onclose = (event) => {
-        console.warn('⚠️ WebSocket connection closed:', {
-          code: event.code,
-          reason: event.reason || 'No reason provided',
-          wasClean: event.wasClean
-        });
+        const closeMessage = `WebSocket closed with code ${event.code}${event.reason ? `: ${event.reason}` : ''}`;
+        console.log(closeMessage, { code: event.code, reason: event.reason, cleanClose: event.wasClean });
         setIsConnected(false);
         (window as any).__websocket = null;
 
-        // Always attempt to reconnect after a delay (for new conversations)
-        // Only skip reconnect if this is a user-initiated disconnect (code 1000 with clean close)
-        const isUserDisconnect = event.wasClean && event.code === 1000 && event.reason === 'User initiated disconnect';
+        if (useConversationStore.getState().status === 'processing') {
+          if (event.code !== 1000) {
+            let disconnectReason = 'Connection closed unexpectedly.';
+            if (event.code === 1001) {
+              disconnectReason = 'Server is shutting down. Please try again later.';
+            } else if (event.code === 1002 || event.code === 1003) {
+              disconnectReason = 'Protocol error. Please refresh the page and try again.';
+            } else if (event.code === 1006) {
+              disconnectReason = 'Connection lost. Please check your network and try again.';
+            } else if (event.code === 1011) {
+              disconnectReason = 'Server error. Please try again later.';
+            }
 
-        if (!isUserDisconnect) {
+            const disconnectMessage: Message = {
+              id: `disconnect_${Date.now()}`,
+              type: 'system',
+              content: `Connection Error: ${disconnectReason}`,
+              timestamp: new Date()
+            };
+            const currentMessages = useConversationStore.getState().messages;
+            _setConversationState({
+              status: 'idle',
+              messages: [...currentMessages, disconnectMessage]
+            });
+          } else {
+            _setConversationState({ status: 'idle' });
+          }
+          useConversationStore.setState({ isLoading: false });
+        }
+
+        if (!event.wasClean && event.code !== 1000) {
           console.log('🔄 Will attempt to reconnect in 2 seconds...');
           setTimeout(() => {
-            console.log('🔄 Attempting to reconnect WebSocket...');
-            connect();
+            if (!ws.current || ws.current.readyState === WebSocket.CLOSED) {
+              connect();
+            }
           }, 2000);
         }
       };
@@ -854,61 +878,6 @@ export function useWebSocketManager({
 
           // Set isLoading to false on parse error
           useConversationStore.setState({ isLoading: false, status: 'idle' });
-        }
-      };
-
-      ws.current.onclose = (event) => {
-        const closeMessage = `WebSocket closed with code ${event.code}${event.reason ? `: ${event.reason}` : ''}`;
-        console.log(closeMessage, { code: event.code, reason: event.reason, cleanClose: event.wasClean });
-        setIsConnected(false);
-
-        // If the store is still in a processing state, handle gracefully
-        if (useConversationStore.getState().status === 'processing') {
-          // Use console.warn instead of console.error to avoid Next.js error overlay
-          console.warn('WebSocket disconnected while processing');
-
-          // Only show error message for abnormal closures (not code 1000)
-          if (event.code !== 1000) {
-            let disconnectReason = 'Connection closed unexpectedly.';
-            // Categorize disconnect reason based on close code
-            if (event.code === 1001) {
-              disconnectReason = 'Server is shutting down. Please try again later.';
-            } else if (event.code === 1002 || event.code === 1003) {
-              disconnectReason = 'Protocol error. Please refresh the page and try again.';
-            } else if (event.code === 1006) {
-              disconnectReason = 'Connection lost. Please check your network and try again.';
-            } else if (event.code === 1011) {
-              disconnectReason = 'Server error. Please try again later.';
-            }
-
-            // Add disconnection message to chat only for abnormal closures
-            const disconnectMessage: Message = {
-              id: `disconnect_${Date.now()}`,
-              type: 'system',
-              content: `Connection Error: ${disconnectReason}`,
-              timestamp: new Date()
-            };
-            const currentMessages = useConversationStore.getState().messages;
-            _setConversationState({
-              status: 'idle', // Keep as idle so conversation can continue
-              messages: [...currentMessages, disconnectMessage]
-            });
-          } else {
-            // Normal closure (code 1000) - just reset state without error message
-            _setConversationState({ status: 'idle' });
-          }
-
-          useConversationStore.setState({ isLoading: false });
-        }
-
-        // Attempt automatic reconnection with backoff
-        if (!event.wasClean && event.code !== 1000) {
-          console.log('Attempting automatic reconnection in 2 seconds...');
-          setTimeout(() => {
-            if (!ws.current || ws.current.readyState === WebSocket.CLOSED) {
-              connect();
-            }
-          }, 2000);
         }
       };
 

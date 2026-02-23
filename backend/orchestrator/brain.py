@@ -21,9 +21,9 @@ from pydantic import BaseModel, Field
 from langchain_core.messages import HumanMessage, BaseMessage, AIMessage
 from langchain_core.runnables import RunnableConfig
 
-from .schemas import TaskItem, TaskStatus, TaskPriority, PlanPhase, ParallelAction
+from .schemas import TaskItem, TaskStatus
 from .content_orchestrator import get_optimized_llm_context
-from services.inference_service import inference_service, InferencePriority
+from backend.services.inference_service import inference_service, InferencePriority
 
 logger = logging.getLogger(__name__)
 
@@ -59,8 +59,6 @@ class BrainDecision(BaseModel):
     memory_updates: Optional[Dict[str, Any]] = Field(
         None, description="Key-value pairs to store in persistent memory"
     )
-    is_finished: bool = Field(False, description="True if the objective is fully met")
-
     # --- ADAPTIVE PLANNING ---
     execution_plan: Optional[List[Dict[str, Any]]] = Field(
         None,
@@ -92,9 +90,6 @@ class BrainDecision(BaseModel):
         None,
         description="When requires_approval=True: Clear explanation of what will happen and why approval is needed",
     )
-    fallback_mode: bool = Field(
-        False, description="True if entering fallback due to consecutive failures"
-    )
 
 
 class Brain:
@@ -105,7 +100,7 @@ class Brain:
 
     def __init__(self):
         self.max_failures = 3
-        self.max_iterations = 25
+        self.max_iterations = 15
 
     async def think(
         self, state: Dict[str, Any], config: Optional[RunnableConfig] = None
@@ -126,7 +121,7 @@ class Brain:
             return self._initialize_initial_state(state)
 
         # Check error conditions AFTER initialization check
-        if iteration_count > self.max_iterations:
+        if iteration_count >= self.max_iterations:
             return self._force_finish_with_error(state, "Maximum iterations reached")
 
         if failure_count >= self.max_failures:
@@ -135,9 +130,42 @@ class Brain:
         # Extract insights from last execution if significant
         updated_insights = self._extract_insights_from_last_action(state, insights)
 
-        decision = await self._make_decision(
-            state, config, memory, updated_insights, action_history
-        )
+        decision = None
+        try:
+            decision = await self._make_decision(
+                state, config, memory, updated_insights, action_history
+            )
+        except Exception as e:
+            logger.error(f"🧠 Brain: All inference providers failed: {e}")
+            # Force a finish with whatever results are available
+            action_history = state.get("action_history", [])
+            # Gather any results from previous actions
+            collected_results = []
+            for entry in action_history:
+                if entry.get("success") and entry.get("result_summary"):
+                    collected_results.append(entry["result_summary"][:200])
+            
+            if collected_results:
+                summary = "\n\n".join(collected_results)
+                decision = {
+                    "action_type": "finish",
+                    "user_response": f"Here are the results gathered so far:\n\n{summary}\n\n(Note: LLM providers were temporarily unavailable, so processing could not continue.)",
+                    "reasoning": f"All inference providers failed: {str(e)[:100]}",
+                }
+            else:
+                # Increment failure count and try again next iteration
+                return {
+                    "failure_count": failure_count + 1,
+                    "iteration_count": iteration_count + 1,
+                }
+        
+        if decision is None:
+            return {
+                "failure_count": failure_count + 1,
+                "iteration_count": iteration_count + 1,
+            }
+        
+        decision = self._apply_stagnation_guard(state, decision)
 
         updates = self._apply_decision_to_state(state, decision)
 
@@ -147,34 +175,35 @@ class Brain:
 
         return updates
 
-    def _build_conversation_history_view(self, messages: List[Any], limit: int = 10) -> str:
+    def _build_conversation_history_view(
+        self, messages: List[Any], limit: int = 10
+    ) -> str:
         """Build a view of the recent conversation history (user & assistant messages)."""
         if not messages:
             return "No conversation history."
-        
+
         recent_messages = messages[-limit:]
         history_lines = []
-        
+
         for msg in recent_messages:
             # Handle both object and dict (just in case)
             role = "User"
             content = ""
-            
+
             if hasattr(msg, "type"):
                 role = "User" if msg.type == "human" else "Assistant"
                 content = msg.content
             elif isinstance(msg, dict):
                 role = "User" if msg.get("type") == "human" else "Assistant"
                 content = msg.get("content", "")
-            
+
             # Simple truncation for very long messages to avoid context overflow
             if len(content) > 500:
                 content = content[:500] + "... (truncated)"
-            
-            history_lines.append(f"{role}: {content}")
-            
-        return "\n".join(history_lines)
 
+            history_lines.append(f"{role}: {content}")
+
+        return "\n".join(history_lines)
 
     async def _make_decision(
         self,
@@ -187,14 +216,22 @@ class Brain:
         """
         Use LLM to decide next action based on state.
         """
-        from services.agent_registry_service import agent_registry
-        from services.tool_registry_service import tool_registry
+        from backend.services.agent_registry_service import agent_registry
+        from backend.services.tool_registry_service import tool_registry
 
         active_agents = agent_registry.list_active_agents()
         active_tools = tool_registry.list_tools()
 
+        # UAP: Include full skill context and standardized agent list for selection
+        agent_skills_context = agent_registry.get_all_skills_context()
+        active_agents = agent_registry.list_active_agents()
+
+        # Build standardized agent list using centralized registry
         agent_list = "\n".join(
-            [f"- {a['name']}: {a['description']}" for a in active_agents]
+            [
+                f"- **{a['name']}** (ID: {a['id']}): {a.get('description', '').split('.')[0]}"
+                for a in active_agents
+            ]
         )
         tool_list = "\n".join(
             [f"- {t['name']}: {t['description']}" for t in active_tools]
@@ -204,14 +241,16 @@ class Brain:
         optimized_context = get_optimized_llm_context(state, thread_id)
         history_str = optimized_context.get("context", "No history available.")
 
+        iteration_count = state.get("iteration_count", 0)
         todo_preview = self._build_todo_preview(state.get("todo_list", []))
 
         # Build FULL action history view (never compressed)
         action_history_str = self._build_action_history_view(action_history)
 
         # Build conversation history view (NEW)
-        conversation_history_str = self._build_conversation_history_view(state.get("messages", []))
-
+        conversation_history_str = self._build_conversation_history_view(
+            state.get("messages", [])
+        )
 
         # Build insights view (key learnings, never compressed)
         insights_str = self._build_insights_view(insights)
@@ -221,6 +260,22 @@ class Brain:
 
         # Build uploaded files view (NEW)
         files_str = self._build_uploaded_files_view(state.get("uploaded_files", []))
+
+        # === ARTIFACT RETRIEVAL: Pull relevant past experience ===
+        artifacts_str = ""
+        user_profile_str = "New user - no history."
+        try:
+            from .artifact_store import get_artifact_store
+            user_id = state.get("user_id", "default")
+            artifact_store = get_artifact_store(user_id)
+            artifacts_str = artifact_store.retrieve_relevant(
+                query=state.get("original_prompt", ""),
+                top_k=3,
+                max_tokens=2000,
+            )
+            user_profile_str = artifact_store.get_user_profile_prompt()
+        except Exception as e:
+            logger.debug(f"Artifact retrieval skipped: {e}")
 
         prompt = f"""You are the Brain of an intelligent orchestrator. achieve the objective by managing tasks and selecting the best resource for each.
 
@@ -247,11 +302,43 @@ You are a helpful, intelligent, and expressive AI assistant.
 - To read or process these files, you MUST use an appropriate Agent (e.g., `DocumentAgent` for PDFs/Docs) or a Tool (e.g., `read_file` or `Python` code).
 - **NEVER** hallucinate or guess the contents of a file if it has not been explicitly read in the Action History.
 
+## YOUR FILES
+
+### Thread Workspace (This conversation only)
+{self._build_created_files_view(state.get("created_files", []), state.get("orchestrator_workspace", "Unknown"))}
+- These files are private to THIS conversation
+- Use these for temporary analysis, charts, downloads
+- They won't be visible in other conversations
+
+### Shared Workspace (All your conversations)
+{self._build_shared_workspace_view(state.get("shared_files", []), state.get("shared_workspace", "Unknown"))}
+- These files persist ACROSS all your conversations
+- Use these for templates, saved reports, reusable data
+- When user says "save this for later" or "remember this", put files here
+- Files are shared across ALL your conversation threads
+
+## AGENT WORKSPACES (Files created by agents)
+{self._build_agent_workspaces_view()}
+- These are files stored in agent-specific directories
+- You can access these if needed for the task
+
 ## EXECUTION PLAN
 {plan_str}
 
 ## COMPLETE ACTION HISTORY (all actions with results)
 {action_history_str}
+
+## SELF-CHECK: REVIEW BEFORE EVERY DECISION
+**Before choosing your next action, reflect on your progress:**
+
+1. **Review your action history above.** What have you already accomplished? What data do you already have?
+2. **Avoid redundancy.** If a tool already returned the data you need, use that data — don't call it again with a similar query.
+3. **Progress toward the goal.** Each action should bring you meaningfully closer to completing the user's request. If you have all the information needed, move to the next step (e.g., from research → Python → finish).
+4. **Know when to finish.** Once you've gathered the data, processed it, and created any requested outputs (CSV, analysis, etc.), present the results to the user with action_type='finish'.
+5. **Handle errors gracefully.** If a tool or agent fails, try a different approach or work with what you have. Don't repeat the same failing action.
+6. **Be efficient.** The user values results, not exhaustive retries. One good search is better than five similar ones.
+7. **NEVER repeat the same action.** If you already called python to read a file, DO NOT call python again to read the same file. The result is in your action history above.
+8. **Iteration awareness.** You are on iteration {iteration_count}/{self.max_iterations}. If you're past iteration 8, you MUST prioritize finishing over gathering more data.
 
 ## CONVERSATION HISTORY (Recent interactions)
 {conversation_history_str}
@@ -265,35 +352,72 @@ You are a helpful, intelligent, and expressive AI assistant.
 
 ## CONSECUTIVE FAILURES: {state.get("failure_count", 0)}
 
-## AVAILABLE RESOURCES
-AGENTS (specialized, for complex domain work):
-{agent_list or "None"}
+## RELEVANT EXPERIENCE (from past interactions)
+{artifacts_str or 'No relevant past experience.'}
 
-TOOLS (fast, direct functions - PREFER over agents when both qualify):
-{tool_list or "None"}
+## USER PROFILE
+{user_profile_str}
 
-## TOOL USE GUIDELINES
-1. **Explicit Requests**: If the user asks to "run code", "use python", "search", or "use [AgentName]", you **MUST** prioritize that action type.
-2. **Contextual Logic**: If the objective requires calculation, data processing, or current time/date, use **PYTHON** or **TERMINAL**. Do not guess.
-3. **No unnecessary planning**: If the task is simple and can be solved with a single tool/agent call, DO NOT create a complex plan. Just execute.
+## RESOURCE SELECTION — PICK THE RIGHT ACTION TYPE
 
-AGENT: Delegate to a specialized agent.
-  - Use action_type='agent', resource_id='<Agent Name>'
-  - Payload must include:
-    - 'prompt': A clear, natural language description of what you want the agent to do.
-  - **DO NOT** specify technical `action` endpoints unless absolutely necessary. The agent will plan its own actions.
-  - Example: {{"action_type": "agent", "resource_id": "Document Agent", "payload": {{"prompt": "Summarize the Q3 report and highlight risks."}}}}
+**CRITICAL RULES (read FIRST):**
+- If the user says "create a file/CSV/JSON" or "run/write code" → you MUST use action_type='python'. Do NOT write code inside user_response.
+- If the user says "use the browser" or "go to [website]" → you MUST use action_type='agent' with Browser Automation Agent.
+- If the user says "send email" or "check email" → you MUST use action_type='agent' with Mail Agent.
+- Code in user_response is **NOT EXECUTED**. Only action_type='python' executes code.
+- Files are **NOT CREATED** by finish. Only action_type='python' or 'terminal' can create files.
 
-PYTHON: Execute Python code directly in sandbox.
-  - Use action_type='python' when user asks to: run code, calculate, compute, process data, parse, convert, generate.
-  - **YOU MUST GENERATE THE CODE**. The user will not provide it.
-  - **Output**: The output of your code (stdout) and the value of the variable `result` (if assigned) will be returned.
-  - Provide: payload.code (the full, valid Python code to execute)
-  - Example: {{"action_type": "python", "payload": {{"code": "print(2 + 2)"}}}}
-  - The sandbox has access to: pandas, numpy, json, datetime, re, math, statistics.
-  - PREFER PYTHON over agents for quick calculations and data processing.
+**Choose the action type that matches the CURRENT STEP of the task:**
 
-TERMINAL: Shell commands (ls, cat, grep, etc.).
+1. **TOOL** — Need external data? (web search, news, finance, wiki lookup)
+   → action_type='tool', resource_id='tool_name', payload={{...}}
+   Available tools:
+{tool_list or '   None'}
+
+2. **PYTHON** — Need to compute, process, create files, or execute code?
+   → action_type='python', payload={{"code": "your_python_code_here"}}
+   ✅ Generate CSV/JSON/files, calculations, data processing, parsing, charting
+   ✅ YOU write the code. Sandbox has: pandas, numpy, json, datetime, re, math, statistics, csv, os
+   ✅ Files created in the sandbox persist and are tracked automatically
+   ✅ **DATA ACCESS**: A `tool_results` dict is pre-loaded with data from previous tool/agent calls.
+      - Keys are tool names (e.g., `tool_results['get_stock_quote']`), values are the result data.
+      - Also available as JSON files: `<tool_name>_result.json` in the workspace directory.
+      - Example: `data = tool_results.get('get_stock_quote', {{}})` or `json.load(open('get_stock_quote_result.json'))`
+   ⚠️ If the task says "create a CSV" or "write a file" → you MUST use python, NOT finish
+
+3. **AGENT** — Need a specialized external system?
+   → action_type='agent', resource_id='<Agent Name>', payload={{"prompt": "..."}}
+   Use agents when the task requires:
+   - **Browser access**: web navigation, scraping, form filling → Browser Automation Agent
+   - **Email/Gmail access**: read, send, search emails → Mail Agent
+   - **Uploaded file parsing**: .xlsx/.csv analysis, PDF/DOCX OCR → SpreadsheetAgent / Document Agent
+   - **Accounting system**: invoices, payments, Zoho → Zoho Books Agent
+
+   **Available agents:**
+{agent_skills_context or agent_list or '   None'}
+
+   ❌ NEVER spawn SpreadsheetAgent just to create a CSV — use Python
+   ❌ NEVER spawn DocumentAgent to write markdown — use Python
+   ✅ DO use SpreadsheetAgent when user uploaded .xlsx that needs pivot/analysis
+   ✅ DO use Browser Automation Agent when you need to navigate real websites
+
+4. **TERMINAL** — Need a shell command? (dir, type, findstr, system info)
+   → action_type='terminal', payload={{"command": "..."}}
+   ⚠️ This is a WINDOWS system. Use `dir` not `ls`, `type` not `cat`, `findstr` not `grep`
+
+5. **FINISH** — Have you completed ALL steps the user asked for?
+   → action_type='finish', user_response='your comprehensive answer'
+   ⚠️ ONLY use finish when ALL subtasks are done
+   ⚠️ If user asked to "create a file" and you haven't created it yet → DO NOT finish
+   ⚠️ If user asked to "use Python" and you haven't executed code yet → DO NOT finish
+   ✅ Use finish to summarize results AFTER tools/python/agents have done the work
+
+## MULTI-STEP TASK RULES
+- If task has multiple parts (e.g., "search, then code, then display"):
+  → Execute each part in order: tool → python → finish
+  → Do NOT skip ahead to finish after just the first part
+- If task needs multiple independent steps → Use action_type='parallel'
+- If task needs sequential phases → Use action_type='plan'
 
 ## ADVANCED ACTION TYPES
 
@@ -371,7 +495,102 @@ When `requires_approval=True`:
 6. **Within a phase**: Focus only on the current phase's goal.
 7. **Phase done?**: Set phase_complete=True with phase_goal_verified when phase goal is met.
 8. **SENSITIVE ACTIONS**: Set requires_approval=True with approval_reason for emails, deletions, payments, etc.
-9. Set is_finished=True ONLY when ALL phases complete or objective is met.
+
+## TASK COMPLETION DETECTION - CRITICAL
+
+**You MUST stop when the task is complete. Do NOT continue indefinitely.**
+
+**Ask yourself these questions BEFORE every decision:**
+
+1. **Have I answered the user's original question?** 
+   - If YES → Use action_type='finish' immediately
+   - If NO → Continue with next action
+
+2. **Is the information I have sufficient to satisfy the objective?**
+   - For data/analysis tasks: Do I have the key results/data the user asked for?
+   - For research tasks: Have I found the core information requested?
+   - For coding tasks: Does the code run and produce the expected output?
+
+3. **Am I making progress or just repeating similar actions?**
+   - If the last 2-3 actions gave similar results → You likely have enough data
+   - If you're searching for "just one more" piece of info → You probably have enough
+
+**COMPLETION EXAMPLES:**
+
+✅ **User**: "Get Tesla stock news and prices, then predict future"
+- After: News fetched + Prices fetched + Python prediction ran with output
+- **ACTION**: action_type='finish' with the prediction results
+
+✅ **User**: "Summarize this PDF"
+- After: DocumentAgent reads PDF and returns summary
+- **ACTION**: action_type='finish' with the summary
+
+✅ **User**: "Calculate Q4 revenue"
+- After: Python code runs and returns the calculated value
+- **ACTION**: action_type='finish' with the answer
+
+❌ **DON'T**: Keep searching for "more context" or "verification" when you already have a clear answer
+❌ **DON'T**: Create additional analysis, charts, or reports unless explicitly requested
+❌ **DON'T**: Ask "Would you like me to..." - just finish if the core task is done
+
+## STOPPING/TERMINATION - CRITICAL
+- When the objective is COMPLETELY MET and you have the final answer → **MUST use action_type='finish'**
+- When task is complete, you MUST use action_type='finish'
+- If you have the answer ready, just set action_type='finish' and provide user_response
+- **BEFORE calling another tool/agent, ask: "Do I already have what the user needs?"**
+
+## FILE SHARING - WHEN TO USE WHICH WORKSPACE
+
+**Thread Workspace (Private):**
+- Use for: Temporary files, analysis results, charts, downloads
+- User says: "Create a chart", "Analyze this data", "Download this file"
+- Files stay private to this conversation
+- **Default location** for all created files
+
+**Shared Workspace (Persistent):**
+- Use for: Templates, saved reports, reusable data, important files
+- User says: "Save this for later", "Remember this", "Keep this for next time"
+- Files available in ALL your conversations
+- To share a file: Use Python to copy from thread workspace to shared workspace
+  ```python
+  import shutil
+  shutil.copy('chart.png', '../shared/user_123/chart.png')
+  ```
+
+**Example:**
+- User: "Create a sales report" → Save to thread workspace
+- User: "Save this report for future reference" → Copy to shared workspace
+- User: "Use that template from last week" → Read from shared workspace
+
+## INTELLIGENT FILE SHARING - YOU DECIDE
+
+As the orchestrator, YOU decide when to share files based on user intent:
+
+**Automatically SHARE to persistent storage when:**
+1. User explicitly says: "save this", "keep this", "remember this"
+2. Creating a template (email template, report template, etc.)
+3. User marks something as "important" or "permanent"
+4. User wants to "reuse" or "use again"
+5. File type suggests persistence (.docx report, .json config, etc.)
+
+**Keep PRIVATE (thread workspace) when:**
+1. Temporary analysis or charts
+2. One-time downloads
+3. Scratch/experimental files
+4. User doesn't indicate importance
+5. File type suggests temporary (.tmp, .cache, .log)
+
+**How to share after creating a file:**
+Use Python to copy the file:
+```python
+import shutil
+# After creating a file, copy to shared workspace
+shutil.copy('myfile.png', '../shared/test_user/myfile.png')
+```
+
+Then tell user: "I've saved this to your persistent storage so it's available in all your conversations."
+
+**Note:** Agents don't have direct access to shared storage - only YOU do. When an agent needs a shared file, YOU provide it to them.
 
 ## OUTPUT
 Return JSON with:
@@ -385,7 +604,7 @@ Return JSON with:
 - requires_approval: True for sensitive operations (default False)
 - approval_reason: explanation of what will happen (when requires_approval=True)
 - reasoning: brief explanation
-- user_response: final answer (when is_finished=True)
+- user_response: final answer (when action_type='finish')
 """
 
         try:
@@ -406,7 +625,6 @@ Return JSON with:
             return BrainDecision(
                 action_type="finish",
                 user_response=f"Brain error: {str(e)}",
-                is_finished=True,
             )
 
     def _build_todo_preview(self, todo_list: List[Dict]) -> str:
@@ -465,15 +683,174 @@ Return JSON with:
         for entry in entries_to_show:
             status = "✅" if entry.get("success") else "❌"
             action_type = entry.get("action_type", "?")
-            resource = entry.get("resource_id", "")
+            resource = entry.get("resource_id") or ""
             result = entry.get("result_summary", "No result")
             iteration = entry.get("iteration", 0)
+            instruction = entry.get("instruction", "")
 
-            lines.append(f"[Step {iteration}] {status} {action_type}:{resource}")
-            # Limit result length for token budget
-            lines.append(f"   Result: {result[:200]}")
+            # Show action type with resource (avoid ":None" or ":" suffix)
+            label = f"{action_type}:{resource}" if resource else action_type
+            lines.append(f"[Step {iteration}] {status} {label}")
+            # Show what was requested (helps Brain detect its own repetition)
+            if instruction:
+                lines.append(f"   Code/Instruction: {instruction[:150]}")
+            # Result truncation: 400 chars for data-heavy types, 200 for others
+            max_result_len = 400 if action_type in ("tool", "python", "agent") else 200
+            lines.append(f"   Result: {result[:max_result_len]}")
+
+        # === REDUNDANCY DETECTION ===
+        # Count repeated action patterns to warn the Brain
+        from collections import Counter
+        action_patterns = []
+        for entry in action_history:
+            a_type = entry.get("action_type", "")
+            a_resource = entry.get("resource_id", "")
+            action_patterns.append(f"{a_type}:{a_resource}")
+        
+        pattern_counts = Counter(action_patterns)
+        repeated = {k: v for k, v in pattern_counts.items() if v >= 3}
+        if repeated:
+            lines.append("")
+            lines.append("⚠️ REDUNDANCY WARNING: You are repeating actions!")
+            for pattern, count in repeated.items():
+                lines.append(f"   → {pattern} called {count} times. STOP repeating this.")
+            lines.append("   → Use the data you already have, or call 'finish' now.")
 
         return "\n".join(lines)
+
+    def _extract_text_output(self, output: Any) -> str:
+        """Extract readable text from execution output."""
+        if output is None:
+            return ""
+        if isinstance(output, str):
+            text = output.strip()
+            if "\nResult:" in text:
+                return text.split("\nResult:", 1)[-1].strip()
+            return text
+        if isinstance(output, dict):
+            for key in ("result", "output", "message", "response", "data"):
+                value = output.get(key)
+                if value:
+                    return str(value).strip()
+        return str(output).strip()
+
+    def _normalize_signature(self, value: str) -> str:
+        """Normalize signature strings to compare repeated actions robustly."""
+        return " ".join(str(value or "").split())
+
+    def _build_decision_signature(self, decision: BrainDecision) -> str:
+        """Build a stable signature for a proposed decision."""
+        payload = decision.payload or {}
+        try:
+            payload_str = json.dumps(
+                payload, sort_keys=True, separators=(",", ":"), default=str
+            )
+        except Exception:
+            payload_str = str(payload)
+        return self._normalize_signature(
+            f"{decision.action_type}|{decision.resource_id or ''}|{payload_str}"
+        )
+
+    def _build_history_signature(self, entry: Dict[str, Any]) -> str:
+        """Build a stable signature for an executed action history entry."""
+        action_type = entry.get("action_type") or ""
+        resource_id = entry.get("resource_id") or ""
+        instruction = entry.get("instruction") or ""
+        try:
+            # instruction is typically json.dumps(payload)
+            parsed = json.loads(instruction)
+            instruction = json.dumps(parsed, sort_keys=True, separators=(",", ":"))
+        except Exception:
+            # Keep raw instruction when it is truncated or non-JSON
+            pass
+        return self._normalize_signature(f"{action_type}|{resource_id}|{instruction}")
+
+    def _is_open_ended_objective(self, objective: str) -> bool:
+        """
+        Detect objectives that intentionally require ongoing/repeated actions.
+        In these cases, do not auto-finalize on repetition.
+        """
+        text = (objective or "").lower()
+        keywords = [
+            "monitor",
+            "watch continuously",
+            "keep checking",
+            "real-time",
+            "stream",
+            "poll",
+            "every second",
+            "every minute",
+            "continuously",
+        ]
+        return any(k in text for k in keywords)
+
+    def _build_stagnation_response(self, output_text: str) -> str:
+        """Build a concise final response from the latest successful output."""
+        cleaned = " ".join((output_text or "").split())
+        if not cleaned:
+            return "Task complete."
+        if len(cleaned) <= 400:
+            return f"Here is the latest result: {cleaned}"
+        return f"Here is the latest result: {cleaned[:400]}..."
+
+    def _apply_stagnation_guard(
+        self, state: Dict[str, Any], decision: BrainDecision
+    ) -> BrainDecision:
+        """
+        Generic loop breaker for repeated successful actions with no observable progress.
+        This is intentionally action-agnostic (not tied to a specific use case).
+        """
+        if decision.action_type in {
+            "finish",
+            "skip",
+            "plan",
+            "replan",
+            "parallel",
+        }:
+            return decision
+
+        if self._is_open_ended_objective(state.get("original_prompt", "")):
+            return decision
+
+        previous_result = state.get("execution_result") or {}
+        if not previous_result.get("success"):
+            return decision
+
+        if state.get("execution_plan"):
+            # In explicit plan mode, let the planner decide phase advancement.
+            return decision
+
+        action_history = list(state.get("action_history", []))
+        if len(action_history) < 3:
+            return decision
+
+        recent = action_history[-3:]
+        if not all(entry.get("success") for entry in recent):
+            return decision
+
+        recent_signatures = [self._build_history_signature(entry) for entry in recent]
+        current_signature = self._build_decision_signature(decision)
+
+        if not current_signature or any(not sig for sig in recent_signatures):
+            return decision
+        if len(set(recent_signatures + [current_signature])) != 1:
+            return decision
+
+        output_text = self._extract_text_output(previous_result.get("output"))
+        if not output_text:
+            return decision
+        lowered = output_text.lower()
+        if "[system warning]" in lowered and "no output" in lowered:
+            return decision
+
+        logger.warning(
+            "Stagnation guard triggered: repeated identical successful action detected; forcing finish."
+        )
+        return BrainDecision(
+            action_type="finish",
+            user_response=self._build_stagnation_response(output_text),
+            reasoning="Repeated identical successful actions detected without new progress; finalized using the latest successful result.",
+        )
 
     def _estimate_prompt_tokens(self, prompt: str) -> int:
         """Estimate token count for a prompt (rough: 4 chars ~ 1 token)."""
@@ -490,7 +867,7 @@ Return JSON with:
         """Build a view of uploaded files available in the context."""
         if not uploaded_files:
             return "No files uploaded."
-        
+
         lines = []
         for f in uploaded_files:
             # Handle both dict and Pydantic object
@@ -502,11 +879,67 @@ Return JSON with:
                 name = getattr(f, "file_name", "Unknown")
                 path = getattr(f, "file_path", "Unknown")
                 ftype = getattr(f, "file_type", "Unknown")
-                
+
             lines.append(f"- {name} (Type: {ftype})")
             lines.append(f"  Path: {path}")
-            
+
         return "\n".join(lines)
+
+    def _build_created_files_view(self, created_files: List[Dict], workspace_path: str) -> str:
+        """Build a view of files created by the orchestrator in this conversation."""
+        if not created_files:
+            return f"No files created yet in this conversation.\nWorkspace: {workspace_path}"
+        
+        lines = [f"Workspace: {workspace_path}"]
+        for f in created_files:
+            name = f.get("file_name", "Unknown")
+            ftype = f.get("file_type", "Unknown")
+            created_by = f.get("created_by", "Unknown")
+            size = f.get("size_bytes", 0)
+            size_kb = size / 1024 if size else 0
+            
+            lines.append(f"- {name} ({ftype}, {size_kb:.1f} KB) [Created by: {created_by}]")
+        
+        return "\n".join(lines)
+    
+    def _build_shared_workspace_view(self, shared_files: List[Dict], workspace_path: str) -> str:
+        """Build a view of files in the shared workspace."""
+        if not shared_files:
+            return f"No shared files yet.\nShared workspace: {workspace_path}"
+        
+        lines = [f"Shared workspace: {workspace_path}"]
+        for f in shared_files:
+            name = f.get("file_name", "Unknown")
+            ftype = f.get("file_type", "Unknown")
+            description = f.get("description", "")
+            size = f.get("size_bytes", 0)
+            size_kb = size / 1024 if size else 0
+            
+            lines.append(f"- {name} ({ftype}, {size_kb:.1f} KB)")
+            if description:
+                lines.append(f"  Note: {description}")
+        
+        return "\n".join(lines)
+    
+    def _build_agent_workspaces_view(self) -> str:
+        """Build a view of files in agent workspaces."""
+        try:
+            from .workspace_manager import STORAGE_BASE
+            if not STORAGE_BASE.exists():
+                return "No agent workspaces found."
+            
+            lines = []
+            for agent_dir in STORAGE_BASE.iterdir():
+                if agent_dir.is_dir() and agent_dir.name not in ['orchestrator', 'content', 'system', 'vector_store']:
+                    files = [f.name for f in agent_dir.iterdir() if f.is_file()][:5]  # Limit to 5
+                    if files:
+                        lines.append(f"- {agent_dir.name}:")
+                        for fname in files:
+                            lines.append(f"    - {fname}")
+            
+            return "\n".join(lines) if lines else "No files in agent workspaces."
+        except Exception as e:
+            return f"Could not scan agent workspaces: {e}"
 
     def _build_execution_plan_view(self, state: Dict[str, Any]) -> str:
         """Build a view of the execution plan for complex tasks."""
@@ -603,13 +1036,13 @@ Return JSON with:
             "current_phase_id": None,
             "iteration_count": 0,
             "failure_count": 0,
-            "last_failure_id": None,
             "current_task_id": initial_task.task_id,
             "decision": BrainDecision(
                 action_type="skip",
                 reasoning="Initializing system state",
             ).model_dump(),
         }
+
 
     def _apply_decision_to_state(
         self, state: Dict[str, Any], decision: BrainDecision
@@ -748,9 +1181,74 @@ Return JSON with:
             )
 
         # Handle finish
-        is_finished = decision.is_finished or decision.action_type == "finish"
-        if is_finished:
+        if decision.action_type == "finish":
             updates["final_response"] = decision.user_response or "Task complete."
+
+            # === CANVAS AUTO-DETECT for finish responses ===
+            # When Brain finishes directly (bypassing Hands), detect structured content
+            # and register canvas in the Canvas Registry
+            user_resp = decision.user_response or ""
+            if len(user_resp) > 300:
+                try:
+                    import re
+                    from services.canvas_service import CanvasService
+                    from backend.services.canvas_registry import get_canvas_registry
+
+                    thread_id = (
+                        state.get("thread_id")
+                        or state.get("configurable", {}).get("thread_id", "default")
+                    )
+
+                    canvas_obj = None
+
+                    # 1. Code block detection (5+ lines)
+                    code_match = re.search(r'```(\w+)?\n(.*?)```', user_resp, re.DOTALL)
+                    if code_match:
+                        lang = code_match.group(1) or 'python'
+                        code = code_match.group(2).strip()
+                        if code and code.count('\n') >= 4:
+                            canvas_obj = CanvasService.build_from_template(
+                                "code_viewer",
+                                {"code": code, "language": lang},
+                                title=f"Code ({lang})",
+                            )
+
+                    # 2. Long markdown with structure → document_viewer
+                    if not canvas_obj:
+                        has_headers = bool(re.search(r'^##?\s+', user_resp, re.MULTILINE))
+                        has_tables = '|---' in user_resp or '| ---' in user_resp
+                        if has_headers or has_tables:
+                            title_match = re.search(r'^#\s+(.+)', user_resp, re.MULTILINE)
+                            title = title_match.group(1).strip() if title_match else "Document"
+                            canvas_obj = CanvasService.build_from_template(
+                                "document_viewer",
+                                {"content": user_resp, "title": title, "status": "created"},
+                                title=title,
+                            )
+
+                    # Register canvas in registry
+                    if canvas_obj:
+                        canvas_dict = canvas_obj.model_dump()
+                        registry = get_canvas_registry(thread_id)
+                        import time as _time
+                        c_type = canvas_dict.get("canvas_type", "document")
+                        canvas_id = f"brain_finish_{c_type}_{int(_time.time())}"
+                        registry.register_sync(
+                            canvas_id=canvas_id,
+                            canvas_type=c_type,
+                            source_agent="brain",
+                            canvas_data=canvas_dict.get("canvas_data"),
+                            canvas_content=canvas_dict.get("canvas_content"),
+                            canvas_title=canvas_dict.get("canvas_title"),
+                        )
+                        compat = registry.get_backward_compat_fields()
+                        updates.update(compat)
+                        updates["canvas_registry"] = registry.get_registry_state().model_dump()
+                        updates["active_canvas_id"] = registry.get_active_id()
+                        logger.info(f"🎨 Brain: Auto-canvas registered for finish response (type={c_type})")
+
+                except Exception as e:
+                    logger.debug(f"Canvas auto-detect in finish skipped: {e}")
 
             # CRITICAL: Append the final response to the message history so it appears in the chat
             # The 'messages' key in State triggers add_messages reducer which appends to the list
@@ -774,7 +1272,7 @@ Return JSON with:
 
             for task in todo_list:
                 if task.get("status") in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS):
-                    task["status"] = "completed" if is_finished else "skipped"
+                    task["status"] = "completed"
             updates["todo_list"] = todo_list
 
         return updates
@@ -840,8 +1338,6 @@ Return JSON with:
             "decision": BrainDecision(
                 action_type="finish",
                 user_response=f"I've encountered multiple issues, but here is what I know: {json.dumps(context_summary, default=str)}",
-                is_finished=True,
-                fallback_mode=True,
             ).model_dump(),
             "final_response": f"I've encountered multiple issues, but here is what I know: {json.dumps(context_summary, default=str)}",
             "current_task_id": None,

@@ -11,20 +11,12 @@ from fastapi import APIRouter, HTTPException, Depends, status, Query, Response, 
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_, select
 
-from database import SessionLocal
+from database import get_db
 from models import Agent, AgentCapability, AgentEndpoint, EndpointParameter
-from schemas import AgentCard
+from backend.schemas import AgentCard
 
 router = APIRouter(prefix="/api/agents", tags=["Agents"])
 logger = logging.getLogger("uvicorn.error")
-
-# --- Database Dependency (duplicated for now, will be centralized later) ---
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 # --- Sentence Transformer Model Loading (duplicated for now) ---
 _model = None

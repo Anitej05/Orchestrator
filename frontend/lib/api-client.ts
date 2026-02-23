@@ -261,25 +261,3 @@ export async function processPrompt(request: { prompt: string }): Promise<{
     throw error;
   }
 }
-
-// Static data exports for components
-export const frameworks = ["CrewAI", "AutoGen", "LangGraph", "LangChain", "Custom"]
-
-export const capabilities = [
-  "find_travel_agent",
-  "find_hotel_booking_agent", 
-  "summarize_documents",
-  "write_python_code",
-  "research_sales_leads",
-  "draft_marketing_emails",
-  "Lead Generation",
-  "Email Drafting", 
-  "Translation",
-  "Scheduling",
-  "Payments",
-  "Data Analysis",
-  "Content Creation",
-  "Research",
-  "Customer Support",
-  "Social Media Management",
-]

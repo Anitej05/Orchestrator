@@ -1,6 +1,10 @@
 from typing import Dict, Any, Optional, List, Union, Literal
 from pydantic import ValidationError
-from schemas import CanvasDisplay, StandardAgentResponse
+from backend.schemas import CanvasDisplay, StandardAgentResponse
+from services.canvas_templates import (
+    get_template, list_templates, get_template_ids,
+    validate_template_data, get_canvas_type_for_template, CANVAS_TEMPLATES
+)
 import logging
 
 logger = logging.getLogger("CanvasService")
@@ -117,6 +121,172 @@ class CanvasService:
             canvas_data={"file_path": file_path}
         )
 
+    # --- TEMPLATE-BASED BUILDERS ---
+
+    @staticmethod
+    def build_from_template(
+        template_id: str,
+        data: Dict[str, Any],
+        title: Optional[str] = None,
+        requires_confirmation: Optional[bool] = None,
+        confirmation_message: Optional[str] = None,
+    ) -> Optional[CanvasDisplay]:
+        """
+        Build a canvas from a predefined template.
+
+        1. Looks up the template in the registry
+        2. Validates data against the template's data_schema
+        3. Returns a CanvasDisplay with template_id attached
+
+        Args:
+            template_id: Template to use (e.g., 'chart_bar', 'spreadsheet_viewer')
+            data: Structured data matching the template's data_schema
+            title: Override the default title
+            requires_confirmation: Override the template's confirmation setting
+            confirmation_message: Override the template's confirmation message
+        """
+        template = get_template(template_id)
+        if not template:
+            logger.error(f"❌ Unknown canvas template: {template_id}")
+            return None
+
+        # Validate data
+        is_valid, error = validate_template_data(template_id, data)
+        if not is_valid:
+            logger.warning(f"⚠️ Template validation: {error}")
+            # Proceed anyway — soft validation
+
+        # Determine settings
+        config = template.get("default_config", {})
+        canvas_type = template["canvas_type"]
+
+        confirm = requires_confirmation
+        if confirm is None:
+            confirm = config.get("requires_confirmation", False)
+
+        confirm_msg = confirmation_message
+        if confirm_msg is None:
+            confirm_msg = config.get("confirmation_message")
+
+        # Attach template_id into canvas_data so frontend knows which template rendered it
+        enriched_data = {**data, "template_id": template_id}
+
+        return CanvasDisplay(
+            canvas_type=canvas_type,
+            canvas_data=enriched_data,
+            canvas_title=title or template.get("display_name"),
+            requires_confirmation=confirm,
+            confirmation_message=confirm_msg,
+        )
+
+    @staticmethod
+    def build_chart(
+        chart_type: Literal["bar", "line", "pie"],
+        labels: List[str],
+        datasets: Optional[List[Dict[str, Any]]] = None,
+        values: Optional[List[float]] = None,
+        title: Optional[str] = None,
+        x_label: Optional[str] = None,
+        y_label: Optional[str] = None,
+    ) -> Optional[CanvasDisplay]:
+        """
+        Build a chart canvas using predefined chart templates.
+
+        For bar/line charts: provide labels + datasets
+        For pie charts: provide labels + values
+        """
+        template_id = f"chart_{chart_type}"
+
+        if chart_type == "pie":
+            if not values:
+                logger.error("Pie chart requires 'values'")
+                return None
+            data = {"labels": labels, "values": values, "title": title or "Pie Chart"}
+        else:
+            if not datasets:
+                logger.error(f"{chart_type} chart requires 'datasets'")
+                return None
+            data = {
+                "labels": labels,
+                "datasets": datasets,
+                "title": title or f"{chart_type.title()} Chart",
+                "chart_subtype": chart_type,
+            }
+            if x_label:
+                data["x_label"] = x_label
+            if y_label:
+                data["y_label"] = y_label
+
+        return CanvasService.build_from_template(template_id, data, title=title)
+
+    @staticmethod
+    def build_code_view(
+        code: str,
+        language: str = "python",
+        filename: Optional[str] = None,
+        title: Optional[str] = None,
+    ) -> CanvasDisplay:
+        """Build a syntax-highlighted code viewer canvas."""
+        return CanvasService.build_from_template(
+            "code_viewer",
+            {"code": code, "language": language, "filename": filename},
+            title=title or f"Code: {filename or language}",
+        )
+
+    @staticmethod
+    def build_code_diff_view(
+        diffs: List[Dict[str, str]],
+        summary: str = "",
+        files_modified: Optional[List[str]] = None,
+        terminal_log: Optional[str] = None,
+        tests_passed: Optional[bool] = None,
+        requires_confirmation: bool = True,
+        confirmation_message: str = "Apply these code changes?",
+        title: Optional[str] = None,
+    ) -> Optional[CanvasDisplay]:
+        """
+        Build a code diff viewer canvas for the coding agent.
+
+        Args:
+            diffs: List of {"file": path, "diff": unified_diff, "language": lang, "status": "modified"|"created"|"deleted"}
+            summary: Natural language summary of changes
+            files_modified: List of file paths that were modified
+            terminal_log: Terminal output from the coding task
+            tests_passed: Whether tests passed (None if not run)
+            requires_confirmation: Whether user must approve before applying
+            confirmation_message: Approval button text
+            title: Optional canvas title override
+        """
+        file_count = len(diffs)
+        auto_title = title or f"Code Changes ({file_count} file{'s' if file_count != 1 else ''})"
+
+        data = {
+            "diffs": diffs,
+            "summary": summary,
+            "files_modified": files_modified or [d.get("file", "") for d in diffs],
+            "file_count": file_count,
+        }
+        if terminal_log:
+            data["terminal_log"] = terminal_log
+        if tests_passed is not None:
+            data["tests_passed"] = tests_passed
+
+        return CanvasService.build_from_template(
+            "code_diff_viewer",
+            data,
+            title=auto_title,
+            requires_confirmation=requires_confirmation,
+            confirmation_message=confirmation_message,
+        )
+
+    @staticmethod
+    def get_available_templates(
+        category: Optional[str] = None,
+        agent: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """List available canvas templates, optionally filtered."""
+        return list_templates(category=category, agent=agent)
+
     # --- EXTRACTION METHODS (Parse agent results) ---
 
     @staticmethod
@@ -213,3 +383,87 @@ class CanvasService:
                 return None
 
         return None
+
+    # --- LLM-POWERED CANVAS DECISION ---
+
+    @staticmethod
+    async def decide_canvas_llm(
+        output: str,
+        agent_name: str,
+        capability_name: str = "",
+        file_changes: Optional[List[Dict[str, Any]]] = None,
+        files_modified: Optional[List[str]] = None,
+        primary_canvas_type: Optional[str] = None,
+    ) -> Optional["CanvasDisplay"]:
+        """
+        LLM-powered canvas decision. Analyzes agent output and picks the
+        best canvas type, template, and content dynamically.
+
+        All agents should call this method for dynamic canvas support.
+
+        Args:
+            output: Raw agent output text
+            agent_name: e.g. "spreadsheet_agent", "coding_agent"
+            capability_name: e.g. "code_task", "load_file"
+            file_changes: For coding agents — list of {file, diff, status} dicts
+            files_modified: List of modified file paths
+            primary_canvas_type: Agent's default type (LLM can override if better)
+
+        Returns:
+            Validated CanvasDisplay or None on failure
+        """
+        try:
+            from services.canvas_llm import decide_canvas as _llm_decide
+        except ImportError:
+            try:
+                from backend.services.canvas_llm import decide_canvas as _llm_decide
+            except ImportError:
+                logger.warning("canvas_llm module not available — skipping LLM canvas decision")
+                return None
+
+        try:
+            templates = get_template_ids()
+        except Exception:
+            templates = []
+
+        decision = await _llm_decide(
+            output=output,
+            agent_name=agent_name,
+            capability_name=capability_name,
+            file_changes=file_changes,
+            files_modified=files_modified,
+            available_templates=templates,
+            primary_canvas_type=primary_canvas_type,
+        )
+
+        # Convert to CanvasDisplay
+        try:
+            # Try template first
+            if decision.template_id:
+                display = CanvasService.build_from_template(
+                    template_id=decision.template_id,
+                    data=decision.canvas_data or {},
+                    title=decision.canvas_title,
+                    requires_confirmation=decision.requires_confirmation,
+                    confirmation_message=decision.confirmation_message,
+                )
+                if display:
+                    return display
+
+            # Direct CanvasDisplay
+            kwargs = {
+                "canvas_type": decision.canvas_type,
+                "canvas_title": decision.canvas_title,
+                "requires_confirmation": decision.requires_confirmation,
+                "confirmation_message": decision.confirmation_message,
+            }
+            if decision.canvas_content:
+                kwargs["canvas_content"] = decision.canvas_content
+            if decision.canvas_data:
+                kwargs["canvas_data"] = decision.canvas_data
+
+            return CanvasDisplay(**kwargs)
+
+        except Exception as e:
+            logger.warning(f"Failed to build CanvasDisplay from LLM decision: {e}")
+            return None

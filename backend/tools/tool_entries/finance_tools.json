@@ -84,8 +84,20 @@
                 {
                     "name": "ticker",
                     "type": "string",
-                    "required": true,
-                    "description": "Stock ticker symbol"
+                    "required": false,
+                    "description": "Stock ticker symbol (e.g., 'AAPL', 'MSFT', 'TSLA')"
+                },
+                {
+                    "name": "company",
+                    "type": "string",
+                    "required": false,
+                    "description": "Company name or ticker symbol"
+                },
+                {
+                    "name": "company_name",
+                    "type": "string",
+                    "required": false,
+                    "description": "Full company name or ticker symbol"
                 }
             ],
             "returns": "Dictionary with company name, sector, industry, website, employees, and business summary",

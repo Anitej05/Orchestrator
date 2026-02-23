@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from datetime import datetime
 
-from services.content_management_service import (
+from backend.services.content_management_service import (
     ContentManagementService,
     UnifiedContentMetadata,
     ContentType,
@@ -578,7 +578,7 @@ async def get_file_cache_stats():
     - cached_files: Number of files in cache
     - cache_keys: List of cache keys (file:hash pairs)
     """
-    from services.file_processor import file_processor
+    from backend.services.file_processor import file_processor
     
     stats = file_processor.get_cache_stats()
     return {
@@ -595,7 +595,7 @@ async def clear_file_cache():
     Clear the file processing cache.
     Use this to force re-processing of all documents.
     """
-    from services.file_processor import file_processor
+    from backend.services.file_processor import file_processor
     
     file_processor.clear_cache()
     return {

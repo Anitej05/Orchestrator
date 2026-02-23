@@ -32,7 +32,7 @@ except ImportError:
 
 # Local imports
 # Adjust as needed if these are used elsewhere
-from agents.utils.standard_file_interface import AgentFileMetadata
+from backend.agents.utils.standard_file_interface import AgentFileMetadata
 
 # Robust Import for KeyManager (Handles potential shadowing)
 import sys
@@ -40,8 +40,8 @@ orbimesh_root = Path(__file__).parent.parent.parent.resolve() # services -> back
 if str(orbimesh_root) not in sys.path:
     sys.path.insert(0, str(orbimesh_root))
 
-from utils.key_manager import get_cerebras_key, report_rate_limit
-from services.inference_service import inference_service, InferencePriority
+from backend.utils.key_manager import get_cerebras_key, report_rate_limit
+from backend.services.inference_service import inference_service, InferencePriority
 from langchain_core.messages import HumanMessage
 
 logger = logging.getLogger("ContentManagementService")
@@ -276,12 +276,15 @@ class ContentManagementService:
     CHUNK_SIZE_CHARS = CHUNK_SIZE_TOKENS * CHARS_PER_TOKEN_EST
     
     # Models
-    # Models
-    MODEL_HELPER = "llama-3.3-70b"  # For Map phase
+    MODEL_HELPER = "gpt-oss-120b"  # For Map phase (same model across all providers)
     MODEL_GENERATOR = "gpt-oss-120b" # For Reduce phase
     
-    def __init__(self, storage_dir: str = "storage/content"):
+    def __init__(self, storage_dir: str = None):
         self._registry: Dict[str, UnifiedContentMetadata] = {}
+        # Use absolute path based on BACKEND dir to avoid CWD issues
+        if storage_dir is None:
+            backend_dir = Path(__file__).parent.parent.resolve()  # services -> backend
+            storage_dir = str(backend_dir / "storage" / "content")
         self._registry_path = Path(storage_dir) / "content_registry.json"
         self._registry_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()

@@ -23,9 +23,16 @@ import platform
 import socket
 import re
 
+# Ensure both import styles resolve without requiring external PYTHONPATH.
+BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(BACKEND_DIR)
+for _path in (BACKEND_DIR, PROJECT_ROOT):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
 # Load environment variables from .env file
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(dotenv_path=os.path.join(BACKEND_DIR, ".env"), override=True)
 
 # --- Third-party Imports ---
 from fastapi import FastAPI, HTTPException, Depends, status, Query, Response, WebSocket, WebSocketDisconnect, Body, Request
@@ -41,14 +48,15 @@ import httpx
 
 # --- Local Application Imports ---
 CONVERSATION_HISTORY_DIR = "conversation_history"
-from database import SessionLocal
+from database import SessionLocal, get_db
 from models import Agent, StatusEnum, AgentCapability, AgentEndpoint, EndpointParameter, Workflow, WorkflowExecution, UserThread, WorkflowSchedule, WorkflowWebhook, AgentType
-from schemas import AgentCard, ProcessRequest, ProcessResponse, PlanResponse, FileObject, ActionApprovalRequest, ActionRejectRequest
-from orchestrator.graph import ForceJsonSerializer, create_graph_with_checkpointer, create_execution_subgraph, messages_from_dict, messages_to_dict, serialize_complex_object
-from orchestrator.state import State
+from backend.schemas import AgentCard, ProcessRequest, ProcessResponse, PlanResponse, FileObject, ActionApprovalRequest, ActionRejectRequest
+from backend.orchestrator.graph import ForceJsonSerializer, create_graph_with_checkpointer, create_execution_subgraph, messages_from_dict, messages_to_dict, serialize_complex_object
+from backend.orchestrator.state import State
 from langgraph.checkpoint.memory import MemorySaver
 from routers import connect_router
 from routers import credentials_router
+from routers import integrations_router
 
 # --- Lifespan Event Handler (replaces deprecated @app.on_event) ---
 @asynccontextmanager
@@ -78,25 +86,15 @@ async def lifespan(app: FastAPI):
     # Create database tables if they don't exist
     try:
         logger.info("🔧 Ensuring database tables exist...")
-        from manage import create_tables
+        from services.agent_registry_service import create_tables
         create_tables()
         logger.info("✅ Database tables ready")
     except Exception as e:
         logger.error(f"❌ Failed to create tables: {str(e)}", exc_info=True)
     
-    # Initialize integrations singletons (thread-safe)
-    try:
-        logger.info("🔧 Initializing integrations services...")
-        from services.integrations import get_auth_manager, get_tool_manager
-        app.state.auth_manager = get_auth_manager()
-        app.state.tool_manager = get_tool_manager()
-        logger.info("✅ Integrations services initialized")
-    except Exception as e:
-        logger.error(f"❌ Failed to initialize integrations: {str(e)}", exc_info=True)
-    
     # Sync agent definitions from SKILL.md files (UAP) to database
     try:
-        from manage import sync_skill_entries
+        from services.agent_registry_service import sync_skill_entries
         logger.info("Syncing SKILL.md agent definitions to database...")
         result = sync_skill_entries(verbose=True)
         if result.get('errors'):
@@ -117,7 +115,7 @@ async def lifespan(app: FastAPI):
     # Initialize workflow scheduler and load active schedules
     try:
         logger.info("Initializing workflow scheduler...")
-        from services.workflow_scheduler import init_scheduler
+        from backend.services.workflow_scheduler import init_scheduler
         from database import SessionLocal
         db = SessionLocal()
         try:
@@ -225,14 +223,11 @@ app.add_middleware(
 # Include routers
 app.include_router(connect_router.router)
 app.include_router(credentials_router.router)
+app.include_router(integrations_router.router)
 
 # Import and include content management router
 from routers import content_router
 app.include_router(content_router.router)
-
-# Import and include integrations router
-from routers import integrations_router
-app.include_router(integrations_router.router)
 
 # Import and include the new modular routers
 from routers import files_router, agents_router, conversations_router, workflows_router, dashboard_router
@@ -243,18 +238,22 @@ conversations_router.set_shared_state(conversation_store, store_lock)
 # workflows_router needs access to checkpointer
 workflows_router.set_checkpointer(checkpointer)
 
-app.include_router(files_router.router)
+# NOTE: files_router, workflows_router, and dashboard_router are NOT included here
+# because their routes are already defined inline in main.py (with additional logic).
+# Including them would cause Duplicate Operation ID warnings.
+# TODO: Migrate inline routes to routers and re-enable these includes.
+# app.include_router(files_router.router)
+# app.include_router(workflows_router.router)
+# app.include_router(dashboard_router.router)
+
 app.include_router(agents_router.router)
 app.include_router(conversations_router.router)
-app.include_router(workflows_router.router)
-app.include_router(dashboard_router.router)
 
 
 # --- Static Files for Screenshots ---
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
-# Create storage directory if it doesn't exist
 # Create storage directory if it doesn't exist
 # Fix: Use absolute path to project root (Orbimesh/storage) instead of relative (Orbimesh/backend/storage)
 storage_path = (Path(__file__).parent.parent / "storage").resolve()
@@ -343,7 +342,7 @@ async def serve_file(file_path: str, request: Request):
             )
         
         # ===== SECURITY VALIDATION =====
-        from utils.file_server import is_safe_path, find_file_in_storage, get_mime_type, should_inline_preview
+        from backend.utils.file_server import is_safe_path, find_file_in_storage, get_mime_type, should_inline_preview
         
         # Check for path traversal attempts
         if not is_safe_path(file_path):
@@ -529,7 +528,7 @@ async def create_document_unified(request: CreateDocumentRequest, req: Request):
         
         # ===== GENERATE PREVIEW =====
         from pathlib import Path as PathlibPath
-        from utils.file_server import find_file_in_storage, get_mime_type
+        from backend.utils.file_server import find_file_in_storage, get_mime_type
         
         canvas_display = None
         relative_path = None
@@ -775,13 +774,175 @@ class UpdateScheduleRequest(BaseModel):
     task_agent_pairs: Optional[List[Dict]] = None
     error_message: Optional[str] = None
 
-# --- Database Dependency ---
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+# --- Agent Server Startup ---
+def is_port_in_use(port: int) -> bool:
+    """Checks if a local port is already in use."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(('127.0.0.1', port)) == 0
+
+def wait_for_port(port: int, agent_file: str, timeout: int = 15):
+    """Waits for a network port to become active."""
+    start_time = time.time()
+    logger.info(f"Waiting for agent '{agent_file}' to start on port {port}...")
+    while time.time() - start_time < timeout:
+        if is_port_in_use(port):
+            logger.info(f"Agent '{agent_file}' is now running on port {port}.")
+            return True
+        time.sleep(0.5)
+    logger.error(f"Agent '{agent_file}' did not start on port {port} within {timeout} seconds.")
+    return False
+
+def start_agent_servers():
+    """
+    Finds and starts agent servers, with enhanced logging and better error handling
+    to track which agents start successfully and which fail.
+    """
+    global agent_processes
+    
+    # Use absolute path based on the project root directory
+    project_root = os.path.dirname(os.path.abspath(__file__))  # This gets the backend directory
+    agents_dir = os.path.join(project_root, "agents")
+    
+    if not os.path.isdir(agents_dir):
+        logger.warning(f"'{agents_dir}' directory not found. Skipping agent server startup.")
+        return
+
+    logs_dir = "logs"
+    os.makedirs(logs_dir, exist_ok=True)
+    logger.info(f"Agent logs will be stored in the '{logs_dir}' directory.")
+
+    started_agents = []
+    failed_agents = []
+
+    # UAP: Read from SKILL.md definitions (Source of Truth)
+    agent_configs = {}
+    
+    # SKILL.md directories to scan (each contains SKILL.md with port)
+    skill_dirs = [
+        ("spreadsheet_agent", "spreadsheet_agent/__init__.py"),
+        ("mail_agent", "mail_agent/agent.py"),
+        ("browser_agent", "browser_agent/__init__.py"),
+        ("document_agent_lib", "document_agent_lib/__init__.py"),
+        ("zoho_books", "zoho_books/zoho_books_agent.py"),
+    ]
+    
+    import yaml
+    for skill_dir, script_path in skill_dirs:
+        skill_file = os.path.join(agents_dir, skill_dir, "SKILL.md")
+        full_script_path = os.path.join(agents_dir, script_path)
+        
+        if not os.path.exists(skill_file):
+            continue
+            
+        if not os.path.exists(full_script_path):
+            logger.warning(f"Script not found for {skill_dir}: {script_path}")
+            continue
+            
+        try:
+            with open(skill_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+                # Extract YAML frontmatter
+                if content.startswith('---'):
+                    parts = content.split('---', 2)
+                    if len(parts) >= 3:
+                        yaml_content = parts[1]
+                        config = yaml.safe_load(yaml_content)
+                        port = config.get('port')
+                        if port:
+                            agent_configs[full_script_path] = int(port)
+                            logger.info(f"UAP: Found {skill_dir} on port {port}")
+        except Exception as e:
+            logger.warning(f"Failed to parse SKILL.md for {skill_dir}: {e}")
+
+    logger.info(f"Target Agent Configurations: {len(agent_configs)} agents")
+
+    for agent_file, port in agent_configs.items():
+        agent_path = os.path.join(agents_dir, agent_file)
+        
+        if is_port_in_use(port):
+            logger.info(f"Agent '{agent_file}' is already running on port {port}.")
+            started_agents.append({
+                'agent': agent_file,
+                'port': port,
+                'status': 'already_running'
+            })
+            continue
+
+        logger.info(f"Attempting to start '{agent_file}' on port {port}...")
+        log_path = os.path.join(logs_dir, f"{agent_file}.log")
+
+        # Create the subprocess
+        process = None
+        if platform.system() == "Windows":
+             try:
+                with open(log_path, 'w') as log_file:
+                    process = subprocess.Popen(
+                        [sys.executable, agent_path],
+                        stdout=log_file,
+                        stderr=log_file,
+                        creationflags=subprocess.CREATE_NO_WINDOW
+                    )
+                    agent_processes.append(process)
+             except Exception as e:
+                logger.error(f"Failed to start {agent_file}: {e}")
+        else:
+            with open(log_path, 'w') as log_file:
+                process = subprocess.Popen(
+                    [sys.executable, agent_path],
+                    stdout=log_file,
+                    stderr=log_file
+                )
+                agent_processes.append(process)
+
+            # Wait for the port to be in use with a timeout
+            # With lazy imports and reload=False, agents should start quickly
+            agent_timeout = 15  # Reasonable timeout for fast startup
+            
+            if wait_for_port(port, agent_file, timeout=agent_timeout):
+                logger.info(f"Successfully started agent '{agent_file}' on port {port}")
+                started_agents.append({
+                    'agent': agent_file,
+                    'port': port,
+                    'status': 'started',
+                    'process': process
+                })
+            else:
+                logger.error(f"Timed out waiting for agent '{agent_file}' to start on port {port}")
+                failed_agents.append({
+                    'agent': agent_file,
+                    'reason': f'Timed out waiting for port {port} to become available',
+                    'port': port
+                })
+                if process:
+                    try:
+                        process.terminate()
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+
+
+
+    # Log summary of agent startup results
+    logger.info(f"Agent startup completed. Started: {len(started_agents)}, Failed: {len(failed_agents)}")
+    
+    if started_agents:
+        logger.info("Successfully started agents:")
+        for agent_info in started_agents:
+            logger.info(f"  - {agent_info['agent']} on port {agent_info['port']} ({agent_info['status']})")
+    
+    if failed_agents:
+        logger.error("Failed to start agents:")
+        for agent_info in failed_agents:
+            logger.error(f"  - {agent_info['agent']}: {agent_info['reason']}")
+        
+        # Provide detailed instructions for manual startup
+        logger.info("To start agents manually, run these commands in separate terminals:")
+        for agent_info in failed_agents:
+            agent_file = agent_info['agent']
+            agent_path = os.path.join(agents_dir, agent_file)
+            logger.info(f"  - python {agent_path}")
+    
+    logger.info("Agent startup check completed.")
 
 os.makedirs("storage/images", exist_ok=True)
 os.makedirs("storage/documents", exist_ok=True)
@@ -897,7 +1058,9 @@ async def execute_orchestration(
         logger.info("📂 EXECUTE_ORCHESTRATION: No files received in this request")
 
     # Build config with task_event_callback and owner if provided
-    config = {"configurable": {"thread_id": thread_id}}
+    # Keep graph recursion budget above Brain.max_iterations so controller-level
+    # safeguards can terminate gracefully before LangGraph hard-recursion errors.
+    config = {"recursion_limit": 80, "configurable": {"thread_id": thread_id}}
     if task_event_callback:
         config["configurable"]["task_event_callback"] = task_event_callback
         logger.info(f"✅ Task event callback registered for real-time streaming")
@@ -1021,7 +1184,7 @@ async def execute_orchestration(
                     print(f"!!! ORIGINAL PROMPT VALUE: '{initial_state['original_prompt'][:200]}...'")
                 
                 # Add user's modification message to the conversation history
-                from orchestrator.message_manager import MessageManager
+                from backend.orchestrator.message_manager import MessageManager
                 existing_messages = initial_state.get("messages", [])
                 modification_message = HumanMessage(content=user_response)
                 updated_messages = MessageManager.add_message(
@@ -1069,7 +1232,7 @@ async def execute_orchestration(
         logger.info(f"Prompt content: '{prompt[:100]}'")
         
         # Use MessageManager to add new message without duplicates
-        from orchestrator.message_manager import MessageManager
+        from backend.orchestrator.message_manager import MessageManager
         existing_messages = current_conversation.get("messages", [])
         # Create message with metadata to preserve timestamp and ID
         import hashlib
@@ -1117,7 +1280,10 @@ async def execute_orchestration(
             "canvas_requires_confirmation": current_conversation.get("canvas_requires_confirmation", False),
             "canvas_confirmation_message": current_conversation.get("canvas_confirmation_message"),
 
-            # Preserve current canvas payload so the UI remains consistent
+            # Preserve Canvas Registry state across turns
+            "canvas_registry": current_conversation.get("canvas_registry"),
+            "active_canvas_id": current_conversation.get("active_canvas_id"),
+            # Backward compat canvas fields
             "has_canvas": current_conversation.get("has_canvas", False),
             "canvas_type": current_conversation.get("canvas_type"),
             "canvas_content": current_conversation.get("canvas_content"),
@@ -1302,19 +1468,28 @@ async def execute_orchestration(
             
         # Save conversation history using orchestrator's save routine
         try:
-            from orchestrator.graph import save_conversation_history
+            from backend.orchestrator.graph import save_conversation_history
             save_conversation_history(final_state, {"configurable": {"thread_id": thread_id}})
         except Exception as e:
             logger.error(f"Failed to save conversation history for {thread_id}: {e}")
 
         # Ensure a plan file is saved for every conversation
         try:
-            from orchestrator.graph import save_plan_to_file
+            from backend.orchestrator.graph import save_plan_to_file
             save_plan_to_file({**final_state, "thread_id": thread_id})
         except Exception as e:
             logger.error(f"Failed to save plan file for thread {thread_id}: {e}")
 
         logger.info(f"Orchestration completed for thread_id: {thread_id}")
+
+        # === ARTIFACT DISTILLATION: Distill learnings from this conversation ===
+        try:
+            from backend.orchestrator.content_orchestrator import hooks as content_hooks
+            user_id = final_state.get("user_id", "default")
+            await content_hooks.on_conversation_end(final_state, thread_id, user_id)
+        except Exception as e:
+            logger.debug(f"Artifact distillation skipped: {e}")
+
         return final_state
 
     except Exception as e:
@@ -1504,7 +1679,7 @@ async def approve_action_endpoint(request: ActionApprovalRequest):
     logger.info(f"👍 APPROVING action for thread {thread_id}")
 
     try:
-        from orchestrator.omni_dispatcher import approve_pending_action
+        from backend.orchestrator.omni_dispatcher import approve_pending_action
         
         # Get current state
         with store_lock:
@@ -1540,7 +1715,7 @@ async def reject_action_endpoint(request: ActionRejectRequest):
     logger.info(f"👎 REJECTING action for thread {thread_id}: {request.reason}")
 
     try:
-        from orchestrator.omni_dispatcher import reject_pending_action
+        from backend.orchestrator.omni_dispatcher import reject_pending_action
         
         # Get current state
         with store_lock:
@@ -1607,12 +1782,31 @@ async def find_agents(request: ProcessRequest):
 
         logger.info(f"Successfully processed request for thread_id: {thread_id}")
 
-        # Check if there's canvas data from browser agent
-        canvas_data = {}
+        # Get Canvas Registry state for this thread
+        from backend.services.canvas_registry import get_canvas_registry
+        canvas_registry = get_canvas_registry(thread_id)
+
+        # Also merge any live canvas updates (e.g., from browser agent WebSocket)
         with canvas_lock:
             if thread_id in live_canvas_updates:
-                canvas_data = live_canvas_updates[thread_id]
-                logger.info(f"📊 Including canvas data in response for thread {thread_id}")
+                live_data = live_canvas_updates[thread_id]
+                if live_data.get('has_canvas'):
+                    canvas_registry.register_sync(
+                        canvas_id=f"live_{thread_id}_{int(time.time())}",
+                        canvas_type=live_data.get('canvas_type', 'html'),
+                        source_agent="browser_agent",
+                        canvas_data=live_data.get('canvas_data'),
+                        canvas_content=live_data.get('canvas_content'),
+                    )
+                logger.info(f"📊 Merged live canvas data for thread {thread_id}")
+
+        # Build registry state and backward-compat fields
+        registry_state = canvas_registry.get_registry_state()
+        compat = canvas_registry.get_backward_compat_fields()
+
+        # Also check final_state for registry (from Hands)
+        state_registry = final_state.get('canvas_registry')
+        state_active = final_state.get('active_canvas_id')
 
         return ProcessResponse(
             message="Successfully processed the request.",
@@ -1621,13 +1815,17 @@ async def find_agents(request: ProcessRequest):
             final_response=final_response_str,
             pending_user_input=False,
             question_for_user=None,
-            has_canvas=canvas_data.get('has_canvas') or final_state.get('has_canvas', False),
-            canvas_content=canvas_data.get('canvas_content') or final_state.get('canvas_content'),
-            canvas_type=canvas_data.get('canvas_type') or final_state.get('canvas_type'),
-            canvas_data=canvas_data.get('canvas_data') or final_state.get('canvas_data'), # Support V2 data from state
-            browser_view=canvas_data.get('browser_view'),
-            plan_view=canvas_data.get('plan_view'),
-            current_view=canvas_data.get('current_view', 'browser'),
+            # Canvas Registry (NEW)
+            canvas_registry=registry_state if registry_state.canvases else None,
+            active_canvas_id=canvas_registry.get_active_id() or state_active,
+            # Backward compat fields
+            has_canvas=compat.get('has_canvas') or final_state.get('has_canvas', False),
+            canvas_content=compat.get('canvas_content') or final_state.get('canvas_content'),
+            canvas_type=compat.get('canvas_type') or final_state.get('canvas_type'),
+            canvas_data=compat.get('canvas_data') or final_state.get('canvas_data'),
+            browser_view=compat.get('browser_view'),
+            plan_view=compat.get('plan_view'),
+            current_view=compat.get('current_view', 'browser'),
             # Omni-Dispatcher fields
             execution_plan=final_state.get('execution_plan'),
             action_history=final_state.get('action_history'),
@@ -1686,12 +1884,24 @@ async def continue_conversation(user_response: UserResponse):
 
         logger.info(f"Successfully continued conversation for thread_id: {user_response.thread_id}")
 
-        # Check if there's canvas data from browser agent
-        canvas_data = {}
+        # Get Canvas Registry state
+        from backend.services.canvas_registry import get_canvas_registry
+        canvas_registry = get_canvas_registry(user_response.thread_id)
+
         with canvas_lock:
             if user_response.thread_id in live_canvas_updates:
-                canvas_data = live_canvas_updates[user_response.thread_id]
-                logger.info(f"📊 Including canvas data in continue response for thread {user_response.thread_id}")
+                live_data = live_canvas_updates[user_response.thread_id]
+                if live_data.get('has_canvas'):
+                    canvas_registry.register_sync(
+                        canvas_id=f"live_{user_response.thread_id}_{int(time.time())}",
+                        canvas_type=live_data.get('canvas_type', 'html'),
+                        source_agent="browser_agent",
+                        canvas_data=live_data.get('canvas_data'),
+                        canvas_content=live_data.get('canvas_content'),
+                    )
+
+        registry_state = canvas_registry.get_registry_state()
+        compat = canvas_registry.get_backward_compat_fields()
 
         return ProcessResponse(
             message="Successfully processed the continued conversation.",
@@ -1700,17 +1910,79 @@ async def continue_conversation(user_response: UserResponse):
             final_response=final_response_str,
             pending_user_input=False,
             question_for_user=None,
-            has_canvas=canvas_data.get('has_canvas', False),
-            canvas_content=canvas_data.get('canvas_content'),
-            canvas_type=canvas_data.get('canvas_type'),
-            browser_view=canvas_data.get('browser_view'),
-            plan_view=canvas_data.get('plan_view'),
-            current_view=canvas_data.get('current_view', 'browser')
+            canvas_registry=registry_state if registry_state.canvases else None,
+            active_canvas_id=canvas_registry.get_active_id(),
+            has_canvas=compat.get('has_canvas', False),
+            canvas_content=compat.get('canvas_content'),
+            canvas_type=compat.get('canvas_type'),
+            canvas_data=compat.get('canvas_data'),
+            browser_view=compat.get('browser_view'),
+            plan_view=compat.get('plan_view'),
+            current_view=compat.get('current_view', 'browser')
         )
 
     except Exception as e:
         logger.error(f"An unexpected error occurred during conversation continuation for thread_id {user_response.thread_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {e}")
+
+# ============================================================================
+# CANVAS REGISTRY API ENDPOINTS
+# ============================================================================
+
+class CanvasFocusRequest(BaseModel):
+    thread_id: str
+    canvas_id: str
+
+class CanvasDismissRequest(BaseModel):
+    thread_id: str
+    canvas_id: str
+
+@app.get("/api/canvas/templates", tags=["Canvas"])
+async def list_canvas_templates(category: str = None, agent: str = None):
+    """List all predefined canvas templates with their data schemas."""
+    from services.canvas_templates import list_templates
+    templates = list_templates(category=category, agent=agent)
+    return {"templates": templates, "count": len(templates)}
+
+@app.get("/api/canvas/{thread_id}", tags=["Canvas"])
+async def get_canvas_registry_state(thread_id: str):
+    """Get the full Canvas Registry state for a thread."""
+    from backend.services.canvas_registry import get_canvas_registry
+    registry = get_canvas_registry(thread_id)
+    state = registry.get_registry_state()
+    return {
+        "thread_id": thread_id,
+        "registry": state.model_dump(),
+        "backward_compat": registry.get_backward_compat_fields(),
+    }
+
+@app.post("/api/canvas/focus", tags=["Canvas"])
+async def set_canvas_focus(request: CanvasFocusRequest):
+    """Set the active (focused) canvas for a thread."""
+    from backend.services.canvas_registry import get_canvas_registry
+    registry = get_canvas_registry(request.thread_id)
+    success = await registry.set_active(request.canvas_id)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Canvas '{request.canvas_id}' not found or not active")
+    return {
+        "success": True,
+        "active_canvas_id": request.canvas_id,
+        "registry": registry.get_registry_state().model_dump(),
+    }
+
+@app.post("/api/canvas/dismiss", tags=["Canvas"])
+async def dismiss_canvas(request: CanvasDismissRequest):
+    """Dismiss a canvas (hide it without deleting)."""
+    from backend.services.canvas_registry import get_canvas_registry
+    registry = get_canvas_registry(request.thread_id)
+    success = await registry.dismiss(request.canvas_id)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Canvas '{request.canvas_id}' not found")
+    return {
+        "success": True,
+        "dismissed_canvas_id": request.canvas_id,
+        "registry": registry.get_registry_state().model_dump(),
+    }
 
 # ============================================================================
 # WEBSOCKET SCREENSHOT RELAY ENDPOINT
@@ -1785,240 +2057,11 @@ async def screenshots_websocket(websocket: WebSocket, thread_id: str):
         logger.error(f"Error in screenshot WebSocket: {e}")
 
 
-@app.get("/api/chat/status/{thread_id}", response_model=ConversationStatus)
-async def get_conversation_status(thread_id: str):
-    """
-    Get the current status of a conversation thread.
-    """
-    try:
-        # Get conversation from our store
-        with store_lock:
-            state_data = conversation_store.get(thread_id)
+# NOTE: Conversation routes (/api/chat/*, /api/conversations/*) are defined in routers/conversations_router.py
+# and included via app.include_router(conversations_router.router)
 
-        if not state_data:
-            raise HTTPException(status_code=404, detail="Conversation thread not found")
-
-        if state_data.get("pending_user_input"):
-            status = "pending_user_input"
-        elif state_data.get("final_response"):
-            status = "completed"
-        else:
-            status = "processing"
-
-        return ConversationStatus(
-            thread_id=thread_id,
-            status=status,
-            question_for_user=state_data.get("question_for_user"),
-            final_response=state_data.get("final_response"),
-            task_agent_pairs=state_data.get("task_agent_pairs", [])
-        )
-
-    except HTTPException as http_exc:
-        raise http_exc
-    except Exception as e:
-        logger.error(f"Error getting conversation status for thread_id {thread_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"An internal server error occurred: {e}")
-
-@app.get("/api/chat/history/{thread_id}")
-async def get_conversation_history(thread_id: str):
-    """
-    Load the full conversation history from the saved JSON file.
-    Returns all messages, metadata, plan, and uploaded files.
-    """
-    try:
-        # Use absolute path relative to backend directory
-        backend_dir = os.path.dirname(os.path.abspath(__file__))
-        history_dir = os.path.join(backend_dir, "conversation_history")
-        history_path = os.path.join(history_dir, f"{thread_id}.json")
-        
-        logger.info(f"Looking for conversation history at: {history_path}")
-        
-        if not os.path.exists(history_path):
-            logger.warning(f"Conversation history not found at: {history_path}")
-            raise HTTPException(status_code=404, detail=f"Conversation history not found for thread_id: {thread_id}")
-        
-        with open(history_path, 'r', encoding='utf-8') as f:
-            conversation_data = json.load(f)
-        
-        logger.info(f"Successfully loaded conversation history for thread_id: {thread_id}")
-        return conversation_data
-        
-    except HTTPException as http_exc:
-        raise http_exc
-    except Exception as e:
-        logger.error(f"Error loading conversation history for thread_id {thread_id}: {e}")
-        logger.exception("Full traceback:")
-        raise HTTPException(status_code=500, detail=f"Failed to load conversation history: {str(e)}")
-
-@app.delete("/api/chat/{thread_id}")
-async def clear_conversation(thread_id: str):
-    """
-    Clear a conversation thread from memory.
-    """
-    try:
-        with store_lock:
-            if thread_id in conversation_store:
-                del conversation_store[thread_id]
-                logger.info(f"Cleared conversation for thread_id: {thread_id}")
-                return {"message": f"Conversation {thread_id} cleared successfully"}
-            else:
-                raise HTTPException(status_code=404, detail="Conversation thread not found")
-
-    except HTTPException as http_exc:
-        raise http_exc
-    except Exception as e:
-        logger.error(f"Error clearing conversation for thread_id {thread_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"An internal server error occurred: {e}")
-
-@app.get("/api/chat/debug/conversations")
-async def debug_conversations():
-    """
-    Debug endpoint to see all active conversations (remove in production).
-    """
-    try:
-        with store_lock:
-            conversations = {}
-            for thread_id, state in conversation_store.items():
-                conversations[thread_id] = {
-                    "pending_user_input": state.get("pending_user_input", False),
-                    "question_for_user": state.get("question_for_user"),
-                    "has_final_response": bool(state.get("final_response")),
-                    "parsed_tasks_count": len(state.get("parsed_tasks", [])),
-                    "original_prompt": state.get("original_prompt", "")[:100] + "..." if state.get("original_prompt", "") else ""
-                }
-        return {"active_conversations": conversations}
-
-    except Exception as e:
-        logger.error(f"Error getting debug conversations: {e}")
-        raise HTTPException(status_code=500, detail=f"An internal server error occurred: {e}")
-
-@app.get("/api/conversations")
-async def get_all_conversations(request: Request, db: Session = Depends(get_db)):
-    """
-    Retrieves a list of conversations for the authenticated user.
-    Returns conversation objects with metadata (id, title, created_at, last_message).
-    """
-    try:
-        # Get authenticated user
-        from auth import get_user_from_request
-        user = get_user_from_request(request)
-        user_id = user.get("sub") or user.get("user_id") or user.get("id")
-        
-        if not user_id:
-            raise HTTPException(status_code=401, detail="Unable to determine user identity")
-        
-        logger.info(f"Fetching conversations for user: {user_id}")
-        
-        # Query user_threads table for this user's conversations
-        from models import UserThread
-        user_threads = db.query(UserThread).filter_by(user_id=user_id).order_by(
-            UserThread.updated_at.desc()
-        ).all()
-        
-        logger.info(f"Found {len(user_threads)} conversations for user {user_id}")
-        
-        # Build response with conversation metadata
-        conversations = []
-        for ut in user_threads:
-            # Get last message from conversation history file if it exists
-            history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{ut.thread_id}.json")
-            last_message = None
-            
-            if os.path.exists(history_path):
-                try:
-                    with open(history_path, "r", encoding="utf-8") as f:
-                        history_data = json.load(f)
-                        # Extract last message from messages array
-                        messages = history_data.get("messages", [])
-                        if messages and len(messages) > 0:
-                            last_msg = messages[-1]
-                            if isinstance(last_msg, dict):
-                                last_message = last_msg.get("content", "")[:100]  # First 100 chars
-                except Exception as e:
-                    logger.warning(f"Failed to read history for {ut.thread_id}: {e}")
-            
-            # Handle title: check for None, empty string, or the literal string "None"
-            title = ut.title
-            if not title or title == "None" or title.strip() == "":
-                title = "Untitled Conversation"
-            
-            conversations.append({
-                "id": ut.thread_id,
-                "thread_id": ut.thread_id,
-                "title": title,
-                "created_at": ut.created_at.isoformat() if ut.created_at else None,
-                "updated_at": ut.updated_at.isoformat() if ut.updated_at else None,
-                "last_message": last_message
-            })
-        
-        return conversations
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error fetching conversations: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to fetch conversations")
-
-@app.get("/api/conversations/{thread_id}")
-async def get_conversation_history(thread_id: str, request: Request, db: Session = Depends(get_db)):
-    """
-    Retrieves the full, standardized conversation state from its JSON file.
-    This is the single source of truth for a conversation's history.
-    Ensures user can only access their own conversations.
-    """
-    try:
-        # Get authenticated user
-        from auth import get_user_from_request
-        user = get_user_from_request(request)
-        user_id = user.get("sub") or user.get("user_id") or user.get("id")
-        
-        if not user_id:
-            raise HTTPException(status_code=401, detail="Unable to determine user identity")
-        
-        # Verify ownership - check if this thread belongs to this user
-        from models import UserThread
-        logger.info(f"Checking ownership: looking for thread_id={thread_id}, user_id={user_id}")
-        user_thread = db.query(UserThread).filter_by(
-            thread_id=thread_id,
-            user_id=user_id
-        ).first()
-        
-        if not user_thread:
-            logger.warning(f"User {user_id} attempted to access thread {thread_id} they don't own")
-            # Debug: list all threads for this user
-            all_user_threads = db.query(UserThread).filter_by(user_id=user_id).all()
-            logger.debug(f"User {user_id} owns {len(all_user_threads)} threads: {[t.thread_id for t in all_user_threads]}")
-            # Debug: check if thread exists for any user
-            thread_for_any_user = db.query(UserThread).filter_by(thread_id=thread_id).first()
-            if thread_for_any_user:
-                logger.debug(f"Thread {thread_id} exists and belongs to user: {thread_for_any_user.user_id}")
-            raise HTTPException(status_code=403, detail="You don't have permission to access this conversation")
-        
-        # Load the conversation history
-        history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
-        
-        if not os.path.exists(history_path):
-            raise HTTPException(status_code=404, detail="Conversation history not found.")
-            
-        with open(history_path, "r", encoding="utf-8") as f:
-            # The file already contains the standardized, serializable state.
-            # No further processing is needed.
-            history_data = json.load(f)
-        
-        logger.info(f"User {user_id} successfully accessed conversation {thread_id}")
-        return history_data
-        
-    except HTTPException:
-        raise
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse conversation history for {thread_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to parse conversation history file.")
-    except Exception as e:
-        logger.error(f"Error loading conversation history for {thread_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"An unexpected error occurred while loading the conversation: {str(e)}")
-
-# Workflow Endpoints
-@app.post("/api/workflows", tags=["Workflows"])
+# NOTE: Workflow routes (/api/workflows/*, /api/schedules/*, /api/plan/*) are defined in routers/workflows_router.py
+# and included via app.include_router(workflows_router.router)
 async def save_workflow(request: Request, thread_id: str, name: str, description: str = "", db: Session = Depends(get_db)):
     """Save conversation as reusable workflow"""
     from auth import get_user_from_request
@@ -2385,7 +2428,7 @@ async def create_workflow_conversation(workflow_id: str, request: Request, db: S
 async def schedule_workflow(workflow_id: str, body: ScheduleWorkflowRequest, request: Request, db: Session = Depends(get_db)):
     """Schedule workflow execution with cron expression"""
     from auth import get_user_from_request
-    from services.workflow_scheduler import get_scheduler
+    from backend.services.workflow_scheduler import get_scheduler
     from database import SessionLocal
     
     user = get_user_from_request(request)
@@ -2571,7 +2614,7 @@ async def get_schedule_executions(schedule_id: str, request: Request, db: Sessio
 async def update_schedule(schedule_id: str, body: UpdateScheduleRequest, request: Request, db: Session = Depends(get_db)):
     """Update a workflow schedule (pause/resume, change cron, update inputs)"""
     from auth import get_user_from_request
-    from services.workflow_scheduler import get_scheduler
+    from backend.services.workflow_scheduler import get_scheduler
     from database import SessionLocal
     
     user = get_user_from_request(request)
@@ -2655,7 +2698,7 @@ async def reload_schedules(
     Reload all active schedules from database into the scheduler.
     Useful for debugging or recovering from scheduler initialization issues.
     """
-    from services.workflow_scheduler import get_scheduler
+    from backend.services.workflow_scheduler import get_scheduler
     scheduler = get_scheduler()
     
     try:
@@ -2687,7 +2730,7 @@ async def reload_schedules(
 async def delete_schedule(workflow_id: str, schedule_id: str, request: Request, db: Session = Depends(get_db)):
     """Delete a workflow schedule"""
     from auth import get_user_from_request
-    from services.workflow_scheduler import get_scheduler
+    from backend.services.workflow_scheduler import get_scheduler
     
     user = get_user_from_request(request)
     user_id = user.get("sub")
@@ -2740,7 +2783,7 @@ async def trigger_webhook(webhook_id: str, payload: Dict[str, Any], webhook_toke
     db.commit()
     
     # Execute workflow in background
-    from services.workflow_scheduler import get_scheduler
+    from backend.services.workflow_scheduler import get_scheduler
     scheduler = get_scheduler()
     asyncio.create_task(
         scheduler._async_execute_workflow(
@@ -2792,8 +2835,7 @@ async def websocket_workflow_execute(websocket: WebSocket, workflow_id: str, tok
     db = None
     
     try:
-        # TODO: WorkflowExecutor module doesn't exist - needs implementation
-        # from orchestrator.workflow_executor import WorkflowExecutor
+        from backend.orchestrator.workflow_executor import WorkflowExecutor
         from auth import verify_clerk_token
         
         # Verify token from query params
@@ -2835,16 +2877,12 @@ async def websocket_workflow_execute(websocket: WebSocket, workflow_id: str, tok
         db.add(execution)
         db.commit()
         
-        # TODO: WorkflowExecutor doesn't exist - needs implementation
         # Use WorkflowExecutor to prepare execution
-        # executor = WorkflowExecutor(workflow.blueprint)
-        # execution_data = await executor.execute(inputs, owner)
-        # thread_id = execution_data["thread_id"]
-        # prompt = execution_data["prompt"]
+        executor = WorkflowExecutor(workflow.blueprint)
+        execution_data = await executor.execute(inputs, owner)
         
-        # Temporary fallback until WorkflowExecutor is implemented
-        await websocket.send_json({"node": "__error__", "error": "WorkflowExecutor not implemented yet"})
-        return
+        thread_id = execution_data["thread_id"]
+        prompt = execution_data["prompt"]
         
         logger.info(f"Executing workflow {workflow_id} as thread {thread_id}")
         
@@ -3007,7 +3045,7 @@ async def websocket_chat(websocket: WebSocket):
             if not message_type and prompt:
                 # Check if there's a pending confirmation
                 try:
-                    from orchestrator.graph import graph
+                    from backend.orchestrator.graph import graph
                     config = {"configurable": {"thread_id": thread_id}}
                     current_state = graph.get_state(config)
                     
@@ -3302,6 +3340,10 @@ async def websocket_chat(websocket: WebSocket):
             finally:
                 # Stop polling - always cleanup regardless of success/failure
                 polling_active = False
+                try:
+                    await polling_task
+                except:
+                    pass
 
             # Check if workflow is paused for user input
             if final_state.get("pending_user_input"):
@@ -3365,7 +3407,7 @@ async def websocket_chat(websocket: WebSocket):
                     logger.error(f"Missing owner_id for thread {thread_id}. Conversation will NOT be saved.")
                     # Don't raise error - allow workflow to continue, just log the issue
                 else:
-                    from orchestrator.graph import save_conversation_history
+                    from backend.orchestrator.graph import save_conversation_history
                     
                     owner_obj = {"user_id": owner_id}
                     final_state["owner"] = owner_obj
@@ -3377,7 +3419,7 @@ async def websocket_chat(websocket: WebSocket):
             
             # Get serializable state with error handling
             try:
-                from orchestrator.graph import get_serializable_state
+                from backend.orchestrator.graph import get_serializable_state
                 serializable_state = get_serializable_state(final_state, thread_id)
             except Exception as serialize_err:
                 logger.warning(f"Failed to serialize complete state for thread {thread_id}: {serialize_err}")
@@ -3461,187 +3503,8 @@ async def websocket_chat(websocket: WebSocket):
         else:
             logger.debug(f"Could not send error message (connection closed) for thread_id {thread_id}")
 
-@app.post("/api/agents/register", response_model=AgentCard)
-def register_or_update_agent(agent_data: AgentCard, response: Response, db: Session = Depends(get_db)):
-    db_agent = db.query(Agent).options(
-        joinedload(Agent.capability_vectors),
-        joinedload(Agent.endpoints).joinedload(AgentEndpoint.parameters) # Eager load parameters
-    ).get(agent_data.id)
-
-    agent_dict = agent_data.model_dump(
-        mode='json',
-        exclude={"endpoints"},
-        exclude_none=True,
-        exclude_unset=True
-    )
-
-    if db_agent:
-        for key, value in agent_dict.items():
-            setattr(db_agent, key, value)
-
-        # Clear old related data
-        db_agent.capability_vectors.clear()
-        db_agent.endpoints.clear()
-        response.status_code = status.HTTP_200_OK
-    else:
-        db_agent = Agent(**agent_dict)
-        db.add(db_agent)
-        response.status_code = status.HTTP_201_CREATED
-
-    if agent_data.capabilities:
-        sentence_model = get_sentence_transformer_model()
-        for cap_text in agent_data.capabilities:
-            embedding_vector = sentence_model.encode(cap_text)
-            new_capability = AgentCapability(
-                agent=db_agent,
-                capability_text=cap_text,
-                embedding=embedding_vector
-            )
-            db.add(new_capability)
-
-    # *** START: CORRECTED ENDPOINT AND PARAMETER LOGIC ***
-    if agent_data.endpoints:
-        for endpoint_data in agent_data.endpoints:
-            # Create the main endpoint record
-            new_endpoint = AgentEndpoint(
-                agent=db_agent,
-                endpoint=str(endpoint_data.endpoint),
-                http_method=endpoint_data.http_method,
-                description=endpoint_data.description
-            )
-            db.add(new_endpoint)
-
-            # Create and associate its parameters in a nested loop
-            if endpoint_data.parameters:
-                for param_data in endpoint_data.parameters:
-                    new_param = EndpointParameter(
-                        endpoint=new_endpoint,  # Link to the endpoint being created
-                        name=param_data.name,
-                        description=param_data.description,
-                        param_type=param_data.param_type,
-                        required=param_data.required,
-                        default_value=param_data.default_value
-                    )
-                    db.add(new_param)
-    # *** END: CORRECTED ENDPOINT AND PARAMETER LOGIC ***
-
-    db.commit()
-    db.refresh(db_agent)
-
-    return AgentCard.model_validate(db_agent)
-
-@app.get("/api/agents/search", response_model=List[AgentCard])
-def search_agents(
-    db: Session = Depends(get_db),
-    capabilities: List[str] = Query(..., description="A list of task names to find capable agents for."),
-    max_price: Optional[float] = Query(None),
-    min_rating: Optional[float] = Query(None),
-    similarity_threshold: float = Query(0.5, description="Cosine distance threshold (lower is stricter).")
-):
-    """
-    Finds active agents that match ANY of the specified capabilities using vector search.
-    Falls back to text search if vector search fails.
-    """
-    if not capabilities:
-        return []
-
-    try:
-        sentence_model = get_sentence_transformer_model()
-        conditions = []
-        for task_name in capabilities:
-            query_vector = sentence_model.encode(task_name)
-            # Subquery to find agent_ids for this one task
-            subquery = select(AgentCapability.agent_id).where(
-                AgentCapability.embedding.cosine_distance(query_vector) < similarity_threshold
-            )
-            conditions.append(Agent.id.in_(subquery))
-
-        # Combine conditions with OR logic
-        query = db.query(Agent).options(
-            joinedload(Agent.endpoints).joinedload(AgentEndpoint.parameters) # Eager load parameters
-        ).filter(Agent.status == 'active').filter(or_(*conditions))
-
-        # Apply optional price and rating filters
-        if max_price is not None:
-            query = query.filter(Agent.price_per_call_usd <= max_price)
-        if min_rating is not None:
-            query = query.filter(Agent.rating >= min_rating)
-
-        return query.all()
-    
-    except Exception as e:
-        logger.warning(f"Vector search failed, falling back to text search: {e}")
-        # Fallback: text-based search on capabilities
-        query = db.query(Agent).options(
-            joinedload(Agent.endpoints).joinedload(AgentEndpoint.parameters)
-        ).filter(Agent.status == 'active')
-        
-        # Apply optional filters
-        if max_price is not None:
-            query = query.filter(Agent.price_per_call_usd <= max_price)
-        if min_rating is not None:
-            query = query.filter(Agent.rating >= min_rating)
-        
-        # Return all active agents as fallback
-        return query.all()
-
-@app.get("/api/agents/all", response_model=List[AgentCard])
-def get_all_agents(db: Session = Depends(get_db)):
-    """
-    Returns all agents in the agents table as a JSON list.
-    """
-    return db.query(Agent).options(
-        joinedload(Agent.endpoints).joinedload(AgentEndpoint.parameters) # Eager load parameters
-    ).all()
-
-@app.get("/api/agents/{agent_id}", response_model=AgentCard)
-def get_agent(agent_id: str, db: Session = Depends(get_db)):
-    db_agent = db.query(Agent).options(
-        joinedload(Agent.endpoints).joinedload(AgentEndpoint.parameters) # Eager load parameters
-    ).get(agent_id)
-    if not db_agent:
-        raise HTTPException(status_code=404, detail="Agent not found!")
-    return db_agent
-
-@app.post("/api/agents/{agent_id}/rate", response_model=AgentCard)
-def rate_agent(agent_id: str, rating: float = Body(..., embed=True), db: Session = Depends(get_db)):
-    """
-    Update the agent's rating as the mean of the current rating and the new user rating.
-    """
-    db_agent = db.get(Agent, agent_id)
-    if not db_agent:
-        raise HTTPException(status_code=404, detail="Agent not found!")
-    if rating < 0 or rating > 5:
-        raise HTTPException(status_code=400, detail="Rating must be between 0 and 5.")
-    # Calculate new mean rating
-    current_rating = db_agent.rating if db_agent.rating is not None else 0.0
-    count = db_agent.rating_count if db_agent.rating_count is not None else 0
-    new_rating = ((current_rating * count) + rating) / (count + 1) if count > 0 else rating
-    db_agent.rating = float(new_rating)
-    db_agent.rating_count = int(count + 1)
-    db.commit()
-    db.refresh(db_agent)
-    return AgentCard.model_validate(db_agent)
-
-@app.post("/api/agents/by-name/{agent_name}/rate", response_model=AgentCard)
-def rate_agent_by_name(agent_name: str, rating: float = Body(..., embed=True), db: Session = Depends(get_db)):
-    """
-    Update the agent's rating using the agent's name as a fallback.
-    """
-    db_agent = db.query(Agent).filter(Agent.name == agent_name).first()
-    if not db_agent:
-        raise HTTPException(status_code=404, detail="Agent not found!")
-    if rating < 0 or rating > 5:
-        raise HTTPException(status_code=400, detail="Rating must be between 0 and 5.")
-    # Calculate new mean rating
-    current_rating = db_agent.rating if db_agent.rating is not None else 0.0
-    count = db_agent.rating_count if db_agent.rating_count is not None else 0
-    new_rating = ((current_rating * count) + rating) / (count + 1) if count > 0 else rating
-    db_agent.rating = float(new_rating)
-    db_agent.rating_count = int(count + 1)
-    db.commit()
-    db.refresh(db_agent)
-    return AgentCard.model_validate(db_agent)
+# NOTE: Agent routes (/api/agents/*) are defined in routers/agents_router.py
+# and included via app.include_router(agents_router.router)
 
 @app.get("/api/health")
 def health_check():
@@ -3914,10 +3777,8 @@ agent_status = {}  # {agent_name: {'port': int, 'process': subprocess.Popen, 'st
 agent_status_lock = asyncio.Lock()
 
 def cleanup_agents():
-    """Stop all agent processes — both tracked handles and orphaned port holders"""
+    """Stop all agent processes"""
     global agent_processes
-    
-    # 1. Kill tracked process handles (from current session)
     for process in agent_processes:
         try:
             process.terminate()
@@ -3929,45 +3790,6 @@ def cleanup_agents():
                 pass
     agent_processes = []
     agent_status.clear()
-
-
-def _kill_process_on_port(port: int):
-    """Kill any process listening on the given port (handles orphaned agents after reload)"""
-    if platform.system() == "Windows":
-        try:
-            result = subprocess.run(
-                ["netstat", "-ano"],
-                capture_output=True, text=True, timeout=5
-            )
-            for line in result.stdout.splitlines():
-                # Match lines like: TCP  0.0.0.0:9000  0.0.0.0:0  LISTENING  12345
-                if f":{port}" in line and "LISTENING" in line:
-                    parts = line.split()
-                    pid = int(parts[-1])
-                    if pid > 0:
-                        try:
-                            subprocess.run(["taskkill", "/F", "/PID", str(pid)],
-                                         capture_output=True, timeout=5)
-                            logger.info(f"  Killed orphaned process on port {port} (pid={pid})")
-                        except:
-                            pass
-        except:
-            pass
-    else:
-        try:
-            result = subprocess.run(
-                ["lsof", "-ti", f":{port}"],
-                capture_output=True, text=True, timeout=5
-            )
-            for pid_str in result.stdout.strip().split('\n'):
-                if pid_str.strip():
-                    try:
-                        os.kill(int(pid_str.strip()), 9)
-                        logger.info(f"  Killed orphaned process on port {port} (pid={pid_str.strip()})")
-                    except:
-                        pass
-        except:
-            pass
 
 async def wait_for_agent_ready(agent_name: str, port: int, timeout: float = 30.0) -> bool:
     """
@@ -4037,13 +3859,7 @@ async def check_agent_health_background():
                         pass
 
 def start_agents_async():
-    """
-    Start agent servers as subprocesses without blocking main.py startup.
-    
-    Uses SKILL.md files as source of truth for agent discovery and port config.
-    Each agent runs as a separate uvicorn process from the backend directory.
-    Agents are idle (sleep-state) until the orchestrator sends them HTTP requests.
-    """
+    """Start agents asynchronously without blocking main.py startup"""
     global agent_processes, agent_status
     
     # Clean up any existing agents first
@@ -4066,108 +3882,48 @@ def start_agents_async():
     if skip_agents:
         logger.info(f"SKIP_AGENTS configured: {skip_agents}")
 
-    # UAP: Discover agents by scanning for SKILL.md + entry script pairs
-    # Each tuple: (agent_name, script_relative_to_agents_dir)
-    import yaml
-    agent_configs = []  # List of (name, script_path, port)
-    
-    for item in os.listdir(agents_dir):
-        item_path = os.path.join(agents_dir, item)
-        if not os.path.isdir(item_path):
-            continue
-        
-        skill_file = os.path.join(item_path, "SKILL.md")
-        if not os.path.exists(skill_file):
-            continue
-        
-        # Parse port from SKILL.md frontmatter
-        try:
-            with open(skill_file, 'r', encoding='utf-8') as f:
-                content = f.read()
-            if content.startswith('---'):
-                parts = content.split('---', 2)
-                if len(parts) >= 3:
-                    config = yaml.safe_load(parts[1])
-                    port = config.get('port')
-                    if not port:
-                        logger.warning(f"No port in SKILL.md for {item}, skipping")
-                        continue
-                    port = int(port)
-                else:
-                    continue
-            else:
-                continue
-        except Exception as e:
-            logger.warning(f"Failed to parse SKILL.md for {item}: {e}")
-            continue
-        
-        # Determine module path for `python -m` invocation
-        # All agents use __init__.py with if __name__ == "__main__" blocks
-        init_file = os.path.join(item_path, "__init__.py")
-        
-        module_path = None
-        
-        if os.path.exists(init_file):
-            # Check if __init__.py has uvicorn entry point
-            with open(init_file, 'r', encoding='utf-8') as f:
-                init_content = f.read()
-            if 'if __name__' in init_content and 'uvicorn' in init_content:
-                module_path = f"agents.{item}"
-        
-        if module_path:
-            agent_configs.append((item, module_path, port))
-        else:
-            logger.warning(f"No runnable entry point found for {item} (missing if __name__ block in __init__.py), skipping")
+    agent_files = [f for f in os.listdir(agents_dir) if f.endswith("_agent.py")]
+    logger.info(f"Starting {len(agent_files)} agent server(s)...")
 
-    logger.info(f"Starting {len(agent_configs)} agent server(s)...")
-
-    # Kill any orphaned agent processes from previous reload cycles
-    for _, _, port in agent_configs:
-        _kill_process_on_port(port)
-
-    for agent_name, module_path, port in agent_configs:
+    for agent_file in agent_files:
+        agent_path = os.path.join(agents_dir, agent_file)
+        agent_name = agent_file.replace('.py', '')
+        port = None
+        
         # Check if this agent should be skipped (for running in separate terminal)
-        if agent_name.lower() in skip_agents:
+        if agent_name.lower() in skip_agents or agent_file.lower() in skip_agents:
             logger.info(f"Skipping {agent_name} (in SKIP_AGENTS, run it separately)")
             continue
         
         try:
-            log_path = os.path.join(logs_dir, f"{agent_name}.log")
+            # Extract port from agent file
+            with open(agent_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+                match = re.search(r'port\s*=\s*int\(os\.getenv\([^,]+,\s*(\d+)\)', content)
+                if not match:
+                    match = re.search(r"port\s*=\s*(\d+)", content)
+                if match:
+                    port = int(match.group(1))
 
-            # Start agent using `python -m <module>` from the backend directory
-            # -m preserves package context so relative imports work correctly
-            # cwd=project_root (backend/) ensures `from services.X`, `from utils.X` resolve
-            #
-            # PYTHONPATH must include:
-            #   1. project_root (backend/) — for `from services.X`, `from utils.X`, `from models import`
-            #   2. parent of project_root — for `from backend.services.X` (used by agent llm.py files)
-            env = os.environ.copy()
-            parent_of_backend = os.path.dirname(project_root)
-            extra_paths = os.pathsep.join([project_root, parent_of_backend])
-            env["PYTHONPATH"] = extra_paths + os.pathsep + env.get("PYTHONPATH", "")
-            
+            if port is None:
+                continue
+
+            log_path = os.path.join(logs_dir, f"{agent_file}.log")
+
+            # Start the agent process
             with open(log_path, 'w') as log_file:
-                cmd = [
-                    sys.executable,
-                    "-c",
-                    f"from {module_path} import run_agent; run_agent()"
-                ]
                 if platform.system() == "Windows":
                     process = subprocess.Popen(
-                        cmd,
+                        [sys.executable, agent_path],
                         stdout=log_file,
                         stderr=log_file,
-                        cwd=project_root,
-                        env=env,
                         creationflags=subprocess.CREATE_NO_WINDOW
                     )
                 else:
                     process = subprocess.Popen(
-                        cmd,
+                        [sys.executable, agent_path],
                         stdout=log_file,
                         stderr=log_file,
-                        cwd=project_root,
-                        env=env,
                         start_new_session=True
                     )
                 
@@ -4177,10 +3933,8 @@ def start_agents_async():
                     'process': process,
                     'status': 'starting'
                 }
-                logger.info(f"  → {agent_name} starting on port {port} via -m {module_path} (pid={process.pid})")
         
         except Exception as e:
-            logger.error(f"Failed to start {agent_name}: {e}")
             agent_status[agent_name] = {
                 'port': port,
                 'process': None,
@@ -4207,8 +3961,7 @@ if __name__ == "__main__":
         host="0.0.0.0",  # Changed from 127.0.0.1 to support both IPv4 and IPv6
         port=8000, 
         reload=True,
-        reload_includes=["*.py"],  # Watch all Python files (removed redundant patterns)
-        reload_excludes=["logs/*", "storage/*", "*.log"],  # Don't reload on agent log writes
+        reload_includes=["*.py", "orchestrator/*.py", "agents/*.py", "services/*.py", "routers/*.py"],  # Watch all Python files
         ws_ping_interval=20,  # Send ping every 20 seconds
         ws_ping_timeout=20,   # Wait 20 seconds for pong
         log_level="info"

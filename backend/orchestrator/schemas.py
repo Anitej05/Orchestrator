@@ -40,16 +40,6 @@ class TaskItem(BaseModel):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
-class BrainAction(BaseModel):
-    action_id: str = Field(..., description="Unique identifier for the action")
-    action_type: str = Field(..., description="Type of action to perform")
-    target_task: Optional[str] = Field(None, description="Associated task ID")
-    parameters: Dict[str, Any] = Field(
-        default_factory=dict, description="Action parameters"
-    )
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-
-
 class ActionResult(BaseModel):
     action_id: str = Field(..., description="Associated action ID")
     success: bool = Field(..., description="Whether the action succeeded")

@@ -1,14 +1,13 @@
 # In Orbimesh Backend/orchestrator/state.py
 
-from typing import Annotated, Any, List, Optional, Dict, Literal
+from typing import Annotated, Any, List, Optional, Dict
 from typing_extensions import TypedDict
 from langgraph.graph.message import add_messages
 from langchain_core.messages import BaseMessage
-import operator
 
 # Import the Pydantic models from the single source of truth: schemas.py
 # This resolves the circular import error.
-from schemas import (
+from backend.schemas import (
     Task,
     AgentCard, # This is a Pydantic model
     TaskAgentPair, # This is a Pydantic model
@@ -109,9 +108,32 @@ class State(TypedDict):
     # Error tracking
     error: Annotated[Optional[str], overwrite_reducer]
     failure_count: Annotated[int, overwrite_reducer] # Count of consecutive failed tasks
-    last_failure_id: Annotated[Optional[str], overwrite_reducer] # ID of the last failed task
     
     # Metadata
     thread_id: str
     user_id: str
     uploaded_files: Annotated[List[Dict], overwrite_reducer]
+    
+    # --- FILE TRACKING ---
+    # Files created by orchestrator during this conversation (persisted per thread)
+    created_files: Annotated[List[Dict], append_reducer]
+    # Path to orchestrator's workspace for this thread
+    orchestrator_workspace: Annotated[str, overwrite_reducer]
+    # Files in shared workspace (available across all conversations for this user)
+    shared_files: Annotated[List[Dict], overwrite_reducer]
+    # Path to shared workspace
+    shared_workspace: Annotated[str, overwrite_reducer]
+
+    # --- CANVAS REGISTRY ---
+    # Full canvas registry state (replaces old has_canvas/canvas_type/etc)
+    canvas_registry: Annotated[Optional[Dict], overwrite_reducer]
+    active_canvas_id: Annotated[Optional[str], overwrite_reducer]
+    # Backward compat — populated from active canvas
+    has_canvas: Annotated[bool, overwrite_reducer]
+    canvas_type: Annotated[Optional[str], overwrite_reducer]
+    canvas_content: Annotated[Optional[str], overwrite_reducer]
+    canvas_data: Annotated[Optional[Dict], overwrite_reducer]
+    canvas_title: Annotated[Optional[str], overwrite_reducer]
+    browser_view: Annotated[Optional[str], overwrite_reducer]
+    plan_view: Annotated[Optional[Any], overwrite_reducer]
+    current_view: Annotated[Optional[str], overwrite_reducer]

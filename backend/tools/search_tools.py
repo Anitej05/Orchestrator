@@ -31,24 +31,37 @@ def web_search_and_summarize(
     """
     try:
         from langchain_groq import ChatGroq
+        from dotenv import load_dotenv
+        
+        # Ensure .env is loaded (override=True so .env wins over stale system vars)
+        load_dotenv(override=True)
         
         api_key = os.getenv("GROQ_API_KEY")
         if not api_key:
             return {"error": "GROQ_API_KEY not configured", "answer": None, "sources": []}
         
         # Use Groq's compound-mini model for web search
-        llm = ChatGroq(model="groq/compound-mini", api_key=api_key)
+        # max_tokens prevents 413 errors from oversized responses
+        llm = ChatGroq(
+            model="groq/compound-mini",
+            api_key=api_key,
+            max_tokens=2000,
+        )
         
         # Generate response based on query
-        response = llm.invoke([HumanMessage(content=f"""You are a helpful search assistant. Answer the following query based on your knowledge.
+        response = llm.invoke([HumanMessage(content=f"""You are a helpful search assistant. Answer the following query concisely.
 
 Query: {query}
 
-Provide a helpful, accurate answer. If you're not certain about current events or real-time data, acknowledge that your information may not be up to date.""")])
+Provide a helpful, accurate, CONCISE answer (under 500 words). Focus on key facts and data points. If you're not certain about current events, acknowledge that.""")])
         
         answer = response.content
         if not isinstance(answer, str):
             answer = str(answer)
+        
+        # Truncate very long responses to prevent downstream prompt bloat
+        if len(answer) > 3000:
+            answer = answer[:3000] + "\n\n[Response truncated for brevity]"
         
         return {
             "answer": answer,
@@ -58,9 +71,28 @@ Provide a helpful, accurate answer. If you're not certain about current events o
         }
 
     except Exception as e:
+        error_str = str(e)
+        # On 413 (too large), return a simpler response
+        if "413" in error_str:
+            try:
+                llm_fallback = ChatGroq(
+                    model="llama-3.3-70b-versatile",
+                    api_key=api_key,
+                    max_tokens=1000,
+                )
+                response = llm_fallback.invoke([HumanMessage(content=f"Briefly answer: {query}")])
+                return {
+                    "answer": response.content[:2000],
+                    "sources": [],
+                    "query": query,
+                    "note": "Fallback response due to size limits."
+                }
+            except Exception:
+                pass
+        
         # Return error dict instead of raising - prevents infinite retries
         return {
-            "error": f"Search failed: {str(e)}",
+            "error": f"Search failed: {error_str}",
             "answer": None,
             "sources": [],
             "query": query

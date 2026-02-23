@@ -75,14 +75,17 @@ DATAFRAME CONTEXT:
 
 RULES:
 1. The DataFrame is available as 'df'
-2. Output ONLY the code, no explanations
-3. Always assign result back to 'df' if modifying
-4. Use .copy() when creating subsets to avoid SettingWithCopyWarning
-5. Handle missing values gracefully
-6. Never use inplace=True for operations that return None
-7. DO NOT assume existence of other variables (like df_last, df2) - only 'df' exists
-8. To SAVE a file, use: `path = save_spreadsheet(df, 'filename.xlsx')` (returns the path)
-9. If saving, assign the path to 'result' (e.g. `result = save_spreadsheet(df, 'file.xlsx')`)
+2. 'pd' (pandas) and 'np' (numpy) are ALREADY IMPORTED — do NOT use import statements
+3. Output ONLY the code, no explanations
+4. Always assign result back to 'df' if modifying
+5. Use .copy() when creating subsets to avoid SettingWithCopyWarning
+6. Handle missing values gracefully
+7. Never use inplace=True for operations that return None
+8. DO NOT assume existence of other variables (like df_last, df2) - only 'df' exists
+9. To SAVE a file, use: `path = save_spreadsheet(df, 'filename.xlsx')` (returns the path)
+10. If saving, assign the path to 'result' (e.g. `result = save_spreadsheet(df, 'file.xlsx')`)
+11. NEVER use import, __import__, or exec — all needed libraries are pre-loaded
+12. For conditionals, use np.where(condition, true_val, false_val) or df.apply()
 
 OUTPUT FORMAT:
 ```python
@@ -370,16 +373,20 @@ OUTPUT JSON:
         data_preview = context.get('data_preview')
         history = context.get('history', [])
         
-        data_context = f"""
-**DATA IS ALREADY LOADED**
-- Available columns: {columns[:20] if columns else 'None'}
-"""
-        if data_preview:
+        # CRITICAL FIX: Only say data is loaded if has_data is actually True
+        if has_data and data_preview:
             data_context = f"""
 **DATA IS ALREADY LOADED**
 DATA PREVIEW:
 {data_preview}
 """
+        elif has_data:
+            data_context = f"""
+**DATA IS ALREADY LOADED**
+- Available columns: {columns[:20] if columns else 'None'}
+"""
+        else:
+            data_context = "**NO DATA LOADED YET - You MUST include a load_file step first**"
 
         prompt = f"""You are a spreadsheet task planner. Break complex requests into simple executable steps.
 

@@ -341,10 +341,9 @@ Respond with JSON: {{"decision": "...", "multiplier": 2.0, "reasoning": "..."}}"
                         try:
                             actions.append(AtomicAction.model_validate(act))
                         except Exception:
-                             # Soft fallback
                              try:
                                 actions.append(AtomicAction(name=act['name'], params=act.get('params',{})))
-                             except: pass
+                             except Exception: pass
                 elif 'action' in data: # Old format support
                      actions.append(AtomicAction(name=data.get('action'), params=data.get('params', {})))
 

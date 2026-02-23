@@ -9,6 +9,7 @@ Hands is stateless - it takes an action and parameters, executes, returns result
 
 import logging
 import json
+import os
 import time
 import asyncio
 from typing import Dict, Any, Optional, List
@@ -18,13 +19,15 @@ from langchain_core.runnables import RunnableConfig
 
 from .schemas import ActionResult, TaskStatus
 from .content_orchestrator import hooks
-from utils.retry_utils import RetryManager
-from services.agent_registry_service import agent_registry
-from services.tool_registry_service import tool_registry
-from services.telemetry_service import telemetry_service
-from services.code_sandbox_service import code_sandbox
-from services.terminal_service import terminal_service
-from services.credential_service import get_credentials_for_headers
+from .workspace_manager import get_workspace_manager
+from backend.utils.retry_utils import RetryManager
+from backend.services.agent_registry_service import agent_registry
+from backend.services.tool_registry_service import tool_registry
+from backend.services.telemetry_service import telemetry_service
+from backend.services.code_sandbox_service import code_sandbox
+from backend.services.terminal_service import terminal_service
+from backend.services.credential_service import get_credentials_for_headers
+from services.canvas_service import CanvasService
 from database import SessionLocal
 
 logger = logging.getLogger(__name__)
@@ -38,7 +41,7 @@ class Hands:
 
     def __init__(self):
         self.timeout_map = {
-            "agent": 60.0,
+            "agent": 120.0,
             "tool": 30.0,
             "terminal": 30.0,
             "python": 60.0,
@@ -109,6 +112,9 @@ class Hands:
             result = await self._execute_parallel(parallel_actions, user_id, start_time)
             return self._update_state_with_result(state, result, config)
 
+        # Initialize workspace manager for file tracking
+        workspace_manager = get_workspace_manager(thread_id)
+        
         # === Direct execution actions ===
         if action_type == "agent":
             result = await self._execute_agent(
@@ -118,16 +124,33 @@ class Hands:
             result = await self._execute_tool(resource_id, payload, start_time)
         elif action_type == "terminal":
             result = await self._execute_terminal(payload, start_time)
+            # Scan for files created by terminal command
+            new_files = workspace_manager.scan_for_new_files(created_by="terminal")
+            if new_files:
+                logger.info(f"📝 Terminal created {len(new_files)} new file(s): {[f.file_name for f in new_files]}")
         elif action_type == "python":
-            result = await self._execute_python(payload, start_time)
+            result = await self._execute_python(payload, start_time, thread_id, state)
+            # Scan for files created by Python code
+            new_files = workspace_manager.scan_for_new_files(created_by="python")
+            if new_files:
+                logger.info(f"📝 Python created {len(new_files)} new file(s): {[f.file_name for f in new_files]}")
         elif action_type == "skip" or action_type == "finish":
             # Return a valid result object even for skip/finish to ensure state consistency
+            if action_type == "finish":
+                user_response = decision_dict.get("user_response", "")
+                output_dict = {"message": user_response}
+                # Auto-detect canvas from user_response content
+                canvas = self._auto_detect_canvas_from_text(user_response)
+                if canvas:
+                    output_dict["canvas_display"] = canvas
+                    logger.info(f"🎨 Hands: Auto-detected canvas in finish response")
+            else:
+                output_dict = {"skipped": True}
+
             result = ActionResult(
                 action_id=f"{action_type}_{int(time.time())}",
                 success=True,
-                output={"message": decision_dict.get("user_response")}
-                if action_type == "finish"
-                else {"skipped": True},
+                output=output_dict,
                 execution_time_ms=(time.time() - start_time) * 1000,
             )
             return self._update_state_with_result(state, result, config)
@@ -140,6 +163,8 @@ class Hands:
             )
 
         # Post-process through CMS hooks if success
+        # IMPORTANT: Save raw output BEFORE CMS compression replaces it with _content_ref
+        raw_output = result.output  # Preserve uncompressed data
         if result.success and result.output:
             processed_output = await hooks.on_task_complete(
                 resource_id or action_type,
@@ -147,6 +172,9 @@ class Hands:
                 thread_id,
             )
             result.output = processed_output
+        
+        # Attach raw output for downstream use (e.g., Python sandbox injection)
+        result._raw_output = raw_output
 
         return self._update_state_with_result(state, result, config)
 
@@ -287,118 +315,75 @@ class Hands:
     async def _execute_agent(
         self, agent_id: str, payload: Dict[str, Any], user_id: str, start_time: float
     ) -> ActionResult:
-        """Execute an agent call with robust retry and credential handling."""
-        agents = agent_registry.list_active_agents()
-        # Case-insensitive match for name or exact match for ID
-        agent = next(
-            (
-                a
-                for a in agents
-                if a["name"].lower() == agent_id.lower() or a["id"] == agent_id
-            ),
-            None,
-        )
-
-        if not agent:
-            return ActionResult(
-                action_id=f"agent_{agent_id}",
-                success=False,
-                error_message=f"Agent '{agent_id}' not found",
-                execution_time_ms=(time.time() - start_time) * 1000,
-            )
-
+        """
+        Execute an agent task with on-demand spawning.
+        
+        The agent is automatically spawned if not running, executes the task,
+        and can be terminated after completion based on policy.
+        """
+        from backend.services.agent_manager import get_agent_manager
+        
+        # Get agent info for logging/telemetry
+        agent = agent_registry.find_agent(agent_id)
+        agent_name = agent.get("name", agent_id) if agent else agent_id
+        
+        # Prepare task
         instruction = payload.get("instruction", payload.get("prompt", ""))
-
-        # Get absolute URL from registry
-        db = SessionLocal()
-        try:
-            base_url = agent_registry.get_agent_url(agent["id"], agent["name"], db)
-            auth_headers = get_credentials_for_headers(
-                db, agent["id"], user_id, agent.get("type", "http_rest")
-            )
-        finally:
-            db.close()
-
-        if not base_url:
-            logger.error(
-                f"No base URL configured for agent '{agent['name']}' (ID: {agent_id}). Check connection_config or agent_entries file."
-            )
-            return ActionResult(
-                action_id=f"agent_{agent_id}",
-                success=False,
-                error_message=f"Agent '{agent['name']}' has no configured base URL. Cannot execute.",
-                execution_time_ms=(time.time() - start_time) * 1000,
-            )
-
-        url = f"{base_url.rstrip('/')}/execute"
-
-        # Build UAP-compliant request payload
-        uap_request = {
-            "type": "execute",  # Explicitly set message type
-            "action": payload.get("action"),  # Extract action from payload (CRITICAL FIX)
+        task = {
             "prompt": instruction,
+            "action": payload.get("action"),
             "payload": payload.get("payload", {}),
             "task_id": payload.get("task_id"),
             "thread_id": payload.get("thread_id"),
+            "user_id": user_id,
         }
-        # Remove None values
-        uap_request = {k: v for k, v in uap_request.items() if v is not None}
-
-        async def _call_agent():
-            async with httpx.AsyncClient(timeout=self.timeout_map["agent"]) as client:
-                # UAP: All agents receive standardized request format
-                logger.debug(f"📤 Sending UAP Request to {url}: {json.dumps(uap_request, default=str)}")
-                resp = await client.post(
-                    url, json=uap_request, headers=auth_headers
-                )
-                logger.debug(f"📥 Received Response from {url}: Status={resp.status_code}, Body={resp.text[:500]}...") # Truncate for brevity
-                return resp
-
+        
         try:
-            response = await RetryManager.retry_async(
-                func=_call_agent,
-                max_retries=2,
-                operation_name=f"AgentCall({agent['name']})",
-                retry_on_status_codes=[502, 503, 504],
-            )
-
-            agent_result = response.json()
-            success = response.status_code == 200
-
-            # Deep validation
+            # Get agent manager and ensure it's initialized
+            agent_manager = get_agent_manager()
+            if not agent_manager._initialized:
+                await agent_manager.initialize()
+            
+            # Execute task (agent spawned automatically if needed)
+            logger.info(f"🚀 Executing task on {agent_name} (on-demand)")
+            agent_result = await agent_manager.execute(agent_id, task)
+            
+            # Determine success
+            success = agent_result.get("status") != "error"
             if isinstance(agent_result, dict):
-                if (
-                    agent_result.get("success") is False
-                    or agent_result.get("status") == "error"
-                ):
+                if agent_result.get("success") is False:
                     success = False
-
+            
+            # Log telemetry
             telemetry_service.log_agent_call(
-                agent["name"], success, (time.time() - start_time) * 1000
+                agent_name, success, (time.time() - start_time) * 1000
             )
-
-            # Extract error from Standard Response if available
+            
+            # Extract error message
             error_message = agent_result.get("error")
             if not error_message and "standard_response" in agent_result:
                 error_message = agent_result["standard_response"].get("error_message")
-
+            
+            logger.info(f"✅ Agent {agent_name} execution complete (success={success})")
+            
             return ActionResult(
-                action_id=f"agent_{agent['id']}",
+                action_id=f"agent_{agent_id}",
                 success=success,
                 output=agent_result,
                 error_message=error_message if not success else None,
                 execution_time_ms=(time.time() - start_time) * 1000,
             )
-
+            
         except Exception as e:
+            logger.error(f"❌ Agent {agent_name} execution failed: {e}")
             telemetry_service.log_agent_call(
-                agent["name"], False, (time.time() - start_time) * 1000
+                agent_name, False, (time.time() - start_time) * 1000
             )
-
+            
             return ActionResult(
-                action_id=f"agent_{agent['id']}",
+                action_id=f"agent_{agent_id}",
                 success=False,
-                error_message=f"Agent connection error: {str(e)}",
+                error_message=f"Agent execution error: {str(e)}",
                 execution_time_ms=(time.time() - start_time) * 1000,
             )
 
@@ -475,9 +460,9 @@ class Hands:
         )
 
     async def _execute_python(
-        self, payload: Dict[str, Any], start_time: float
+        self, payload: Dict[str, Any], start_time: float, thread_id: str = "default", state: Dict[str, Any] = None
     ) -> ActionResult:
-        """Execute Python code in the sandbox."""
+        """Execute Python code in the sandbox, tracking any created files."""
         code = payload.get("code", "")
         session_id = payload.get("session_id", "orchestrator_main")
 
@@ -489,15 +474,139 @@ class Hands:
                 execution_time_ms=(time.time() - start_time) * 1000,
             )
 
-        result = code_sandbox.execute_code(code, session_id=session_id)
+        # Get workspace path for this thread
+        workspace_manager = get_workspace_manager(thread_id)
+        workspace_path = str(workspace_manager.get_workspace_path())
+        
+        # === INJECT TOOL RESULTS FROM ACTION HISTORY ===
+        # Collect results from previous tool/agent actions so Python code can access them
+        tool_results = {}
+        if state:
+            action_history = state.get("action_history", [])
+            for entry in action_history:
+                if entry.get("success") and entry.get("action_type") in ("tool", "agent"):
+                    resource_id = entry.get("resource_id", "unknown")
+                    # Use result_raw (uncompressed) if available, fall back to result_full
+                    # result_raw has actual data; result_full may contain _content_ref from CMS
+                    result_data = entry.get("result_raw", entry.get("result_full", entry.get("result_summary", "")))
+                    
+                    # Extract the actual data from the result dict
+                    if isinstance(result_data, dict):
+                        # Tool results are usually wrapped: {'result': {...actual data...}}
+                        actual = result_data.get("result", result_data)
+                        tool_results[resource_id] = actual
+                    else:
+                        tool_results[resource_id] = result_data
+                        # Try to parse JSON string
+                        if isinstance(result_data, str) and result_data.strip().startswith('{'):
+                            try:
+                                tool_results[resource_id] = json.loads(result_data)
+                            except:
+                                pass
+            
+            # Save tool results as JSON files in workspace for file-based access
+            if tool_results:
+                for tool_name, data in tool_results.items():
+                    safe_name = tool_name.replace('/', '_').replace('\\', '_')
+                    filepath = os.path.join(workspace_path, f"{safe_name}_result.json")
+                    try:
+                        with open(filepath, 'w', encoding='utf-8') as f:
+                            json.dump(data, f, indent=2, default=str)
+                    except:
+                        pass
+        
+        # Modify code to ensure it saves to workspace directory
+        # Add workspace path context at the beginning of code
+        modified_code = f"""
+import os
+os.chdir(r'{workspace_path}')
+
+{code}
+"""
+
+        # Inject tool_results as context variables into the sandbox
+        context_vars = {"tool_results": tool_results} if tool_results else None
+
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None, 
+            lambda: code_sandbox.execute_code(modified_code, session_id=session_id, context_vars=context_vars)
+        )
 
         success = result.get("success", False)
-        output = result.get("stdout") or result.get("error") or "No output"
+        stdout = (result.get("stdout") or "").strip()
+        result_value = result.get("result")
+        error_value = result.get("error")
+
+        if stdout and result_value is not None:
+            output = f"{stdout}\nResult: {result_value}"
+        elif stdout:
+            output = stdout
+        elif result_value is not None:
+            output = str(result_value)
+        elif error_value:
+            output = str(error_value)
+        else:
+            output = "No output"
+
+        output_dict = {"result": output, "code": code}
+
+        # Auto-detect canvas for created files (.xlsx, .csv) in workspace
+        try:
+            workspace_manager = get_workspace_manager(thread_id)
+            workspace_path = workspace_manager.get_workspace_path()
+            import glob as glob_mod
+            for pattern in ["*.xlsx", "*.csv"]:
+                for fpath in glob_mod.glob(str(workspace_path / pattern)):
+                    from pathlib import Path
+                    p = Path(fpath)
+                    if p.suffix == ".csv":
+                        import csv, io
+                        content = p.read_text(encoding="utf-8", errors="replace")
+                        reader = csv.reader(io.StringIO(content))
+                        rows_all = list(reader)
+                        if rows_all:
+                            canvas = CanvasService.build_from_template(
+                                "spreadsheet_viewer",
+                                {"headers": rows_all[0], "rows": rows_all[1:50], "filename": p.name,
+                                 "metadata": {"rows_total": len(rows_all)-1, "rows_shown": min(49, len(rows_all)-1)}},
+                                title=p.name,
+                            )
+                            if canvas:
+                                output_dict["canvas_display"] = canvas.model_dump()
+                                logger.info(f"🎨 Hands: Auto-canvas for CSV {p.name}")
+                                break
+                    elif p.suffix == ".xlsx":
+                        try:
+                            import openpyxl
+                            wb = openpyxl.load_workbook(fpath, read_only=True)
+                            ws = wb.active
+                            rows_all = list(ws.iter_rows(values_only=True))
+                            wb.close()
+                            if rows_all:
+                                headers = [str(h) if h else "" for h in rows_all[0]]
+                                data_rows = [[str(c) if c is not None else "" for c in r] for r in rows_all[1:51]]
+                                canvas = CanvasService.build_from_template(
+                                    "spreadsheet_viewer",
+                                    {"headers": headers, "rows": data_rows, "filename": p.name,
+                                     "metadata": {"rows_total": len(rows_all)-1, "rows_shown": min(50, len(rows_all)-1)}},
+                                    title=p.name,
+                                )
+                                if canvas:
+                                    output_dict["canvas_display"] = canvas.model_dump()
+                                    logger.info(f"🎨 Hands: Auto-canvas for XLSX {p.name}")
+                                    break
+                        except Exception as e:
+                            logger.debug(f"Could not read xlsx {fpath}: {e}")
+                if "canvas_display" in output_dict:
+                    break
+        except Exception as e:
+            logger.debug(f"Auto-canvas file detection skipped: {e}")
 
         return ActionResult(
             action_id="python",
             success=success,
-            output=output,
+            output=output_dict,
             error_message=result.get("error") if not success else None,
             execution_time_ms=(time.time() - start_time) * 1000,
         )
@@ -512,60 +621,167 @@ class Hands:
         decision_dict = state.get("decision", {})
         iteration = state.get("iteration_count", 0)
         action_type = decision_dict.get("action_type", "unknown")
+        
+        # Get thread_id and user_id for workspace managers
+        thread_id = (config or {}).get("configurable", {}).get("thread_id", "default")
+        user_id = state.get("user_id", "default")
 
-        # Generate result summary (first 500 chars of string representation)
-        result_summary = self._generate_result_summary(result.output)
+        # Generate result summary from RAW output (before CMS compression)
+        # CRITICAL: result.output may be CMS-compressed (_content_ref), which makes
+        # the summary opaque to the Brain. Using raw output ensures the Brain can
+        # actually see what each action returned, preventing blind repetition loops.
+        raw_output = getattr(result, '_raw_output', result.output)
+        result_summary = self._generate_result_summary(raw_output)
 
         # Create action history entry for FULL context awareness
+        # For Python actions, extract a meaningful label from the code
+        resource_id = decision_dict.get("resource_id")
+        instruction = json.dumps(decision_dict.get("payload", {}))[:200]
+        if action_type == "python" and not resource_id:
+            code = (decision_dict.get("payload") or {}).get("code", "")
+            # Extract meaningful label: first comment, or first line of real code
+            resource_id = "code"
+            for line in code.splitlines():
+                line = line.strip()
+                if line.startswith("#"):
+                    resource_id = line[1:].strip()[:50]
+                    break
+                elif line and not line.startswith("import ") and not line.startswith("from "):
+                    resource_id = line[:50]
+                    break
+            # Show first 150 chars of actual code as instruction (more useful than JSON)
+            instruction = code[:150]
+        
         history_entry = {
             "iteration": iteration,
             "action_type": action_type,
-            "resource_id": decision_dict.get("resource_id"),
-            "instruction": json.dumps(decision_dict.get("payload", {}))[:200],
+            "resource_id": resource_id,
+            "instruction": instruction,
             "success": result.success,
             "result_summary": result_summary,
-            "result_full": result.output,  # Full result preserved
+            "result_full": result.output,  # CMS-compressed version for Brain context
+            "result_raw": raw_output,  # Uncompressed version for Python sandbox
             "timestamp": time.time(),
             "execution_time_ms": result.execution_time_ms,
         }
 
+        # === ARTIFACT CAPTURE: Record learnings from this execution ===
+        try:
+            from .artifact_store import get_artifact_store
+            artifact_store = get_artifact_store(user_id)
+            import asyncio
+            # Use fire-and-forget to avoid blocking the main pipeline
+            asyncio.ensure_future(artifact_store.capture_from_task(
+                action_entry=history_entry,
+                state=state,
+                objective=state.get("original_prompt", ""),
+            ))
+        except Exception as e:
+            logger.debug(f"Artifact capture skipped: {e}")
+
         existing_action_history = list(state.get("action_history", []))
+        
+        # Get workspace managers for file tracking
+        workspace_manager = get_workspace_manager(thread_id)
+        created_files = workspace_manager.list_files()
+        
+        # Get shared workspace
+        from .shared_workspace import get_shared_workspace_manager
+        shared_manager = get_shared_workspace_manager(user_id)
+        shared_files = shared_manager.list_files()
+        
         updates = {
             "execution_result": result.model_dump(),
             "error": result.error_message if not result.success else None,
             # Append to action history manually
             "action_history": existing_action_history + [history_entry],
+            # Track created files and workspace
+            "created_files": [f.to_dict() for f in created_files],
+            "orchestrator_workspace": str(workspace_manager.get_workspace_path()),
+            # Track shared files
+            "shared_files": [f.to_dict() for f in shared_files],
+            "shared_workspace": str(shared_manager.get_workspace_path()),
         }
 
-        # SOTA: Extract Canvas Data from Standard Response (UAP v2)
-        # This Bubbles up the canvas display to the top-level state so main.py can see it
-        if isinstance(result.output, dict) and "standard_response" in result.output:
-            std_response = result.output["standard_response"]
+        # === CANVAS REGISTRY: Extract and register canvases from agent responses ===
+        output = result.output
+        canvas = None
+
+        # Path 1: StandardResponse V2 — standard_response.canvas_display
+        std_response = None
+        if isinstance(output, dict) and "standard_response" in output:
+            std_response = output.get("standard_response")
+        elif hasattr(output, "standard_response") and output.standard_response:
+            std_response = output.standard_response
+
+        if std_response:
             if isinstance(std_response, dict) and "canvas_display" in std_response:
                 canvas = std_response["canvas_display"]
+            elif (
+                hasattr(std_response, "canvas_display") and std_response.canvas_display
+            ):
+                canvas = std_response.canvas_display
+
+        # Path 2: Direct canvas_display on output dict (Universal Agent, etc.)
+        if not canvas and isinstance(output, dict) and "canvas_display" in output:
+            canvas = output["canvas_display"]
+            if canvas:
+                logger.info(f"🎨 Hands: Found direct canvas_display in result output")
+
+        # Path 3: Nested in output.result dict
+        if not canvas and isinstance(output, dict):
+            nested_result = output.get("result")
+            if isinstance(nested_result, dict) and "canvas_display" in nested_result:
+                canvas = nested_result["canvas_display"]
                 if canvas:
-                    logger.info(f"🎨 Hands: Extracting canvas display from agent response")
-                    updates["has_canvas"] = True
-                    updates["canvas_type"] = canvas.get("canvas_type")
-                    updates["canvas_content"] = canvas.get("canvas_content")
-                    updates["canvas_data"] = canvas.get("canvas_data")
-                    updates["canvas_title"] = canvas.get("heading") or canvas.get("title")
-                    
-                    # For browser view specifically
-                    if canvas.get("canvas_type") == "html":
-                        updates["browser_view"] = canvas.get("canvas_content")
-                        updates["current_view"] = "browser"
-                    elif canvas.get("canvas_type") == "plan_graph":
-                        updates["plan_view"] = canvas.get("canvas_data") 
-                        updates["current_view"] = "plan"
+                    logger.info(f"🎨 Hands: Found canvas_display in nested result")
+
+        if canvas:
+            logger.info(f"🎨 Hands: Registering canvas in Canvas Registry")
+            c_type = canvas.get("canvas_type") if isinstance(canvas, dict) else canvas.canvas_type
+            c_content = canvas.get("canvas_content") if isinstance(canvas, dict) else canvas.canvas_content
+            c_data = canvas.get("canvas_data") if isinstance(canvas, dict) else canvas.canvas_data
+            c_title = (
+                (canvas.get("heading") or canvas.get("canvas_title"))
+                if isinstance(canvas, dict)
+                else (canvas.canvas_title or getattr(canvas, "heading", None))
+            )
+            c_confirm = (
+                canvas.get("requires_confirmation", False)
+                if isinstance(canvas, dict)
+                else getattr(canvas, "requires_confirmation", False)
+            )
+            c_confirm_msg = (
+                canvas.get("confirmation_message")
+                if isinstance(canvas, dict)
+                else getattr(canvas, "confirmation_message", None)
+            )
+            source_agent = decision_dict.get("resource_id") or action_type
+            canvas_id = f"{source_agent}_{c_type}_{int(time.time())}"
+
+            from backend.services.canvas_registry import get_canvas_registry
+            registry = get_canvas_registry(thread_id)
+            registry.register_sync(
+                canvas_id=canvas_id,
+                canvas_type=c_type or "unknown",
+                source_agent=source_agent,
+                canvas_data=c_data,
+                canvas_content=c_content,
+                canvas_title=c_title,
+                requires_confirmation=c_confirm,
+                confirmation_message=c_confirm_msg,
+            )
+            registry_state = registry.get_registry_state()
+            updates["canvas_registry"] = registry_state.model_dump()
+            updates["active_canvas_id"] = registry.get_active_id()
+            compat = registry.get_backward_compat_fields()
+            updates.update(compat)
 
         if not result.success:
             failure_count = state.get("failure_count", 0) + 1
             updates["failure_count"] = failure_count
-            updates["last_failure_id"] = result.action_id
         else:
             updates["failure_count"] = 0
-            updates["last_failure_id"] = None
 
         current_task_id = state.get("current_task_id")
         todo_list = state.get("todo_list", [])
@@ -609,7 +825,9 @@ class Hands:
         reasoning = decision.get("phase_goal_verified") or "Phase goal met"
 
         if not execution_plan or not current_phase_id:
-            logger.warning("⚠️ Phase completion requested but no active plan/phase found.")
+            logger.warning(
+                "⚠️ Phase completion requested but no active plan/phase found."
+            )
             return {}
 
         # Find current phase index
@@ -624,39 +842,42 @@ class Hands:
         if not current_phase:
             return {}
 
-        logger.info(f"✅ Phase '{current_phase.get('name')}' EXPLICITLY completed by Brain.")
+        logger.info(
+            f"✅ Phase '{current_phase.get('name')}' EXPLICITLY completed by Brain."
+        )
 
         # update plan
         new_plan = list(execution_plan)
         new_plan[current_idx] = {
             **current_phase,
             "status": "completed",
-            "result_summary": reasoning
+            "result_summary": reasoning,
         }
 
         # Find next phase
         next_phase_id = None
         # Simple logic: find first pending phase that depends on this one, or just next in list if linear
         # But we should respect dependencies.
-        
+
         # Get set of all completed phases (including this one)
-        completed_ids = {p.get("phase_id") for p in new_plan if p.get("status") in ("completed", "skipped")}
-        
-        for phase in new_plan:
-             pid = phase.get("phase_id")
-             if pid in completed_ids:
-                 continue
-             
-             # Check dependencies
-             deps = phase.get("depends_on", [])
-             if not deps or all(d in completed_ids for d in deps):
-                 next_phase_id = pid
-                 break
-        
-        updates = {
-            "execution_plan": new_plan,
-            "current_phase_id": next_phase_id
+        completed_ids = {
+            p.get("phase_id")
+            for p in new_plan
+            if p.get("status") in ("completed", "skipped")
         }
+
+        for phase in new_plan:
+            pid = phase.get("phase_id")
+            if pid in completed_ids:
+                continue
+
+            # Check dependencies
+            deps = phase.get("depends_on", [])
+            if not deps or all(d in completed_ids for d in deps):
+                next_phase_id = pid
+                break
+
+        updates = {"execution_plan": new_plan, "current_phase_id": next_phase_id}
 
         if next_phase_id:
             logger.info(f"➡ Advancing to phase: {next_phase_id}")
@@ -798,7 +1019,9 @@ class Hands:
         if isinstance(output, dict):
             # UAP v2: Check for StandardAgentResponse summary FIRST
             # This is the dedicated summary specifically for the Orchestrator Brain
-            if "standard_response" in output and isinstance(output["standard_response"], dict):
+            if "standard_response" in output and isinstance(
+                output["standard_response"], dict
+            ):
                 std_summary = output["standard_response"].get("summary")
                 if std_summary:
                     return std_summary[:max_length]
@@ -806,11 +1029,66 @@ class Hands:
             # Extract key fields for summary (Legacy fallback)
             summary_parts = []
             for key in ["result", "message", "data", "response", "output"]:
-                if key in output and key != "standard_response": # Avoid recursing into standard_response
-                    val = str(output[key])[:200]
+                if (
+                    key in output and key != "standard_response"
+                ):  # Avoid recursing into standard_response
+                    val = str(output[key])[:400]
                     summary_parts.append(f"{key}: {val}")
             if summary_parts:
                 return "; ".join(summary_parts)[:max_length]
             return json.dumps(output, default=str)[:max_length]
 
         return str(output)[:max_length]
+
+    def _auto_detect_canvas_from_text(self, text: str) -> dict | None:
+        """
+        Auto-detect structured content in text and return a canvas_display dict.
+        
+        Detection rules (in priority order):
+        1. Code block with 5+ lines → code_viewer canvas
+        2. Long markdown (500+ chars) with headers → document_viewer canvas
+        
+        Returns canvas_display dict or None.
+        """
+        import re
+
+        if not text or not isinstance(text, str):
+            return None
+
+        try:
+            # 1. Code block detection — look for ```lang\n...``` with 5+ lines
+            code_match = re.search(r'```(\w+)?\n(.*?)```', text, re.DOTALL)
+            if code_match:
+                lang = code_match.group(1) or 'python'
+                code = code_match.group(2).strip()
+                if code and code.count('\n') >= 4:
+                    canvas = CanvasService.build_from_template(
+                        "code_viewer",
+                        {"code": code, "language": lang},
+                        title=f"Code ({lang})",
+                    )
+                    if canvas:
+                        return canvas.model_dump()
+
+            # 2. Long markdown with structure → document_viewer
+            has_headers = bool(re.search(r'^##?\s+', text, re.MULTILINE))
+            has_tables = '|---' in text or '| ---' in text
+            is_long = len(text) > 500
+
+            if is_long and (has_headers or has_tables):
+                # Extract a title from the first header
+                title_match = re.search(r'^#\s+(.+)', text, re.MULTILINE)
+                title = title_match.group(1).strip() if title_match else "Document"
+                canvas = CanvasService.build_from_template(
+                    "document_viewer",
+                    {"content": text, "title": title, "status": "created"},
+                    title=title,
+                )
+                if canvas:
+                    return canvas.model_dump()
+
+        except Exception as e:
+            logger.debug(f"Auto-detect canvas failed (non-fatal): {e}")
+
+        return None
+
