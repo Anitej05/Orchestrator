@@ -199,8 +199,48 @@ class AgentCredential(Base):
     agent = relationship("Agent", back_populates="credentials")
 
 
-# NOTE: UserConnection and ConnectionLog models removed — tables dropped in migration e7a71c4bf948.
-# composio_auth.py still references them but is dead code (Composio integration deprecated).
+# ============================================================================
+# INTEGRATIONS / COMPOSIO OAUTH TABLES
+# ============================================================================
+
+class UserConnection(Base):
+    """
+    Stores OAuth connection metadata for external services (Composio).
+    Links users to external app connections (Gmail, Zoho Books, etc.)
+    """
+    __tablename__ = "user_connections"
+    
+    id = Column(String, primary_key=True)
+    user_id = Column(String(255), nullable=False, index=True)
+    app_slug = Column(String(100), nullable=False, index=True)  # 'gmail', 'zohobooks', etc.
+    connection_id = Column(Text, nullable=True)  # Encrypted Composio connection ID
+    status = Column(String(50), default='initiated')  # 'initiated', 'active', 'expired', 'error'
+    
+    # Connection metadata
+    app_metadata = Column(JSON, nullable=True)  # Store app-specific data
+    auth_timestamp = Column(DateTime, nullable=True)
+    last_verified = Column(DateTime, nullable=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ConnectionLog(Base):
+    """
+    Audit log for OAuth connection events.
+    Tracks auth attempts, refreshes, errors, etc.
+    """
+    __tablename__ = "connection_logs"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(255), nullable=False, index=True)
+    app_slug = Column(String(100), nullable=False)
+    connection_id = Column(String(255), nullable=True)
+    event_type = Column(String(50), nullable=False)  # 'auth_started', 'auth_completed', 'refresh', etc.
+    status = Column(String(50), nullable=False)  # 'success', 'error'
+    error_message = Column(Text, nullable=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 
 # ============================================================================

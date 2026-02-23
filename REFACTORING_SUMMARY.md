@@ -90,22 +90,22 @@ This document summarizes all the changes made to improve the Orchestrator codeba
 ## Files Changed
 
 ### Modified Files:
-1. `/home/clawuser/Orchestrator/backend/orchestrator/hands.py`
-2. `/home/clawuser/Orchestrator/backend/orchestrator/brain.py`
-3. `/home/clawuser/Orchestrator/backend/services/agent_registry_service.py`
-4. `/home/clawuser/Orchestrator/backend/services/canvas_service.py`
-5. `/home/clawuser/Orchestrator/backend/services/code_sandbox_service.py`
-6. `/home/clawuser/Orchestrator/backend/services/content_management_service.py`
-7. `/home/clawuser/Orchestrator/backend/services/credential_service.py`
-8. `/home/clawuser/Orchestrator/backend/services/inference_service.py`
-9. `/home/clawuser/Orchestrator/backend/services/mcp_service.py`
-10. `/home/clawuser/Orchestrator/backend/services/telemetry_service.py`
-11. `/home/clawuser/Orchestrator/backend/services/terminal_service.py`
-12. `/home/clawuser/Orchestrator/backend/services/tool_registry_service.py`
+1. `/backend/orchestrator/hands.py`
+2. `/backend/orchestrator/brain.py`
+3. `/backend/services/agent_registry_service.py`
+4. `/backend/services/canvas_service.py`
+5. `/backend/services/code_sandbox_service.py`
+6. `/backend/services/content_management_service.py`
+7. `/backend/services/credential_service.py`
+8. `/backend/services/inference_service.py`
+9. `/backend/services/mcp_service.py`
+10. `/backend/services/telemetry_service.py`
+11. `/backend/services/terminal_service.py`
+12. `/backend/services/tool_registry_service.py`
 
 ### New Files:
-1. `/home/clawuser/Orchestrator/backend/utils/json_utils.py`
-2. `/home/clawuser/Orchestrator/backend/utils/db_utils.py`
+1. `/backend/utils/json_utils.py`
+2. `/backend/utils/db_utils.py`
 
 ## Notes
 

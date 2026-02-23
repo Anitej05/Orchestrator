@@ -56,6 +56,7 @@ from backend.orchestrator.state import State
 from langgraph.checkpoint.memory import MemorySaver
 from routers import connect_router
 from routers import credentials_router
+from routers import integrations_router
 
 # --- Lifespan Event Handler (replaces deprecated @app.on_event) ---
 @asynccontextmanager
@@ -222,6 +223,7 @@ app.add_middleware(
 # Include routers
 app.include_router(connect_router.router)
 app.include_router(credentials_router.router)
+app.include_router(integrations_router.router)
 
 # Import and include content management router
 from routers import content_router

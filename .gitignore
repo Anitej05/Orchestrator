@@ -62,3 +62,6 @@ test_logs/
 
 # Specific standalone test scripts (user requested cleanup)
 backend/test_*.py
+
+
+*.md
