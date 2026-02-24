@@ -3,6 +3,7 @@ import logging
 import traceback
 import sys
 import io
+import os
 import pandas as pd
 import numpy as np
 import requests
@@ -12,6 +13,9 @@ import builtins
 from typing import Dict, Any, Optional, List
 
 logger = logging.getLogger("CodeSandboxService")
+
+# Get backend directory for resolving relative paths
+BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 class CodeSandboxService:
     """
@@ -99,6 +103,15 @@ class CodeSandboxService:
             logger.warning("nest_asyncio not installed, async code execution might fail if event loop is already running.")
         logger.info("CodeSandboxService initialized")
 
+    def _normalize_file_path(self, path: str) -> str:
+        """
+        Normalize file paths to use forward slashes for cross-platform compatibility.
+        Converts backslashes to forward slashes.
+        """
+        if isinstance(path, str):
+            return path.replace('\\', '/')
+        return path
+
     def _get_or_create_session(self, session_id: str) -> Dict[str, Any]:
         if session_id not in self.sessions:
             output_buffer = io.StringIO()
@@ -108,6 +121,12 @@ class CodeSandboxService:
                     print(*args, file=buffer, **kwargs)
                 return custom_print
             
+            # Create wrapper for pd.read_excel that auto-normalizes paths
+            def read_excel_safe(path, *args, **kwargs):
+                normalized_path = self._normalize_file_path(path)
+                logger.info(f"Reading Excel file: {path} (normalized: {normalized_path})")
+                return pd.read_excel(normalized_path, *args, **kwargs)
+            
             self.sessions[session_id] = {
                 'globals': {
                     '__builtins__': {**self.SAFE_BUILTINS, 'print': make_print(output_buffer)},
@@ -115,6 +134,9 @@ class CodeSandboxService:
                     'np': np,
                     'requests': requests,
                     'json': json,
+                    'os': os,  # Provide os module for path operations
+                    'BACKEND_DIR': BACKEND_DIR,  # Base directory for resolving paths
+                    'normalize_path': self._normalize_file_path,  # Add path normalization utility
                 },
                 'output_buffer': output_buffer,
                 'history': []
@@ -147,6 +169,34 @@ class CodeSandboxService:
             
         if '__name__' not in exec_globals:
             exec_globals['__name__'] = '__main__'
+        
+        # **CRITICAL FIX: Resolve relative storage paths to absolute paths**
+        # This fixes FileNotFoundError when code uses relative paths like 'storage/spreadsheets/file.xlsx'
+        code_preprocessed = code
+        import re
+        
+        # 1. Normalize backslashes to forward slashes in storage paths
+        code_preprocessed = re.sub(r'([\'\"])(storage[^\'\"]*)\\([^\'\"]*)(\1)', r'\1\2/\3\4', code_preprocessed)
+        
+        # 2. Convert relative storage paths to absolute paths
+        # Match patterns like 'storage/...' or "storage/..." and prepend BACKEND_DIR
+        def make_absolute(match):
+            quote_open = match.group(1)
+            path = match.group(2)
+            quote_close = match.group(3)
+            # Only convert if it's a relative path (doesn't start with / or drive letter)
+            if not path.startswith('/') and not (len(path) > 1 and path[1] == ':'):
+                abs_path = os.path.join(BACKEND_DIR, path).replace('\\', '/')
+                logger.info(f"[CodePreprocess] Converting relative path: '{path}' -> '{abs_path}'")
+                return f'{quote_open}{abs_path}{quote_close}'
+            return match.group(0)
+        
+        code_preprocessed = re.sub(r'([\'"])(storage/[^\'\"]+)([\'"])', make_absolute, code_preprocessed)
+        
+        logger.info(f"[CodePreprocess] Path resolution applied")
+        if code != code_preprocessed:
+            logger.info(f"[CodePreprocess] Original: {code[:200]}")
+            logger.info(f"[CodePreprocess] Modified: {code_preprocessed[:200]}")
             
         result = None
         error = None
@@ -155,8 +205,8 @@ class CodeSandboxService:
         
         try:
             import textwrap
-            code = textwrap.dedent(code)
-            exec(code, exec_globals)
+            code_to_execute = textwrap.dedent(code_preprocessed)  # Use preprocessed code
+            exec(code_to_execute, exec_globals)
             success = True
             
             def safe_serialize(obj, depth=0):

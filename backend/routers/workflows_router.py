@@ -58,7 +58,13 @@ async def save_workflow(request: Request, thread_id: str, name: str, description
     
     history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
     if not os.path.exists(history_path):
-        raise HTTPException(status_code=404, detail="Conversation not found")
+        backend_dir = os.path.dirname(os.path.dirname(__file__))
+        fallback_dir = os.path.join(backend_dir, "agent_conversations")
+        fallback_path = os.path.join(fallback_dir, f"{thread_id}.json")
+        if os.path.exists(fallback_path):
+            history_path = fallback_path
+        else:
+            raise HTTPException(status_code=404, detail="Conversation not found")
     
     with open(history_path, "r", encoding="utf-8") as f:
         history = json.load(f)
@@ -67,6 +73,7 @@ async def save_workflow(request: Request, thread_id: str, name: str, description
     
     task_agent_pairs = history.get("task_agent_pairs", [])
     original_prompt = history.get("original_prompt", "")
+    todo_list = history.get("todo_list", [])
     
     if not original_prompt:
         messages = history.get("messages", [])
@@ -75,7 +82,7 @@ async def save_workflow(request: Request, thread_id: str, name: str, description
             if isinstance(first_msg, dict) and first_msg.get("type") == "user":
                 original_prompt = first_msg.get("content", "")
     
-    if not task_agent_pairs or not original_prompt:
+    if not task_agent_pairs or not original_prompt or not todo_list:
         if checkpointer:
             try:
                 config = {"configurable": {"thread_id": thread_id}}
@@ -84,6 +91,7 @@ async def save_workflow(request: Request, thread_id: str, name: str, description
                     checkpoint_state = checkpoint.get("values", {})
                     task_agent_pairs = checkpoint_state.get("task_agent_pairs", task_agent_pairs)
                     original_prompt = checkpoint_state.get("original_prompt", original_prompt)
+                    todo_list = checkpoint_state.get("todo_list", todo_list)
                     history = {**history, **checkpoint_state}
             except Exception as e:
                 logger.warning(f"Could not load from checkpointer: {e}")
@@ -96,6 +104,7 @@ async def save_workflow(request: Request, thread_id: str, name: str, description
         "original_prompt": original_prompt,
         "task_agent_pairs": task_agent_pairs,
         "task_plan": task_plan,
+        "todo_list": todo_list,
         "parsed_tasks": history.get("parsed_tasks", []),
         "candidate_agents": history.get("candidate_agents", {}),
         "user_expectations": history.get("user_expectations"),
@@ -243,7 +252,7 @@ async def execute_workflow(workflow_id: str, request: Request, inputs: Dict[str,
         "original_prompt": original_prompt,
         "task_plan": task_plan,
         "task_agent_pairs": task_agent_pairs,
-        "messages": [{"type": "user", "content": original_prompt}],
+        "messages": [{"role": "user", "content": original_prompt}],
         "status": "executing",
         "planning_mode": False,
         "plan_approved": True,

@@ -23,6 +23,7 @@ logger = logging.getLogger("AgentRegistryService")
 AGENT_DIRS = [
     "spreadsheet_agent",
     "mail_agent",
+    "gmail_agent",
     "browser_agent",
     "document_agent_lib",
     "zoho_books",
@@ -45,10 +46,10 @@ AGENT_ALIASES = {
     "csv": "Spreadsheet Agent",
     "data_agent": "Spreadsheet Agent",
     # Mail agent aliases
-    "mail": "Mail Agent",
-    "mail_agent": "Mail Agent",
-    "email": "Mail Agent",
-    "gmail": "Mail Agent",
+    "mail": "Gmail Agent",
+    "mail_agent": "Gmail Agent",
+    "email": "Gmail Agent",
+    "gmail": "Gmail Agent",
     # Document agent aliases
     "document": "Document Agent",
     "document_agent": "Document Agent",

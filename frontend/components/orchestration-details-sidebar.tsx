@@ -39,7 +39,7 @@ interface OrchestrationDetailsSidebarProps {
 
 interface Plan {
     // Modified to support parallel execution batches (array of arrays)
-    pendingTasks: { task: string; description: string; agent: string; }[][] | { task: string; description: string; agent: string; }[];
+    pendingTasks: { task: string; description: string; agent: string; task_id?: string; status?: string; short_description?: string; icon_name?: string; agent_image_url?: string; }[][] | { task: string; description: string; agent: string; task_id?: string; status?: string; short_description?: string; icon_name?: string; agent_image_url?: string; }[];
     completedTasks: { task: string; result: string; }[];
 }
 
@@ -68,6 +68,7 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
         const messages = conversationState.messages || [];
         const uploadedFiles = conversationState.uploaded_files || [];
         const planData = conversationState.plan || [];
+        const todoList = conversationState.todo_list || [];
         const hasCanvas = conversationState.has_canvas;
         const canvasContent = conversationState.canvas_content;
         const canvasData = (conversationState as any).canvas_data;
@@ -87,6 +88,31 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
             // Real-time status comes from task_statuses, NOT from completed_tasks
             // This prevents duplicates in the graph
             const pendingTasks: Plan['pendingTasks'] = [];
+
+            if (todoList.length > 0) {
+                todoList.forEach((task: any) => {
+                    const taskId = task.id || task.task_id;
+                    const description = task.description || 'No description';
+                    // @ts-ignore
+                    pendingTasks.push([{
+                        task: description,
+                        description: description,
+                        agent: task.payload?.agent_name || 'Orchestrator',
+                        task_id: taskId,
+                        status: task.status,
+                        short_description: task.short_description,
+                        icon_name: task.icon_name,
+                        agent_image_url: task.agent_image_url,
+                    }]);
+                });
+
+                setPlan({
+                    pendingTasks: pendingTasks,
+                    completedTasks: []
+                });
+                setIsLoadingPlan(false);
+                return;
+            }
 
             // Process pending tasks from planData (the original plan structure)
             // We want to PRESERVE the batch structure (list of lists) for valid parallel visualization
@@ -136,7 +162,7 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                 completedTasks: [] // Always empty - we use task_statuses for real-time updates
             });
             setIsLoadingPlan(false);
-        }, [planData, taskAgentPairs]);
+        }, [planData, taskAgentPairs, todoList]);
 
         // Auto-switch to Plan tab when plan is created (validate_plan_for_execution starts)
         useEffect(() => {

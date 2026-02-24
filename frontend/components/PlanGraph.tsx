@@ -25,6 +25,9 @@ interface PlanTask {
     agent: string;
     short_description?: string;  // AI-generated summary from backend
     agent_image_url?: string;    // Agent avatar URL
+    task_id?: string;
+    status?: string;
+    icon_name?: string;
 }
 
 interface CompletedTask {
@@ -246,6 +249,21 @@ export default function PlanGraph({ planData, taskStatuses = {} }: PlanGraphProp
     useEffect(() => {
         const { pendingTasks, completedTasks } = planData;
 
+        const mapStatus = (rawStatus?: string) => {
+            switch ((rawStatus || '').toLowerCase()) {
+                case 'in_progress':
+                    return 'running';
+                case 'completed':
+                    return 'completed';
+                case 'failed':
+                    return 'failed';
+                case 'skipped':
+                    return 'completed';
+                default:
+                    return 'pending';
+            }
+        };
+
         // ONLY use pendingTasks as the source of truth for the plan structure
         // Real-time status updates come from taskStatuses prop
 
@@ -299,13 +317,14 @@ export default function PlanGraph({ planData, taskStatuses = {} }: PlanGraphProp
 
             batch.forEach((task: any, indexInBatch: number) => {
                 const taskName = task.task;
+                const taskKey = task.task_id || task.task || `${rankIndex}-${indexInBatch}`;
 
                 // Check if we have real-time status for this task
-                const taskStatus = taskStatuses[taskName];
+                const taskStatus = taskStatuses[taskKey] || taskStatuses[taskName];
                 // Fallback to 'pending' if no status found
-                const status = taskStatus?.status || task.status || 'pending';
+                const status = taskStatus?.status || mapStatus(task.status);
 
-                const nodeId = `task-${taskName}`;
+                const nodeId = `task-${taskKey}`;
                 currentLayerIds.push(nodeId);
 
                 // Position

@@ -56,14 +56,20 @@ from backend.orchestrator.state import State
 from langgraph.checkpoint.memory import MemorySaver
 from routers import connect_router
 from routers import credentials_router
+from routers import integrations_router
 
 # --- Lifespan Event Handler (replaces deprecated @app.on_event) ---
+# Global task reference for health checker
+_health_checker_task: Optional[asyncio.Task] = None
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     Async context manager for FastAPI lifespan events.
     Startup logic runs before yield, shutdown logic runs after.
     """
+    global _health_checker_task
+    
     # === STARTUP ===
     # Run database migrations automatically
     try:
@@ -103,12 +109,26 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to sync SKILL.md entries: {str(e)}", exc_info=True)
     
+    # Clear agent logs from previous runs for clean startup
+    try:
+        logs_dir = Path("logs")
+        if logs_dir.exists():
+            for agent_log in logs_dir.glob("*_agent.log"):
+                try:
+                    agent_log.unlink()  # Delete old agent logs
+                    logger.debug(f"Cleared old agent log: {agent_log.name}")
+                except Exception as e:
+                    logger.debug(f"Could not clear {agent_log.name}: {e}")
+            logger.info("✓ Agent logs cleared for fresh startup")
+    except Exception as e:
+        logger.debug(f"Error clearing agent logs: {e}")
+    
     # Start agents in background
     start_agents_async()
     logger.info("✓ Agents started in background")
     
     # Start background health checker
-    asyncio.create_task(check_agent_health_background())
+    _health_checker_task = asyncio.create_task(check_agent_health_background())
     logger.info("✓ Health checker started")
     
     # Initialize workflow scheduler and load active schedules
@@ -137,6 +157,35 @@ async def lifespan(app: FastAPI):
     # === SHUTDOWN ===
     logger.info("=" * 60)
     logger.info("APPLICATION SHUTTING DOWN")
+    logger.info("=" * 60)
+    
+    # Cancel background health checker
+    if _health_checker_task:
+        logger.info("✓ Cancelling health checker task...")
+        _health_checker_task.cancel()
+        try:
+            await _health_checker_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("✓ Health checker stopped")
+    
+    # Stop all agent processes
+    logger.info("✓ Stopping agent processes...")
+    cleanup_agents()
+    logger.info("✓ Agent processes stopped")
+    
+    # Shutdown workflow scheduler
+    try:
+        from backend.services.workflow_scheduler import get_scheduler
+        scheduler = get_scheduler()
+        logger.info("✓ Shutting down workflow scheduler...")
+        scheduler.shutdown()
+        logger.info("✓ Workflow scheduler stopped")
+    except Exception as e:
+        logger.error(f"✗ Error shutting down scheduler: {str(e)}")
+    
+    logger.info("=" * 60)
+    logger.info("APPLICATION SHUTDOWN COMPLETE")
     logger.info("=" * 60)
 
 # --- App Initialization and Configuration ---
@@ -222,6 +271,7 @@ app.add_middleware(
 # Include routers
 app.include_router(connect_router.router)
 app.include_router(credentials_router.router)
+app.include_router(integrations_router.router)
 
 # Import and include content management router
 from routers import content_router
@@ -819,6 +869,7 @@ def start_agent_servers():
     skill_dirs = [
         ("spreadsheet_agent", "spreadsheet_agent/__init__.py"),
         ("mail_agent", "mail_agent/agent.py"),
+        ("gmail_agent", "gmail_agent/__init__.py"),
         ("browser_agent", "browser_agent/__init__.py"),
         ("document_agent_lib", "document_agent_lib/__init__.py"),
         ("zoho_books", "zoho_books/zoho_books_agent.py"),
@@ -847,7 +898,7 @@ def start_agent_servers():
                         config = yaml.safe_load(yaml_content)
                         port = config.get('port')
                         if port:
-                            agent_configs[full_script_path] = int(port)
+                            agent_configs[script_path] = int(port)  # Store relative path, not full path
                             logger.info(f"UAP: Found {skill_dir} on port {port}")
         except Exception as e:
             logger.warning(f"Failed to parse SKILL.md for {skill_dir}: {e}")
@@ -856,67 +907,73 @@ def start_agent_servers():
 
     for agent_file, port in agent_configs.items():
         agent_path = os.path.join(agents_dir, agent_file)
+        # Extract agent name from path (e.g., "spreadsheet_agent/__init__.py" -> "spreadsheet_agent")
+        agent_name = agent_file.split('/')[0].split('\\')[0]
         
         if is_port_in_use(port):
-            logger.info(f"Agent '{agent_file}' is already running on port {port}.")
+            logger.info(f"Agent '{agent_name}' is already running on port {port}.")
             started_agents.append({
-                'agent': agent_file,
+                'agent': agent_name,
                 'port': port,
                 'status': 'already_running'
             })
             continue
 
-        logger.info(f"Attempting to start '{agent_file}' on port {port}...")
-        log_path = os.path.join(logs_dir, f"{agent_file}.log")
+        logger.info(f"Attempting to start '{agent_name}' on port {port}...")
+        log_path = os.path.join(logs_dir, f"{agent_name}.log")
 
         # Create the subprocess
         process = None
-        if platform.system() == "Windows":
-             try:
-                with open(log_path, 'w') as log_file:
+        try:
+            with open(log_path, 'w') as log_file:
+                if platform.system() == "Windows":
                     process = subprocess.Popen(
                         [sys.executable, agent_path],
                         stdout=log_file,
                         stderr=log_file,
                         creationflags=subprocess.CREATE_NO_WINDOW
                     )
-                    agent_processes.append(process)
-             except Exception as e:
-                logger.error(f"Failed to start {agent_file}: {e}")
-        else:
-            with open(log_path, 'w') as log_file:
-                process = subprocess.Popen(
-                    [sys.executable, agent_path],
-                    stdout=log_file,
-                    stderr=log_file
-                )
+                else:
+                    process = subprocess.Popen(
+                        [sys.executable, agent_path],
+                        stdout=log_file,
+                        stderr=log_file
+                    )
                 agent_processes.append(process)
+        except Exception as e:
+            logger.error(f"Failed to start {agent_name}: {e}")
+            failed_agents.append({
+                'agent': agent_name,
+                'reason': f'Failed to spawn process: {e}',
+                'port': port
+            })
+            continue
 
-            # Wait for the port to be in use with a timeout
-            # With lazy imports and reload=False, agents should start quickly
-            agent_timeout = 15  # Reasonable timeout for fast startup
-            
-            if wait_for_port(port, agent_file, timeout=agent_timeout):
-                logger.info(f"Successfully started agent '{agent_file}' on port {port}")
-                started_agents.append({
-                    'agent': agent_file,
-                    'port': port,
-                    'status': 'started',
-                    'process': process
-                })
-            else:
-                logger.error(f"Timed out waiting for agent '{agent_file}' to start on port {port}")
-                failed_agents.append({
-                    'agent': agent_file,
-                    'reason': f'Timed out waiting for port {port} to become available',
-                    'port': port
-                })
-                if process:
-                    try:
-                        process.terminate()
-                        process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
+        # Wait for the port to be in use with a timeout
+        # With lazy imports and reload=False, agents should start quickly
+        agent_timeout = 15  # Reasonable timeout for fast startup
+        
+        if wait_for_port(port, agent_name, timeout=agent_timeout):
+            logger.info(f"Successfully started agent '{agent_name}' on port {port}")
+            started_agents.append({
+                'agent': agent_name,
+                'port': port,
+                'status': 'started',
+                'process': process
+            })
+        else:
+            logger.error(f"Timed out waiting for agent '{agent_name}' to start on port {port}")
+            failed_agents.append({
+                'agent': agent_name,
+                'reason': f'Timed out waiting for port {port} to become available',
+                'port': port
+            })
+            if process:
+                try:
+                    process.terminate()
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
 
 
 
@@ -955,50 +1012,72 @@ async def upload_files(files: List[UploadFile] = File(...)):
     for file in files:
         # **FIX 1: Handle potential None for filename**
         if not file.filename:
-            continue  # Or raise an HTTPException for files without names
+            logger.warning("File upload skipped: filename is None or empty")
+            continue
 
-        # **FIX 2: Handle potential None for content_type and detect file type by extension**
-        file_extension = os.path.splitext(file.filename)[1].lower()
-        
-        # Determine file type based on extension and content type
-        if file.content_type and file.content_type.startswith('image/'):
-            file_type = 'image'
-        elif file_extension in ['.csv', '.xlsx', '.xls']:
-            file_type = 'spreadsheet'
-        else:
-            file_type = 'document'
-        
-        save_dir = f"storage/{file_type}s"  # Path relative to project root
-        file_path = os.path.join(save_dir, file.filename)
-
-        # Save the file asynchronously
         try:
-            async with aio_open(file_path, 'wb') as out_file:
-                while content := await file.read(1024):  # Read in chunks
-                    await out_file.write(content)
-        except Exception as e:
-            # Handle potential file-saving errors
-            raise HTTPException(status_code=500, detail=f"Could not save file: {e}")
-        
-        # CRITICAL VALIDATION: Verify file was actually saved before returning
-        if not os.path.exists(file_path):
-            raise HTTPException(
-                status_code=500, 
-                detail=f"File save failed: {file.filename} does not exist at {file_path}"
-            )
-        
-        # Additional validation: ensure file_path is never None or empty
-        if not file_path or file_path.strip() == '':
-            raise HTTPException(
-                status_code=500,
-                detail=f"Invalid file_path for {file.filename}: file_path is None or empty"
-            )
+            # **FIX 2: Handle potential None for content_type and detect file type by extension**
+            file_extension = os.path.splitext(file.filename)[1].lower()
+            
+            # Determine file type based on extension and content type
+            if file.content_type and file.content_type.startswith('image/'):
+                file_type = 'image'
+            elif file_extension in ['.csv', '.xlsx', '.xls']:
+                file_type = 'spreadsheet'
+            else:
+                file_type = 'document'
+            
+            # **FIX 3: Use pathlib for cross-platform path handling**
+            from pathlib import Path as PathlibPath
+            save_dir = PathlibPath("storage") / f"{file_type}s"
+            
+            # Create storage directory if it doesn't exist
+            try:
+                save_dir.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                logger.error(f"Failed to create storage directory {save_dir}: {e}")
+                raise HTTPException(status_code=500, detail=f"Could not create storage directory: {e}")
+            
+            # **FIX 4: Create full file path and normalize to forward slashes**
+            file_path_obj = save_dir / file.filename
+            # Convert to string and normalize to forward slashes for cross-platform compatibility
+            file_path = str(file_path_obj).replace('\\', '/')
+            
+            logger.info(f"Uploading file: {file.filename} -> {file_path} (type: {file_type})")
 
-        file_objects.append(FileObject(
-            file_name=file.filename,
-            file_path=file_path,
-            file_type=file_type
-        ))
+            # Save the file asynchronously (use the normalized path)
+            try:
+                async with aio_open(str(file_path_obj), 'wb') as out_file:  # Use original Path for actual file I/O
+                    while content := await file.read(1024*64):  # Read in larger chunks (64KB)
+                        await out_file.write(content)
+            except Exception as e:
+                # Handle potential file-saving errors
+                logger.error(f"Failed to save file {file.filename} to {file_path}: {e}", exc_info=True)
+                raise HTTPException(status_code=500, detail=f"Could not save file: {str(e)}")
+            
+            # CRITICAL VALIDATION: Verify file was actually saved before returning
+            if not file_path_obj.exists():
+                raise HTTPException(
+                    status_code=500, 
+                    detail=f"File save failed: {file.filename} does not exist at {file_path}"
+                )
+            
+            # Check file size
+            file_size = file_path_obj.stat().st_size
+            logger.info(f"File uploaded successfully: {file.filename} ({file_size} bytes) at {file_path}")
+
+            file_objects.append(FileObject(
+                file_name=file.filename,
+                file_path=file_path,  # Return normalized path with forward slashes
+                file_type=file_type
+            ))
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error uploading {file.filename}: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Unexpected error uploading file: {str(e)}")
+    
+    logger.info(f"Upload complete: {len(file_objects)} file(s) uploaded successfully")
     return file_objects
 
 @app.get("/api/files/{file_path:path}")
@@ -1741,7 +1820,7 @@ async def find_agents(request: ProcessRequest):
     """
     Receives a prompt, runs it through the agent-finding graph,
     and returns the selected primary and fallback agents for each task.
-    Now supports interactive workflows that may require user input.
+    Supports interactive workflows that may require user input.
     """
     thread_id = request.thread_id or str(uuid.uuid4())
     logger.info(f"Starting agent search with thread_id: {thread_id}")
@@ -2070,7 +2149,12 @@ async def save_workflow(request: Request, thread_id: str, name: str, description
     # Load conversation
     history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
     if not os.path.exists(history_path):
-        raise HTTPException(status_code=404, detail="Conversation not found")
+        fallback_dir = os.path.join(BACKEND_DIR, "agent_conversations")
+        fallback_path = os.path.join(fallback_dir, f"{thread_id}.json")
+        if os.path.exists(fallback_path):
+            history_path = fallback_path
+        else:
+            raise HTTPException(status_code=404, detail="Conversation not found")
     
     with open(history_path, "r", encoding="utf-8") as f:
         history = json.load(f)
@@ -2084,6 +2168,7 @@ async def save_workflow(request: Request, thread_id: str, name: str, description
     task_agent_pairs = history.get("task_agent_pairs", [])
     task_plan = history.get("task_plan", []) or history.get("plan", [])  # Fallback to "plan"
     original_prompt = history.get("original_prompt", "")
+    todo_list = history.get("todo_list", [])
     
     # If data is missing at top-level, try metadata (fallback)
     if not task_agent_pairs or not task_plan or not original_prompt:
@@ -2103,7 +2188,7 @@ async def save_workflow(request: Request, thread_id: str, name: str, description
                 logger.info(f"Extracted original_prompt from first message: '{original_prompt[:50]}...'")
     
     # If still empty after fallbacks, try from checkpointer
-    if not task_agent_pairs or not original_prompt:
+    if not task_agent_pairs or not original_prompt or not todo_list:
         logger.info(f"History file missing data, attempting to load from checkpointer for {thread_id}")
         try:
             config = {"configurable": {"thread_id": thread_id}}
@@ -2113,6 +2198,7 @@ async def save_workflow(request: Request, thread_id: str, name: str, description
                 task_agent_pairs = checkpoint_state.get("task_agent_pairs", task_agent_pairs)
                 task_plan = checkpoint_state.get("task_plan", task_plan)
                 original_prompt = checkpoint_state.get("original_prompt", original_prompt)
+                todo_list = checkpoint_state.get("todo_list", todo_list)
                 # Also get other fields from checkpoint
                 history = {**history, **checkpoint_state}
                 logger.info(f"✅ Retrieved workflow data from checkpointer")
@@ -2131,6 +2217,7 @@ async def save_workflow(request: Request, thread_id: str, name: str, description
         "original_prompt": original_prompt,
         "task_agent_pairs": task_agent_pairs,
         "task_plan": task_plan,
+        "todo_list": todo_list,
         "parsed_tasks": history.get("parsed_tasks", []),
         "candidate_agents": history.get("candidate_agents", {}),
         "user_expectations": history.get("user_expectations"),
@@ -2290,7 +2377,7 @@ async def execute_workflow(workflow_id: str, request: Request, inputs: Dict[str,
         "original_prompt": original_prompt,
         "task_plan": task_plan,
         "task_agent_pairs": task_agent_pairs,
-        "messages": [{"type": "user", "content": original_prompt}],
+        "messages": [{"role": "user", "content": original_prompt}],
         "status": "executing",
         "planning_mode": False,
         "plan_approved": True,  # Skip approval, go straight to execution
@@ -2833,7 +2920,7 @@ async def websocket_workflow_execute(websocket: WebSocket, workflow_id: str, tok
     db = None
     
     try:
-        from backend.orchestrator.workflow_executor import WorkflowExecutor
+        # Note: WorkflowExecutor is deprecated - this endpoint may need refactoring
         from auth import verify_clerk_token
         
         # Verify token from query params
@@ -2875,59 +2962,16 @@ async def websocket_workflow_execute(websocket: WebSocket, workflow_id: str, tok
         db.add(execution)
         db.commit()
         
-        # Use WorkflowExecutor to prepare execution
-        executor = WorkflowExecutor(workflow.blueprint)
-        execution_data = await executor.execute(inputs, owner)
-        
-        thread_id = execution_data["thread_id"]
-        prompt = execution_data["prompt"]
-        
-        logger.info(f"Executing workflow {workflow_id} as thread {thread_id}")
-        
-        # Stream via orchestrator
-        async for event in graph.astream_events(
-            {"original_prompt": prompt, "owner": owner},
-            config={"configurable": {"thread_id": thread_id}},
-            version="v2"
-        ):
-            if event["event"] == "on_chain_stream":
-                node_name = event.get("name", "unknown")
-                event_data = event.get("data", {})
-                
-                await websocket.send_json({
-                    "node": node_name,
-                    "data": serialize_complex_object(event_data),
-                    "thread_id": thread_id,
-                    "execution_id": execution_id,
-                    "workflow_id": workflow_id
-                })
-        
-        # Update execution status
-        execution.status = 'completed'
-        execution.completed_at = datetime.utcnow()
-        db.commit()
-        
+        # TODO: Implement workflow execution logic
+        # For now, this endpoint is not functional
         await websocket.send_json({
-            "node": "__complete__",
-            "thread_id": thread_id,
-            "execution_id": execution_id,
-            "workflow_id": workflow_id
+            "node": "__error__",
+            "error": "Workflow WebSocket execution is currently not implemented"
         })
+        return
         
     except Exception as e:
         logger.error(f"Workflow execution error: {e}", exc_info=True)
-        
-        if db and execution_id:
-            try:
-                execution = db.query(WorkflowExecution).filter_by(execution_id=execution_id).first()
-                if execution:
-                    execution.status = 'failed'
-                    execution.error = str(e)
-                    execution.completed_at = datetime.utcnow()
-                    db.commit()
-            except Exception as db_error:
-                logger.error(f"Failed to update execution status: {db_error}")
-        
         await websocket.send_json({"node": "__error__", "error": str(e)})
     
     finally:
@@ -3155,9 +3199,12 @@ async def websocket_chat(websocket: WebSocket):
                 }
             })
 
+            sent_todo_snapshot = False
+
             # Define stream callback for WebSocket updates
             async def stream_callback(node_name: str, node_output, progress: float, node_count: int, thread_id: str):
                 try:
+                    nonlocal sent_todo_snapshot
                     # Process node data using unified helper
                     final_data = process_node_data(node_name, node_output, progress, node_count, thread_id)
 
@@ -3170,6 +3217,32 @@ async def websocket_chat(websocket: WebSocket):
                         "timestamp": time.time()
                     }, thread_id)
                     logger.info(f"Streamed update from node '{node_name}' (#{node_count}) for thread_id {thread_id} - Progress: {progress:.1f}%")
+
+                    if isinstance(node_output, dict) and node_output.get("todo_list") is not None:
+                        todo_list = serialize_complex_object(node_output.get("todo_list", []))
+                        todo_statuses = {}
+                        for task in todo_list:
+                            if isinstance(task, dict):
+                                task_key = task.get("id") or task.get("task_id")
+                                if task_key:
+                                    todo_statuses[task_key] = {
+                                        "status": task.get("status"),
+                                        "description": task.get("description"),
+                                        "updated_at": task.get("updated_at")
+                                    }
+
+                        await safe_websocket_send(websocket, {
+                            "node": "todo_list_update",
+                            "thread_id": thread_id,
+                            "data": {
+                                "mode": "snapshot" if not sent_todo_snapshot else "delta",
+                                "todo_list": todo_list,
+                                "task_statuses": todo_statuses,
+                                "current_task_id": node_output.get("current_task_id")
+                            },
+                            "timestamp": time.time()
+                        }, thread_id)
+                        sent_todo_snapshot = True
                     
                     # Emit task status events for real-time UI updates
                     if node_name == "execute_batch" and isinstance(node_output, dict):
@@ -3336,12 +3409,8 @@ async def websocket_chat(websocket: WebSocket):
                     })
                     continue
             finally:
-                # Stop polling - always cleanup regardless of success/failure
+                # Cleanup - always cleanup regardless of success/failure
                 polling_active = False
-                try:
-                    await polling_task
-                except:
-                    pass
 
             # Check if workflow is paused for user input
             if final_state.get("pending_user_input"):

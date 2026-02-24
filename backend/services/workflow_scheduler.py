@@ -219,7 +219,7 @@ class WorkflowScheduler:
                 
                 # Add execution start message
                 execution_start_message = {
-                    "type": "system",
+                    "role": "system",
                     "content": f"Scheduled execution started at {datetime.utcnow().isoformat()}",
                     "timestamp": datetime.utcnow().isoformat()
                 }
