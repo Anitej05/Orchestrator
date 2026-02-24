@@ -22,6 +22,7 @@ export function useNewConversation() {
     useConversationStore.setState({
       metadata: {},
       plan: [],
+      todo_list: [],
       task_agent_pairs: [],
       messages: [],
       final_response: undefined,

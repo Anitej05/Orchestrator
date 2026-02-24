@@ -4,12 +4,16 @@ General Agent Service
 
 Core business logic for the General Fallback Agent.
 Handles tool discovery, connection checking, and execution.
+
+Updated for BaseAgent compatibility.
 """
 
 import logging
 import re
 from typing import Dict, Any, Optional, List
 import os
+
+from backend.agents.base.types import ExecutionContext
 
 logger = logging.getLogger("general_agent")
 
@@ -25,80 +29,93 @@ class GeneralAgentService:
     - Handle errors gracefully
     """
     
-    def __init__(self, user_id: str, tool_cache):
+    def __init__(
+        self,
+        user_id: str,
+        tool_cache,
+        tool_manager=None,
+        auth_manager=None
+    ):
         """
         Initialize service for a specific user.
         
         Args:
             user_id: User ID for connection checking
             tool_cache: Shared ToolCache instance
+            tool_manager: ComposioToolManager instance
+            auth_manager: ComposioAuthManager instance
         """
         self.user_id = user_id
         self.tool_cache = tool_cache
         
-        # Initialize Composio client
-        from services.integrations.composio_tools import ComposioToolManager
-        self.composio = ComposioToolManager()
+        # Use injected managers or initialize
+        if tool_manager:
+            self.tool_manager = tool_manager
+        else:
+            from services.integrations.composio_tools import get_tool_manager
+            self.tool_manager = get_tool_manager()
         
-        # Initialize connection service for checking
-        from services.integrations.composio_auth import ComposioAuthManager
-        self.auth_service = ComposioAuthManager()
+        if auth_manager:
+            self.auth_manager = auth_manager
+        else:
+            from services.integrations.composio_auth import get_auth_manager
+            self.auth_manager = get_auth_manager()
         
         logger.info(f"[GeneralAgentService] Initialized for user {user_id}")
     
     async def execute(
         self,
         prompt: str,
-        payload: Optional[Dict[str, Any]] = None,
-        task_id: Optional[str] = None,
-        thread_id: Optional[str] = None
+        app_name: Optional[str] = None,
+        action_params: Optional[Dict[str, Any]] = None,
+        context: Optional[ExecutionContext] = None,
     ) -> Dict[str, Any]:
         """
         Execute a user prompt.
         
         Workflow:
-        1. Parse prompt to determine app (e.g., "Slack", "Notion")
+        1. Parse prompt to determine app (or use provided app_name)
         2. Check if user has connection for that app
-        3. If not, return needs_input with connect URL
+        3. If not, return error with connect URL
         4. If yes, discover tools and execute
         5. Return result
         
         Args:
             prompt: Natural language instruction
-            payload: Optional structured data
-            task_id: Task ID for multi-turn
-            thread_id: Thread ID for session context
+            app_name: Optional app name (auto-detected if not provided)
+            action_params: Optional structured parameters
+            context: Execution context with user_id, thread_id, etc.
         
         Returns:
-            UAP response dict
+            Dict with success, data, error, etc.
         """
         try:
             # Step 1: Determine which app the user wants to use
-            app_name = self._extract_app_from_prompt(prompt)
+            if not app_name:
+                app_name = self._extract_app_from_prompt(prompt)
             
             if not app_name:
                 return {
                     "success": False,
-                    "result": None,
-                    "status": "error",
                     "error": "Could not determine which app to use. Please mention the app name explicitly (e.g., 'Send a Slack message', 'Create a Notion page')."
                 }
             
-            logger.info(f"[Execute] Detected app: {app_name} for prompt: {prompt[:100]}")
+            logger.info(f"[Execute] Using app: {app_name} for prompt: {prompt[:100]}")
             
             # Step 2: Check if user has connection for this app
-            connection_status = await self._check_connection(app_name)
+            connection_check = await self._check_connection(app_name)
             
-            if not connection_status["connected"]:
+            if not connection_check["connected"]:
                 # User needs to connect the app
-                connect_url = f"{os.getenv('FRONTEND_URL', 'https://app.orbimesh.com')}/connections/{app_name.lower()}"
+                frontend_url = os.getenv('FRONTEND_URL', 'https://app.orbimesh.com')
+                connect_url = f"{frontend_url}/connections/{app_name.lower()}"
                 
                 return {
                     "success": False,
-                    "result": None,
-                    "status": "needs_input",
-                    "question": f"Please connect your {app_name} account to continue.",
-                    "error": f"No {app_name} connection found. Connect at: {connect_url}"
+                    "error": f"No {app_name.title()} connection found",
+                    "message": f"Please connect your {app_name.title()} account to continue",
+                    "connect_url": connect_url,
+                    "needs_connection": True
                 }
             
             # Step 3: Get tools for this app (cached)
@@ -107,40 +124,27 @@ class GeneralAgentService:
             if not tools:
                 return {
                     "success": False,
-                    "result": None,
-                    "status": "error",
-                    "error": f"No tools available for {app_name}. This may be a temporary issue."
+                    "error": f"No tools available for {app_name.title()}. This may be a temporary issue."
                 }
             
             logger.info(f"[Execute] Found {len(tools)} tools for {app_name}")
             
-            # Step 4: Use LLM to select and execute the right tool
+            # Step 4: Execute using LLM tool selection
+            # For now, using simple heuristic - replace with LLM in production
             result = await self._execute_with_tools(
                 prompt=prompt,
                 tools=tools,
                 app_name=app_name,
-                payload=payload
+                action_params=action_params
             )
             
             return result
             
-        except ValueError as e:
-            # User-friendly errors
-            logger.warning(f"[Execute] ValueError: {e}")
-            return {
-                "success": False,
-                "result": None,
-                "status": "error",
-                "error": str(e)
-            }
         except Exception as e:
-            # Unexpected errors
-            logger.error(f"[Execute] Unexpected error: {e}", exc_info=True)
+            logger.error(f"[Execute] Error: {e}", exc_info=True)
             return {
                 "success": False,
-                "result": None,
-                "status": "error",
-                "error": f"Internal error: {str(e)}"
+                "error": f"Execution failed: {str(e)}"
             }
     
     def _extract_app_from_prompt(self, prompt: str) -> Optional[str]:
@@ -195,11 +199,16 @@ class GeneralAgentService:
             {"connected": True/False}
         """
         try:
-            status = await self.auth_service.check_connection_status(
+            status = self.auth_manager.check_connection_status(
                 user_id=self.user_id,
                 app_slug=app_name.lower()
             )
-            return {"connected": status.get("is_active", False)}
+            
+            # Check if app is in connected_apps list
+            connected_apps = status.get("connected_apps", [])
+            is_connected = app_name.lower() in [app.lower() for app in connected_apps]
+            
+            return {"connected": is_connected}
         except Exception as e:
             logger.error(f"[CheckConnection] Error: {e}")
             return {"connected": False}
@@ -224,17 +233,19 @@ class GeneralAgentService:
         logger.info(f"[GetTools] Cache miss for {app_name}, fetching from Composio")
         
         try:
-            tools = self.composio.get_tools_for_user(
+            # Get tools using tool manager
+            tools = self.tool_manager.get_tools_for_user(
                 user_id=self.user_id,
                 toolkits=[app_name.lower()]
             )
             
             # Cache the result
-            self.tool_cache.set(self.user_id, app_name, tools)
+            if tools:
+                self.tool_cache.set(self.user_id, app_name, tools)
             
-            return tools
+            return tools or []
         except Exception as e:
-            logger.error(f"[GetTools] Error fetching tools: {e}")
+            logger.error(f"[GetTools] Error fetching tools: {e}", exc_info=True)
             return []
     
     async def _execute_with_tools(
@@ -242,73 +253,65 @@ class GeneralAgentService:
         prompt: str,
         tools: List[Any],
         app_name: str,
-        payload: Optional[Dict[str, Any]]
+        action_params: Optional[Dict[str, Any]]
     ) -> Dict[str, Any]:
         """
         Execute the user's prompt using available tools.
         
-        This is a simplified implementation. In production, you'd use:
-        - LangChain Agent with ReAct pattern
-        - OpenAI function calling
-        - Or similar LLM-based tool selection
+        Uses simple heuristic for tool selection.
+        TODO: Replace with LLM-based tool selection for production.
         
         Args:
             prompt: User instruction
             tools: Available tools from Composio
             app_name: App being used
-            payload: Optional structured data
+            action_params: Optional structured parameters
         
         Returns:
-            UAP response dict
+            Result dict with success, data, error
         """
         try:
-            # For now, we'll use a simple heuristic to select the tool
-            # In production, replace this with proper LLM-based tool selection
-            
-            # Example: If prompt contains "send message" and app is Slack,
-            # use SLACK_SEND_MESSAGE tool
-            
+            # Select tool based on heuristic
             tool_name = self._select_tool_heuristic(prompt, tools, app_name)
             
             if not tool_name:
                 return {
                     "success": False,
-                    "result": None,
-                    "status": "error",
-                    "error": f"Could not determine which {app_name} action to take. Please be more specific."
+                    "error": f"Could not determine which {app_name.title()} action to take. Please be more specific."
                 }
             
-            # Extract parameters from prompt (simplified)
-            params = self._extract_parameters(prompt, payload)
+            logger.info(f"[ExecuteWithTools] Selected tool: {tool_name}")
+            
+            # Extract parameters from prompt
+            params = self._extract_parameters(prompt, action_params)
+            
+            logger.info(f"[ExecuteWithTools] Executing {tool_name} with params: {params}")
             
             # Execute the tool
-            result = self.composio.execute_tool(
-                user_id=self.user_id,
-                tool_slug=tool_name,
-                arguments=params
-            )
+            # Note: This is a simplified execution - in production, use LangChain Agent
+            selected_tool = next((t for t in tools if hasattr(t, 'name') and t.name == tool_name), None)
             
-            if result.get("success", False):
-                return {
-                    "success": True,
-                    "result": result.get("data"),
-                    "status": "completed"
-                }
-            else:
+            if not selected_tool:
                 return {
                     "success": False,
-                    "result": None,
-                    "status": "error",
-                    "error": result.get("error", "Tool execution failed")
+                    "error": f"Tool {tool_name} not found in available tools"
                 }
+            
+            # Execute tool directly
+            result = await selected_tool.ainvoke(params)
+            
+            return {
+                "success": True,
+                "data": result,
+                "tool_used": tool_name,
+                "message": f"Successfully executed {tool_name}"
+            }
             
         except Exception as e:
             logger.error(f"[ExecuteWithTools] Error: {e}", exc_info=True)
             return {
                 "success": False,
-                "result": None,
-                "status": "error",
-                "error": str(e)
+                "error": f"Tool execution failed: {str(e)}"
             }
     
     def _select_tool_heuristic(self, prompt: str, tools: List[Any], app_name: str) -> Optional[str]:

@@ -159,6 +159,73 @@ class ToolRegistryService:
                 return t_def.tool_instance
         return None
 
+    def get_tool_definition(self, name: str) -> Optional[ToolDefinition]:
+        """Get tool metadata definition by name."""
+        self.initialize()
+        definition = self._tools.get(name)
+        if definition:
+            return definition
+        for t_name, t_def in self._tools.items():
+            if t_name.lower() == name.lower():
+                return t_def
+        return None
+
+    def apply_default_params(
+        self,
+        tool_name: str,
+        payload: Dict[str, Any],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> tuple[Dict[str, Any], List[str]]:
+        """Fill missing required params using context and return any still missing."""
+        context = context or {}
+        payload = dict(payload or {})
+
+        definition = self.get_tool_definition(tool_name)
+        if not definition:
+            return payload, []
+
+        required = [p for p in definition.parameters if p.get("required")]
+        required_names = [p.get("name") for p in required if p.get("name")]
+
+        original_prompt = context.get("original_prompt") or context.get("prompt") or context.get("user_prompt") or ""
+        uploaded_files = context.get("uploaded_files") or []
+
+        def is_missing(value: Any) -> bool:
+            return value is None or (isinstance(value, str) and not value.strip())
+
+        def get_file_path(file_type: Optional[str] = None) -> Optional[str]:
+            for file_obj in uploaded_files:
+                if isinstance(file_obj, dict):
+                    f_type = file_obj.get("file_type")
+                    f_path = file_obj.get("file_path")
+                else:
+                    f_type = getattr(file_obj, "file_type", None)
+                    f_path = getattr(file_obj, "file_path", None)
+
+                if file_type and f_type != file_type:
+                    continue
+                if f_path:
+                    return f_path
+            return None
+
+        query_params = {"query", "search_query", "prompt", "instruction"}
+        path_params = {"image_path", "file_path", "document_path", "path"}
+
+        for name in required_names:
+            if name not in payload or is_missing(payload.get(name)):
+                if name in query_params and original_prompt:
+                    payload[name] = original_prompt
+                elif name in path_params:
+                    if name == "image_path":
+                        payload[name] = get_file_path("image") or get_file_path(None)
+                    elif name == "document_path":
+                        payload[name] = get_file_path("document") or get_file_path(None)
+                    else:
+                        payload[name] = get_file_path(None)
+
+        missing = [name for name in required_names if name not in payload or is_missing(payload.get(name))]
+        return payload, missing
+
     def list_tools(self) -> List[Dict[str, Any]]:
         """Return full list of tools metadata."""
         self.initialize()
