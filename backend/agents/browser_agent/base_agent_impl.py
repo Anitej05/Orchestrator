@@ -8,13 +8,11 @@ Uses actual Browser class methods from browser.py.
 import logging
 import asyncio
 import base64
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 from dataclasses import dataclass
-from datetime import datetime
-import time
 
 from backend.agents.base import BaseAgent, AgentServices, AgentConfig
-from backend.agents.base.types import AgentRequest, AgentResponse, ExecutionContext
+from backend.agents.base.types import ExecutionContext
 from backend.agents.base.capability import capability, ParameterSchema
 
 from .browser import Browser
@@ -405,7 +403,7 @@ class BrowserAgent(BaseAgent):
         self, params: Dict[str, Any], context: ExecutionContext
     ) -> Dict[str, Any]:
         """Take a screenshot."""
-        full_page = params.get("full_page", False)
+        params.get("full_page", False)
 
         try:
             screenshot_bytes = await self.browser.screenshot()

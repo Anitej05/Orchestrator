@@ -10,7 +10,7 @@ Enhanced Playwright browser control with:
 import asyncio
 import logging
 from pathlib import Path
-from typing import Optional, Dict, Any, Callable, Literal
+from typing import Optional, Callable, Literal
 from playwright.async_api import async_playwright, Browser as PWBrowser, Page, BrowserContext
 
 from .config import CONFIG
@@ -69,6 +69,7 @@ class Browser:
         self._stealth_enabled = True
         self._download_handler: Optional[Callable] = None
         self._browser_pids: set = set()  # Track PIDs for safe cleanup
+        self._is_restarting = False  # Guard: prevent _handle_new_page from killing pages during restart/recovery
     
     @property
     def profile_dir(self) -> Path:
@@ -125,8 +126,7 @@ class Browser:
                 # NOTE: --single-process removed - it causes crashes!
                 
                 # POPUP & TAB PREVENTION
-                '--block-new-web-contents',  # Block popups from creating new tabs
-                '--disable-popup-blocking',  # Let us handle popups ourselves
+                '--disable-popup-blocking',  # Let us handle popups ourselves via _handle_new_page
                 '--disable-features=Prerender2',  # Disable prerendering (creates hidden tabs)
                 '--disable-features=NetworkService',  # Reduces background page creation
                 
@@ -217,6 +217,13 @@ class Browser:
         try:
             new_url = page.url  # Get URL immediately, don't wait
             
+            # GUARD: Skip ALL page handling during browser restart/recovery
+            # Without this, _restart_browser creates a new blank page which
+            # gets immediately closed here before self.page is assigned
+            if self._is_restarting:
+                logger.debug(f"🔕 Skipping new page handling during restart: {new_url}")
+                return
+            
             # FAST PATH: Close blank pages immediately (common ad pattern)
             # CRITICAL FIX: Don't close if it's the ONLY page (startup race condition)
             # or if it's the main page we just created
@@ -243,30 +250,37 @@ class Browser:
             
             # Check if current page is still usable
             current_ok = False
+            current_domain = ""
             if self.page:
                 try:
                     if not self.page.is_closed() and self.page.url and self.page.url.startswith('http'):
                         current_ok = True
+                        from urllib.parse import urlparse
+                        current_domain = urlparse(self.page.url).netloc.lower()
                 except Exception:
                     pass
             
             if current_ok:
-                # Current page is fine - check if this is likely an ad and close it
-                is_likely_ad = any(kw in new_url.lower() for kw in [
-                    'ad', 'click', 'track', 'redirect', 'banner', 'advert', 'popup',
-                    'doubleclick', 'googlesyndication', 'facebook.com/tr', 'analytics'
-                ])
+                # Check if new tab is same domain → switch to it (product page, search result)
+                from urllib.parse import urlparse
+                new_domain = urlparse(new_url).netloc.lower()
+                same_domain = current_domain and new_domain and (
+                    new_domain == current_domain or 
+                    new_domain.endswith('.' + current_domain) or 
+                    current_domain.endswith('.' + new_domain)
+                )
                 
-                if is_likely_ad:
-                    logger.info(f"🗑️ Auto-closing popup/ad tab: {new_url[:50]}...")
-                    try:
-                        await page.close()
-                    except Exception:
-                        pass
+                if same_domain:
+                    # Same domain = user-initiated navigation (product link, etc.) — switch!
+                    logger.info(f"🔄 Switching to same-domain tab: {new_url[:60]}")
+                    await page.bring_to_front()
+                    self.page = page
+                    if self._download_handler:
+                        page.on("download", self._download_handler)
                     return
                 
-                # Not an ad, but still don't want to switch
-                logger.info(f"📑 New tab opened (keeping current focus): {new_url[:50]}")
+                # Cross-domain tab — keep open, don't switch, let the model decide
+                logger.info(f"📑 New cross-domain tab opened (keeping current focus): {new_url[:60]}")
                 if self._download_handler:
                     page.on("download", self._download_handler)
                 return
@@ -296,7 +310,13 @@ class Browser:
             return None
             
         try:
-            pages = self.context.pages
+            # Wrap context.pages access - it throws if context is dead
+            try:
+                pages = self.context.pages
+            except Exception:
+                # Context is dead, return None to trigger recovery
+                logger.debug("📌 Context is dead (pages inaccessible), returning None")
+                return None
             if pages:
                 for p in reversed(pages):
                     try:
@@ -349,6 +369,7 @@ class Browser:
         If browser is dead, restarts the browser.
         Optionally navigates to target_url if provided.
         """
+        self._is_restarting = True  # Prevent _handle_new_page from killing pages
         new_page = None
         
         # Try 1: Create page from existing context
@@ -412,12 +433,14 @@ class Browser:
             except Exception as nav_err:
                 logger.warning(f"Post-recovery navigation failed: {nav_err}")
         
+        self._is_restarting = False
         return new_page
     
     async def _restart_browser(self, target_url: str = None) -> Optional[Page]:
         """Restart the browser instance when it crashes."""
         try:
             logger.info("🔄 BROWSER RESTART - relaunching browser instance...")
+            self._is_restarting = True  # Prevent _handle_new_page from killing our new page
             
             # 1. Clean up old browser/context gracefully
             try:
@@ -454,8 +477,7 @@ class Browser:
                 # NOTE: --single-process removed - it causes crashes!
                 
                 # POPUP & TAB PREVENTION
-                '--block-new-web-contents',  # Block popups from creating new tabs
-                '--disable-popup-blocking',  # Let us handle popups ourselves
+                '--disable-popup-blocking',  # Let us handle popups ourselves via _handle_new_page
                 '--disable-features=Prerender2',  # Disable prerendering (creates hidden tabs)
                 '--disable-features=NetworkService',  # Reduces background page creation
                 
@@ -512,6 +534,7 @@ class Browser:
                 new_page.on("download", self._download_handler)
             
             self.page = new_page
+            self._is_restarting = False  # Safe to handle new pages now
             
             # NOTE: Do NOT auto-navigate here - let the agent control navigation
             logger.info("✅ Browser fully restarted (blank page ready)")
@@ -519,6 +542,7 @@ class Browser:
             return new_page
             
         except Exception as e:
+            self._is_restarting = False
             logger.error(f"❌ Browser restart failed: {e}")
             return None
 
@@ -643,10 +667,16 @@ class Browser:
     
     async def save_session(self) -> bool:
         """Save current session (cookies, localStorage) for later restoration"""
-        if not self.context:
+        if not self.context or self._is_restarting:
             return False
             
         try:
+            # Quick liveness check - access pages to verify context isn't dead
+            try:
+                _ = self.context.pages
+            except Exception:
+                logger.debug("💾 Skipping session save - context is dead")
+                return False
             self.profile_dir.mkdir(parents=True, exist_ok=True)
             await self.context.storage_state(path=str(self.storage_state_path))
             logger.info(f"💾 Session saved to {self.storage_state_path}")

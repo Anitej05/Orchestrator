@@ -131,7 +131,7 @@ class KeyManager:
         # Fallback (shouldn't happen if logic is correct)
         return self._keys[0]
 
-# Global instance
+# Global instance (Cerebras)
 key_manager = KeyManager()
 
 def get_cerebras_key() -> str:
@@ -141,3 +141,36 @@ def get_cerebras_key() -> str:
 def report_rate_limit(key: str):
     """Report 429 for a key"""
     key_manager.report_rate_limit(key)
+
+
+# === Ollama Key Manager ===
+
+class OllamaKeyManager(KeyManager):
+    """KeyManager subclass that lazily loads Ollama keys from env."""
+    
+    def _try_init_from_env(self) -> bool:
+        """Load Ollama API keys from OLLAMA_API_KEYS or OLLAMA_API_KEY."""
+        env_keys = os.getenv("OLLAMA_API_KEYS")
+        if env_keys:
+            keys = [k.strip() for k in env_keys.split(",") if k.strip()]
+            if keys:
+                logger.info(f"Loaded {len(keys)} Ollama API keys from environment")
+                self._initialize(keys)
+                return True
+        single_key = os.getenv("OLLAMA_API_KEY")
+        if single_key:
+            logger.info("Loaded 1 Ollama API key from environment (OLLAMA_API_KEY)")
+            self._initialize([single_key.strip()])
+            return True
+        logger.warning("OLLAMA_API_KEY(S) not configured - Ollama calls may fail")
+        return False
+
+ollama_key_manager = OllamaKeyManager()
+
+def get_ollama_key() -> str:
+    """Helper to get best Ollama key (might block if all limited)"""
+    return ollama_key_manager.get_best_key_with_wait()
+
+def report_ollama_rate_limit(key: str):
+    """Report 429 for an Ollama key"""
+    ollama_key_manager.report_rate_limit(key)

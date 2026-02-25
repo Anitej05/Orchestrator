@@ -524,7 +524,7 @@ class AgentManager:
                 response = await client.post(
                     url,
                     json=uap_request,
-                    timeout=120.0,  # 2 minute timeout
+                    timeout=300.0,  # 5 minute timeout (browser agent needs 200s+ for multi-step tasks)
                     headers={
                         "Content-Type": "application/json",
                         "X-User-ID": task.get("user_id", "anonymous"),
@@ -544,7 +544,7 @@ class AgentManager:
             logger.error(f"Timeout executing task on {agent_id}")
             return {
                 "status": "error",
-                "error": f"Agent {agent_id} timed out after 120s",
+                "error": f"Agent {agent_id} timed out after 300s",
             }
         except httpx.HTTPStatusError as e:
             logger.error(f"HTTP error from {agent_id}: {e.response.status_code}")

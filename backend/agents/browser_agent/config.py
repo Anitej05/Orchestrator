@@ -4,7 +4,6 @@ Browser Agent - Configuration
 Centralized configuration for the browser agent.
 """
 
-import os
 from pathlib import Path
 from typing import Optional
 

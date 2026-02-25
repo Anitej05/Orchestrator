@@ -13,7 +13,7 @@ from langchain_groq import ChatGroq
 from langchain_nvidia_ai_endpoints import ChatNVIDIA
 from dataclasses import dataclass, asdict
 
-from backend.utils.key_manager import key_manager, get_cerebras_key, report_rate_limit
+from backend.utils.key_manager import key_manager, get_cerebras_key, report_rate_limit, ollama_key_manager, get_ollama_key, report_ollama_rate_limit
 
 logger = logging.getLogger("InferenceService")
 
@@ -176,8 +176,13 @@ class InferenceService:
         input_len_estimate = 0 # Difficult to estimate with images
         
         for current_provider in provider_order:
-            from backend.utils.key_manager import key_manager, report_rate_limit
-            max_attempts = len(key_manager._keys) if current_provider == ProviderType.CEREBRAS and key_manager._keys else 1
+            from backend.utils.key_manager import key_manager, report_rate_limit, ollama_key_manager, report_ollama_rate_limit
+            if current_provider == ProviderType.CEREBRAS:
+                max_attempts = len(key_manager._keys) if key_manager._keys else 1
+            elif current_provider == ProviderType.OPENAI:
+                max_attempts = len(ollama_key_manager._keys) if ollama_key_manager._keys else 1
+            else:
+                max_attempts = 1
             
             for attempt in range(max_attempts):
                 try:
@@ -227,6 +232,12 @@ class InferenceService:
                         if attempt < max_attempts - 1:
                             logger.warning(f"🔄 Retrying {current_provider} with a different key...")
                             continue # Try next attempt within this provider
+                    elif current_provider == ProviderType.OPENAI and ("429" in e_str or "quota" in e_str or "rate limit" in e_str or "too many" in e_str):
+                        if ollama_key_manager._current_key:
+                            report_ollama_rate_limit(ollama_key_manager._current_key)
+                        if attempt < max_attempts - 1:
+                            logger.warning(f"🔄 Retrying Ollama with a different key...")
+                            continue
                     
                     if not fallback_enabled:
                         raise e
@@ -417,10 +428,10 @@ class InferenceService:
                     max_retries=0
                 )
             
-            elif provider == ProviderType.OPENAI: # Also handles OLLAMA via OpenAI compatibility
-                 # Check for local OLLAMA
+            elif provider == ProviderType.OPENAI: # Also handles OLLAMA (local or cloud) via OpenAI compatibility
+                 # Ollama Cloud: set OLLAMA_BASE_URL=https://ollama.com/v1 and OLLAMA_API_KEY
                  base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-                 api_key = os.getenv("OLLAMA_API_KEY", "ollama") # Dummy key
+                 api_key = get_ollama_key() or os.getenv("OLLAMA_API_KEY", "ollama")
                  model_to_use = model or "llama3.2-vision"
                  
                  from langchain_openai import ChatOpenAI

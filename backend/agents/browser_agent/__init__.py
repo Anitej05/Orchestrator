@@ -126,7 +126,7 @@ async def execute(request: UAPExecuteRequest):
     Accepts natural language prompts and executes browser automation tasks.
     """
     try:
-        task_id = request.task_id or str(uuid.uuid4())
+        request.task_id or str(uuid.uuid4())
         payload = request.payload or {}
         thread_id = request.thread_id or payload.get("thread_id")
         

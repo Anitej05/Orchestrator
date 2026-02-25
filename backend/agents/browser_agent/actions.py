@@ -5,19 +5,22 @@ Execute browser actions reliably. THE MOST CRITICAL COMPONENT.
 """
 
 import logging
-import re
 import uuid
 import time
 import asyncio
 from pathlib import Path
-from typing import Dict, Any, Optional, List
-from playwright.async_api import Page, TimeoutError as PTimeoutError, Error as PError
+from typing import Dict, Any, List
+from playwright.async_api import Page, Error as PError
 
 from .agent_schemas import ActionPlan, ActionResult, AtomicAction
 from .dom import DOMExtractor
 from .config import CONFIG
 from .persistent_memory import get_persistent_memory
-from agents.utils.agent_file_manager import AgentFileManager, FileType, FileStatus
+from agents.utils.agent_file_manager import FileType
+
+from backend.services.inference_service import inference_service, InferencePriority, ProviderType
+from langchain_core.messages import HumanMessage, SystemMessage
+import base64
 
 logger = logging.getLogger(__name__)
 
@@ -97,16 +100,33 @@ class ActionExecutor:
                 if not result.success and action.name == "click":
                     logger.info("🔄 Click failed, attempting smart retry strategies...")
                     
-                    # Strategy 1: Scroll to potential element location
-                    await page.evaluate("window.scrollBy(0, 300)")
-                    await page.wait_for_timeout(500)
-                    
-                    # Strategy 2: Wait longer for dynamic content and retry original
-                    await page.wait_for_timeout(1500)
+                    # Strategy 1: Wait for dynamic content to settle (DON'T scroll — it closes dropdowns!)
+                    await page.wait_for_timeout(2000)
                     result = await self._execute_single(page, action)
                     if result.success:
                         results_log[-1] = f"{action.name}: {result.message} (after retry)"
                         logger.info(f"✅ Retry after wait succeeded!")
+                    
+                    # Strategy 2: JS click fallback for text-based clicks
+                    if not result.success:
+                        click_text = action.params.get('text', '')
+                        if click_text:
+                            try:
+                                safe_text = click_text.replace("'", "\\'")
+                                js_click = await page.evaluate(f"""
+                                    (() => {{
+                                        const els = [...document.querySelectorAll('a, button, span, li, div, option')];
+                                        const el = els.find(e => e.innerText && e.innerText.trim().includes('{safe_text}'));
+                                        if (el) {{ el.click(); return true; }}
+                                        return false;
+                                    }})()
+                                """)
+                                if js_click:
+                                    result = ActionResult(success=True, action="click", message=f"Clicked via JS fallback: {click_text[:30]}")
+                                    results_log[-1] = f"{action.name}: {result.message} (JS fallback)"
+                                    logger.info(f"✅ JS click fallback succeeded: {click_text[:30]}")
+                            except Exception as js_err:
+                                logger.warning(f"JS click fallback failed: {js_err}")
                 
                 if not result.success:
                     logger.warning(f"⚠️ Action '{action.name}' failed: {result.message}. Stopping sequence.")
@@ -215,6 +235,8 @@ class ActionExecutor:
             return await self._navigate(page, action.params)
         elif action.name == "click":
             return await self._click(page, action.params)
+        elif action.name == "click_coordinate":
+            return await self._click_coordinate(page, action.params.get('x'), action.params.get('y'))
         elif action.name == "type":
             return await self._type(page, action.params)
         elif action.name == "scroll":
@@ -227,6 +249,10 @@ class ActionExecutor:
             return await self._select_option(page, action.params)
         elif action.name == "wait":
             return await self._wait(page, action.params)
+        elif action.name == "search_text":
+            return await self._search_text(page, action.params)
+        elif action.name == "scan_page":
+            return await self._scan_page(page, action.params)
         elif action.name == "go_back":
             try:
                 # Check if we CAN go back (has history)
@@ -279,6 +305,14 @@ class ActionExecutor:
         elif action.name == "extract":
             return await self._extract(page, action.params)
         elif action.name == "done":
+            # Support done with inline data: {"name": "done", "data": {"ram": "12GB", ...}}
+            done_data = action.params.get('data', {})
+            if done_data:
+                return ActionResult(
+                    success=True, action="done",
+                    message="Task complete (with data)",
+                    data={'structured_info': {'key': 'final_result', 'value': done_data, 'verified': True, 'source': 'done_action'}}
+                )
             return ActionResult(success=True, action="done", message="Task complete")
         elif action.name == "save_screenshot":
             return await self._save_screenshot(page, action.params)
@@ -300,6 +334,8 @@ class ActionExecutor:
             return await self._save_credential(page, action.params)
         elif action.name == "get_credential":
             return await self._get_credential(page, action.params)
+        elif action.name == "search_text":
+            return await self._search_text(page, action.params)
 
     async def _query_page_content(self, page: Page, params: Dict[str, Any]) -> ActionResult:
         """
@@ -425,6 +461,23 @@ class ActionExecutor:
         except Exception as e:
             return ActionResult(success=False, action="press", message=str(e))
 
+    async def _click_coordinate(self, page: Page, x: int, y: int) -> ActionResult:
+        """Click a specific absolute (x,y) screen coordinate."""
+        try:
+            if x is None or y is None:
+                return ActionResult(success=False, action="click_coordinate", message="Requires both 'x' and 'y' integer parameters")
+                
+            x, y = int(x), int(y)
+            await page.mouse.click(x, y)
+            
+            # Wait a moment for dynamic interactions to process
+            await page.wait_for_timeout(500)
+            
+            return ActionResult(success=True, action="click_coordinate", message=f"Clicked absolute coordinate ({x}, {y})")
+        except Exception as e:
+            logger.error(f"click_coordinate Error: {str(e)}")
+            return ActionResult(success=False, action="click_coordinate", message=f"Failed to click coordinate ({x}, {y}): {str(e)}")
+
     async def _wait(self, page: Page, params: Dict[str, Any]) -> ActionResult:
         """Wait for seconds"""
         seconds = params.get('seconds', 1)
@@ -469,13 +522,17 @@ class ActionExecutor:
                 
                 # Try to get fresh page reference from browser context
                 try:
-                    from .browser import Browser
                     if hasattr(self, 'browser') and self.browser:
                         fresh_page = self.browser.get_active_page()
                         if fresh_page:
                             logger.info(f"🔄 Got fresh page after navigation: {fresh_page.url[:60] if fresh_page.url else 'new page'}")
                 except Exception:
                     pass  # Browser reference not available here
+                
+                # CRITICAL: Wait for the redirect/new tab to fully settle
+                # Without this delay, the main loop tries to access the page
+                # before the new page context is ready, causing cascading failures
+                await asyncio.sleep(1.5)
                 
                 return ActionResult(
                     success=True, 
@@ -524,6 +581,31 @@ class ActionExecutor:
                 
         except Exception as e:
             return ActionResult(success=False, action="select", message=f"Select failed: {str(e)}")
+            
+    async def _robust_click(self, locator, timeout: int = 3000) -> bool:
+        """
+        Attempts to click a locator robustly.
+        Playwright's actionability checks often fail on modern custom components (like Amazon dropdowns) 
+        where the logical element is covered by an invisible wrapper div or span.
+        1. Try standard click with force=True to bypass actionability overlays.
+        2. If that fails, inject JS to execute .click() directly on the DOM node.
+        """
+        try:
+            # force=True bypasses Playwright's actionability checks
+            # This is critical for custom dropdowns where options are often covered by invisible wrappers
+            await locator.click(timeout=timeout, force=True)
+            return True
+        except Exception:
+            # Standard click blocked natively
+            # Fallback to direct JS click on the element as a last resort
+            try:
+                element = await locator.element_handle()
+                if element:
+                    await element.evaluate("el => el.click()")
+                    return True
+            except Exception:
+                pass
+        return False
     
     async def _click(self, page: Page, params: Dict[str, Any]) -> ActionResult:
         """Click on element - supports index, XPath, CSS selector, role+name (a11y), text, or coordinates"""
@@ -565,9 +647,9 @@ class ActionExecutor:
                             if el_xpath:
                                 locator = page.locator(f"xpath={el_xpath}").first
                                 if await locator.count() > 0:
-                                    await locator.click(timeout=5000)
-                                    clicked = True
-                                    logger.info(f"✅ Clicked via index #{index} xpath: {el_xpath[:50]}")
+                                    if await self._robust_click(locator, timeout=5000):
+                                        clicked = True
+                                        logger.info(f"✅ Clicked via index #{index} xpath (robust): {el_xpath[:50]}")
                             if not clicked:
                                 attempts.append(f"index({index}):no coords/xpath")
                     else:
@@ -619,26 +701,17 @@ class ActionExecutor:
                     locator = page.locator(f"xpath={xpath}").first
                     count = await locator.count()
                     if count > 0:
-                        await locator.click(timeout=5000)
-                        clicked = True
-                        logger.info(f"✅ Clicked via XPath: {xpath[:50]}")
+                        if await self._robust_click(locator, timeout=5000):
+                            clicked = True
+                            logger.info(f"✅ Clicked via XPath (robust): {xpath[:50]}")
+                        else:
+                            attempts.append(f"xpath(robust_failed)")
                     else:
                         attempts.append(f"xpath(not found)")
                         logger.warning(f"XPath not found: {xpath[:50]}")
                 except Exception as xpath_err:
                     attempts.append(f"xpath:{str(xpath_err)[:30]}")
-                    # Try JS click fallback
-                    try:
-                        element = await page.query_selector(f"xpath={xpath}")
-                        if element:
-                            await element.evaluate("el => el.click()")
-                            clicked = True
-                            logger.info(f"✅ Clicked via XPath JS fallback: {xpath[:50]}")
-                        else:
-                            logger.warning(f"XPath element not found for JS click: {xpath[:50]}")
-                    except Exception as js_err:
-                        attempts.append(f"xpath_js:{str(js_err)[:20]}")
-                        logger.warning(f"XPath JS click also failed: {xpath[:50]}")
+                    logger.warning(f"XPath robust click failed: {xpath[:50]}")
             
             # 3. Role + Name click (from accessibility tree) - VERY ROBUST
             if not clicked and role and name:
@@ -652,20 +725,23 @@ class ActionExecutor:
                         'search': 'searchbox', 'input': 'textbox'  # Common aliases
                     }
                     pw_role = role_map.get(role.lower(), role.lower())
-                    locator = page.get_by_role(pw_role, name=name).first
-                    count = await locator.count()
-                    if count > 0:
-                        await locator.click(timeout=5000)
-                        clicked = True
-                        logger.info(f"✅ Clicked via role+name: [{role}] {name}")
-                    else:
-                        attempts.append(f"role({role}):{name[:20]}(not found)")
-                        # Try partial name match
-                        locator = page.get_by_role(pw_role, name=name[:20]).first
+                    
+                    # Try exact name first, then partial
+                    for name_to_try in [name, name[:20]]:
+                        if clicked: break
+                        if not name_to_try: continue
+                        
+                        locator = page.get_by_role(pw_role, name=name_to_try).first
                         if await locator.count() > 0:
-                            await locator.click(timeout=5000)
-                            clicked = True
-                            logger.info(f"✅ Clicked via role+partial name: [{role}] {name[:20]}...")
+                            if await self._robust_click(locator, timeout=3000):
+                                clicked = True
+                                logger.info(f"✅ Clicked via role+name (robust): [{role}] {name_to_try}")
+                            else:
+                                attempts.append(f"role_robust_fail")
+                                    
+                    if not clicked:
+                        attempts.append(f"role({role}):{name[:20]}(not found)")
+                        
                 except Exception as role_err:
                     attempts.append(f"role:{str(role_err)[:30]}")
                     logger.warning(f"Role+name click failed: [{role}] {name} - {role_err}")
@@ -673,13 +749,20 @@ class ActionExecutor:
             # 4. Text click (before CSS selector as it's more specific)
             if not clicked and text:
                 try:
-                    locator = page.get_by_text(text, exact=False).first
-                    count = await locator.count()
-                    if count > 0:
-                        await locator.click(timeout=5000)
-                        clicked = True
-                        logger.info(f"✅ Clicked via text: {text[:30]}")
-                    else:
+                    # First try exact match, then loose match
+                    for exact_match in [True, False]:
+                        if clicked: break
+                        
+                        locator = page.get_by_text(text, exact=exact_match).first
+                        count = await locator.count()
+                        if count > 0:
+                            if await self._robust_click(locator, timeout=3000):
+                                clicked = True
+                                logger.info(f"✅ Clicked via text (exact={exact_match}, robust): {text[:30]}")
+                            else:
+                                attempts.append(f"text_robust_fail")
+                        
+                    if not clicked:
                         attempts.append(f"text(not found)")
                 except Exception as text_err:
                     attempts.append(f"text:{str(text_err)[:30]}")
@@ -690,22 +773,16 @@ class ActionExecutor:
                 try:
                     element = page.locator(selector).first
                     if await element.count() > 0:
-                        await element.click(timeout=5000)
-                        clicked = True
-                        logger.info(f"✅ Clicked via CSS selector: {selector[:30]}")
+                        if await self._robust_click(element, timeout=5000):
+                            clicked = True
+                            logger.info(f"✅ Clicked via CSS selector (robust): {selector[:30]}")
+                        else:
+                            attempts.append(f"selector_robust_fail")
                     else:
                         attempts.append(f"selector(not found)")
                 except Exception as sel_err:
                     attempts.append(f"selector:{str(sel_err)[:30]}")
-                    # Try JS click as final fallback
-                    try:
-                        element = await page.query_selector(selector)
-                        if element:
-                            await element.evaluate("el => el.click()")
-                            clicked = True
-                            logger.info(f"✅ Clicked via CSS JS fallback: {selector[:30]}")
-                    except Exception:
-                        logger.warning(f"CSS selector click failed: {selector[:30]}")
+                    logger.warning(f"CSS selector click failed: {selector[:30]}")
 
             if clicked:
                 try:
@@ -877,19 +954,20 @@ class ActionExecutor:
             max_scroll_y = scroll_info['maxScrollY']
             
             # Check if already at limit BEFORE attempting (save time)
+            # Returns success=False so the agent's no-effect detection catches scroll loops
             if direction == 'down' and start_y >= max_scroll_y - 1:
                 return ActionResult(
-                    success=True,  # Not a failure, just at bottom
+                    success=False,  # Signal to agent: scrolling further is pointless
                     action="scroll", 
-                    message=f"Already at bottom of page (position: {int(start_y)}/{int(max_scroll_y)})",
-                    data={"scroll_position": int(start_y), "max_scroll": int(max_scroll_y), "at_bottom": True}
+                    message=f"CANNOT scroll down — already at bottom of page (position: {int(start_y)}/{int(max_scroll_y)}). Use run_js to extract data from the current viewport instead.",
+                    data={"scroll_position": int(start_y), "max_scroll": int(max_scroll_y), "at_bottom": True, "at_limit": True}
                 )
             elif direction == 'up' and start_y <= 1:
                 return ActionResult(
-                    success=True,  # Not a failure, just at top
+                    success=False,  # Signal to agent: scrolling further is pointless
                     action="scroll", 
-                    message=f"Already at top of page (position: 0/{int(max_scroll_y)})",
-                    data={"scroll_position": 0, "max_scroll": int(max_scroll_y), "at_top": True}
+                    message=f"CANNOT scroll up — already at top of page (position: 0/{int(max_scroll_y)}). The content you see IS the top. Use run_js to extract data directly.",
+                    data={"scroll_position": 0, "max_scroll": int(max_scroll_y), "at_top": True, "at_limit": True}
                 )
             
             # Try scrolling with retry and decreasing amounts
@@ -953,6 +1031,80 @@ class ActionExecutor:
             return ActionResult(success=True, action="extract", message="Extracted data", data=data)
         except Exception as e:
             return ActionResult(success=False, action="extract", message=str(e))
+
+    async def _search_text(self, page: Page, params: Dict[str, Any]) -> ActionResult:
+        """Find text on page and return surrounding context to the LLM"""
+        query = params.get('query', '')
+        if not query:
+            return ActionResult(success=False, action="search_text", message="No query provided")
+            
+        try:
+            # Inject JS to find text nodes and return their parent's textContext
+            js_code = f"""
+                (() => {{
+                    const query = '{query.lower()}';
+                    const results = [];
+                    // Simple text search in DOM
+                    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+                    let node;
+                    while (node = walker.nextNode()) {{
+                        if (node.nodeValue.toLowerCase().includes(query)) {{
+                            // Get parent element's full text for context
+                            const parent = node.parentElement;
+                            if (parent && parent.innerText) {{
+                                const text = parent.innerText.replace(/\\s+/g, ' ').trim();
+                                if (text && !results.includes(text)) {{
+                                    results.push(text);
+                                }}
+                            }}
+                        }}
+                    }}
+                    return results.slice(0, 5); // Return top 5 matches context
+                }})()
+            """
+            matches = await page.evaluate(js_code)
+            
+            if matches:
+                 # Extract the context surrounding the query
+                 context_texts = [f"Match {i+1}: {t[:250]}" for i, t in enumerate(matches)]
+                 
+                 # Also try to scroll to the first match
+                 try:
+                     scroll_js = f"""
+                        (() => {{
+                            const query = '{query.lower()}';
+                            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+                            let node;
+                            while (node = walker.nextNode()) {{
+                                if (node.nodeValue.toLowerCase().includes(query)) {{
+                                    if (node.parentElement) {{
+                                        node.parentElement.scrollIntoView({{behavior: 'smooth', block: 'center'}});
+                                        return true;
+                                    }}
+                                }}
+                            }}
+                            return false;
+                        }})()
+                     """
+                     await page.evaluate(scroll_js)
+                     await page.wait_for_timeout(1000) # Wait for smooth scroll
+                 except Exception as e:
+                     logger.warning(f"Could not scroll to searched text: {e}")
+                     
+                 # Join outputs for message
+                 joined_matches = "\\n".join(context_texts)
+                 
+                 return ActionResult(
+                     success=True, 
+                     action="search_text", 
+                     message=f"Found {len(matches)} matches for '{query}'",
+                     data={"matches": joined_matches, 'structured_info': {'key': f'search_{query}', 'value': joined_matches, 'verified': True}}
+                 )
+            else:
+                 return ActionResult(success=False, action="search_text", message=f"Text '{query}' not found on page")
+                 
+        except Exception as e:
+             return ActionResult(success=False, action="search_text", message=f"Search failed: {e}")
 
     async def _screenshot(self, page: Page, params: Dict[str, Any]) -> ActionResult:
         """Save screenshot to disk with robust handling"""
@@ -1305,7 +1457,6 @@ class ActionExecutor:
         wait_timeout = params.get('wait_timeout', 30) * 1000  # Convert to ms
         
         try:
-            download_path = None
             
             if url:
                 # Direct URL download
@@ -1399,8 +1550,8 @@ class ActionExecutor:
             - Get page data: {"code": "return document.body.dataset"}
         """
         code = params.get('code') or params.get('script')
-        return_value = params.get('return_value', True)
-        timeout = params.get('timeout', 30000)
+        params.get('return_value', True)
+        params.get('timeout', 30000)
         
         if not code:
             return ActionResult(
@@ -1427,16 +1578,6 @@ class ActionExecutor:
             elif isinstance(result, (dict, list)):
                 import json
                 result_str = json.dumps(result, indent=2, default=str)[:500]
-                
-                # AUTO-SAVE EXTRACTED DATA: If JS returned structured data, save it!
-                if isinstance(result, list) and len(result) > 0:
-                    # Looks like extracted products/items
-                    logger.info(f"📦 AUTO-SAVING {len(result)} items from run_js to memory")
-                    # This will be picked up by the agent's memory system
-                elif isinstance(result, dict):
-                    # Check if it contains product-like data
-                    if any(k in str(result).lower() for k in ['product', 'price', 'title', 'name', 'items']):
-                        logger.info(f"📦 AUTO-SAVING extracted data from run_js to memory")
             else:
                 result_str = str(result)[:500]
             
@@ -1665,3 +1806,168 @@ class ActionExecutor:
                 message=f"Failed to save learning: {str(e)}"
             )
 
+    async def _search_text(self, page: Page, params: Dict[str, Any]) -> ActionResult:
+        """Search for text on the page and scroll it into view (Simulates Ctrl+F)"""
+        query = params.get('query')
+        if not query:
+            return ActionResult(success=False, action="search_text", message="query parameter is required")
+        
+        try:
+            # Step 1: Try Playwright's locator to find the element and scroll to it
+            # This is robust because it handles Shadow DOM and custom components well
+            locator = page.get_by_text(query, exact=False).first
+            count = await locator.count()
+            
+            if count > 0:
+                try:
+                    # Scroll it into view
+                    await locator.scroll_into_view_if_needed(timeout=2000)
+                    
+                    # Highlight it temporarily to simulate Ctrl+F visual feedback
+                    try:
+                        element = await locator.element_handle()
+                        if element:
+                            await element.evaluate('''el => {
+                                const originalBg = el.style.backgroundColor;
+                                el.style.transition = 'background-color 0.5s ease';
+                                el.style.backgroundColor = 'yellow';
+                                setTimeout(() => { el.style.backgroundColor = originalBg; }, 2000);
+                            }''')
+                    except Exception:
+                        pass # Ignore highlight failures
+                    
+                    logger.info(f"✅ Found and scrolled to text via locator: '{query[:30]}'")
+                    return ActionResult(success=True, action="search_text", message=f"Found '{query}' and scrolled it into view")
+                except Exception as loc_err:
+                    logger.debug(f"Locator scroll failed, falling back to window.find: {loc_err}")
+            
+            # Step 2: Fallback to native window.find()
+            # This is the literal Ctrl+F browser API, but it might miss ShadowDOM elements
+            result = await page.evaluate(f'''(query) => {{
+                // Reset search to top if we've reached the bottom
+                if (window.scrollY + window.innerHeight >= document.body.scrollHeight) {{
+                    window.scrollTo(0, 0);
+                }}
+                return window.find(query);
+            }}''', query)
+            
+            if result:
+                logger.info(f"✅ Found and scrolled to text via window.find: '{query[:30]}'")
+                return ActionResult(success=True, action="search_text", message=f"Found '{query}' and scrolled it into view")
+            
+            return ActionResult(success=False, action="search_text", message=f"Text '{query}' not found on page")
+            
+        except Exception as e:
+            logger.warning(f"search_text action failed: {e}")
+            return ActionResult(success=False, action="search_text", message=f"Search failed: {str(e)}")
+
+    async def _scan_page(self, page: Page, params: Dict[str, Any]) -> ActionResult:
+        """
+        Scan Mode Hack: Automates manual scrolling by taking consecutive viewport screenshots 
+        and asking the Vision LLM to find the target information in a single batched inference call.
+        """
+        query = params.get('query')
+        if not query:
+            return ActionResult(success=False, action="scan_page", message="query parameter is required")
+        
+        try:
+            # 1. Scroll to top to begin scan
+            await page.evaluate("window.scrollTo(0, 0)")
+            await page.wait_for_timeout(500)
+            
+            viewport_height = await page.evaluate("window.innerHeight")
+            total_height = await page.evaluate("document.body.scrollHeight")
+            
+            max_scrolls = 6  # Limit to 6 viewports to avoid token bloat/infinite scroll
+            screenshots_b64 = []
+            scroll_positions = []
+            
+            logger.info(f"📸 Starting batched page scan for: '{query}'")
+            
+            # 2. Loop through viewports and capture screenshots
+            for step in range(max_scrolls):
+                current_y = await page.evaluate("window.scrollY")
+                scroll_positions.append(current_y)
+                
+                # Take screenshot
+                screenshot_bytes = await page.screenshot(type="jpeg", quality=60) # lower quality for batching
+                b64 = base64.b64encode(screenshot_bytes).decode('utf-8')
+                screenshots_b64.append(f"data:image/jpeg;base64,{b64}")
+                
+                # Check if we've reached the bottom
+                if current_y + viewport_height >= total_height - 10:
+                    break
+                    
+                # Scroll down one viewport
+                await page.evaluate(f"window.scrollBy(0, {viewport_height})")
+                await page.wait_for_timeout(400) # Give it time to render
+                
+            # 3. Construct the Vision prompt
+            prompt = (
+                f"You are a visual search assistant. I am scanning a long webpage for: '{query}'.\n"
+                f"I have attached {len(screenshots_b64)} consecutive screenshots of the page scrolling from top to bottom.\n\n"
+                f"Here are the Y-coordinates for each screenshot image (in order from 1 to {len(screenshots_b64)}):\n"
+            )
+            for idx, y_pos in enumerate(scroll_positions):
+                prompt += f"Image {idx+1}: Y={y_pos}px\n"
+                
+            prompt += (
+                "\nWhich image contains the best match for the query? "
+                "Respond ONLY with a JSON object containing the winning Y-coordinate and a brief reason. "
+                "If none of the images contain the target, return -1.\n\n"
+                'Example format: {"found": true, "y_coordinate": 850, "reason": "Pricing table is clearly visible here"}\n'
+                'Or: {"found": false, "y_coordinate": -1, "reason": "No pricing details found in any screenshot"}'
+            )
+            
+            messages = [
+                SystemMessage(content="You are a strict JSON-only visual search agent."),
+                HumanMessage(content=prompt)
+            ]
+            
+            logger.info(f"🧠 Sending {len(screenshots_b64)} images to Vision LLM for analysis...")
+            
+            # Call inference service directly (bypassing conversational memory)
+            response = await inference_service.generate(
+                messages=messages,
+                provider=ProviderType.OPENAI,
+                model_name="kimi-k2.5:cloud", # Assuming the multimodal model from llm.py
+                priority=InferencePriority.QUALITY,
+                temperature=0.1,
+                json_mode=True,
+                images=screenshots_b64,
+                fallback_enabled=False,
+                use_cache=False
+            )
+            
+            if not response:
+                return ActionResult(success=False, action="scan_page", message="Vision LLM returned no answer.")
+                
+            # 4. Parse response and teleport to coordinate
+            try:
+                import json
+                # Strip markdown code blocks if any
+                clean_json = response.strip()
+                if clean_json.startswith('```json'):
+                    clean_json = clean_json[7:-3]
+                elif clean_json.startswith('```'):
+                    clean_json = clean_json[3:-3]
+                    
+                data = json.loads(clean_json.strip())
+                
+                if data.get('found', False) and data.get('y_coordinate', -1) != -1:
+                    target_y = data['y_coordinate']
+                    await page.evaluate(f"window.scrollTo(0, {target_y})")
+                    await page.wait_for_timeout(500)
+                    reason = data.get('reason', '')
+                    logger.info(f"✅ Scan successful! Teleported to Y={target_y}. Reason: {reason}")
+                    return ActionResult(success=True, action="scan_page", message=f"Successfully found visual target. Scrolled to Y={target_y}. Context: {reason}")
+                else:
+                    return ActionResult(success=False, action="scan_page", message=f"Target not found in any of the {len(screenshots_b64)} viewports scanned. Reason: {data.get('reason')}")
+                    
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse Vision response: {response}")
+                return ActionResult(success=False, action="scan_page", message=f"Failed to parse Vision response: {e}")
+            
+        except Exception as e:
+            logger.warning(f"Feature scan_page failed: {e}")
+            return ActionResult(success=False, action="scan_page", message=f"Scan failed: {str(e)}")
