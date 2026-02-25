@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useConversationStore } from '@/lib/conversation-store';
-import type { ConversationState, Message } from '@/lib/types';
+import type { ConversationState, Message, TaskStatus } from '@/lib/types';
 
 // This interface defines the structure of messages coming from the WebSocket
 interface WebSocketEventData {
@@ -124,10 +124,54 @@ export function useWebSocketManager({
             dataKeys: eventData.data ? Object.keys(eventData.data).slice(0, 10) : []
           });
 
+          const mapTodoStatus = (status?: string) => {
+            switch ((status || '').toLowerCase()) {
+              case 'in_progress':
+                return 'running';
+              case 'completed':
+                return 'completed';
+              case 'failed':
+                return 'failed';
+              case 'skipped':
+                return 'completed';
+              default:
+                return 'pending';
+            }
+          };
+
           // Handle orchestration stage updates with animations
           // Use stage information from backend if available, otherwise fall back to node-based mapping
           const currentMessages = useConversationStore.getState().messages;
           const currentState = useConversationStore.getState();
+
+          if (eventData.node === 'todo_list_update' || eventData.data?.todo_list) {
+            const todoList = eventData.data?.todo_list || [];
+            const currentTaskId = eventData.data?.current_task_id;
+            const updatedTaskStatuses: Record<string, TaskStatus> = { ...currentState.task_statuses };
+
+            todoList.forEach((task: any) => {
+              if (!task || typeof task !== 'object') return;
+              const taskKey = task.id || task.task_id;
+              if (!taskKey) return;
+
+              updatedTaskStatuses[taskKey] = {
+                status: mapTodoStatus(task.status),
+                taskName: task.description || 'Untitled task',
+                taskId: taskKey,
+                taskDescription: task.description,
+                agentName: task.payload?.agent_name,
+                executionTime: task.execution_time,
+                error: task.error,
+                result: task.result,
+              };
+            });
+
+            _setConversationState({
+              todo_list: todoList,
+              task_statuses: updatedTaskStatuses,
+              current_executing_task: currentTaskId || currentState.current_executing_task,
+            });
+          }
 
           // Extract stage information from event data (sent by backend)
           const backendStage = eventData.data?.current_stage;
@@ -393,12 +437,12 @@ export function useWebSocketManager({
               }
             });
           }
-          else if (eventData.node === 'ask_user' || eventData.node === '__user_input_required__') {
+          else if (eventData.node === 'ask_user' || eventData.node === '__user_input_required__' || eventData.node === 'action_approval_required') {
             const currentMessages = useConversationStore.getState().messages;
             const question = eventData.data?.question_for_user || eventData.data?.question || 'Please provide additional information';
 
             // Check if this is an approval request (has needs_approval or approval_required flag)
-            const isApprovalRequest = eventData.data?.needs_approval === true || eventData.data?.approval_required === true;
+            const isApprovalRequest = eventData.data?.needs_approval === true || eventData.data?.approval_required === true || eventData.data?.pending_approval === true;
 
             if (isApprovalRequest) {
               // This is a plan approval request - set approval state WITHOUT adding message

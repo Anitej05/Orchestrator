@@ -8,23 +8,51 @@ import base64
 from PIL import Image
 import io
 from typing import Dict
+from pathlib import Path
 from langchain_core.tools import tool
 from groq import Groq
-
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # Initialize Groq client
 _groq_client = None
 
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = BACKEND_DIR.parent
 
 def _get_groq_client():
     """Lazy initialization of Groq client."""
     global _groq_client
     if _groq_client is None:
-        if not GROQ_API_KEY:
+        # Fetch the key here to ensure it catches vars set dynamically after import
+        api_key = os.getenv("GROQ_API_KEY") 
+        if not api_key:
             return None
-        _groq_client = Groq(api_key=GROQ_API_KEY)
+        _groq_client = Groq(api_key=api_key)
     return _groq_client
+
+
+def _resolve_image_path(image_path: str) -> str:
+    """Resolve image path across common storage roots."""
+    if not image_path:
+        return image_path
+
+    # Normalize slashes for cross-platform use
+    normalized = image_path.replace("\\", "/")
+    candidates = [Path(normalized)]
+
+    # If path is relative, try backend and project root
+    if not Path(normalized).is_absolute():
+        candidates.append(BACKEND_DIR / normalized)
+        candidates.append(PROJECT_ROOT / normalized)
+
+    # If path starts with storage/, try from project root
+    if normalized.startswith("storage/"):
+        candidates.append(PROJECT_ROOT / normalized)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+
+    return image_path
 
 
 def _compress_and_encode_image(
@@ -41,10 +69,11 @@ def _compress_and_encode_image(
     Returns:
         Base64 encoded string
     """
-    if not os.path.exists(image_path):
-        raise FileNotFoundError(f"Image not found: {image_path}")
+    resolved_path = _resolve_image_path(image_path)
+    if not os.path.exists(resolved_path):
+        raise FileNotFoundError(f"Image not found: {resolved_path}")
 
-    with open(image_path, "rb") as f:
+    with open(resolved_path, "rb") as f:
         image = Image.open(f)
 
         # Convert to RGB if needed
@@ -88,7 +117,7 @@ def analyze_image(image_path: str = "", query: str = "") -> Dict:
             return {"error": "No image_path provided"}
 
         if not query:
-            return {"error": "No query provided"}
+            query = "Describe the image in detail."
 
         # Compress and encode image
         compressed_base64 = _compress_and_encode_image(image_path)
@@ -109,7 +138,9 @@ def analyze_image(image_path: str = "", query: str = "") -> Dict:
                     ],
                 }
             ],
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            # Replaced HuggingFace ID with standard Groq formatting. 
+            # Verify exact ID in your Groq Cloud Console -> Supported Models
+            model="llama-4-scout", 
         )
 
         answer = chat_completion.choices[0].message.content

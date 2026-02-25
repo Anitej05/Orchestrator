@@ -20,6 +20,33 @@ from backend.services.agent_registry_service import agent_registry
 
 logger = logging.getLogger("AgentManager")
 
+DEFAULT_AGENT_EXECUTE_TIMEOUT = 120.0
+AGENT_EXECUTE_TIMEOUTS = {
+    "document": 240.0,
+    "document_agent": 240.0,
+    "spreadsheet": 180.0,
+    "spreadsheet_agent": 180.0,
+    "browser": 300.0,
+    "browser_agent": 300.0,
+    "universal": 120.0,
+    "universal_agent": 120.0,
+    "mail": 120.0,
+    "mail_agent": 120.0,
+    "zoho_books": 180.0,
+    "coding": 180.0,
+    "coding_agent": 180.0,
+}
+
+
+def _get_agent_timeout(agent_id: str) -> float:
+    env_key = f"AGENT_TIMEOUT_{agent_id.upper()}"
+    if env_key in os.environ:
+        try:
+            return float(os.environ[env_key])
+        except ValueError:
+            logger.warning(f"Invalid {env_key} value: {os.environ[env_key]}")
+    return AGENT_EXECUTE_TIMEOUTS.get(agent_id, DEFAULT_AGENT_EXECUTE_TIMEOUT)
+
 
 @dataclass
 class AgentInstance:
@@ -48,6 +75,8 @@ class PortPool:
         "spreadsheet_agent": 9000,
         "mail": 8040,
         "mail_agent": 8040,
+        "gmail": 8003,
+        "gmail_agent": 8003,
         "document": 8050,
         "document_agent": 8050,
         "zoho_books": 8060,
@@ -122,6 +151,8 @@ class ProcessManager:
         "spreadsheet_agent": "agents.spreadsheet_agent",
         "mail": "agents.mail_agent",
         "mail_agent": "agents.mail_agent",
+        "gmail": "agents.gmail_agent",
+        "gmail_agent": "agents.gmail_agent",
         "document": "agents.document_agent_lib",
         "document_agent": "agents.document_agent_lib",
         "zoho_books": "agents.zoho_books",
@@ -219,15 +250,25 @@ class ProcessManager:
         logger.debug(f"PYTHONPATH: {env['PYTHONPATH']}")
         logger.debug(f"Command: {' '.join(cmd)}")
 
+        logs_dir = self.backend_dir / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        log_path = logs_dir / f"{agent_id}.log"
+        try:
+            log_file = open(log_path, "a", encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"Failed to open log file {log_path}: {e}")
+            log_file = subprocess.DEVNULL
+
         # Start process
         process = subprocess.Popen(
             cmd,
             cwd=str(self.backend_dir),
             env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=log_file,
+            stderr=log_file,
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
         )
+        setattr(process, "_log_file", log_file)
 
         logger.info(f"Agent {agent_id} started with PID {process.pid}")
         return process
@@ -235,6 +276,12 @@ class ProcessManager:
     async def stop_agent(self, process: subprocess.Popen, timeout: int = 10) -> bool:
         """Gracefully stop an agent process."""
         if process.poll() is not None:
+            log_file = getattr(process, "_log_file", None)
+            if log_file and log_file is not subprocess.DEVNULL:
+                try:
+                    log_file.close()
+                except Exception:
+                    pass
             # Already stopped
             return True
 
@@ -249,12 +296,24 @@ class ProcessManager:
             try:
                 process.wait(timeout=timeout)
                 logger.info(f"Agent process {process.pid} terminated gracefully")
+                log_file = getattr(process, "_log_file", None)
+                if log_file and log_file is not subprocess.DEVNULL:
+                    try:
+                        log_file.close()
+                    except Exception:
+                        pass
                 return True
             except subprocess.TimeoutExpired:
                 # Force kill
                 process.kill()
                 process.wait()
                 logger.warning(f"Agent process {process.pid} killed forcefully")
+                log_file = getattr(process, "_log_file", None)
+                if log_file and log_file is not subprocess.DEVNULL:
+                    try:
+                        log_file.close()
+                    except Exception:
+                        pass
                 return True
         except Exception as e:
             logger.error(f"Error stopping agent process: {e}")
@@ -517,14 +576,15 @@ class AgentManager:
             "thread_id": task.get("thread_id"),
         }
 
-        logger.info(f"Executing task on {agent_id} (port {instance.port})")
+        timeout = _get_agent_timeout(agent_id)
+        logger.info(f"Executing task on {agent_id} (port {instance.port}, timeout={timeout}s)")
 
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     url,
                     json=uap_request,
-                    timeout=300.0,  # 5 minute timeout (browser agent needs 200s+ for multi-step tasks)
+                    timeout=timeout,
                     headers={
                         "Content-Type": "application/json",
                         "X-User-ID": task.get("user_id", "anonymous"),
@@ -544,7 +604,7 @@ class AgentManager:
             logger.error(f"Timeout executing task on {agent_id}")
             return {
                 "status": "error",
-                "error": f"Agent {agent_id} timed out after 300s",
+                "error": f"Agent {agent_id} timed out after {timeout:.0f}s",
             }
         except httpx.HTTPStatusError as e:
             logger.error(f"HTTP error from {agent_id}: {e.response.status_code}")

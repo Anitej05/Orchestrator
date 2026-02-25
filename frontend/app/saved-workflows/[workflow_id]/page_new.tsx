@@ -11,6 +11,7 @@ import { toast } from 'sonner';
 import PlanGraph from '@/components/PlanGraph';
 import WorkflowExecutionChat from '@/components/workflow-execution-chat';
 import type { TaskStatus } from '@/lib/types';
+import { useTaskExecutionWebSocket } from '@/hooks/use-task-execution-websocket';
 
 interface WorkflowDetail {
   workflow_id: string;
@@ -41,24 +42,43 @@ export default function WorkflowDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [showExecutionChat, setShowExecutionChat] = useState(false);
   
-  // Legacy execution state (kept for compatibility)
+  // Legacy execution state (migrated to useTaskExecutionWebSocket hook)
   const [isExecuting, setIsExecuting] = useState(false);
   const [executionThreadId, setExecutionThreadId] = useState<string | null>(null);
-  const [taskStatuses, setTaskStatuses] = useState<Record<string, TaskStatus>>({});
-  const [taskResults, setTaskResults] = useState<Array<{ task_name: string; result: any; timestamp: string }>>([]);
   const [resultsExpanded, setResultsExpanded] = useState(true);
-  const wsRef = useRef<WebSocket | null>(null);
+
+  // Use unified WebSocket hook for task execution monitoring
+  const { taskStatuses, taskResults, isConnected, connect, disconnect } = useTaskExecutionWebSocket({
+    onTaskStart: (taskName, agentName) => {
+      console.log(`Task started: ${taskName} with ${agentName}`);
+    },
+    onTaskComplete: (taskName, result, executionTime) => {
+      console.log(`Task completed: ${taskName} (${executionTime}ms)`);
+    },
+    onTaskFail: (taskName, error) => {
+      console.log(`Task failed: ${taskName} - ${error}`);
+    },
+    onFinalResponse: (data) => {
+      setIsExecuting(false);
+      toast.success('Workflow execution completed!');
+    },
+    onError: (error) => {
+      setIsExecuting(false);
+      toast.error(error);
+    },
+    onDisconnect: () => {
+      setIsExecuting(false);
+    },
+  });
 
   useEffect(() => {
     if (workflowId) {
       loadWorkflow();
     }
     return () => {
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
+      disconnect();
     };
-  }, [workflowId]);
+  }, [workflowId, disconnect]);
 
   const loadWorkflow = async () => {
     setLoading(true);
@@ -82,84 +102,8 @@ export default function WorkflowDetailPage() {
     }
   };
 
-  const connectWebSocket = (threadId: string) => {
-    const ws = new WebSocket(`${WS_BASE_URL}/ws/chat?thread_id=${threadId}`);
-    
-    ws.onopen = () => {
-      console.log('WebSocket connected for workflow execution');
-    };
-
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        
-        if (data.type === 'task_started') {
-          setTaskStatuses(prev => ({
-            ...prev,
-            [data.task_name]: {
-              status: 'running',
-              agentName: data.agent_name,
-              startTime: Date.now()
-            }
-          }));
-        }
-        
-        if (data.type === 'task_completed') {
-          const executionTime = data.execution_time || 0;
-          setTaskStatuses(prev => ({
-            ...prev,
-            [data.task_name]: {
-              status: 'completed',
-              agentName: data.agent_name,
-              executionTime,
-              startTime: prev[data.task_name]?.startTime || Date.now()
-            }
-          }));
-          
-          setTaskResults(prev => [...prev, {
-            task_name: data.task_name,
-            result: data.result,
-            timestamp: new Date().toISOString()
-          }]);
-        }
-        
-        if (data.type === 'task_failed') {
-          setTaskStatuses(prev => ({
-            ...prev,
-            [data.task_name]: {
-              status: 'failed',
-              agentName: data.agent_name,
-              error: data.error
-            }
-          }));
-        }
-        
-        if (data.type === 'final_response') {
-          setIsExecuting(false);
-          toast.success('Workflow execution completed!');
-        }
-        
-        if (data.type === 'error') {
-          setIsExecuting(false);
-          toast.error(data.message || 'Execution error');
-        }
-      } catch (err) {
-        console.error('WebSocket message parse error:', err);
-      }
-    };
-
-    ws.onerror = (error) => {
-      console.error('WebSocket error:', error);
-      toast.error('Connection error during execution');
-    };
-
-    ws.onclose = () => {
-      console.log('WebSocket closed');
-      setIsExecuting(false);
-    };
-
-    wsRef.current = ws;
-  };
+  // Removed inline WebSocket implementation - now using useTaskExecutionWebSocket hook
+  
   const handleExecute = async () => {
     if (!workflow) return;
     

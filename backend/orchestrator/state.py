@@ -102,6 +102,8 @@ class State(TypedDict):
     
     # --- HUMAN-IN-THE-LOOP ---
     # When Brain sets requires_approval=True, execution pauses here
+    pending_user_input: Annotated[bool, overwrite_reducer]
+    question_for_user: Annotated[Optional[str], overwrite_reducer]
     pending_approval: Annotated[bool, overwrite_reducer]  # True = waiting for user approval
     pending_decision: Annotated[Optional[Dict], overwrite_reducer]  # Snapshot of decision awaiting approval
     

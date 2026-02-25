@@ -79,6 +79,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
   // Real-time task tracking
   task_statuses: {},
   current_executing_task: null,
+  todo_list: [],
   isLoading: false,
   canvas_data: undefined,
 
@@ -95,6 +96,9 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
         final_response: undefined,
         metadata: {},
         plan: [],
+        todo_list: [],
+        task_statuses: {},
+        current_executing_task: null,
         canvas_content: undefined,
         canvas_type: undefined,
         has_canvas: false,
@@ -419,6 +423,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
           metadata: conversationData.metadata || {},
           uploaded_files: conversationData.uploaded_files || [],
           plan: conversationData.plan || conversationData.task_plan || [],
+          todo_list: conversationData.todo_list || [],
           original_prompt: conversationData.original_prompt || undefined,
           canvas_content: conversationData.canvas_content,
           canvas_data: conversationData.canvas_data,
@@ -464,6 +469,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
         uploaded_files: [],
         task_statuses: {}, // Explicitly clear task statuses
         current_executing_task: null,
+        todo_list: [],
         isLoading: false,
         plan: [], // Explicitly clear plan
         canvas_content: undefined, // Clear canvas
