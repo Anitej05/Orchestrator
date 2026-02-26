@@ -9,7 +9,7 @@ from typing import List, Dict, Any, Optional
 
 class AgentMemory(BaseModel):
     """The agent's long-term memory and state"""
-    task: str
+    task: str = Field(default="")
     history: List[Dict[str, Any]] = Field(default_factory=list)
     observations: Dict[str, Any] = Field(default_factory=dict) # Key facts learned
     extracted_data: Dict[str, Any] = Field(default_factory=dict)
