@@ -5,13 +5,16 @@ Provides REST API endpoints for document operations.
 Optimized for cloud deployment with minimal memory overhead.
 """
 
+# CRITICAL: Load .env BEFORE any imports that trigger InferenceService/KeyManager singletons.
+from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).parent.parent.parent / ".env")
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import logging
 import os
 import asyncio
-from dotenv import load_dotenv
-from pathlib import Path
 from aiofiles import open as aio_open
 from fastapi import File, UploadFile
 from typing import List, Dict, Optional
@@ -48,15 +51,14 @@ from .state import DialogueStateManager
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Load environment variables from backend/.env
+# .env already loaded at top of this file
 BACKEND_ENV = Path(__file__).resolve().parents[2] / ".env"
-load_dotenv(BACKEND_ENV)
 if BACKEND_ENV.exists():
-    logger.info(f"Loaded environment from {BACKEND_ENV}")
+    logger.info(f"Environment loaded from {BACKEND_ENV}")
 
 # Check required API keys
-if not os.getenv('CEREBRAS_API_KEY'):
-    logger.warning("CEREBRAS_API_KEY not set - some features may be limited")
+if not os.getenv('CEREBRAS_API_KEY') and not os.getenv('CEREBRAS_API_KEYS'):
+    logger.warning("CEREBRAS_API_KEY(S) not set - some features may be limited")
 
 # Initialize FastAPI app
 app = FastAPI(

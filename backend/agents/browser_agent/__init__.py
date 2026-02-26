@@ -4,6 +4,10 @@ Browser Agent - FastAPI Entry Point
 UAP-compliant browser automation agent with /execute and /continue endpoints.
 """
 
+# CRITICAL: Load .env BEFORE any imports that trigger InferenceService/KeyManager singletons.
+from pathlib import Path as _Path
+from dotenv import load_dotenv as _load_dotenv
+_load_dotenv(_Path(__file__).parent.parent.parent / ".env")
 import logging
 import uuid
 from typing import Optional, Dict, Any

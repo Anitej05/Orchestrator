@@ -6,11 +6,12 @@ import logging
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from dotenv import load_dotenv
+from pathlib import Path
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from backend.services.inference_service import inference_service, InferencePriority, ProviderType
 
-load_dotenv()
+load_dotenv(Path(__file__).parent.parent.parent / ".env")
 logger = logging.getLogger(__name__)
 
 class LLMClient:
