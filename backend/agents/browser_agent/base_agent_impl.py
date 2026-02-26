@@ -74,7 +74,7 @@ class BrowserAgent(BaseAgent):
         self.browser = Browser()
         self.dom = DOMExtractor()
         self.llm = LLMClient()
-        self.memory = AgentMemory()
+        self.memory = AgentMemory(task="Initialize Browser Agent")
 
         logger.info("Browser Agent resources initialized")
 
@@ -295,12 +295,12 @@ class BrowserAgent(BaseAgent):
 
     @capability(
         name="execute_javascript",
-        description="Execute JavaScript code on the page",
+        description="Execute JavaScript code on the page. IMPORTANT: Do NOT use top-level 'return' statements; just write the expression directly (e.g. 'document.querySelector(\"h1\").textContent' instead of 'return document.querySelector(\"h1\").textContent').",
         parameters=[
             ParameterSchema(
                 name="script",
                 type="string",
-                description="JavaScript code",
+                description="JavaScript expression or code. Do NOT use top-level return statements — just write the expression.",
                 required=True,
             )
         ],
@@ -313,6 +313,22 @@ class BrowserAgent(BaseAgent):
 
         if not script:
             return {"success": False, "error": "Script is required"}
+
+        # Sanitize LLM-generated scripts
+        script = script.strip()
+
+        # Strip markdown code fences that LLMs sometimes wrap code in
+        if script.startswith("```"):
+            lines = script.split("\n")
+            lines = [l for l in lines if not l.strip().startswith("```")]
+            script = "\n".join(lines).strip()
+
+        # Wrap in IIFE if script contains a top-level 'return' statement.
+        # Playwright's page.evaluate() uses eval() where bare 'return' is
+        # a SyntaxError. LLMs consistently generate 'return expr;' style code.
+        stripped = script.lstrip()
+        if stripped.startswith("return ") or stripped.startswith("return;") or stripped.startswith("return\n"):
+            script = f"(() => {{ {script} }})()"
 
         try:
             page = self._get_page()

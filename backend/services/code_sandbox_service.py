@@ -45,6 +45,7 @@ class CodeSandboxService:
         'any': any, 'all': all, 'isinstance': isinstance, 'issubclass': issubclass,
         'callable': callable, 'hash': hash, 'id': id,
         'sorted': sorted, 'vars': vars, 'dir': dir,
+        'globals': globals, 'locals': locals,
         # Attribute access
         'getattr': getattr, 'setattr': setattr, 'hasattr': hasattr, 'delattr': delattr,
         # OOP

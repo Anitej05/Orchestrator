@@ -1351,29 +1351,43 @@ class BrowserAgent:
                 extracted_data={"merged": {}, "items": [], "stats": {}, "persistent_memory": {}}
             )
         finally:
-            # Final wait for downloads before closing
-            await self._wait_for_downloads()
+            # FAST CLEANUP: Minimize delay before HTTP response returns
+            # The orchestrator is blocked waiting for this response.
+            
+            # Quick download check (1s max — don't block for slow downloads)
+            if self._active_downloads:
+                try:
+                    await asyncio.wait_for(self._wait_for_downloads(timeout=1), timeout=1.0)
+                except asyncio.TimeoutError:
+                    logger.info(f"⏳ {len(self._active_downloads)} downloads still active — will complete in background")
             
             self.is_running = False
+            
+            # Cancel streaming task without awaiting (non-blocking)
             if self.streaming_task:
                 self.streaming_task.cancel()
-                try:
-                    await self.streaming_task
-                except asyncio.CancelledError:
-                    pass
+                # Don't await — let cancellation happen in background
             
-            # Clear Canvas on exit
+            # Clear Canvas on exit (with short timeout to avoid stalling)
             if self.thread_id:
                 try:
-                    await self._push_state_update(None, 0)
-                except Exception as e:
-                    logger.warning(f"Failed to clear canvas: {e}")
+                    await asyncio.wait_for(self._push_state_update(None, 0), timeout=2.0)
+                except (Exception, asyncio.TimeoutError) as e:
+                    logger.warning(f"Failed to clear canvas (non-critical): {e}")
             
             # Clear cached data (no longer needed after task)
             self.executor._cached_page_text = ""
             self.executor._cached_elements = []
 
+            # Fire-and-forget browser close — don't block HTTP response
+            asyncio.ensure_future(self._safe_close_browser())
+
+    async def _safe_close_browser(self):
+        """Close browser in background without blocking the caller."""
+        try:
             await self.browser.close()
+        except Exception as e:
+            logger.warning(f"Browser close error (non-critical): {e}")
 
     # NOTE: _needs_image_analysis and _is_stuck methods removed - they were dead code
     # Vision decision is now handled by the unified multimodal planner in llm.py
@@ -1558,41 +1572,8 @@ class BrowserAgent:
             }
         )
         
-        # === SECTION 4: LLM-DRIVEN CANVAS for extracted data ===
-        try:
-            from backend.services.canvas_service import CanvasService as _CS
-            import asyncio
-            
-            canvas_input = summary
-            if self.memory.extracted_data:
-                canvas_input += "\n\nExtracted Data:\n" + json.dumps(
-                    {k: v for k, v in list(self.memory.extracted_data.items())[:20]},
-                    default=str, indent=2
-                )[:2000]
-            
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # Schedule async canvas decision
-                async def _get_canvas():
-                    return await _CS.decide_canvas_llm(
-                        output=canvas_input[:3000],
-                        agent_name="browser_agent",
-                        capability_name="browse",
-                    )
-                future = asyncio.ensure_future(_get_canvas())
-                # Can't await here since _build_final_result is sync
-                # Attach canvas_display as a separate post-processing step
-                result._pending_canvas = future
-            else:
-                display = loop.run_until_complete(_CS.decide_canvas_llm(
-                    output=canvas_input[:3000],
-                    agent_name="browser_agent",
-                    capability_name="browse",
-                ))
-                if display:
-                    result.canvas_display = display.model_dump() if hasattr(display, "model_dump") else display.dict()
-        except Exception as e:
-            logger.debug(f"Browser agent canvas decision skipped: {e}")
+        # NOTE: Canvas detection is handled by the orchestrator's Hands._update_state_with_result
+        # which checks for canvas_display in agent responses. No need to do it here.
         
         logger.info(f"📊 Final Result: {'Success' if has_data else 'Incomplete'}, {len(self.memory.extracted_items)} items, {len(self.memory.extracted_data)} data keys")
         

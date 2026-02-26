@@ -33,8 +33,8 @@ AGENT_EXECUTE_TIMEOUTS = {
     "mail": 120.0,
     "mail_agent": 120.0,
     "zoho_books": 180.0,
-    "coding": 180.0,
-    "coding_agent": 180.0,
+    "coding": 600.0,
+    "coding_agent": 600.0,
 }
 
 
@@ -566,11 +566,9 @@ class AgentManager:
         # Prepare request
         url = f"http://localhost:{instance.port}/execute"
 
-        # Standard UAP format
+        # Standard UAP format (matches UAPExecuteRequest schema on agents)
         uap_request = {
-            "type": "execute",
             "prompt": task.get("prompt", ""),
-            "action": task.get("action"),
             "payload": task.get("payload", {}),
             "task_id": task.get("task_id"),
             "thread_id": task.get("thread_id"),
