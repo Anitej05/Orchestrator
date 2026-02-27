@@ -25,6 +25,15 @@ class AgentMemory(BaseModel):
         """Remember a key fact"""
         self.observations[key] = value
 
+    def update_knowledge(self, url: str, selector_map: Dict[str, Any]):
+        """Record page selectors for the current URL in observations.
+        
+        Called by _get_step_context after DOM extraction so the LLM knows
+        what interactive elements are available on the current page.
+        """
+        self.observations["current_url"] = url
+        self.observations["available_selectors"] = len(selector_map) if selector_map else 0
+
     def safe_add_extracted(self, data: Dict[str, Any]):
         """Add extracted data without overwriting existing keys.
         
