@@ -158,13 +158,15 @@ class WorkflowScheduler:
                     execution.started_at = datetime.utcnow()
                     db.commit()
                 
-                # Get the saved plan from blueprint
+                # Get the saved plan from blueprint (try new system first, fall back to old)
+                todo_list = blueprint.get("todo_list", [])
                 task_plan = blueprint.get("task_plan", [])
                 task_agent_pairs = blueprint.get("task_agent_pairs", [])
                 original_prompt = blueprint.get("original_prompt", "")
                 
-                if not task_agent_pairs:
-                    raise Exception("Workflow has no saved task agent pairs")
+                # Require at least one execution plan format
+                if not todo_list and not task_agent_pairs:
+                    raise Exception("Workflow has no saved execution plan. Must have either todo_list or task_agent_pairs")
                 
                 # Check if schedule already has a conversation thread
                 schedule = db.query(WorkflowSchedule).filter(
@@ -229,8 +231,12 @@ class WorkflowScheduler:
                 conversation_json = {
                     "thread_id": thread_id,
                     "original_prompt": original_prompt,
+                    # New system (primary)
+                    "todo_list": todo_list,
+                    # Old system (fallback)
                     "task_agent_pairs": task_agent_pairs,
                     "task_plan": task_plan,
+                    # Messages and status
                     "messages": existing_messages,
                     "completed_tasks": [],
                     "final_response": None,

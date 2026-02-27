@@ -43,9 +43,16 @@ export default function WorkflowExecutionChat({ workflowId, workflow, onCancel }
   const wsRef = useRef<WebSocket | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Build plan data from task_plan
+  // Build plan data from todo_list (new system) or task_plan (old system)
   const planData = {
-    pendingTasks: workflow.blueprint.task_plan?.flatMap((batch: any[]) => 
+    pendingTasks: workflow.blueprint.todo_list?.map((task: any) => ({
+      task: task.title || 'Untitled Task',
+      description: task.description || task.instructions || '',
+      agent: task.assigned_to || 'N/A',
+      status: task.status || 'pending',
+      id: task.id
+    })) || 
+    workflow.blueprint.task_plan?.flatMap((batch: any[]) => 
       batch.map((task: any) => ({
         task: task.task_name || task.name,
         description: task.task_description || task.description || '',

@@ -10,6 +10,8 @@ import Markdown from '@/components/ui/markdown';
 import { type ProcessResponse, type ConversationState, type Message, type Attachment } from '@/lib/types';
 import { PlanApprovalModal } from '@/components/plan-approval-modal';
 import { useConversationStore } from '@/lib/conversation-store';
+import { authFetch } from '@/lib/auth-fetch';
+import { API_BASE_URL } from '@/lib/config';
 import { useTTS } from '@/hooks/useTTS';
 import { useSpeechToText } from '@/hooks/useSpeechToText';
 import { AudioWaveSVG } from '@/components/ui/audio-wave-animation';
@@ -175,6 +177,50 @@ export function InteractiveChatInterface({
     useConversationStore.setState({
       approval_required: false
     });
+  };
+
+  const handleApproveAction = async () => {
+    if (!state.thread_id) return;
+
+    try {
+      await authFetch(`${API_BASE_URL}/api/orchestrator/action/approve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ thread_id: state.thread_id })
+      });
+    } catch (error) {
+      console.error('Failed to approve action:', error);
+      return;
+    }
+
+    useConversationStore.setState({
+      pending_action_approval: false,
+      pending_action: undefined
+    });
+
+    await continueConversation('approve', [], false, owner);
+  };
+
+  const handleRejectAction = async () => {
+    if (!state.thread_id) return;
+
+    try {
+      await authFetch(`${API_BASE_URL}/api/orchestrator/action/reject`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ thread_id: state.thread_id, reason: 'User rejected' })
+      });
+    } catch (error) {
+      console.error('Failed to reject action:', error);
+      return;
+    }
+
+    useConversationStore.setState({
+      pending_action_approval: false,
+      pending_action: undefined
+    });
+
+    await continueConversation('reject', [], false, owner);
   };
 
   // Handler for Accept & Execute button (uses parent's logic)
@@ -778,6 +824,31 @@ export function InteractiveChatInterface({
 
               {/* Action Buttons - Right Side */}
               <div className="flex items-center gap-2">
+                {state.pending_action_approval && (
+                  <div className="flex items-center gap-2 px-2 py-1 rounded-md bg-amber-50 border border-amber-200">
+                    <AlertCircle className="w-4 h-4 text-amber-600" />
+                    <span className="text-xs text-amber-800">
+                      {state.currentQuestion || 'Action approval required.'}
+                    </span>
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="bg-status-active text-foreground"
+                      onClick={handleApproveAction}
+                    >
+                      Approve
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ui-secondary"
+                      onClick={handleRejectAction}
+                    >
+                      Reject
+                    </Button>
+                  </div>
+                )}
+
                 {/* Plan Approval Buttons - Only show when in planning mode with approval required, or executing saved workflows */}
                 {((planningMode && state.approval_required) || ((state.metadata?.currentStage === 'validating' || state.status === 'planning_complete') && onAcceptPlan && state.metadata?.from_workflow)) ? (
                   <>

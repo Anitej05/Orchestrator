@@ -21,9 +21,10 @@ logger = logging.getLogger("AgentOrchestrator")
 # Directory paths
 ORCHESTRATOR_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BACKEND_DIR = os.path.dirname(ORCHESTRATOR_DIR)
-PLAN_DIR = os.path.join(BACKEND_DIR, "agent_plans")
-os.makedirs(PLAN_DIR, exist_ok=True)
 
+# Global embeddings cache (lazy-loaded)
+_hf_embeddings = None
+_embedding_model = None
 
 from datetime import datetime
 
@@ -167,82 +168,6 @@ def transform_payload_types(payload: Dict[str, Any], parameters: List[Any]) -> D
     return transformed
 
 
-def save_plan_to_file(state: dict, *args, **kwargs):
-    """Saves the current plan and completed tasks to a Markdown file. Accepts extra args for compatibility."""
-    thread_id = state.get("thread_id")
-    if not thread_id:
-        logger.warning("No thread_id found in state, skipping plan save")
-        return {}
-
-    plan_path = os.path.join(PLAN_DIR, f"{thread_id}-plan.md")
-
-    with open(plan_path, "w", encoding="utf-8") as f:
-        f.write(f"# Execution Plan for Thread: {thread_id}\n\n")
-        f.write(f"**Original Prompt:** {state.get('original_prompt', 'N/A')}\n\n")
-
-        f.write("## Attachments\n")
-        if uploaded_files := state.get("uploaded_files"):
-            for file_obj in uploaded_files:
-                if isinstance(file_obj, dict):
-                    file_name = file_obj.get('file_name', 'N/A')
-                    file_type = file_obj.get('file_type', 'N/A')
-                else:
-                    file_name = getattr(file_obj, 'file_name', 'N/A')
-                    file_type = getattr(file_obj, 'file_type', 'N/A')
-                f.write(f"- `{file_name}` ({file_type})\n")
-        else:
-            f.write("- No attachments.\n")
-        
-        f.write("\n## Pending Tasks\n")
-        if state.get("task_plan"):
-            for i, batch in enumerate(state["task_plan"]):
-                f.write(f"### Batch {i+1}\n")
-                for task in batch:
-                    if isinstance(task, dict):
-                        task_name = task.get('task_name', 'N/A')
-                        task_description = task.get('task_description', 'N/A')
-                        primary_id = task.get('primary', {}).get('id', 'N/A') if task.get('primary') else 'N/A'
-                    else:
-                        task_name = getattr(task, 'task_name', 'N/A')
-                        task_description = getattr(task, 'task_description', 'N/A')
-                        primary_id = getattr(getattr(task, 'primary', None), 'id', 'N/A')
-
-                    f.write(f"- **Task**: `{task_name}`\n")
-                    f.write(f"  - **Description**: {task_description}\n")
-                    f.write(f"  - **Agent**: {primary_id}\n")
-        else:
-            f.write("- No pending tasks.\n")
-
-        f.write("\n## Completed Tasks\n")
-        if state.get("completed_tasks"):
-            for task in state["completed_tasks"]:
-                if isinstance(task, dict):
-                    task_name = task.get('task_name', 'N/A')
-                    result_obj = task.get('result', {})
-                else:
-                    task_name = getattr(task, 'task_name', 'N/A')
-                    result_obj = getattr(task, 'result', {})
-                    
-                result_str = json.dumps(result_obj, indent=2, cls=CustomJSONEncoder)
-                indented_result_str = "\n".join("      " + line for line in result_str.splitlines())
-
-                f.write(f"- **Task**: `{task_name}`\n")
-                f.write("  - **Result**:\n")
-                f.write("    ```json\n")
-                f.write(f"{indented_result_str}\n")
-                f.write("    ```\n")
-        else:
-            f.write("- No completed tasks.\n")
-
-    logger.info(f"Plan for thread {thread_id} saved to {plan_path}")
-    return {}
-
-
-# Lazy-loaded embeddings
-_hf_embeddings = None
-_embedding_model = None
-
-
 def get_hf_embeddings():
     """Lazily load HuggingFace embeddings to avoid import-time issues."""
     global _hf_embeddings, _embedding_model
@@ -252,8 +177,6 @@ def get_hf_embeddings():
         _embedding_model = SentenceTransformer('all-mpnet-base-v2')
         _hf_embeddings = HuggingFaceEmbeddings(model_name='all-mpnet-base-v2')
     return _hf_embeddings
-
-
 
 
 def save_conversation_history(state: dict, *args, **kwargs):

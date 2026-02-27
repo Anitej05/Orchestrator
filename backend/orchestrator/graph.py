@@ -15,7 +15,6 @@ from .omni_dispatcher import brain, hands, omni_route_condition
 from .nodes.utils import (
     serialize_complex_object, 
     CustomJSONEncoder,
-    save_plan_to_file,
     save_conversation_history,
     get_serializable_state
 )
@@ -90,7 +89,6 @@ __all__ = [
     'messages_to_dict',
     'messages_from_dict',
     'serialize_complex_object',
-    'save_plan_to_file',
     'save_conversation_history',
     'get_serializable_state'
 ]

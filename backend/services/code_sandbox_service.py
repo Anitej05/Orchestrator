@@ -3,12 +3,14 @@ import logging
 import traceback
 import sys
 import io
+import os
 import pandas as pd
 import numpy as np
 import requests
 import json
 import ast
 import builtins
+from pathlib import Path
 from typing import Dict, Any, Optional, List
 
 logger = logging.getLogger("CodeSandboxService")
@@ -115,6 +117,8 @@ class CodeSandboxService:
                     'np': np,
                     'requests': requests,
                     'json': json,
+                    'os': os,  # Add os module for path operations
+                    'Path': Path,  # Add pathlib.Path for cross-platform paths
                 },
                 'output_buffer': output_buffer,
                 'history': []

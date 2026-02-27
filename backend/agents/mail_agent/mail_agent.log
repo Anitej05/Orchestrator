@@ -1,7 +1,30 @@
 GMAIL_MCP_URL not set. Gmail agent will not function.
 GMAIL_CONNECTION_ID not set. Using URL without connection ID.
 Loaded 1 Cerebras API key from environment (CEREBRAS_API_KEY)
-ContentManagementService initialized with 0 items
+Loaded 4 content items from registry
+ContentManagementService initialized with 4 items
 AgentFileManager connected to ContentManagementService
 AgentFileManager initialized for mail_agent at C:\Users\mahes\OneDrive\Desktop\Projects\Orbimesh\Orbimesh-new\storage\mail_agent\attachments
-ContentManagementService initialized with 0 items
+Loaded 4 content items from registry
+ContentManagementService initialized with 4 items
+Initializing Mail Agent dependencies...
+Loaded 4 content items from registry
+ContentManagementService initialized with 4 items
+Mail Agent initialization complete
+[SEARCH] Starting optimized semantic search for: None
+Calling Gmail tool via Composio SDK: GMAIL_FETCH_EMAILS
+Parameters: {'query': 'label:inbox', 'max_results': 10, 'user_id': 'me'}
+[SEARCH] Starting optimized semantic search for: in:inbox
+Calling Gmail tool via Composio SDK: GMAIL_FETCH_EMAILS
+Parameters: {'query': 'in:inbox', 'max_results': 5, 'user_id': 'me'}
+Execution failed: 'AgentMemory' object has no attribute 'get_recent_search'
+[SEARCH] Starting optimized semantic search for: None
+Calling Gmail tool via Composio SDK: GMAIL_FETCH_EMAILS
+Parameters: {'query': 'label:inbox', 'max_results': 10, 'user_id': 'me'}
+[SEARCH] Starting optimized semantic search for: None
+Calling Gmail tool via Composio SDK: GMAIL_FETCH_EMAILS
+Parameters: {'query': 'label:inbox', 'max_results': 10, 'user_id': 'me'}
+[SEARCH] Starting optimized semantic search for: in:inbox
+Calling Gmail tool via Composio SDK: GMAIL_FETCH_EMAILS
+Parameters: {'query': 'in:inbox', 'max_results': 5, 'user_id': 'me'}
+Execution failed: 'AgentMemory' object has no attribute 'get_recent_search'

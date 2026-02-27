@@ -71,6 +71,9 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
   approval_required: false,
   estimated_cost: 0,
   task_count: 0,
+  // Action approval fields
+  pending_action_approval: false,
+  pending_action: undefined,
   // Canvas confirmation fields
   pending_confirmation: false,
   pending_confirmation_task: undefined,
@@ -95,6 +98,8 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
         final_response: undefined,
         metadata: {},
         plan: [],
+        pending_action_approval: false,
+        pending_action: undefined,
         canvas_content: undefined,
         canvas_type: undefined,
         has_canvas: false,
@@ -102,6 +107,12 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
         plan_view: undefined,
         current_view: 'browser',
         canvas_data: undefined,
+        canvas_title: undefined,
+        canvas_metadata: undefined,
+        canvas_requires_confirmation: false,
+        canvas_confirmation_message: undefined,
+        pending_confirmation: false,
+        pending_confirmation_task: undefined,
       });
 
       try {
@@ -386,7 +397,14 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
 
         // Use authFetch helper which handles Clerk JWT properly
         const { authFetch } = await import('./auth-fetch');
-        const response = await authFetch(`${API_BASE_URL}/api/conversations/${cleanThreadId}`);
+        let response = await authFetch(`${API_BASE_URL}/api/conversations/${cleanThreadId}`);
+
+        if (!response.ok) {
+          if (response.status === 401 || response.status === 403) {
+            console.warn('Auth failed for conversation load, attempting history fallback');
+            response = await fetch(`${API_BASE_URL}/api/chat/history/${cleanThreadId}`);
+          }
+        }
 
         if (!response.ok) {
           if (response.status === 404) {
@@ -407,6 +425,19 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
           timestamp: new Date(msg.timestamp)
         }));
 
+        let planView: string | undefined = conversationData.plan_view;
+        if (!planView) {
+          try {
+            const planRes = await fetch(`${API_BASE_URL}/api/plan/${cleanThreadId}`);
+            if (planRes.ok) {
+              const planData = await planRes.json();
+              planView = planData?.content;
+            }
+          } catch (planErr) {
+            console.warn('Failed to load plan view:', planErr);
+          }
+        }
+
         // Set the full conversation state
         const conversationState: Partial<ConversationState> = {
           thread_id: conversationData.thread_id || threadId,
@@ -424,6 +455,9 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
           canvas_data: conversationData.canvas_data,
           canvas_type: conversationData.canvas_type,
           has_canvas: conversationData.has_canvas || false,
+          plan_view: planView,
+          pending_action_approval: conversationData.pending_action_approval || false,
+          pending_action: conversationData.pending_action,
         };
 
         get().actions._setConversationState(conversationState);
@@ -451,6 +485,18 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
     },
 
     resetConversation: () => {
+      const threadId = get().thread_id;
+      if (threadId) {
+        (async () => {
+          try {
+            const { authFetch } = await import('./auth-fetch');
+            await authFetch(`${API_BASE_URL}/api/chat/${threadId}`, { method: 'DELETE' });
+          } catch (error) {
+            console.warn('Failed to clear conversation on backend:', error);
+          }
+        })();
+      }
+
       console.log('Resetting conversation state - clearing ALL fields including plan and metadata');
       set({
         thread_id: undefined,
@@ -470,6 +516,15 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
         has_canvas: false,
         canvas_type: undefined,
         canvas_data: undefined,
+        canvas_title: undefined,
+        canvas_metadata: undefined,
+        canvas_requires_confirmation: false,
+        canvas_confirmation_message: undefined,
+        browser_view: undefined,
+        plan_view: undefined,
+        current_view: undefined,
+        pending_confirmation: false,
+        pending_confirmation_task: undefined,
         // Omni-Dispatcher fields
         execution_plan: [],
         current_phase_id: undefined,

@@ -16,6 +16,8 @@ import type { Agent, Message, TaskAgentPair } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { API_BASE_URL } from "@/lib/config"
 import DocumentViewer from "@/components/document-viewer"
+import { dismissCanvas } from "@/lib/canvas-api"
+import { X } from "lucide-react"
 
 
 interface ExecutionResult {
@@ -65,6 +67,7 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
         // Get conversation state from Zustand store
         const conversationState = useConversationStore();
         const taskAgentPairs = conversationState.task_agent_pairs || [];
+        const todoList = conversationState.todo_list || [];
         const messages = conversationState.messages || [];
         const uploadedFiles = conversationState.uploaded_files || [];
         const planData = conversationState.plan || [];
@@ -88,9 +91,21 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
             // This prevents duplicates in the graph
             const pendingTasks: Plan['pendingTasks'] = [];
 
-            // Process pending tasks from planData (the original plan structure)
+            // Try todo_list first (new system)
+            if (todoList && todoList.length > 0) {
+                const batchTasks = todoList.map((task: any) => ({
+                    task: task.title || 'Unknown Task',
+                    description: task.description || task.instructions || 'No description',
+                    agent: task.assigned_to || 'Unknown Agent',
+                    short_description: task.description,
+                    agent_image_url: undefined
+                }));
+                // @ts-ignore - We are changing the type of pendingTasks to allow nested arrays
+                pendingTasks.push(batchTasks);
+            }
+            // Fallback to process pending tasks from planData (the original plan structure for old system)
             // We want to PRESERVE the batch structure (list of lists) for valid parallel visualization
-            if (planData && planData.length > 0) {
+            else if (planData && planData.length > 0) {
                 planData.forEach((batch: any) => {
                     if (Array.isArray(batch)) {
                         // It's a batch of tasks
@@ -136,7 +151,7 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                 completedTasks: [] // Always empty - we use task_statuses for real-time updates
             });
             setIsLoadingPlan(false);
-        }, [planData, taskAgentPairs]);
+        }, [planData, taskAgentPairs, todoList]);
 
         // Auto-switch to Plan tab when plan is created (validate_plan_for_execution starts)
         useEffect(() => {
@@ -370,6 +385,46 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                         {/* Browser live stream is shown in the chat interface instead */}
                         {(hasCanvas || viewedCanvasContent) && displayCanvasContent && !browserView ? (
                             <div className="h-full flex flex-col">
+                                {/* Canvas Header with Dismiss Button */}
+                                {!viewedCanvasContent && hasCanvas && (
+                                    <div className="bg-bg-card border-b border-border-color px-4 py-2 shadow-sm flex items-center justify-between">
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-orbimesh-section-header font-semibold text-text-primary">
+                                                {conversationState.canvas_title || 'Canvas View'}
+                                            </span>
+                                            {canvasType && (
+                                                <span className="text-xs px-2 py-0.5 bg-bg-subtle text-text-secondary rounded-full border border-border-color">
+                                                    {canvasType}
+                                                </span>
+                                            )}
+                                        </div>
+                                        <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            onClick={async () => {
+                                                if (threadId) {
+                                                    try {
+                                                        // Use REST API to dismiss canvas
+                                                        await dismissCanvas(threadId, 'main');
+                                                        // Clear local state
+                                                        useConversationStore.setState({
+                                                            has_canvas: false,
+                                                            canvas_content: undefined,
+                                                            canvas_data: undefined,
+                                                            canvas_type: undefined
+                                                        });
+                                                    } catch (error) {
+                                                        console.error('Failed to dismiss canvas:', error);
+                                                    }
+                                                }
+                                            }}
+                                            className="gap-1 text-text-tertiary hover:text-text-primary"
+                                        >
+                                            <X className="w-4 h-4" />
+                                            Dismiss
+                                        </Button>
+                                    </div>
+                                )}
                                 {viewedCanvasContent && (
                                     <div className="bg-bg-card border-b border-border-color px-6 py-3 shadow-orbimesh-panel">
                                         <div className="flex items-center justify-between max-w-4xl mx-auto">
