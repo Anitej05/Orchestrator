@@ -14,7 +14,7 @@ class AtomicAction(BaseModel):
         "navigate", "click", "type", "scroll", "extract", "done",
         "hover", "press", "wait", "go_back", "go_forward", "save_screenshot", 
         "save_info", "skip_subtask", "select", "upload_file", "download_file",
-        "run_js", "press_keys",
+        "run_js", "press_keys", "search_text", "click_coordinate", "scan_page",
         # Persistent memory actions
         "save_credential", "get_credential", "save_learning"
     ]
@@ -39,19 +39,14 @@ class AtomicAction(BaseModel):
 class ActionPlan(BaseModel):
     """LLM response containing a sequence of actions"""
     reasoning: str = Field(description="Why this sequence of actions")
+    evaluation: str = Field(default="", description="Evaluation of previous action: SUCCESS/FAILURE/PARTIAL + brief why")
+    memory: str = Field(default="", description="Running scratchpad: what you know, what you need, current strategy")
+    next_goal: str = Field(default="", description="What you will achieve with these actions")
     actions: List[AtomicAction] = Field(description="Sequence of actions to execute in order")
     confidence: float = Field(default=0.8, ge=0, le=1)
     next_mode: Literal["text", "vision"] = Field(
         default="text", 
         description="Which model to use for the NEXT step. Use 'vision' if visual analysis is needed."
-    )
-    completed_subtasks: List[Any] = Field(
-        default_factory=list,
-        description="List of subtask IDs that will be completed by these actions"
-    )
-    updated_plan: Optional[List[str]] = Field(
-        default=None,
-        description="A NEW list of subtasks to replace the current remaining plan (Dynamic Replanning)"
     )
     usage: Optional[Dict[str, int]] = Field(
         default=None, 

@@ -3,8 +3,9 @@ import os
 import logging
 from pathlib import Path
 from dotenv import load_dotenv
+from pathlib import Path
 
-load_dotenv()
+load_dotenv(Path(__file__).parent.parent.parent / ".env")
 
 # Configure logging - INFO level for clean output (like browser agent)
 log_file_path = Path(__file__).parent / "mail_agent.log"

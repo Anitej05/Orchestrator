@@ -9,6 +9,12 @@ import os
 import sys
 from pathlib import Path
 
+# CRITICAL: Load .env BEFORE any imports that trigger InferenceService/KeyManager singletons.
+# When using `python -m`, __init__.py loads BEFORE __main__.py, so this must be here.
+from dotenv import load_dotenv
+_BACKEND_DIR = Path(__file__).parent.parent.parent
+load_dotenv(_BACKEND_DIR / ".env")
+
 # ==================== ROBUST PATH HANDLING ====================
 PACKAGE_DIR = Path(__file__).parent.absolute()
 AGENTS_DIR = PACKAGE_DIR.parent
@@ -361,6 +367,12 @@ try:
         agent_name="Spreadsheet Agent"
     )
     app = _server.app  # Export BaseAgent app as primary
+    
+    # Mount legacy endpoints for backwards compatibility
+    # The BaseAgent's /execute expects JSON AgentRequest, but legacy callers
+    # send multipart form-data. Register form-data route under /execute/form.
+    app.post("/execute/form", response_model=ExecuteResponse)(execute)
+    app.post("/execute/json", response_model=ExecuteResponse)(execute_json)
     
 except Exception as e:
     print(f"WARNING: BaseAgent SpreadsheetAgent failed to initialize: {e}", file=sys.stderr)

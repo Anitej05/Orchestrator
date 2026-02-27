@@ -1,11 +1,14 @@
 """
-Wikipedia tools using wikipedia library.
+Wikipedia tools using wikipedia-api library (Python 3.13 compatible).
 Converted from wiki_agent.py to direct function tools.
 """
 
-import wikipedia
+import wikipediaapi
 from typing import List, Dict
 from langchain_core.tools import tool
+
+# Initialize Wikipedia API client
+wiki_wiki = wikipediaapi.Wikipedia('Orbimesh/1.0', 'en')
 
 
 @tool
@@ -26,10 +29,12 @@ def search_wikipedia(query: str = "", search_query: str = "") -> Dict:
         if not search_term:
             return {"error": "No search query provided"}
 
-        results = wikipedia.search(search_term)
-        if not results:
-            return {"error": f"No search results found for '{search_term}'"}
-        return {"results": results}
+        # wikipedia-api doesn't have built-in search, so we'll try to get the page
+        page = wiki_wiki.page(search_term)
+        if page.exists():
+            return {"results": [page.title], "summary": page.summary[:200]}
+        else:
+            return {"error": f"No page found for '{search_term}'. Try a more specific query."}
     except Exception as e:
         return {"error": f"Wikipedia search failed: {str(e)}"}
 
@@ -52,22 +57,18 @@ def get_wikipedia_summary(title: str = "", page_title: str = "") -> Dict:
         if not query:
             return {"error": "No page title provided"}
 
-        page = wikipedia.page(query, auto_suggest=False, redirect=True)
-        return {"title": page.title, "summary": page.summary, "url": page.url}
-    except wikipedia.exceptions.PageError:
-        return {"error": f"Page '{query}' does not exist"}
-    except wikipedia.exceptions.DisambiguationError as e:
-        return {
-            "error": f"Title '{query}' is ambiguous",
-            "options": e.options[:10],  # Limit to first 10 options
-        }
+        page = wiki_wiki.page(query)
+        if not page.exists():
+            return {"error": f"Page '{query}' does not exist"}
+        
+        return {"title": page.title, "summary": page.summary, "url": page.fullurl}
     except Exception as e:
         return {"error": f"Failed to get summary: {str(e)}"}
 
 
 @tool
 def get_wikipedia_section(
-    title: str = "", page_title: str = "", section: str = "", section_name: str = ""
+    title: str = "", page_title: str = "", section: str = "", section_name: str = "", section_title: str = ""
 ) -> Dict:
     """
     Get content of a specific section from a Wikipedia page.
@@ -77,6 +78,7 @@ def get_wikipedia_section(
         page_title: Alias for title
         section: The section title to retrieve (e.g., 'History', 'Applications')
         section_name: Alias for section
+        section_title: Alias for section
 
     Returns:
         Dictionary with title, section name, and content
@@ -84,28 +86,36 @@ def get_wikipedia_section(
     try:
         # Accept both title and page_title parameters
         query_title = title or page_title
-        query_section = section or section_name
+        query_section = section or section_name or section_title
 
         if not query_title:
             return {"error": "No page title provided"}
         if not query_section:
             return {"error": "No section name provided"}
 
-        page = wikipedia.page(query_title, auto_suggest=False, redirect=True)
-        section_content = page.section(query_section)
+        page = wiki_wiki.page(query_title)
+        if not page.exists():
+            return {"error": f"Page '{query_title}' does not exist"}
 
-        if not section_content:
+        # Find the section
+        section_obj = None
+        for sec in page.sections:
+            if sec.title.lower() == query_section.lower():
+                section_obj = sec
+                break
+
+        if not section_obj:
+            available_sections = [s.title for s in page.sections[:10]]
             return {
-                "error": f"Section '{query_section}' not found on page '{query_title}'"
+                "error": f"Section '{query_section}' not found on page '{query_title}'",
+                "available_sections": available_sections
             }
 
         return {
             "title": page.title,
-            "section": query_section,
-            "content": section_content,
+            "section": section_obj.title,
+            "content": section_obj.text,
         }
-    except wikipedia.exceptions.PageError:
-        return {"error": f"Page '{query_title}' does not exist"}
     except Exception as e:
         return {"error": f"Failed to get section: {str(e)}"}
 
@@ -113,14 +123,14 @@ def get_wikipedia_section(
 @tool
 def get_wikipedia_images(title: str = "", page_title: str = "") -> Dict:
     """
-    Get all image URLs from a Wikipedia page.
+    Get Wikipedia page information (images not directly available in wikipedia-api).
 
     Args:
         title: The exact title of the Wikipedia page
         page_title: Alias for title
 
     Returns:
-        Dictionary with title and list of image URLs
+        Dictionary with title and page information
     """
     try:
         # Accept both title and page_title parameters
@@ -128,18 +138,16 @@ def get_wikipedia_images(title: str = "", page_title: str = "") -> Dict:
         if not query:
             return {"error": "No page title provided"}
 
-        page = wikipedia.page(query, auto_suggest=False, redirect=True)
+        page = wiki_wiki.page(query)
+        if not page.exists():
+            return {"error": f"Page '{query}' does not exist"}
 
-        if not page.images:
-            return {"error": f"No images found on page '{query}'"}
-
-        return {"title": page.title, "images": page.images}
-    except wikipedia.exceptions.PageError:
-        return {"error": f"Page '{query}' does not exist"}
-    except wikipedia.exceptions.DisambiguationError as e:
+        # wikipedia-api doesn't provide direct image access
+        # Return page info and note about image limitations
         return {
-            "error": f"Title '{query}' is ambiguous",
-            "options": e.options[:10],  # Limit to first 10 options
+            "title": page.title,
+            "url": page.fullurl,
+            "note": "Image extraction not available in this API version. Visit the URL for images."
         }
     except Exception as e:
-        return {"error": f"Failed to get images: {str(e)}"}
+        return {"error": f"Failed to get page info: {str(e)}"}

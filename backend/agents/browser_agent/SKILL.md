@@ -46,6 +46,6 @@ Use this agent when the user:
 ## Notes
 
 - Uses Playwright for browser control
-- Supports multi-provider LLM fallback (Cerebras → Groq → NVIDIA)
-- Vision analysis via Ollama or NVIDIA
+- Uses centralized Inference Service with multi-provider LLM fallback
+- Vision analysis via Inference Service (multi-provider)
 - Cannot access local filesystem or documents

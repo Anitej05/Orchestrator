@@ -6,7 +6,7 @@ Provides the LLM with complete selector maps for robust JavaScript extraction.
 """
 
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any
 from playwright.async_api import Page
 
 logger = logging.getLogger(__name__)

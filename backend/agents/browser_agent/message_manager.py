@@ -8,7 +8,7 @@ Implements intelligent truncation and prioritization similar to browser-use.
 import logging
 import tiktoken
 from typing import List, Dict, Any, Optional, Literal
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import IntEnum
 
 logger = logging.getLogger(__name__)
@@ -45,7 +45,7 @@ class MessageManager:
     
     # Default token budgets for different parts
     # REDUCED FURTHER: 30k still causes ~58k char prompts hitting timeouts
-    DEFAULT_MAX_TOKENS = 15000  # Reduced from 30k - forces ~20k char prompts max
+    DEFAULT_MAX_TOKENS = 32000  # Balanced for kimi-k2.5:cloud — fits ~500 elements + 10 steps history
     SYSTEM_PROMPT_BUDGET = 2000  # Reserved for system prompt
     CURRENT_STATE_BUDGET = 3000  # Reserved for current page state (reduced from 5k)
     HISTORY_BUDGET_RATIO = 0.5  # 50% of remaining for history
@@ -322,6 +322,24 @@ def format_page_content_for_prompt(
         scroll_text = f"SCROLL: {scroll_info.get('scroll_percent', 0):.0f}% down\n"
         parts.append(scroll_text)
         current_tokens += count(scroll_text)
+    
+    # OVERLAY/MODAL WARNING — surfaced BEFORE elements so model sees it first
+    overlays = page_content.get('overlays', {})
+    if overlays and overlays.get('has_overlay'):
+        overlay_items = overlays.get('overlays', [])
+        close_btns = overlays.get('close_buttons', [])
+        overlay_text = "\n⚠️ ACTIVE OVERLAY/MODAL DETECTED — You MUST dismiss this FIRST before any other action!\n"
+        overlay_text += "Elements behind this overlay are BLOCKED and cannot be clicked.\n"
+        for ov in overlay_items[:3]:  # Max 3 overlays
+            title = ov.get('title', 'Untitled')
+            ov_type = ov.get('type', 'unknown')
+            overlay_text += f"  📋 Modal: \"{title}\" (type: {ov_type})\n"
+        if close_btns:
+            btn = close_btns[0]
+            overlay_text += f"  🔘 Close button: \"{btn.get('text', 'X')}\"\n"
+        overlay_text += "  💡 Dismiss with: press_keys Escape, click close button, or run_js\n\n"
+        parts.append(overlay_text)
+        current_tokens += count(overlay_text)
     
     # Interactive elements (high priority - this is what the agent clicks)
     elements = page_content.get('elements', [])

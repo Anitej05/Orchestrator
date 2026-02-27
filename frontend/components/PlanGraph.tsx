@@ -295,7 +295,7 @@ export default function PlanGraph({ planData, todoList: externalTodoList, taskSt
                 const taskStatus = taskStatuses[taskName];
                 const status = taskStatus?.status || task.status || 'pending';
 
-                const nodeId = `task-${taskName}`;
+                const nodeId = `task-${taskKey}`;
                 currentLayerIds.push(nodeId);
 
                 const xPos = startX + (indexInBatch * 320);

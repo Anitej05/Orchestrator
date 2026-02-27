@@ -9,7 +9,7 @@ Extract page content with:
 
 import logging
 import asyncio
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Set
 from playwright.async_api import Page
 
 logger = logging.getLogger(__name__)
@@ -21,13 +21,16 @@ class DOMExtractor:
     # Configuration
     MAX_IFRAME_DEPTH = 3  # Maximum depth for nested iframes
     MAX_IFRAMES = 3       # Reduced from 10 - skip most ad/tracking iframes
-    MAX_ELEMENTS = 250    # Increased to 250 per user request
+    MAX_ELEMENTS = 500    # Matches 32k prompt budget — viewport-priority scoring ensures important elements first
     
     async def get_page_content(self, page: Page) -> Dict[str, Any]:
         """Get comprehensive page content for LLM, including iFrame contents"""
         try:
             url = page.url
             title = await page.title()
+            
+            # PHASE 1: Detect JS click listeners via CDP (catches React/Vue/Angular handlers)
+            js_click_backend_ids = await self._detect_js_click_listeners(page)
             
             # Get visible text (FULL TEXT - No 200k limit for CMS RAG)
             body_text = await page.evaluate('''() => {
@@ -64,15 +67,10 @@ class DOMExtractor:
                     elements = await self._get_interactive_elements_from_frame(
                         frame, 
                         frame_id=frame_id,
-                        frame_name=frame_name
+                        frame_name=frame_name,
+                        js_click_backend_ids=js_click_backend_ids
                     )
                     all_elements.extend(elements)
-                    
-                    # Enforce MAX_ELEMENTS limit to prevent prompt bloat
-                    if len(all_elements) >= self.MAX_ELEMENTS:
-                        all_elements = all_elements[:self.MAX_ELEMENTS]
-                        logger.info(f"🚫 Element limit reached ({self.MAX_ELEMENTS}), stopping extraction")
-                        break
                     
                     if not is_main:
                         frame_info.append({
@@ -84,8 +82,32 @@ class DOMExtractor:
                 except Exception as frame_err:
                     logger.warning(f"Failed to extract from frame {frame_id}: {frame_err}")
             
+            # Viewport-priority scoring: sort elements by importance, then cap
+            viewport_height = scroll_info.get('innerHeight', 1000)
+            scroll_y = scroll_info.get('scrollY', 0)
+            all_elements = self._prioritize_elements(all_elements, viewport_height, scroll_y)
+            
+            if len(all_elements) > self.MAX_ELEMENTS:
+                logger.info(f"🚫 Element limit reached ({len(all_elements)} → {self.MAX_ELEMENTS} after viewport-priority scoring)")
+                all_elements = all_elements[:self.MAX_ELEMENTS]
+            
+            # PHASE 2: Build unified selector_map — ONLY interactive elements NOT excluded by parent
+            # This single map feeds BOTH text representation AND visual highlights AND click actions
+            # Bounding box propagation: children inside <a>, <button>, etc. are excluded
+            selector_map = []
+            excluded_count = 0
+            for el in all_elements:
+                if el.get('interactive', False):
+                    if el.get('excludedByParent', False):
+                        excluded_count += 1
+                    else:
+                        selector_map.append(el)
+            
+            if excluded_count > 0:
+                logger.info(f"📦 BBox propagation: excluded {excluded_count} children inside propagating parents")
+            
             # DEBUG: Log extracted elements
-            logger.info(f"🔍 DOM Extracted {len(all_elements)} elements from {len(all_frames)} frames")
+            logger.info(f"🔍 DOM Extracted {len(all_elements)} elements, {len(selector_map)} interactive (selector_map) from {len(all_frames)} frames")
             if all_elements:
                 for i, el in enumerate(all_elements[:5]):
                     frame_tag = f"[{el.get('frame_id', 'main')}] " if el.get('frame_id') != 'main' else ""
@@ -124,21 +146,85 @@ class DOMExtractor:
                 'url': url,
                 'title': title,
                 'body_text': self._clean_text(body_text),
-                'elements': all_elements,  # Elements from ALL frames
+                'elements': all_elements,  # ALL elements (interactive + content)
+                'selector_map': selector_map,  # ONLY interactive elements — feeds text list AND visual highlights
                 'element_count': len(all_elements),
                 'a11y_tree': a11y_tree,  # Semantic structure for LLM
                 'scroll_position': scroll_info.get('scrollY', 0),
                 'max_scroll': scroll_info.get('maxScrollY', 0),
                 'scroll_percent': scroll_info.get('scrollPercent', 100),
                 'viewport_height': scroll_info.get('innerHeight', 0),
+                'viewport_width': scroll_info.get('innerWidth', 1280),
                 'frames': frame_info,  # Info about iframes found
                 'overlays': overlay_info,  # Detected modals/popups
                 'observation_summary': observation_summary,  # Key observations for memory
-                'selector_hints': selector_hints  # NEW: Discovered selector patterns
+                'selector_hints': selector_hints  # Discovered selector patterns
             }
         except Exception as e:
             logger.error(f"Failed to get page content: {e}")
-            return {'url': page.url, 'title': '', 'body_text': '', 'elements': [], 'element_count': 0, 'a11y_tree': '', 'frames': []}
+            return {'url': page.url, 'title': '', 'body_text': '', 'elements': [], 'selector_map': [], 'element_count': 0, 'a11y_tree': '', 'frames': []}
+    
+    async def _detect_js_click_listeners(self, page: Page) -> Set[str]:
+        """
+        Detect elements with JavaScript click event listeners using CDP.
+        
+        This catches framework-attached handlers (React onClick, Vue @click, Angular (click))
+        that are invisible to regular DOM attribute checks.
+        
+        Uses DevTools' getEventListeners() API via CDP, then marks elements with a
+        data attribute so the main JS extraction can detect them.
+        
+        Returns:
+            Set of marker IDs (strings) for elements with JS click listeners.
+            Empty set if detection fails (graceful degradation).
+        """
+        try:
+            cdp = await page.context.new_cdp_session(page)
+            try:
+                # Use Runtime.evaluate with includeCommandLineAPI to access getEventListeners()
+                result = await cdp.send('Runtime.evaluate', {
+                    'expression': '''
+                    (() => {
+                        if (typeof getEventListeners !== 'function') return [];
+                        
+                        const markers = [];
+                        let counter = 0;
+                        const allElements = document.querySelectorAll('*');
+                        
+                        for (const el of allElements) {
+                            try {
+                                const listeners = getEventListeners(el);
+                                // Check for click-related event listeners
+                                if (listeners.click || listeners.mousedown || listeners.mouseup || 
+                                    listeners.pointerdown || listeners.pointerup) {
+                                    // Mark with data attribute so JS extraction can find it
+                                    const markerId = 'cdp_' + counter++;
+                                    el.setAttribute('data-bu-click', markerId);
+                                    markers.push(markerId);
+                                }
+                            } catch (e) {
+                                // Ignore cross-origin elements
+                            }
+                        }
+                        
+                        return markers;
+                    })()
+                    ''',
+                    'includeCommandLineAPI': True,
+                    'returnByValue': True,
+                })
+                
+                markers = result.get('result', {}).get('value', [])
+                if markers:
+                    logger.info(f"🎯 CDP detected {len(markers)} elements with JS click listeners")
+                return set(markers) if markers else set()
+                
+            finally:
+                await cdp.detach()
+                
+        except Exception as e:
+            logger.debug(f"CDP click listener detection failed (non-critical): {e}")
+            return set()
     
     async def _get_accessible_frames(self, page: Page, max_depth: int = None) -> List[Dict[str, Any]]:
         """
@@ -236,270 +322,170 @@ class DOMExtractor:
         # Remove Private Use Area characters (E000-F8FF) commonly used for icons
         return "".join(c for c in text if not (0xE000 <= ord(c) <= 0xF8FF)).strip()
     
+    def _prioritize_elements(self, elements: list, viewport_height: int, scroll_y: int) -> list:
+        """Score and sort elements by viewport visibility and interactivity.
+        
+        Ensures viewport-visible elements always appear first in the list,
+        with off-screen elements getting lower priority. This replaces the
+        old flat cap that could miss important in-viewport elements.
+        
+        Scoring:
+            +100: Fully within current viewport
+            +50:  Partially visible in viewport
+            +30:  Interactive element (button, link, input, etc.)
+            +20:  Has meaningful text content
+            -20:  Completely off-screen (also tagged with offscreen=True)
+        """
+        viewport_top = scroll_y
+        viewport_bottom = scroll_y + viewport_height
+        
+        INTERACTIVE_ROLES = {
+            'button', 'link', 'textbox', 'input', 'checkbox', 'radio',
+            'combobox', 'menuitem', 'option', 'switch', 'tab', 'select',
+            'searchbox', 'spinbutton', 'slider', 'a'
+        }
+        
+        for el in elements:
+            score = 0
+            y = el.get('y', 0)
+            h = el.get('height', 0)
+            el_top = y
+            el_bottom = y + h
+            
+            # Viewport visibility scoring
+            if viewport_top <= el_top and el_bottom <= viewport_bottom:
+                score += 100  # Fully visible
+            elif el_top < viewport_bottom and el_bottom > viewport_top:
+                score += 50   # Partially visible
+            else:
+                score -= 20   # Off-screen
+                el['offscreen'] = True
+            
+            # Interactivity bonus
+            role = el.get('role', '').lower()
+            tag = el.get('tag', '').lower()
+            if role in INTERACTIVE_ROLES or tag in INTERACTIVE_ROLES:
+                score += 30
+            
+            # Has meaningful content
+            if el.get('name', '').strip():
+                score += 20
+            
+            el['_priority_score'] = score
+        
+        # Sort by priority score descending (viewport elements first)
+        elements.sort(key=lambda e: e.get('_priority_score', 0), reverse=True)
+        return elements
+    
     async def build_unified_page_tree(
-        self, 
-        page: Page, 
+        self,
+        page: Any,
         page_content: Dict[str, Any],
         mode: str = 'text',
         selector_hints: Dict[str, Any] = None
     ) -> str:
         """
-        Build a unified hierarchical page representation combining:
-        - Semantic structure from accessibility tree
-        - Interactive elements with clickable indices
-        - Optimal selectors (XPath, CSS, or index)
-        - Discovered semantic roles (Title, Price, etc.)
-        
-        Args:
-            page: Playwright page
-            elements: List of extracted interactive elements with indices
-            mode: 'text' (full hierarchy) or 'vision' (simplified for visual models)
-            selector_hints: Discovered CSS patterns from selector_discovery
-        
-        Returns:
-            Formatted string for LLM prompt
+        Build a flat, token-efficient DOM representation combining:
+        - Interactive elements with clickable indices `[N]`
+        - Semantic content summary block
         """
         try:
-            elements = page_content.get('elements', [])
+            # Use selector_map (interactive-only) for the [N] indexed elements
+            # This ensures text indices match visual highlight indices exactly
+            elements = page_content.get('selector_map', page_content.get('elements', []))
             
-            snapshot = await page.accessibility.snapshot(interesting_only=False)
-            if not snapshot:
-                return self._format_elements_fallback(elements, mode)
+            # --- STRUCTURE 1: INTERACTIVE ELEMENTS ---
+            lines = ["[Interactive Elements]"]
             
-            # --- PRE-PROCESS SELECTOR HINTS ---
-            semantic_map = {}  # class/selector -> semantic label (e.g. "TITLE")
+            # Pre-process semantic hints
+            semantic_map = {}
             if selector_hints:
                 content_sels = selector_hints.get('contentSelectors', {})
                 for item in content_sels.get('titles', []):
-                    cls = item['selector'].replace('.', '')
-                    semantic_map[cls] = "TITLE"
+                    semantic_map[item['selector'].replace('.', '')] = "TITLE"
                 for item in content_sels.get('prices', []):
-                    cls = item['selector'].replace('.', '')
-                    semantic_map[cls] = "PRICE"
-                for item in content_sels.get('ratings', []):
-                    cls = item['selector'].replace('.', '')
-                    semantic_map[cls] = "RATING"
-            
-            # Build element lookup by name for merging with a11y tree
-            element_lookup = {}
+                    semantic_map[item['selector'].replace('.', '')] = "PRICE"
+                    
             for idx, el in enumerate(elements):
-                name = el.get('name', '').strip().lower()
-                # Also index by role for generic matches if name is empty
-                key_name = name if name else f"__role__{el.get('role', '')}"
+                role = el.get('role', 'element')
+                name = self._clean_text(el.get('name', ''))[:50]
                 
-                if key_name not in element_lookup:
-                    element_lookup[key_name] = []
-                
-                # Check for semantic tags from discovery
-                semantic_tag = ""
+                # Check semantic tags
+                sem_tag = ""
                 el_classes = el.get('attributes', {}).get('class', '').split()
                 for cls in el_classes:
                     if cls in semantic_map:
-                        semantic_tag = semantic_map[cls]
+                        sem_tag = f" [{semantic_map[cls]}]"
                         break
+                        
+                # Format attributes
+                attrs = ""
+                if role in ('textbox', 'searchbox', 'input') and el.get('attributes', {}).get('placeholder'):
+                    attrs += f" placeholder=\"{el['attributes']['placeholder'][:30]}\""
+                if el.get('checked'):
+                    attrs += " checked=true"
+                if el.get('expanded') is True:
+                    attrs += " expanded=true"
                 
-                element_lookup[key_name].append({
-                    'index': idx + 1,  # 1-indexed
-                    'element': el,
-                    'semantic_tag': semantic_tag
-                })
-            
-            # Roles that indicate a logical group/container
-            GROUP_ROLES = {
-                'navigation', 'banner', 'main', 'complementary', 'contentinfo',
-                'article', 'section', 'region', 'form', 'search',
-                'dialog', 'tabpanel', 'menu', 'menubar', 'toolbar',
-                'list', 'listitem', 'grid', 'row'
-            }
-            
-            # Roles that are interactive/clickable
-            INTERACTIVE_ROLES = {
-                'button', 'link', 'textbox', 'checkbox', 'radio', 
-                'combobox', 'menuitem', 'option', 'switch', 'tab',
-                'searchbox', 'spinbutton', 'slider', 'menuitemcheckbox',
-                'menuitemradio', 'img'  # Images can be clickable
-            }
-            
-            # Track which elements we've matched
-            matched_indices = set()
-            lines = []
-            
-            def get_best_selector(el: Dict) -> str:
-                """Get the best selector, prioritizing Index > CSS > XPath."""
-                # Note: Index is implicit in the tree format "#N"
+                # Spatial Tags (keep our advantage)
+                y = el.get('y', 0)
+                if y < 150: attrs += " [TOP]"
+                elif y > 2000 and y > (page_content.get('max_scroll', 0) - 500): attrs += " [BOTTOM]"
                 
-                # Try to find a simple class selector if it matches
-                attributes = el.get('attributes', {})
-                el_id = attributes.get('id')
-                if el_id:
-                    return f" → #{el_id}"
+                if el.get('sticky'): attrs += " [STICKY]"
+                if el.get('modal'): attrs += " [MODAL]"
                 
-                # Fallback to XPath
-                xpath = el.get('xpath', '')
-                if not xpath or xpath == 'NO XPATH':
-                    return ''
-                if len(xpath) > 60:
-                    return '' 
-                return f" → {xpath}"
-            
-            def format_node(node: Dict, depth: int = 0) -> None:
-                """Recursively format node with unified hierarchy."""
-                role = node.get('role', '')
-                name = self._clean_text(node.get('name', ''))
-                children = node.get('children', [])
-                
-                # Calculate indent (increased depth limit to 20 as requested)
-                indent = "│ " * min(depth, 20)
-                
-                # Try to match with extracted elements
-                name_lower = name.strip().lower()
-                lookup_key = name_lower if name_lower else f"__role__{role}"
-                
-                matched_el = None
-                matched_idx = None
-                matched_semantic = ""
-                
-                if lookup_key in element_lookup:
-                    for match in element_lookup[lookup_key]:
-                        if match['index'] not in matched_indices:
-                            matched_el = match['element']
-                            matched_idx = match['index']
-                            matched_semantic = match['semantic_tag']
-                            matched_indices.add(matched_idx)
-                            break
-                
-                # Determine node type
-                is_group = role in GROUP_ROLES
-                is_interactive = role in INTERACTIVE_ROLES or matched_el is not None
-                
-                # STATE indicators
-                states = []
-                if node.get('checked') is True: states.append('✓')
-                elif node.get('checked') == 'mixed': states.append('◐')
-                if node.get('expanded') is True: states.append('▼')
-                elif node.get('expanded') is False: states.append('▶')
-                if node.get('disabled'): states.append('⊘')
-                state_str = ''.join(states)
-                
-                # BUILD THE LINE
-                if is_group and children:
-                    # === GROUP CONTAINER ===
-                    group_icon = self._get_group_icon(role)
-                    label = name[:50] if name else role.upper()
-                    lines.append(f"{indent}├── {group_icon} {label}")
+                if name:
+                    lines.append(f"[{idx+1}] {role} \"{name}\"{attrs}{sem_tag}")
+                else:
+                    lines.append(f"[{idx+1}] {role}{attrs}{sem_tag}")
                     
-                    sibling_counts = {}
-                    for child in children:
-                        # Smart List Compression
-                        c_role = child.get('role', 'element')
-                        sibling_counts[c_role] = sibling_counts.get(c_role, 0) + 1
-                        if sibling_counts[c_role] > 5:
-                            if sibling_counts[c_role] == 6:
-                                remaining = len(children) - 5
-                                lines.append(f"{indent}│   ... [{remaining} more '{c_role}' items. Use 'run_js' to extract all, or scroll to see more]")
-                            continue
-                        
-                        format_node(child, depth + 1)
-                    
-                elif is_interactive:
-                    # === INTERACTIVE ELEMENT ===
-                    if matched_el:
-                        # We have an extracted element with index
-                        idx_str = f"#{matched_idx}"
-                        selector = get_best_selector(matched_el) if mode == 'text' else ''
-                        
-                        # --- ENHANCED TAGGING ---
-                        tags = []
-                        if matched_semantic: tags.append(matched_semantic)
-                        
-                        # Spatial Tags
-                        y = matched_el.get('y', 0)
-                        vh = page_content.get('viewport_height', 1000)
-                        if y < 150: tags.append("TOP")
-                        elif y > 2000 and y > (page_content.get('max_scroll', 0) - 500): tags.append("BOTTOM")
-                        
-                        # State Tags
-                        if matched_el.get('sticky'): tags.append("STICKY")
-                        if matched_el.get('modal'): tags.append("MODAL")
-                        if matched_el.get('error'): tags.append("ERROR")
-                        
-                        sem_tag = f" [{' '.join(tags)}]" if tags else ""
-                        
-                        if role == 'link':
-                            line = f"{indent}├── {idx_str} 🔗 \"{name[:40]}\"{sem_tag}{selector}"
-                        elif role == 'button':
-                            line = f"{indent}├── {idx_str} 🔘 \"{name[:40]}\"{sem_tag}{selector}"
-                        elif role in ('textbox', 'searchbox'):
-                            line = f"{indent}├── {idx_str} 📝 [{name[:30] or 'input'}]{sem_tag}{selector}"
-                        elif role in ('img', 'image'):
-                            line = f"{indent}├── {idx_str} 🖼️ \"{name[:40]}\"{sem_tag}{selector}"
-                        elif role in ('checkbox', 'radio'):
-                            line = f"{indent}├── {idx_str} {state_str} {role}: \"{name[:30]}\"{sem_tag}{selector}"
-                        elif role == 'combobox':
-                            line = f"{indent}├── {idx_str} 📋 \"{name[:30]}\"{sem_tag}{selector}"
-                        else:
-                            line = f"{indent}├── {idx_str} [{role}] \"{name[:40]}\"{sem_tag}{selector}"
-                        
-                        lines.append(line)
-                    else:
-                        # Interactive but not extracted (maybe off-screen)
-                        if name and mode == 'text':
-                            lines.append(f"{indent}├── [{role}] \"{name[:40]}\" (not in viewport)")
-                    
-                    # Process children
-                    for child in children:
-                        format_node(child, depth + 1)
-                        
-                elif role == 'heading':
-                    # === HEADING ===
-                    level = node.get('level', 1)
-                    if name:
-                        lines.append(f"{indent}{'#' * level} {name[:60]}")
-                    for child in children:
-                        format_node(child, depth)
-                        
-                elif role in ('text', 'StaticText') and name and len(name.strip()) > 3:
-                    # === STATIC TEXT (context) ===
-                    if mode == 'text':
-                        display = name[:80] + "..." if len(name) > 80 else name
-                        lines.append(f'{indent}│ "{display}"')
-                        
-                elif role == 'image' and name:
-                    # === IMAGE (may be clickable) ===
-                    lines.append(f"{indent}├── 🖼️ {name[:50]}")
-                    
-                elif children:
-                    # Just process children without adding a line for this node
-                    for child in children:
-                        format_node(child, depth)
+            # --- STRUCTURE 2: CONTENT SUMMARY ---
+            lines.append("\n[Page Content Summary]")
             
-            # Process the tree
-            format_node(snapshot)
+            title = page_content.get('title', '')
+            if title:
+                lines.append(f"Title: {title}")
+                
+            # --- STRUCTURE 3: SMART ANCHORS (TABLE OF CONTENTS) ---
+            anchors = []
+            for el in elements:
+                href = el.get('attributes', {}).get('href', '')
+                # Only include valid anchors that have a name/text
+                if href and href.startswith('#') and len(href) > 1:
+                    name = self._clean_text(el.get('name', '')).split(']')[-1].strip() # Strip spatial tags from name
+                    if name and name.lower() not in ['top', 'back to top', 'skip to content']:
+                        anchors.append(f"'{name}' ({href})")
             
-            # Add any elements that weren't matched to the tree
-            unmatched = []
-            for idx, el in enumerate(elements):
-                if (idx + 1) not in matched_indices:
-                    unmatched.append((idx + 1, el))
+            if anchors:
+                # Deduplicate while preserving order
+                seen = set()
+                unique_anchors = [x for x in anchors if not (x in seen or seen.add(x))]
+                lines.append("Table of Contents / Jump Links Available (Click these instead of scrolling!):")
+                lines.append("  " + " | ".join(unique_anchors[:15])) # Limit to 15 to save tokens
+                
+            scroll = page_content.get('scroll_info', {})
+            if scroll:
+                pct = scroll.get('scroll_percent', 0)
+                y = scroll.get('y', 0)
+                max_y = scroll.get('max_scroll', 0)
+                lines.append(f"Scroll: {pct:.0f}% ({y}px / {max_y}px)")
+                
+            # Visible text preview
+            body_text = page_content.get('body_text', '')
+            if body_text:
+                import re
+                clean_text = re.sub(r'\s+', ' ', body_text).strip()
+                if clean_text:
+                    lines.append("Visible Text (Preview):")
+                    # Send up to 800 chars of actual content text
+                    lines.append(f"\"{clean_text[:800]}...\"")
             
-            if unmatched and mode == 'text':
-                lines.append("")
-                lines.append("── OTHER ELEMENTS ──")
-                for idx, el in unmatched[:30]:  # Limit unmatched
-                    role = el.get('role', 'element')
-                    name = el.get('name', '')[:40]
-                    selector = get_best_selector(el)
-                    if name:
-                        lines.append(f"  #{idx} [{role}] \"{name}\"{selector}")
-                    else:
-                        lines.append(f"  #{idx} [{role}]{selector}")
-            
-            # Truncate if too long
-            MAX_LINES = 600 if mode == 'vision' else 800
+            # Truncate lines if too long (MAX_ELEMENTS is already applied during JS extraction)
+            MAX_LINES = 300
             if len(lines) > MAX_LINES:
-                lines = lines[:MAX_LINES]
-                lines.append(f"... ({len(elements) - MAX_LINES} more elements)")
-            
+                lines = lines[:MAX_LINES] + [f"... ({len(elements)} total elements, use scroll to see more)"]
+                
             return "\n".join(lines)
             
         except Exception as e:
@@ -529,27 +515,26 @@ class DOMExtractor:
     
     def _format_elements_fallback(self, elements: List[Dict], mode: str) -> str:
         """Fallback format when a11y tree is unavailable."""
-        lines = ["── INTERACTIVE ELEMENTS ──"]
+        lines = ["[Interactive Elements]"]
         
         for idx, el in enumerate(elements[:200]):
             role = el.get('role', 'element')
             name = el.get('name', '')[:50]
-            xpath = el.get('xpath', '')
-            
-            if mode == 'text' and xpath and len(xpath) < 60:
-                line = f"#{idx+1} [{role}] \"{name}\" → {xpath}"
+            if name:
+                lines.append(f"[{idx+1}] {role} \"{name}\"")
             else:
-                line = f"#{idx+1} [{role}] \"{name}\"" if name else f"#{idx+1} [{role}]"
-            
-            lines.append(line)
-        
+                lines.append(f"[{idx+1}] {role}")
+                
+        lines.append("\n[Page Content Summary]")
+        lines.append("A11y tree unavailable. Elements extracted via JS only.")
         return "\n".join(lines)
     
     async def _get_interactive_elements_from_frame(
         self, 
         frame, 
         frame_id: str = 'main',
-        frame_name: str = 'Main Frame'
+        frame_name: str = 'Main Frame',
+        js_click_backend_ids: Set[str] = None
     ) -> List[Dict[str, Any]]:
         """Get interactive elements from a specific frame with robust Shadow DOM traversal"""
         try:
@@ -592,6 +577,12 @@ class DOMExtractor:
                     // 1. Native interactive elements - ALWAYS interactive
                     const nativeInteractive = ['a', 'button', 'select', 'textarea', 'input', 'details', 'summary', 'option', 'label', 'area', 'audio', 'video', 'embed', 'object', 'iframe'];
                     if (nativeInteractive.includes(tag)) {
+                        return true;
+                    }
+                    
+                    // 1b. CDP-detected JS click listeners (React onClick, Vue @click, Angular (click))
+                    // These are marked by the _detect_js_click_listeners() method before this call
+                    if (el.hasAttribute('data-bu-click')) {
                         return true;
                     }
                     
@@ -715,6 +706,67 @@ class DOMExtractor:
                     
                     return null; // No interactive parent found
                 }
+                
+                // BOUNDING BOX PROPAGATION FILTER (Browser-Use inspired)
+                // If an interactive child is >=95% contained within a "propagating" parent
+                // (a, button, div[role=button], etc.), the child gets excluded.
+                // This collapses product cards: <a> contains <img>, <span>, etc.
+                // Only the parent <a> enters the selector_map.
+                function isExcludedByParent(el) {
+                    // EXCEPTION RULES — NEVER exclude these:
+                    const tag = el.tagName.toLowerCase();
+                    // 1. Form elements need individual interaction
+                    if (['input', 'select', 'textarea', 'label'].includes(tag)) return false;
+                    // 2. Elements with explicit onclick or CDP-detected click
+                    if (el.hasAttribute('onclick') || el.hasAttribute('data-bu-click')) return false;
+                    // 3. Elements with aria-label (independently interactive)
+                    if (el.getAttribute('aria-label')) return false;
+                    // 4. Elements with interactive ARIA roles
+                    const role = el.getAttribute('role');
+                    if (['button', 'link', 'checkbox', 'radio', 'tab', 'menuitem', 'option', 'switch', 'combobox'].includes(role)) return false;
+                    
+                    // PROPAGATING PARENT TAGS: these "own" their children's clicks
+                    const propagatingTags = ['a', 'button'];
+                    const propagatingRoles = ['button', 'link', 'combobox'];
+                    
+                    // Walk up looking for a propagating parent
+                    let parent = el.parentElement;
+                    let levels = 0;
+                    while (parent && levels < 5) {
+                        const parentTag = parent.tagName.toLowerCase();
+                        const parentRole = parent.getAttribute('role');
+                        
+                        const isPropagating = propagatingTags.includes(parentTag) ||
+                            (parentRole && propagatingRoles.includes(parentRole));
+                        
+                        if (isPropagating) {
+                            // Check bounding box containment (>=95%)
+                            const childRect = el.getBoundingClientRect();
+                            const parentRect = parent.getBoundingClientRect();
+                            
+                            if (childRect.width > 0 && childRect.height > 0) {
+                                const xOverlap = Math.max(0, 
+                                    Math.min(childRect.right, parentRect.right) - 
+                                    Math.max(childRect.left, parentRect.left));
+                                const yOverlap = Math.max(0, 
+                                    Math.min(childRect.bottom, parentRect.bottom) - 
+                                    Math.max(childRect.top, parentRect.top));
+                                const intersection = xOverlap * yOverlap;
+                                const childArea = childRect.width * childRect.height;
+                                const containment = intersection / childArea;
+                                
+                                if (containment >= 0.95) {
+                                    return true; // Child is contained → exclude from selector_map
+                                }
+                            }
+                        }
+                        
+                        parent = parent.parentElement;
+                        levels++;
+                    }
+                    
+                    return false; // No propagating parent found → keep
+                }
 
                 // Helper: Generate robust XPath (Shadow DOM aware)
                 function getXPath(el) {
@@ -798,6 +850,10 @@ class DOMExtractor:
                                                 xpath: getXPath(interactiveParent),
                                                 x: Math.round(parentRect.x + parentRect.width / 2),
                                                 y: Math.round(absoluteY + parentRect.height / 2),
+                                                top_left_x: Math.round(parentRect.x),
+                                                top_left_y: Math.round(absoluteY),
+                                                width: Math.round(parentRect.width),
+                                                height: Math.round(parentRect.height),
                                                 dist: Math.abs(absoluteY - viewportCenterY),
                                                 section: currentHeading,
                                                 frame_id: frameId,
@@ -850,6 +906,11 @@ class DOMExtractor:
                                 // 1. ALWAYS include: interactive elements, inputs, images, headings
                                 // 2. ONLY include containers (div/span/p) IF they have meaningful text
                                 // 3. Skip technical tags entirely
+                                // 4. NEW: Skip viewport-spanning containers (>80% viewport area)
+                                
+                                const viewportArea = window.innerWidth * window.innerHeight;
+                                const elArea = rect.width * rect.height;
+                                const isHugeContainer = elArea > viewportArea * 0.80;
                                 
                                 const alwaysIncludeTags = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'a', 'button', 'input', 'select', 'textarea', 'img', 'label'];
                                 const containerTags = ['div', 'span', 'p', 'li', 'td', 'th', 'strong', 'em', 'b', 'i', 'article', 'section', 'figure', 'figcaption', 'main', 'aside'];
@@ -858,7 +919,7 @@ class DOMExtractor:
                                 // Require minimum 3 chars of text for non-interactive containers
                                 const hasMeaningfulText = text && text.length >= 3;
                                 
-                                const shouldInclude = !skipElement && (
+                                const shouldInclude = !skipElement && !isHugeContainer && (
                                     targetIsClickable ||                        // Interactive = always
                                     alwaysIncludeTags.includes(tag) ||          // Headings, buttons, inputs, imgs = always
                                     (containerTags.includes(tag) && hasMeaningfulText)  // Containers ONLY with text
@@ -881,6 +942,10 @@ class DOMExtractor:
                                         xpath: getXPath(el),
                                         x: Math.round(rect.x + rect.width / 2),
                                         y: Math.round(absoluteY + rect.height / 2),
+                                        top_left_x: Math.round(rect.x),
+                                        top_left_y: Math.round(absoluteY),
+                                        width: Math.round(rect.width),
+                                        height: Math.round(rect.height),
                                         dist: Math.abs(absoluteY - viewportCenterY),
                                         section: currentHeading,
                                         frame_id: frameId,
@@ -891,6 +956,7 @@ class DOMExtractor:
                                         modal: isModal,
                                         error: isError,
                                         interactive: targetIsClickable,
+                                        excludedByParent: targetIsClickable ? isExcludedByParent(el) : false,
                                         attributes: {
                                             type: el.type,
                                             placeholder: el.placeholder,
@@ -1008,13 +1074,20 @@ class DOMExtractor:
                 
                 // HELPER: Find close buttons in element
                 function findCloseButtons(container) {
+                    // Query standard CSS selectors (no jQuery-only selectors!)
                     const closeBtns = container.querySelectorAll(
                         '[aria-label*="close" i], [aria-label*="dismiss" i], [aria-label*="cancel" i], ' +
                         'button[class*="close"], [class*="close-btn"], [class*="modal-close"], ' +
-                        'button:has(svg), [class*="dismiss"], [data-testid*="close"], ' +
-                        'button:contains("Cancel"), button:contains("Close"), button:contains("×")'
+                        'button:has(svg), [class*="dismiss"], [data-testid*="close"]'
                     );
-                    closeBtns.forEach(btn => {
+                    // Also find buttons by text content (replaces invalid :contains() selectors)
+                    const allButtons = container.querySelectorAll('button');
+                    const textMatches = [...allButtons].filter(btn => {
+                        const text = btn.textContent?.trim().toLowerCase() || '';
+                        return text === 'cancel' || text === 'close' || text === '×' || text === 'x' || text === '✕';
+                    });
+                    const combined = new Set([...closeBtns, ...textMatches]);
+                    combined.forEach(btn => {
                         if (btn.offsetParent !== null) {
                             closeButtons.push({ 
                                 text: btn.textContent?.trim().substring(0, 20) || btn.getAttribute('aria-label') || 'X',
@@ -1081,9 +1154,21 @@ class DOMExtractor:
                         const zIndex = parseInt(style.zIndex) || 0;
                         
                         if (style.display === 'none' || style.visibility === 'hidden') continue;
-                        if (rect.width < 150 || rect.height < 100) continue;
-                        if (zIndex < 100) continue;  // Must have some z-index
+                        if (rect.width < 200 || rect.height < 150) continue;  // Must be substantial
+                        if (zIndex < 500) continue;  // Must have high z-index (not just stacking context)
                         if (rect.right < 0 || rect.bottom < 0 || rect.left > viewportWidth || rect.top > viewportHeight) continue;
+                        
+                        // Must cover at least 30% of viewport in BOTH dimensions
+                        // This filters out sidebars, nav bars, filter panels, sticky headers
+                        const coversWidth = rect.width >= viewportWidth * 0.3;
+                        const coversHeight = rect.height >= viewportHeight * 0.3;
+                        if (!coversWidth || !coversHeight) continue;
+                        
+                        // Exclude common non-modal patterns (nav, filters, headers, footers)
+                        const cn = (el.className || '').toLowerCase();
+                        const id = (el.id || '').toLowerCase();
+                        const isNavOrFilter = /\b(nav|header|footer|sidebar|filter|menu|toolbar|banner|sticky|search)\b/.test(cn + ' ' + id);
+                        if (isNavOrFilter) continue;
                         
                         overlays.push({
                             tag: el.tagName.toLowerCase(),
@@ -1168,7 +1253,7 @@ class DOMExtractor:
         buttons = [e for e in elements if e.get('role') == 'button' or e.get('tag') == 'button' or e.get('type') in ['submit', 'button']]
         links = [e for e in elements if e.get('role') == 'link' or e.get('tag') == 'a']
         inputs = [e for e in elements if e.get('tag') == 'input' or e.get('role') in ['textbox', 'searchbox', 'combobox']]
-        checkboxes = [e for e in elements if e.get('role') == 'checkbox' or e.get('type') == 'checkbox']
+        [e for e in elements if e.get('role') == 'checkbox' or e.get('type') == 'checkbox']
         images = [e for e in elements if e.get('tag') == 'img']
         
         # Detailed input summary

@@ -1,55 +1,100 @@
 """
-Browser Agent - Vision Module (SOTA with Set-of-Mark)
+Browser Agent - Vision Utilities
 
-Vision model integration with Set-of-Mark (SoM) overlays for precise element selection.
+Image processing utilities for the browser agent:
+- Set-of-Mark (SoM) overlays for element annotation
+- Screenshot compression and resizing
+- Standalone image analysis via InferenceService
+
+NOTE: Action planning is now handled entirely by the unified multimodal
+LLMClient in llm.py. This module is only for image processing utilities.
 """
 
-import os
-import re
-import json
 import base64
 import logging
 import io
-import asyncio
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Optional, List, Tuple
 from dotenv import load_dotenv
 
 # Use centralized inference service
-from backend.services.inference_service import inference_service, ProviderType, InferencePriority
-from langchain_core.messages import SystemMessage, HumanMessage
+from backend.services.inference_service import inference_service, InferencePriority
+from langchain_core.messages import HumanMessage
 
 try:
     from PIL import Image, ImageDraw, ImageFont
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
-    
-from .agent_schemas import ActionPlan, AtomicAction
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-class VisionClient:
-    """Vision model client with Set-of-Mark overlays for precise action planning - uses Unified InferenceService"""
+
+class VisionUtils:
+    """Vision utility class for image processing and analysis.
+    
+    Provides:
+    - SoM overlay annotation for screenshots  
+    - Screenshot compression/resizing for token-efficient multimodal calls
+    - Standalone image analysis (not action planning)
+    """
     
     def __init__(self):
-        # Models configuration
-        self.model_ollama = "qwen3-vl:235b-cloud" # Legacy/Specific model name for Ollama fallback
-        self.mark_elements: Dict[int, Dict] = {} 
+        self.mark_elements: Dict[int, Dict] = {}
     
     @property
     def available(self) -> bool:
-        """Check if vision is available - assume yes via InferenceService"""
-        return True
+        """Check if vision utilities are available (PIL required)."""
+        return PIL_AVAILABLE
     
-    def _add_som_overlay(self, screenshot_b64: str, elements: List[Dict]) -> Tuple[str, Dict[int, Dict]]:
-        """Add Set-of-Mark overlays with element boundaries and numbered labels"""
+    @staticmethod
+    def compress_screenshot(screenshot_b64: str, max_width: int = 800, quality: int = 50) -> str:
+        """Compress and resize a screenshot for token-efficient multimodal calls.
+        
+        Reduces a full-res screenshot to ~10-20KB (~250-500 image tokens).
+        """
+        if not PIL_AVAILABLE:
+            return screenshot_b64
+        
+        try:
+            img_bytes = base64.b64decode(screenshot_b64)
+            img = Image.open(io.BytesIO(img_bytes))
+            
+            # Resize if wider than max_width
+            if img.width > max_width:
+                ratio = max_width / img.width
+                new_height = int(img.height * ratio)
+                img = img.resize((max_width, new_height), Image.LANCZOS)
+            
+            # Convert to RGB (drop alpha) and compress as JPEG
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            output = io.BytesIO()
+            img.save(output, format='JPEG', quality=quality, optimize=True)
+            compressed_b64 = base64.b64encode(output.getvalue()).decode()
+            
+            original_size = len(screenshot_b64)
+            compressed_size = len(compressed_b64)
+            ratio_pct = (compressed_size / original_size * 100) if original_size > 0 else 0
+            logger.debug(f"📸 Screenshot compressed: {original_size//1024}KB → {compressed_size//1024}KB ({ratio_pct:.0f}%)")
+            
+            return compressed_b64
+        except Exception as e:
+            logger.warning(f"Screenshot compression failed: {e}")
+            return screenshot_b64
+    
+    def add_som_overlay(self, screenshot_b64: str, elements: List[Dict]) -> Tuple[str, Dict[int, Dict]]:
+        """Add Set-of-Mark overlays with element boundaries and numbered labels.
+        
+        Returns:
+            Tuple of (annotated_screenshot_b64, mark_mapping)
+        """
         if not PIL_AVAILABLE:
             logger.warning("PIL not available for SoM overlay")
             return screenshot_b64, {}
         
         try:
-            # Decode image
             img_bytes = base64.b64decode(screenshot_b64)
             img = Image.open(io.BytesIO(img_bytes)).convert('RGBA')
             
@@ -58,7 +103,6 @@ class VisionClient:
             overlay_draw = ImageDraw.Draw(overlay)
             draw = ImageDraw.Draw(img)
             
-            # Try to get a good font
             try:
                 font = ImageFont.truetype("arial.ttf", 12)
             except Exception:
@@ -75,7 +119,6 @@ class VisionClient:
                 'default': (255, 0, 0, 180)      # Red
             }
             
-            # Mark ALL viewport-visible elements (limit to 300)
             for idx, el in enumerate(elements[:300]):
                 mark_num = idx + 1
                 x, y = el.get('x', 0), el.get('y', 0)
@@ -114,14 +157,14 @@ class VisionClient:
             
             img = Image.alpha_composite(img, overlay).convert('RGB')
             
-            # COMPRESS for vision API
-            max_width = 1024
+            # Compress for the multimodal model
+            max_width = 800
             if img.width > max_width:
                 ratio = max_width / img.width
                 img = img.resize((max_width, int(img.height * ratio)), Image.LANCZOS)
             
             output = io.BytesIO()
-            img.save(output, format='JPEG', quality=85, optimize=True)
+            img.save(output, format='JPEG', quality=50, optimize=True)
             modified_b64 = base64.b64encode(output.getvalue()).decode()
             
             logger.info(f"🎨 SoM overlay: marked {len(mark_mapping)} elements")
@@ -131,102 +174,14 @@ class VisionClient:
             logger.error(f"Failed to add SoM overlay: {e}")
             return screenshot_b64, {}
     
-    async def plan_action_with_vision(
-        self,
-        task: str,
-        screenshot_base64: str,
-        page_content: Dict[str, Any],
-        history: list,
-        step: int
-    ) -> Optional[ActionPlan]:
-        """Plan action based on screenshot analysis using InferenceService"""
-        
-        try:
-            # Add SoM Overlays
-            marked_screenshot, self.mark_elements = self._add_som_overlay(screenshot_base64, page_content.get('elements', []))
-            
-            # Build Prompt
-            user_prompt = self._build_vision_prompt(task, page_content, history, step, self.mark_elements)
-            system_msg = """You are an EXPERT browser automation agent with ADVANCED VISUAL UNDERSTANDING.
-            
-            Look at the screenshot with NUMBERED LABELS [1], [2]...
-            Your job is to identify the best action to take.
-            
-            RESPONSE FORMAT (JSON ONLY):
-            {
-              "reasoning": "Visual analysis... decision...",
-              "actions": [{"name": "click", "params": {"mark": 3}}],
-              "confidence": 0.9,
-              "next_mode": "text"
-            }
-            
-            Valid actions: click, type, scroll, navigate, done, wait, hover, press, go_back, save_info, skip_subtask, run_js
-            For 'click', always use {"mark": N} if possible.
-            """
-            
-            logger.info(f"📸 Calling Vision Model (Unified InferenceService)")
-            
-            content = None
-            
-            # 1. Try NVIDIA (Primary - Llama 3.2 90b Vision or similar)
-            try:
-                content = await inference_service.generate(
-                    messages=[
-                        SystemMessage(content=system_msg),
-                        HumanMessage(content=user_prompt)
-                    ],
-                    images=[marked_screenshot],
-                    provider=ProviderType.NVIDIA,
-                    model_name="meta/llama-3.2-90b-vision-instruct", # Specific Vision Model
-                    priority=InferencePriority.QUALITY,
-                    json_mode=True,
-                    fallback_enabled=False # Handle fallback manually here
-                )
-            except Exception as e:
-                logger.warning(f"⚠️ NVIDIA Vision failed: {e}. Trying fallback...")
-            
-            # 2. Key Fallback: OLLAMA (if NVIDIA failed/timed out)
-            if not content:
-                try:
-                    content = await inference_service.generate(
-                        messages=[
-                            SystemMessage(content=system_msg),
-                            HumanMessage(content=user_prompt)
-                        ],
-                        images=[marked_screenshot],
-                        provider=ProviderType.OPENAI, # Maps to OLLAMA via InferenceService logic
-                        model_name=self.model_ollama,
-                        priority=InferencePriority.SPEED,
-                        json_mode=True
-                    )
-                except Exception as e:
-                     logger.error(f"❌ Ollama Vision also failed: {e}")
-
-            if not content:
-                logger.warning("Vision returned empty content from all providers")
-                return None
-                
-            return self._parse_action(content, self.mark_elements)
-            
-        except Exception as e:
-            logger.error(f"plan_action_with_vision generic error: {e}", exc_info=True)
-            return None
-    
     async def analyze_image(
         self,
         screenshot_base64: str,
         task: str,
         page_url: str
     ) -> Optional[str]:
-        """Analyze image using InferenceService"""
+        """Analyze image using InferenceService (standalone, not for action planning)."""
         try:
-            # Compress if needed (simple heuristic)
-            if len(screenshot_base64) > 500000 and PIL_AVAILABLE:
-                 # Re-use SoM logic to just resize without drawing? 
-                 # Or just pass raw if InferenceService handles it.
-                 # InferenceService assumes valid base64.
-                 pass
-
             prompt = f"""Analyze this screenshot. 
             TASK: {task}
             URL: {page_url}
@@ -242,75 +197,6 @@ class VisionClient:
             logger.error(f"Image analysis failed: {e}")
             return None
 
-    def _build_vision_prompt(self, task: str, page_content: Dict, history: list, step: int, mark_elements: Dict = None) -> str:
-        # Simplified prompt builder
-        legend = ""
-        if mark_elements:
-             # Limit legend size
-             items = list(mark_elements.items())[:50] 
-             legend = "\n".join([f"[{k}] {v.get('role')} '{v.get('name')}'" for k, v in items])
-             if len(mark_elements) > 50: legend += "\n...(more entries truncated)..."
 
-        # Build history string
-        history_str = ""
-        if history:
-            for h in history[-5:]:
-                res = h.get('result', {})
-                status = "✅" if res.get('success') else "❌"
-                history_str += f"- Step {h.get('step')}: {h.get('action', {}).get('actions')} ({status})\n"
-
-        return f"""TASK: {task}
-URL: {page_content.get('url')}
-Step: {step}
-
-LEGEND (SoM - [mark] Role 'Name'):
-{legend}
-
-HISTORY:
-{history_str}
-
-Analyze the UI and provide the JSON action plan."""
-
-    def _parse_action(self, response: str, mark_elements: Dict[int, Dict] = None) -> Optional[ActionPlan]:
-        """Parse JSON response and resolve marks"""
-        try:
-             json_str = response.strip()
-             # Basic cleanup
-             if "```" in json_str:
-                 match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', json_str, re.DOTALL)
-                 if match: json_str = match.group(1)
-             
-             data = json.loads(json_str)
-             
-             actions = []
-             raw_actions = data.get('actions', [])
-             if isinstance(raw_actions, dict): raw_actions = [raw_actions] # Handle single object
-             
-             for act in raw_actions:
-                 params = act.get('params', {})
-                 # Resolve Mark
-                 if 'mark' in params and mark_elements:
-                     m = int(params['mark']) # Ensure int
-                     if m in mark_elements:
-                         el = mark_elements[m]
-                         # Inject precise coordinates/xpath
-                         params.update({
-                             'x': el['x'], 
-                             'y': el['y'], 
-                             'xpath': el['xpath'], 
-                             'role': el['role'], 
-                             'name': el['name']
-                         })
-                 actions.append(AtomicAction(name=act['name'], params=params))
-             
-             return ActionPlan(
-                 reasoning=data.get('reasoning', ''),
-                 actions=actions,
-                 confidence=data.get('confidence', 1.0),
-                 next_mode=data.get('next_mode', 'text'),
-                 completed_subtasks=data.get('completed_subtasks', [])
-             )
-        except Exception as e:
-            logger.error(f"Parse error: {e}")
-            logger.debug(f"Failed JSON: {response}")
-            return None
+# Backward compatibility alias
+VisionClient = VisionUtils

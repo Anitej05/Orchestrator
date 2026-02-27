@@ -99,7 +99,6 @@ class Brain:
     """
 
     def __init__(self):
-        self.max_failures = 3
         self.max_iterations = 15
 
     async def think(
@@ -120,12 +119,9 @@ class Brain:
         if not todo_list and state.get("original_prompt"):
             return self._initialize_initial_state(state)
 
-        # Check error conditions AFTER initialization check
+        # Check iteration limit — the ONLY hard safety net
         if iteration_count >= self.max_iterations:
             return self._force_finish_with_error(state, "Maximum iterations reached")
-
-        if failure_count >= self.max_failures:
-            return self._enter_fallback_mode(state, memory, insights)
 
         # Extract insights from last execution if significant
         updated_insights = self._extract_insights_from_last_action(state, insights)
@@ -351,6 +347,7 @@ You are a helpful, intelligent, and expressive AI assistant.
 {todo_preview}
 
 ## CONSECUTIVE FAILURES: {state.get("failure_count", 0)}
+{self._build_failure_guidance(state)}
 
 ## RELEVANT EXPERIENCE (from past interactions)
 {artifacts_str or 'No relevant past experience.'}
@@ -360,57 +357,57 @@ You are a helpful, intelligent, and expressive AI assistant.
 
 ## RESOURCE SELECTION — PICK THE RIGHT ACTION TYPE
 
-**CRITICAL RULES (read FIRST):**
-- If the user says "create a file/CSV/JSON" or "run/write code" → you MUST use action_type='python'. Do NOT write code inside user_response.
-- If the user says "use the browser" or "go to [website]" → you MUST use action_type='agent' with Browser Automation Agent.
-- If the user says "send email" or "check email" → you MUST use action_type='agent' with Mail Agent.
+**Match the current step to the RIGHT resource.** Each action type has a specific purpose — read the agent skills, tool descriptions, and Python scope below to decide which one fits.
+
+**CRITICAL RULES:**
 - Code in user_response is **NOT EXECUTED**. Only action_type='python' executes code.
 - Files are **NOT CREATED** by finish. Only action_type='python' or 'terminal' can create files.
 
-**Choose the action type that matches the CURRENT STEP of the task:**
 
-1. **TOOL** — Need external data? (web search, news, finance, wiki lookup)
-   → action_type='tool', resource_id='tool_name', payload={{...}}
-   Available tools:
-{tool_list or '   None'}
+### 1. AGENT — Refer to agent skills below for when to use each agent
+→ action_type='agent', resource_id='<Agent Name>', payload={{"prompt": "..."}}
 
-2. **PYTHON** — Need to compute, process, create files, or execute code?
-   → action_type='python', payload={{"code": "your_python_code_here"}}
-   ✅ Generate CSV/JSON/files, calculations, data processing, parsing, charting
-   ✅ YOU write the code. Sandbox has: pandas, numpy, json, datetime, re, math, statistics, csv, os
-   ✅ Files created in the sandbox persist and are tracked automatically
-   ✅ **DATA ACCESS**: A `tool_results` dict is pre-loaded with data from previous tool/agent calls.
-      - Keys are tool names (e.g., `tool_results['get_stock_quote']`), values are the result data.
-      - Also available as JSON files: `<tool_name>_result.json` in the workspace directory.
-      - Example: `data = tool_results.get('get_stock_quote', {{}})` or `json.load(open('get_stock_quote_result.json'))`
-   ⚠️ If the task says "create a CSV" or "write a file" → you MUST use python, NOT finish
-
-3. **AGENT** — Need a specialized external system?
-   → action_type='agent', resource_id='<Agent Name>', payload={{"prompt": "..."}}
-   Use agents when the task requires:
-   - **Browser access**: web navigation, scraping, form filling → Browser Automation Agent
-   - **Email/Gmail access**: read, send, search emails → Mail Agent
-   - **Uploaded file parsing**: .xlsx/.csv analysis, PDF/DOCX OCR → SpreadsheetAgent / Document Agent
-   - **Accounting system**: invoices, payments, Zoho → Zoho Books Agent
-
-   **Available agents:**
+**Available agents (see their full capabilities, uses, and limitations below):**
 {agent_skills_context or agent_list or '   None'}
 
-   ❌ NEVER spawn SpreadsheetAgent just to create a CSV — use Python
-   ❌ NEVER spawn DocumentAgent to write markdown — use Python
-   ✅ DO use SpreadsheetAgent when user uploaded .xlsx that needs pivot/analysis
-   ✅ DO use Browser Automation Agent when you need to navigate real websites
+### 2. TOOL — External data APIs
+→ action_type='tool', resource_id='tool_name', payload={{...}}
+Available tools:
+{tool_list or '   None'}
 
-4. **TERMINAL** — Need a shell command? (dir, type, findstr, system info)
-   → action_type='terminal', payload={{"command": "..."}}
-   ⚠️ This is a WINDOWS system. Use `dir` not `ls`, `type` not `cat`, `findstr` not `grep`
+### 3. PYTHON — Computation, data processing, file generation ONLY
+→ action_type='python', payload={{"code": "your_python_code_here"}}
 
-5. **FINISH** — Have you completed ALL steps the user asked for?
-   → action_type='finish', user_response='your comprehensive answer'
-   ⚠️ ONLY use finish when ALL subtasks are done
-   ⚠️ If user asked to "create a file" and you haven't created it yet → DO NOT finish
-   ⚠️ If user asked to "use Python" and you haven't executed code yet → DO NOT finish
-   ✅ Use finish to summarize results AFTER tools/python/agents have done the work
+**USE Python for:**
+✅ Calculations, data analysis, charting (matplotlib, pandas)
+✅ Creating CSV, JSON, Excel files from data you already have
+✅ Processing results from tools/agents into deliverables
+✅ Parsing structured data, JSON manipulation, text processing
+
+**DO NOT use Python for (use agents instead):**
+❌ Navigating websites, web scraping, or extracting data from URLs → Browser Agent
+❌ Creating Word/PDF documents → Document Agent
+❌ Analyzing user-uploaded spreadsheets → Spreadsheet Agent
+❌ Writing/editing actual project code → Coding Agent
+❌ Sending/reading emails → Mail Agent
+
+**Sandbox details:**
+- Modules: pandas, numpy, json, datetime, re, math, statistics, csv, os, requests
+- `tool_results` dict is pre-loaded with data from previous tool/agent calls
+  - Keys are tool/agent names, values are the result data
+  - Also available as JSON files: `<tool_name>_result.json` in workspace
+- Files created in the sandbox persist and are tracked automatically
+- HTTP calls use proper browser headers (no 403 issues)
+
+### 4. TERMINAL — Shell commands
+→ action_type='terminal', payload={{"command": "..."}}
+⚠️ This is a WINDOWS system. Use `dir` not `ls`, `type` not `cat`, `findstr` not `grep`
+
+### 5. FINISH — All work is done
+→ action_type='finish', user_response='your comprehensive answer'
+⚠️ ONLY use finish when ALL subtasks are done
+⚠️ If user asked to "create a file" and you haven't created it yet → DO NOT finish
+✅ Use finish to summarize results AFTER tools/python/agents have done the work
 
 ## MULTI-STEP TASK RULES
 - If task has multiple parts (e.g., "search, then code, then display"):
@@ -816,15 +813,15 @@ Return JSON with:
         if not previous_result.get("success"):
             return decision
 
-        if state.get("execution_plan"):
-            # In explicit plan mode, let the planner decide phase advancement.
-            return decision
+        # In plan mode, be slightly more lenient but still detect stagnation.
+        # Without a plan: trigger after 3 identical actions. With a plan: 4.
+        repeat_threshold = 4 if state.get("execution_plan") else 3
 
         action_history = list(state.get("action_history", []))
-        if len(action_history) < 3:
+        if len(action_history) < repeat_threshold:
             return decision
 
-        recent = action_history[-3:]
+        recent = action_history[-repeat_threshold:]
         if not all(entry.get("success") for entry in recent):
             return decision
 
@@ -1323,6 +1320,71 @@ Return JSON with:
 
         return validated, errors
 
+    def _build_failure_guidance(self, state: Dict[str, Any]) -> str:
+        """
+        Build dynamic guidance for the LLM based on current failure patterns.
+        Instead of hardcoded limits, this lets the LLM reason about failures.
+        """
+        failure_count = state.get("failure_count", 0)
+        if failure_count == 0:
+            return ""
+        
+        action_history = state.get("action_history", [])
+        
+        # Analyze recent failures to detect patterns
+        recent_failures = []
+        for entry in reversed(action_history):
+            if not entry.get("success"):
+                recent_failures.append(entry)
+            else:
+                break  # Stop at first success (we only want the consecutive tail)
+        
+        # Build specific guidance based on failure patterns
+        guidance_parts = []
+        
+        if failure_count >= 2:
+            guidance_parts.append(
+                f"⚠️ You have {failure_count} consecutive failures. You MUST change your approach — do NOT repeat the same action."
+            )
+        
+        # Detect common failure patterns
+        error_messages = [f.get("result_summary", "") for f in recent_failures]
+        error_types = set()
+        for err in error_messages:
+            err_lower = err.lower()
+            if "403" in err or "forbidden" in err_lower:
+                error_types.add("http_blocked")
+            if "timeout" in err_lower or "timed out" in err_lower:
+                error_types.add("timeout")
+            if "connection" in err_lower:
+                error_types.add("connection")
+            if "agent" in err_lower or any(f.get("action_type") == "agent" for f in recent_failures):
+                error_types.add("agent_failure")
+        
+        if "http_blocked" in error_types:
+            guidance_parts.append(
+                "🔄 HTTP requests are being blocked (403). Use `requests.get(url)` which has proper headers, "
+                "or try `read_html(url)` for HTML tables. Do NOT use urllib directly."
+            )
+        if "agent_failure" in error_types:
+            failed_agents = set(f.get("resource_id", "") for f in recent_failures if f.get("action_type") == "agent")
+            guidance_parts.append(
+                f"🔄 Agent(s) {failed_agents} failed. Consider using Python or tools as a fallback instead of retrying the same agent."
+            )
+        if "timeout" in error_types:
+            guidance_parts.append(
+                "🔄 Timeouts detected. Try simpler queries or break the task into smaller parts."
+            )
+        
+        if failure_count >= 3:
+            guidance_parts.append(
+                "💡 Consider: Can you complete the task with the data you already have? "
+                "If so, use action_type='finish' to provide the best possible answer. "
+                "If not, try a fundamentally different approach."
+            )
+        
+        return "\n".join(guidance_parts) if guidance_parts else ""
+
     def _enter_fallback_mode(
         self,
         state: Dict[str, Any],
@@ -1330,16 +1392,43 @@ Return JSON with:
         insights: Dict[str, str] = None,
     ) -> Dict[str, Any]:
         """Fallback mode: provide best answer from available context."""
-        context_summary = {
-            "memory": memory,
-            "insights": insights or {},
-        }
+        # Build a useful summary from action history instead of raw JSON
+        action_history = state.get("action_history", [])
+        successes = []
+        failures = []
+        for entry in action_history:
+            action_desc = f"{entry.get('action_type', '?')}:{entry.get('resource_id', '?')}"
+            if entry.get("success"):
+                summary = entry.get("result_summary", "")[:150]
+                successes.append(f"- ✅ {action_desc}: {summary}")
+            else:
+                error = entry.get("result_summary", "")[:100]
+                failures.append(f"- ❌ {action_desc}: {error}")
+        
+        parts = ["I encountered multiple issues while working on your request. Here's what happened:\n"]
+        if successes:
+            parts.append("**Completed steps:**")
+            parts.extend(successes[:10])
+        if failures:
+            parts.append("\n**Failed steps:**")
+            parts.extend(failures[:5])
+        
+        # Include any insights gathered
+        if insights:
+            parts.append("\n**What I learned:**")
+            for key, val in list(insights.items())[:5]:
+                parts.append(f"- {str(val)[:150]}")
+        
+        parts.append("\nPlease try again or rephrase your request. If a specific step keeps failing, I can try an alternative approach.")
+        
+        user_response = "\n".join(parts)
+        
         return {
             "decision": BrainDecision(
                 action_type="finish",
-                user_response=f"I've encountered multiple issues, but here is what I know: {json.dumps(context_summary, default=str)}",
+                user_response=user_response,
             ).model_dump(),
-            "final_response": f"I've encountered multiple issues, but here is what I know: {json.dumps(context_summary, default=str)}",
+            "final_response": user_response,
             "current_task_id": None,
         }
 

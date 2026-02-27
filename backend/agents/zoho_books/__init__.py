@@ -5,6 +5,10 @@ Zoho Books accounting integration agent.
 Supports both legacy and BaseAgent architectures.
 """
 
+# CRITICAL: Load .env BEFORE any imports that trigger InferenceService/KeyManager singletons.
+from pathlib import Path as _Path
+from dotenv import load_dotenv as _load_dotenv
+_load_dotenv(_Path(__file__).parent.parent.parent / ".env")
 # Legacy imports
 try:
     from .zoho_books_agent import ZohoBooksAgent as LegacyZohoBooksAgent

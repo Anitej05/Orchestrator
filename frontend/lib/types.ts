@@ -48,6 +48,7 @@ export interface ConversationStatus {
 export interface TaskStatus {
   status: 'pending' | 'running' | 'completed' | 'failed';
   taskName: string;
+  taskId?: string;
   taskDescription?: string;
   agentName?: string;
   startedAt?: Date;
@@ -58,6 +59,19 @@ export interface TaskStatus {
   result?: any;
   error?: string;
   is_dialogue?: boolean;
+}
+
+export interface TodoItem {
+  id?: string;
+  task_id?: string;
+  description: string;
+  status: string;
+  priority?: number;
+  payload?: Record<string, any>;
+  result?: any;
+  error?: string;
+  created_at?: number | string;
+  updated_at?: number | string;
 }
 
 export interface ConversationState {
@@ -76,6 +90,7 @@ export interface ConversationState {
   // Real-time task execution tracking
   task_statuses?: Record<string, TaskStatus>;
   current_executing_task?: string | null;
+  todo_list?: TodoItem[];
   // Canvas feature fields
   canvas_content?: string;  // Legacy: HTML/markdown string
   canvas_data?: Record<string, any>;  // Preferred: Structured data

@@ -10,11 +10,9 @@ import asyncio
 import base64
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
-from datetime import datetime
-import time
 
 from backend.agents.base import BaseAgent, AgentServices, AgentConfig
-from backend.agents.base.types import AgentRequest, AgentResponse, ExecutionContext
+from backend.agents.base.types import ExecutionContext, AgentRequest, AgentResponse, CapabilityResult, ExecutionStep
 from backend.agents.base.capability import capability, ParameterSchema
 
 from .browser import Browser
@@ -76,7 +74,7 @@ class BrowserAgent(BaseAgent):
         self.browser = Browser()
         self.dom = DOMExtractor()
         self.llm = LLMClient()
-        self.memory = AgentMemory()
+        self.memory = AgentMemory(task="Initialize Browser Agent")
 
         logger.info("Browser Agent resources initialized")
 
@@ -95,6 +93,132 @@ class BrowserAgent(BaseAgent):
         if not self.browser:
             return None
         return self.browser.get_active_page()
+
+    async def _get_step_context(self, request: AgentRequest, context: ExecutionContext, previous_results: List[CapabilityResult]) -> Any:
+        page = self._get_page()
+        if not page:
+            # Auto-launch browser if not yet started
+            if self.browser and not self.browser.browser:
+                logger.info("Auto-launching browser for first ReAct step...")
+                headless = True  # Default to headless for on-demand spawning
+                if request.payload:
+                    headless = request.payload.get("headless", True)
+                await self.browser.launch(headless=headless)
+                page = self._get_page()
+            if not page:
+                return {"page_content": {}, "screenshot_b64": None, "url": ""}
+        
+        # Extract DOM
+        try:
+            page_content = await self.dom.get_page_content(page)
+        except Exception as e:
+            logger.warning(f"DOM Extraction failed: {e}")
+            page_content = {}
+            
+        # Capture Screenshot
+        screenshot_b64 = None
+        if self.config.enable_vision:
+            try:
+                screenshot_bytes = await page.screenshot(type='jpeg', quality=self.config.screenshot_quality)
+                screenshot_b64 = base64.b64encode(screenshot_bytes).decode('utf-8')
+            except Exception as e:
+                logger.warning(f"Screenshot failed: {e}")
+                
+        # Update memory
+        if "selector_map" in page_content:
+            self.memory.update_knowledge(page.url, page_content["selector_map"])
+            
+        return {
+            "page_content": page_content,
+            "screenshot_b64": screenshot_b64,
+            "url": page.url,
+            "title": await page.title() if page else "Unknown"
+        }
+
+    async def _llm_decide_next_react_step(self, request: AgentRequest, understanding: Dict[str, Any], step_context: Any, previous_results: List[CapabilityResult], step_num: int):
+        page_content = step_context.get("page_content", {})
+        screenshot_b64 = step_context.get("screenshot_b64")
+        
+        action_prompt_context = self.memory.to_prompt_context()
+        task_context = f"Main Task: {request.prompt}\n{action_prompt_context}"
+        
+        last_error = None
+        prev_result_dict = None
+        if previous_results:
+            last = previous_results[-1]
+            if not last.success:
+                last_error = last.error if isinstance(last.error, str) else str(last.error)
+            prev_result_dict = {"success": last.success, "data": last.data, "error": last.error}
+            
+        # Use native browser multi-modal unified LLM call
+        action_plan = await self.llm.plan_action(
+            task=task_context,
+            page_content=page_content,
+            history=self.memory.history,
+            step=step_num,
+            screenshot_b64=screenshot_b64,
+            last_error=last_error, 
+            extracted_items=self.memory.extracted_items,
+            prev_result=prev_result_dict,
+            agent_memory=self.memory.get_saved_summary()
+        )
+        
+        from pydantic import BaseModel
+        class ReactDecisionProxy(BaseModel):
+            reasoning: str
+            capability_name: str
+            description: str
+            parameters: Dict[str, Any]
+            expected_outcome: str
+
+        first_action = action_plan.actions[0] if action_plan.actions else None
+        
+        if first_action:
+            # CRITICAL: AtomicAction has {name: str, params: dict}.
+            # first_action.dict() returns {"name": "navigate", "params": {"url": "..."}}.
+            # Capabilities expect FLAT params like {"url": "..."}, NOT nested {"params": {"url": "..."}}.
+            # So we extract .params directly instead of using .dict().
+            cap_name = first_action.name
+            cap_params = dict(first_action.params)  # Flat copy of the params dict
+            
+            # Legacy mapping: browser LLM action names → BaseAgent capability names
+            name_mapping = {
+                "done": "finish",
+                "type": "type_text",
+                "extract": "extract_data",
+                "run_js": "execute_javascript",
+            }
+            cap_name = name_mapping.get(cap_name, cap_name)
+                
+            return ReactDecisionProxy(
+                reasoning=action_plan.reasoning,
+                capability_name=cap_name,
+                description=action_plan.next_goal or str(cap_params), 
+                parameters=cap_params,
+                expected_outcome="Expected page state change."
+            )
+        else:
+            return ReactDecisionProxy(
+                reasoning="Task appears complete or plan empty.",
+                capability_name="finish",
+                description="Task complete.",
+                parameters={},
+                expected_outcome=""
+            )
+
+    async def _update_state_post_step(self, step: ExecutionStep, result: CapabilityResult, context: ExecutionContext) -> None:
+        if self.llm:
+            self.llm.update_last_turn_result(
+                success=result.success,
+                data_extracted=result.data if isinstance(result.data, dict) else None,
+                url_changed=False,
+                failure_reason="" if result.success else str(result.error)
+            )
+            
+        if self.memory and result.data and isinstance(result.data, dict):
+            saved = result.data.get("extracted", result.data.get("data"))
+            if saved:
+                self.memory.extracted_items.append({"step": step.step_number, "data": saved})
 
     # ========================================================================
     # CAPABILITIES - Navigation & Interaction
@@ -297,12 +421,12 @@ class BrowserAgent(BaseAgent):
 
     @capability(
         name="execute_javascript",
-        description="Execute JavaScript code on the page",
+        description="Execute JavaScript code on the page. IMPORTANT: Do NOT use top-level 'return' statements; just write the expression directly (e.g. 'document.querySelector(\"h1\").textContent' instead of 'return document.querySelector(\"h1\").textContent').",
         parameters=[
             ParameterSchema(
                 name="script",
                 type="string",
-                description="JavaScript code",
+                description="JavaScript expression or code. Do NOT use top-level return statements — just write the expression.",
                 required=True,
             )
         ],
@@ -315,6 +439,22 @@ class BrowserAgent(BaseAgent):
 
         if not script:
             return {"success": False, "error": "Script is required"}
+
+        # Sanitize LLM-generated scripts
+        script = script.strip()
+
+        # Strip markdown code fences that LLMs sometimes wrap code in
+        if script.startswith("```"):
+            lines = script.split("\n")
+            lines = [l for l in lines if not l.strip().startswith("```")]
+            script = "\n".join(lines).strip()
+
+        # Wrap in IIFE if script contains a top-level 'return' statement.
+        # Playwright's page.evaluate() uses eval() where bare 'return' is
+        # a SyntaxError. LLMs consistently generate 'return expr;' style code.
+        stripped = script.lstrip()
+        if stripped.startswith("return ") or stripped.startswith("return;") or stripped.startswith("return\n"):
+            script = f"(() => {{ {script} }})()"
 
         try:
             page = self._get_page()
@@ -384,6 +524,58 @@ class BrowserAgent(BaseAgent):
             logger.error(f"Extract failed: {e}")
             return {"success": False, "error": str(e)}
 
+    @capability(
+        name="extract_table",
+        description="Extract structured data from a table element",
+        parameters=[
+            ParameterSchema(
+                name="selector",
+                type="string",
+                description="CSS selector for the table element",
+                required=True,
+            )
+        ],
+    )
+    async def extract_table(
+        self, params: Dict[str, Any], context: ExecutionContext
+    ) -> Dict[str, Any]:
+        """Extract structured data from a table."""
+        selector = params.get("selector")
+
+        if not selector:
+            return {"success": False, "error": "Selector is required"}
+
+        try:
+            page = self._get_page()
+            if not page:
+                return {"success": False, "error": "Browser not initialized"}
+
+            # Standard structured table extraction
+            script = f"""
+            (() => {{
+                const table = document.querySelector(`{selector}`);
+                if (!table) return null;
+                const rows = Array.from(table.querySelectorAll("tr"));
+                return rows.map(row => {{
+                    const cells = Array.from(row.querySelectorAll("td, th"));
+                    return cells.map(cell => cell.innerText.trim());
+                }});
+            }})()
+            """
+            data = await page.evaluate(script)
+
+            if not data:
+                return {"success": False, "error": f"Table not found for selector: {selector}"}
+
+            return {
+                "success": True,
+                "data": {"table_data": data, "extracted": data},
+                "message": f"Extracted table data from {selector}",
+            }
+        except Exception as e:
+            logger.error(f"Extract table failed: {e}")
+            return {"success": False, "error": str(e)}
+
     # ========================================================================
     # CAPABILITIES - Screenshots
     # ========================================================================
@@ -405,7 +597,7 @@ class BrowserAgent(BaseAgent):
         self, params: Dict[str, Any], context: ExecutionContext
     ) -> Dict[str, Any]:
         """Take a screenshot."""
-        full_page = params.get("full_page", False)
+        params.get("full_page", False)
 
         try:
             screenshot_bytes = await self.browser.screenshot()
@@ -513,3 +705,157 @@ class BrowserAgent(BaseAgent):
             return {"success": False, "error": "No page"}
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    # ========================================================================
+    # CAPABILITIES - Additional (LLM frequently generates these)
+    # ========================================================================
+
+    @capability(
+        name="hover",
+        description="Hover over an element on the page",
+        parameters=[
+            ParameterSchema(
+                name="selector",
+                type="string",
+                description="CSS selector of element to hover over",
+                required=True,
+            )
+        ],
+    )
+    async def hover(
+        self, params: Dict[str, Any], context: ExecutionContext
+    ) -> Dict[str, Any]:
+        """Hover over an element."""
+        selector = params.get("selector")
+        if not selector:
+            return {"success": False, "error": "Selector is required"}
+        try:
+            page = self._get_page()
+            if not page:
+                return {"success": False, "error": "Browser not initialized"}
+            await page.hover(selector)
+            return {"success": True, "message": f"Hovered over {selector}"}
+        except Exception as e:
+            return {"success": False, "error": f"Hover failed: {str(e)}"}
+
+    @capability(
+        name="press",
+        description="Press a keyboard key (Enter, Escape, Tab, ArrowDown, etc.)",
+        parameters=[
+            ParameterSchema(
+                name="key",
+                type="string",
+                description="Key to press (Enter, Escape, Tab, ArrowDown, etc.)",
+                required=True,
+            )
+        ],
+    )
+    async def press(
+        self, params: Dict[str, Any], context: ExecutionContext
+    ) -> Dict[str, Any]:
+        """Press a keyboard key."""
+        key = params.get("key", "")
+        if not key:
+            return {"success": False, "error": "Key is required"}
+        try:
+            page = self._get_page()
+            if not page:
+                return {"success": False, "error": "Browser not initialized"}
+            await page.keyboard.press(key)
+            await asyncio.sleep(0.3)
+            return {"success": True, "message": f"Pressed {key}"}
+        except Exception as e:
+            return {"success": False, "error": f"Press failed: {str(e)}"}
+
+    @capability(
+        name="wait",
+        description="Wait for a specified number of seconds",
+        parameters=[
+            ParameterSchema(
+                name="seconds",
+                type="integer",
+                description="Number of seconds to wait",
+                required=False,
+                default=2,
+            )
+        ],
+    )
+    async def wait(
+        self, params: Dict[str, Any], context: ExecutionContext
+    ) -> Dict[str, Any]:
+        """Wait for a specified duration."""
+        seconds = params.get("seconds", 2)
+        await asyncio.sleep(min(seconds, 10))  # Cap at 10s to prevent abuse
+        return {"success": True, "message": f"Waited {seconds}s"}
+
+    @capability(
+        name="save_info",
+        description="Save extracted information to agent memory for later use",
+        parameters=[
+            ParameterSchema(
+                name="key",
+                type="string",
+                description="Key/label for the saved information",
+                required=True,
+            ),
+            ParameterSchema(
+                name="value",
+                type="string",
+                description="The information to save",
+                required=True,
+            ),
+        ],
+    )
+    async def save_info(
+        self, params: Dict[str, Any], context: ExecutionContext
+    ) -> Dict[str, Any]:
+        """Save information to agent memory."""
+        key = params.get("key", "")
+        value = params.get("value", "")
+        if not key:
+            return {"success": False, "error": "Key is required"}
+        if self.memory:
+            self.memory.safe_add_extracted({
+                "structured_info": {"key": key, "value": value, "verified": True}
+            })
+        return {
+            "success": True,
+            "data": {"extracted": {"key": key, "value": value}},
+            "message": f"Saved: {key}",
+        }
+
+    @capability(
+        name="select",
+        description="Select an option from a dropdown/select element",
+        parameters=[
+            ParameterSchema(
+                name="selector",
+                type="string",
+                description="CSS selector for the select element",
+                required=True,
+            ),
+            ParameterSchema(
+                name="value",
+                type="string",
+                description="Value or label of the option to select",
+                required=True,
+            ),
+        ],
+    )
+    async def select(
+        self, params: Dict[str, Any], context: ExecutionContext
+    ) -> Dict[str, Any]:
+        """Select a dropdown option."""
+        selector = params.get("selector")
+        value = params.get("value", "")
+        if not selector:
+            return {"success": False, "error": "Selector is required"}
+        try:
+            page = self._get_page()
+            if not page:
+                return {"success": False, "error": "Browser not initialized"}
+            await page.select_option(selector, value)
+            return {"success": True, "message": f"Selected {value} in {selector}"}
+        except Exception as e:
+            return {"success": False, "error": f"Select failed: {str(e)}"}
+

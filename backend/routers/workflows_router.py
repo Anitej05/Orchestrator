@@ -58,7 +58,13 @@ async def save_workflow(request: Request, thread_id: str, name: str, description
     
     history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
     if not os.path.exists(history_path):
-        raise HTTPException(status_code=404, detail="Conversation not found")
+        backend_dir = os.path.dirname(os.path.dirname(__file__))
+        fallback_dir = os.path.join(backend_dir, "agent_conversations")
+        fallback_path = os.path.join(fallback_dir, f"{thread_id}.json")
+        if os.path.exists(fallback_path):
+            history_path = fallback_path
+        else:
+            raise HTTPException(status_code=404, detail="Conversation not found")
     
     with open(history_path, "r", encoding="utf-8") as f:
         history = json.load(f)
@@ -68,6 +74,7 @@ async def save_workflow(request: Request, thread_id: str, name: str, description
     # Extract todo_list (new system) for the primary execution plan
     todo_list = history.get("todo_list", [])
     original_prompt = history.get("original_prompt", "")
+    todo_list = history.get("todo_list", [])
     
     if not original_prompt:
         messages = history.get("messages", [])
@@ -92,6 +99,7 @@ async def save_workflow(request: Request, thread_id: str, name: str, description
                     task_agent_pairs = checkpoint_state.get("task_agent_pairs", task_agent_pairs)
                     task_plan = checkpoint_state.get("task_plan", task_plan)
                     original_prompt = checkpoint_state.get("original_prompt", original_prompt)
+                    todo_list = checkpoint_state.get("todo_list", todo_list)
                     history = {**history, **checkpoint_state}
                     logger.info(f"✅ Retrieved workflow data from checkpointer")
             except Exception as e:

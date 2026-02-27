@@ -10,6 +10,7 @@ import PlanGraph from '@/components/PlanGraph';
 import type { TaskStatus } from '@/lib/types';
 import { authFetch } from '@/lib/auth-fetch';
 import { toast } from 'sonner';
+import { useTaskExecutionWebSocket } from '@/hooks/use-task-execution-websocket';
 
 interface WorkflowExecutionChatProps {
   workflowId: string;
@@ -38,9 +39,7 @@ export default function WorkflowExecutionChat({ workflowId, workflow, onCancel }
   const [messages, setMessages] = useState<Message[]>([]);
   const [planApproved, setPlanApproved] = useState(false);
   const [isExecuting, setIsExecuting] = useState(false);
-  const [taskStatuses, setTaskStatuses] = useState<Record<string, TaskStatus>>({});
   const [executionThreadId, setExecutionThreadId] = useState<string | null>(null);
-  const wsRef = useRef<WebSocket | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Build plan data from todo_list (new system) or task_plan (old system)
@@ -82,11 +81,9 @@ export default function WorkflowExecutionChat({ workflowId, workflow, onCancel }
     ]);
 
     return () => {
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
+      disconnect();
     };
-  }, []);
+  }, [disconnect]);
 
   useEffect(() => {
     // Auto-scroll to bottom when new messages arrive
@@ -95,86 +92,7 @@ export default function WorkflowExecutionChat({ workflowId, workflow, onCancel }
     }
   }, [messages]);
 
-  const connectWebSocket = (threadId: string) => {
-    import { WS_BASE_URL } from '@/lib/config';
-    const ws = new WebSocket(`${WS_BASE_URL}/ws/chat?thread_id=${threadId}`);
-    
-    ws.onopen = () => {
-      console.log('WebSocket connected for workflow execution');
-      addMessage('system', 'Connected to execution server. Starting workflow...');
-    };
-
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        
-        if (data.type === 'task_started') {
-          setTaskStatuses(prev => ({
-            ...prev,
-            [data.task_name]: {
-              status: 'running',
-              agentName: data.agent_name,
-              startTime: Date.now()
-            }
-          }));
-          addMessage('assistant', `🚀 Starting task: ${data.task_name} with ${data.agent_name}`);
-        }
-        
-        if (data.type === 'task_completed') {
-          const executionTime = data.execution_time || 0;
-          setTaskStatuses(prev => ({
-            ...prev,
-            [data.task_name]: {
-              status: 'completed',
-              agentName: data.agent_name,
-              executionTime,
-              startTime: prev[data.task_name]?.startTime || Date.now()
-            }
-          }));
-          addMessage('assistant', `✅ Completed: ${data.task_name} (${executionTime}ms)`);
-        }
-        
-        if (data.type === 'task_failed') {
-          setTaskStatuses(prev => ({
-            ...prev,
-            [data.task_name]: {
-              status: 'failed',
-              agentName: data.agent_name,
-              error: data.error
-            }
-          }));
-          addMessage('assistant', `❌ Failed: ${data.task_name} - ${data.error}`);
-        }
-        
-        if (data.type === 'final_response') {
-          setIsExecuting(false);
-          addMessage('system', '🎉 Workflow execution completed successfully!');
-          if (data.content) {
-            addMessage('assistant', data.content);
-          }
-        }
-        
-        if (data.type === 'error') {
-          setIsExecuting(false);
-          addMessage('system', `⚠️ Error: ${data.message || 'Execution error'}`);
-        }
-      } catch (err) {
-        console.error('WebSocket message parse error:', err);
-      }
-    };
-
-    ws.onerror = (error) => {
-      console.error('WebSocket error:', error);
-      addMessage('system', '⚠️ Connection error during execution');
-    };
-
-    ws.onclose = () => {
-      console.log('WebSocket closed');
-      setIsExecuting(false);
-    };
-
-    wsRef.current = ws;
-  };
+  // Removed inline WebSocket implementation - now using useTaskExecutionWebSocket hook
 
   const addMessage = (type: Message['type'], content: string) => {
     setMessages(prev => [...prev, {
@@ -207,18 +125,8 @@ export default function WorkflowExecutionChat({ workflowId, workflow, onCancel }
       const threadId = data.thread_id;
       setExecutionThreadId(threadId);
       
-      // Connect WebSocket for real-time updates
-      connectWebSocket(threadId);
-      
-      // Send execution command
-      setTimeout(() => {
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({
-            type: 'execute_workflow',
-            workflow_id: workflowId
-          }));
-        }
-      }, 500);
+      // Connect WebSocket for real-time updates using the hook
+      connect(threadId);
       
     } catch (err) {
       console.error('Failed to execute workflow:', err);

@@ -277,12 +277,30 @@ async def manage_todo_list(state: State, config: Optional[RunnableConfig] = None
                         if not (cmd.startswith("TERM:") or cmd.startswith("AGENT:") or cmd.startswith("TOOL:")):
                              cmd = f"TERM:{cmd}"
                         t['code_snippet'] = cmd
+
+                    # Attach metadata for UI display
+                    payload = t.get('payload') or {}
+                    if isinstance(t.get('code_snippet'), str):
+                        snippet = t['code_snippet']
+                        if snippet.startswith("AGENT:"):
+                            payload["action_type"] = "agent"
+                            payload["agent_name"] = snippet[6:].strip().split(" ", 1)[0]
+                        elif snippet.startswith("TOOL:"):
+                            payload["action_type"] = "tool"
+                            payload["tool_name"] = snippet[5:].strip().split(" ", 1)[0]
+                        elif snippet.startswith("TERM:"):
+                            payload["action_type"] = "terminal"
+                            payload["terminal_command"] = snippet[5:].strip()
+                        else:
+                            payload["action_type"] = "python"
+                    t['payload'] = payload
         
         # Activate task
         if next_task_id:
              for t in new_todo_list:
                 if t['id'] == next_task_id:
                     t['status'] = TaskStatus.IN_PROGRESS
+                    t['updated_at'] = time.time()
                     
         return {
             "todo_list": new_todo_list,
@@ -328,6 +346,9 @@ async def execute_next_action(state: State, config: Optional[RunnableConfig] = N
         
         if snippet.startswith("TERM:"):
             cmd = snippet[5:].strip()
+            current_task.setdefault("payload", {})
+            current_task["payload"]["action_type"] = "terminal"
+            current_task["payload"]["terminal_command"] = cmd
             # Terminal service is sync (subprocess matches sync)
             start_time = time.time()
             res = terminal_service.execute_command(cmd)
@@ -359,11 +380,15 @@ async def execute_next_action(state: State, config: Optional[RunnableConfig] = N
                     break
             
             if not agent:
-                 # Fallback to old splitting if no match found
-                 parts = content.split(' ', 1)
-                 agent_name = parts[0]
-                 instruction = parts[1] if len(parts) > 1 else current_task['description']
-                 agent = next((a for a in agents if a['name'].lower() == agent_name.lower()), None)
+                # Fallback to old splitting if no match found
+                parts = content.split(' ', 1)
+                agent_name = parts[0]
+                instruction = parts[1] if len(parts) > 1 else current_task['description']
+                agent = next((a for a in agents if a['name'].lower() == agent_name.lower()), None)
+
+            current_task.setdefault("payload", {})
+            current_task["payload"]["action_type"] = "agent"
+            current_task["payload"]["agent_name"] = agent_name
             
             start_time = time.time()
             if agent:
@@ -406,31 +431,47 @@ async def execute_next_action(state: State, config: Optional[RunnableConfig] = N
             parts = snippet[5:].strip().split(' ', 1)
             tool_name = parts[0]
             args_str = parts[1] if len(parts) > 1 else "{}"
+
+            current_task.setdefault("payload", {})
+            current_task["payload"]["action_type"] = "tool"
+            current_task["payload"]["tool_name"] = tool_name
             
             try:
                 args = json.loads(args_str)
             except:
                 args = {"query": args_str} if args_str else {}
             
-            logger.info(f"Invoking Tool: {tool_name} with {args}")
-            exec_result = await tool_registry.execute_tool(tool_name, args)
-            
-            if exec_result["success"]:
-                result_val = exec_result["result"]
-                result_content = str(result_val)
-                # Check if the result itself indicates an error (common pattern in tools)
-                if isinstance(result_val, dict) and "error" in result_val:
-                    is_success = False
-                else:
-                    is_success = True
-            else:
-                result_content = exec_result["error"]
+            context = {
+                "original_prompt": state.get("original_prompt"),
+                "uploaded_files": state.get("uploaded_files", []),
+            }
+            args, missing = tool_registry.apply_default_params(tool_name, args, context)
+            if missing:
+                result_content = f"Missing required tool parameters: {', '.join(missing)}"
                 is_success = False
+            else:
+                logger.info(f"Invoking Tool: {tool_name} with {args}")
+                exec_result = await tool_registry.execute_tool(tool_name, args)
+            
+                if exec_result["success"]:
+                    result_val = exec_result["result"]
+                    result_content = str(result_val)
+                    # Check if the result itself indicates an error (common pattern in tools)
+                    if isinstance(result_val, dict) and "error" in result_val:
+                        is_success = False
+                    else:
+                        is_success = True
+                else:
+                    result_content = exec_result["error"]
+                    is_success = False
                 
         else:
             # Default to Code Sandbox - execute actual Python code if present
             # Use the snippet (without prefix) or fallback to task description
             code_to_run = snippet if snippet and not snippet.startswith(("TERM:", "AGENT:", "TOOL:")) else None
+
+            current_task.setdefault("payload", {})
+            current_task["payload"]["action_type"] = "python"
             
             if code_to_run:
                 # Actually execute the Python code provided by Brain
@@ -456,6 +497,8 @@ async def execute_next_action(state: State, config: Optional[RunnableConfig] = N
             if t['id'] == current_task_id:
                 t['result'] = processed_result
                 t['status'] = TaskStatus.COMPLETED if is_success else TaskStatus.FAILED
+                t['updated_at'] = time.time()
+                t['completed_at'] = time.time()
 
         return {
             "todo_list": todo_list,

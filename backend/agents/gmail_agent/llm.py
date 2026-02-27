@@ -8,8 +8,8 @@ from typing import List, Optional, Tuple, Dict, Any
 from datetime import datetime
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
-
-load_dotenv()
+from pathlib import Path
+load_dotenv(Path(__file__).parent.parent.parent / ".env")
 logger = logging.getLogger("gmail_agent")
 
 # API Keys

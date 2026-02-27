@@ -3,8 +3,9 @@ import os
 import logging
 from pathlib import Path
 from dotenv import load_dotenv
+from pathlib import Path
 
-load_dotenv()
+load_dotenv(Path(__file__).parent.parent.parent / ".env")
 
 # API Keys
 COMPOSIO_API_KEY = os.getenv("COMPOSIO_API_KEY")
