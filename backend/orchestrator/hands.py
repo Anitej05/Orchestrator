@@ -521,6 +521,36 @@ class Hands:
                                 tool_results[resource_id] = json.loads(result_data)
                             except:
                                 pass
+
+                # === UNPACK PARALLEL RESULTS ===
+                # Parallel actions wrap multiple tool/agent results in parallel_results list.
+                # Extract each sub-result so Python can access them individually via tool_results.
+                elif entry.get("action_type") == "parallel":
+                    raw = entry.get("result_raw", entry.get("result_full", {}))
+                    if isinstance(raw, dict):
+                        parallel_results = raw.get("parallel_results", [])
+                        for pr in parallel_results:
+                            if not isinstance(pr, dict) or not pr.get("success"):
+                                continue
+                            pr_type = pr.get("action_type", "")
+                            pr_resource = pr.get("resource_id", "unknown")
+                            pr_output = pr.get("output")
+                            if pr_type in ("tool", "agent") and pr_resource and pr_output is not None:
+                                # Extract actual data from wrapper
+                                if isinstance(pr_output, dict):
+                                    actual = pr_output.get("result", pr_output)
+                                else:
+                                    actual = pr_output
+                                # For duplicate tool names (e.g., multiple search_news calls),
+                                # collect all results into a list
+                                if pr_resource in tool_results:
+                                    existing = tool_results[pr_resource]
+                                    if isinstance(existing, list):
+                                        existing.append(actual)
+                                    else:
+                                        tool_results[pr_resource] = [existing, actual]
+                                else:
+                                    tool_results[pr_resource] = actual
             
             # Save tool results as JSON files in workspace for file-based access
             if tool_results:

@@ -8,11 +8,11 @@ Uses actual Browser class methods from browser.py.
 import logging
 import asyncio
 import base64
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 
 from backend.agents.base import BaseAgent, AgentServices, AgentConfig
-from backend.agents.base.types import ExecutionContext
+from backend.agents.base.types import ExecutionContext, AgentRequest, AgentResponse, CapabilityResult, ExecutionStep
 from backend.agents.base.capability import capability, ParameterSchema
 
 from .browser import Browser
@@ -93,6 +93,117 @@ class BrowserAgent(BaseAgent):
         if not self.browser:
             return None
         return self.browser.get_active_page()
+
+    async def _get_step_context(self, request: AgentRequest, context: ExecutionContext, previous_results: List[CapabilityResult]) -> Any:
+        page = self._get_page()
+        if not page:
+            return {"page_content": {}, "screenshot_b64": None, "url": ""}
+        
+        # Extract DOM
+        try:
+            page_content = await self.dom.get_page_content(page)
+        except Exception as e:
+            logger.warning(f"DOM Extraction failed: {e}")
+            page_content = {}
+            
+        # Capture Screenshot
+        screenshot_b64 = None
+        if self.config.enable_vision:
+            try:
+                screenshot_bytes = await page.screenshot(type='jpeg', quality=self.config.screenshot_quality)
+                screenshot_b64 = base64.b64encode(screenshot_bytes).decode('utf-8')
+            except Exception as e:
+                logger.warning(f"Screenshot failed: {e}")
+                
+        # Update memory
+        if "selector_map" in page_content:
+            self.memory.update_knowledge(page.url, page_content["selector_map"])
+            
+        return {
+            "page_content": page_content,
+            "screenshot_b64": screenshot_b64,
+            "url": page.url,
+            "title": await page.title() if page else "Unknown"
+        }
+
+    async def _llm_decide_next_react_step(self, request: AgentRequest, understanding: Dict[str, Any], step_context: Any, previous_results: List[CapabilityResult], step_num: int):
+        page_content = step_context.get("page_content", {})
+        screenshot_b64 = step_context.get("screenshot_b64")
+        
+        action_prompt_context = self.memory.to_prompt_context()
+        task_context = f"Main Task: {request.prompt}\n{action_prompt_context}"
+        
+        last_error = None
+        prev_result_dict = None
+        if previous_results:
+            last = previous_results[-1]
+            if not last.success:
+                last_error = last.error if isinstance(last.error, str) else str(last.error)
+            prev_result_dict = {"success": last.success, "data": last.data, "error": last.error}
+            
+        # Use native browser multi-modal unified LLM call
+        action_plan = await self.llm.plan_action(
+            task_context=task_context,
+            page_content=page_content,
+            history=self.memory.history,
+            step=step_num,
+            screenshot_b64=screenshot_b64,
+            last_error=last_error, 
+            extracted_items=self.memory.extracted_items,
+            prev_result=prev_result_dict,
+            agent_memory=self.memory.get_saved_summary()
+        )
+        
+        from pydantic import BaseModel
+        class ReactDecisionProxy(BaseModel):
+            reasoning: str
+            capability_name: str
+            description: str
+            parameters: Dict[str, Any]
+            expected_outcome: str
+
+        first_action = action_plan.actions[0] if action_plan.actions else None
+        
+        if first_action:
+            params = first_action.dict()
+            cap_name = params.pop("name", "unknown")
+            reasoning = params.pop("reasoning", action_plan.reasoning)
+            
+            # Legacy mapping: done -> finish, type -> type_text
+            if cap_name == "done":
+                cap_name = "finish"
+            elif cap_name == "type":
+                cap_name = "type_text"
+                
+            return ReactDecisionProxy(
+                reasoning=reasoning,
+                capability_name=cap_name,
+                description=str(params), 
+                parameters=params,
+                expected_outcome="Expected page state change."
+            )
+        else:
+            return ReactDecisionProxy(
+                reasoning="Task appears complete or plan empty.",
+                capability_name="finish",
+                description="Task complete.",
+                parameters={},
+                expected_outcome=""
+            )
+
+    async def _update_state_post_step(self, step: ExecutionStep, result: CapabilityResult, context: ExecutionContext) -> None:
+        if self.llm:
+            self.llm.update_last_turn_result(
+                success=result.success,
+                data_extracted=result.data if isinstance(result.data, dict) else None,
+                url_changed=False,
+                failure_reason="" if result.success else str(result.error)
+            )
+            
+        if self.memory and result.data and isinstance(result.data, dict):
+            saved = result.data.get("extracted", result.data.get("data"))
+            if saved:
+                self.memory.extracted_items.append({"step": step.step_number, "data": saved})
 
     # ========================================================================
     # CAPABILITIES - Navigation & Interaction
@@ -396,6 +507,58 @@ class BrowserAgent(BaseAgent):
             }
         except Exception as e:
             logger.error(f"Extract failed: {e}")
+            return {"success": False, "error": str(e)}
+
+    @capability(
+        name="extract_table",
+        description="Extract structured data from a table element",
+        parameters=[
+            ParameterSchema(
+                name="selector",
+                type="string",
+                description="CSS selector for the table element",
+                required=True,
+            )
+        ],
+    )
+    async def extract_table(
+        self, params: Dict[str, Any], context: ExecutionContext
+    ) -> Dict[str, Any]:
+        """Extract structured data from a table."""
+        selector = params.get("selector")
+
+        if not selector:
+            return {"success": False, "error": "Selector is required"}
+
+        try:
+            page = self._get_page()
+            if not page:
+                return {"success": False, "error": "Browser not initialized"}
+
+            # Standard structured table extraction
+            script = f"""
+            (() => {{
+                const table = document.querySelector(`{selector}`);
+                if (!table) return null;
+                const rows = Array.from(table.querySelectorAll("tr"));
+                return rows.map(row => {{
+                    const cells = Array.from(row.querySelectorAll("td, th"));
+                    return cells.map(cell => cell.innerText.trim());
+                }});
+            }})()
+            """
+            data = await page.evaluate(script)
+
+            if not data:
+                return {"success": False, "error": f"Table not found for selector: {selector}"}
+
+            return {
+                "success": True,
+                "data": {"table_data": data, "extracted": data},
+                "message": f"Extracted table data from {selector}",
+            }
+        except Exception as e:
+            logger.error(f"Extract table failed: {e}")
             return {"success": False, "error": str(e)}
 
     # ========================================================================

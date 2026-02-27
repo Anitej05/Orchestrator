@@ -8,6 +8,7 @@ import time
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
+from enum import Enum
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -46,6 +47,11 @@ class _StepFailure(Exception):
         super().__init__(str(original_error))
 
 
+class ExecutionMode(str, Enum):
+    PLAN_EXECUTE = "plan_execute"
+    REACT = "react"
+
+
 @dataclass
 class AgentConfig:
     """Configuration for agent behavior."""
@@ -55,6 +61,8 @@ class AgentConfig:
     llm_temperature: float = 0.0  # Deterministic for planning
     enable_telemetry: bool = True
     request_timeout: float = 120.0
+    execution_mode: ExecutionMode = ExecutionMode.REACT
+    max_react_steps: int = 15
 
 
 class BaseAgent(ABC):
@@ -246,10 +254,15 @@ class BaseAgent(ABC):
 
         while attempt < self.config.max_retries:
             try:
-                # Try execution, passing completed_results to skip done steps
-                return await self._execute_single_attempt(
-                    request, attempt, completed_results=completed_results
-                )
+                # Dispatch based on execution mode
+                if self.config.execution_mode == ExecutionMode.REACT:
+                    return await self._execute_react_attempt(
+                        request, attempt, completed_results=completed_results
+                    )
+                else:
+                    return await self._execute_single_attempt(
+                        request, attempt, completed_results=completed_results
+                    )
 
             except _StepFailure as sf:
                 # Preserve results from steps that completed before the failure
@@ -387,6 +400,161 @@ class BaseAgent(ABC):
         )
 
         return final_response
+
+    async def _get_step_context(self, request: AgentRequest, context: ExecutionContext, previous_results: List[CapabilityResult]) -> Any:
+        """
+        Virtual hook: Subclasses should override this to return current environment context.
+        For example, BrowserAgent returns DOM state and screenshots; SpreadsheetAgent returns active DataFrames.
+        """
+        return None
+
+    async def _update_state_post_step(self, step: ExecutionStep, result: CapabilityResult, context: ExecutionContext) -> None:
+        """
+        Virtual hook: Subclasses override to run post-step logic.
+        For example, Visual state verification, or maintaining conversational memory.
+        """
+        pass
+
+    async def _execute_react_attempt(
+        self, request: AgentRequest, attempt: int,
+        completed_results: List[CapabilityResult] = None,
+    ) -> AgentResponse:
+        """
+        Iterative Execution (ReAct) Attempt.
+        The agent observes state, decides next action, executes, and repeats.
+        """
+        completed_results = completed_results or []
+        skip_count = len(completed_results)
+
+        # Step 1: LLM understands the task
+        understanding = await self._llm_understand_task(request)
+
+        context = ExecutionContext(
+            thread_id=request.thread_id or "",
+            user_id=request.user_id or "",
+            task_id=request.task_id,
+        )
+
+        # Seed context with results from previously completed steps
+        results: List[CapabilityResult] = []
+        for i, prev_result in enumerate(completed_results):
+            results.append(prev_result)
+            context.set(f"step_{i + 1}_result", prev_result)
+
+        for step_num in range(1, self.config.max_react_steps + 1):
+            if step_num <= skip_count:
+                logger.info(f"[SKIP] React Step {step_num} already completed, skipping")
+                continue
+
+            # 1. Observe state
+            step_context = await self._get_step_context(request, context, results)
+
+            # 2. Decide next action
+            plan_step = await self._llm_decide_next_react_step(request, understanding, step_context, results, step_num)
+
+            # 3. Check for completion or escalation
+            if plan_step.capability_name.lower() in ["finish", "complete", "done"]:
+                break
+            if plan_step.capability_name.lower() == "escalate":
+                return AgentResponse.needs_input(
+                    question=plan_step.description,
+                    metadata={"reasoning": "Agent self-escalated"}
+                )
+            
+            # Construct ExecutionStep
+            step = ExecutionStep(
+                step_number=step_num,
+                capability_name=plan_step.capability_name,
+                description=plan_step.description,
+                parameters=plan_step.parameters,
+                expected_outcome=plan_step.expected_outcome
+            )
+
+            # Execution
+            result = await self._execute_step(step, context)
+            results.append(result)
+            context.set(f"step_{step_num}_result", result)
+
+            # 4. Update post step
+            await self._update_state_post_step(step, result, context)
+
+            # In ReAct, if a step fails, we expose it to the standard error recovery
+            if not result.success:
+                raise _StepFailure(
+                    failed_step=step.step_number,
+                    original_error=Exception(
+                        f"ReAct step {step.step_number} failed: {result.error}"
+                    ),
+                    completed_results=results[:-1],
+                )
+
+        # Step 5: Synthesize
+        final_response = await self._llm_synthesize_response(
+            results=results, understanding=understanding, request=request
+        )
+
+        return final_response
+
+    async def _llm_decide_next_react_step(self, request: AgentRequest, understanding: Dict[str, Any], step_context: Any, previous_results: List[CapabilityResult], step_num: int):
+        """LLM decides the next immediate action based on current state."""
+        from pydantic import BaseModel, Field, model_validator
+
+        class ReactDecision(BaseModel):
+            reasoning: str = Field(description="Reasoning based on current context and past results on what to do next.")
+            capability_name: str = Field(description="The name of the capability to use. Use 'finish' if the goal is completely achieved.")
+            description: str = Field(description="Description of what this action will achieve, or question if escalating.")
+            parameters: Dict[str, Any] = Field(description="Parameters for the capability, or empty if none.")
+            expected_outcome: str = Field(description="What you expect to observe after this action.")
+
+            @model_validator(mode="after")
+            def coerce_fields(self):
+                if not isinstance(self.parameters, dict):
+                    self.parameters = {}
+                return self
+
+        sys_prompt = f"""You are determining the NEXT immediate action for the agent: '{self.agent_name}'.
+You are using a ReAct (Reason + Act) loop. 
+Review the original task, the current context, and previous step results.
+
+AVAILABLE CAPABILITIES:
+"""
+        for count, cap in enumerate(self.capability_registry.list_all(), 1):
+            sys_prompt += f"{count}. {cap.name}: {cap.description}\\n"
+            if isinstance(cap.parameters, list):
+                sys_prompt += f"   Parameters: {[p.model_dump() if hasattr(p, 'model_dump') else p.__dict__ for p in cap.parameters]}\n"
+            else:
+                sys_prompt += f"   Parameters: {cap.parameters.schema() if hasattr(cap.parameters, 'schema') else str(cap.parameters)}\n"
+
+        sys_prompt += """
+SPECIAL CAPABILITIES:
+- finish: Use this when the user's task is fully complete. Leave parameters empty.
+- escalate: Use this to ask the user a clarifying question before proceeding. Set the question as the description.
+
+Your job: output the singular NEXT step to take. Output strictly as JSON.
+"""
+        
+        # Prepare context payload
+        user_content = f"Task: {request.prompt}\n\nUnderstanding: {understanding}\n\n"
+        if previous_results:
+            user_content += "Previous Step Results:\n"
+            for i, res in enumerate(previous_results, 1):
+                user_content += f"Step {i}: Success={res.success}, Output={str(res.data)[:500]}\n"
+        
+        user_content += f"\nCurrent State Context:\n{str(step_context)[:2000]}\n\n"
+        user_content += f"Determine Step {step_num}."
+
+        messages = [
+            SystemMessage(content=sys_prompt),
+            HumanMessage(content=user_content)
+        ]
+
+        logger.info(f"LLM: Deciding next ReAct step ({step_num})")
+        decision = await self.services.inference.generate_structured(
+            messages=messages,
+            schema=ReactDecision,
+            temperature=self.config.llm_temperature
+        )
+        return decision
 
     def _enrich_step_params(
         self, step: ExecutionStep, previous_results: List[CapabilityResult]
@@ -554,7 +722,7 @@ Create an execution plan with:
 
 Respond with structured JSON."""
 
-        from pydantic import BaseModel, Field
+        from pydantic import BaseModel, Field, model_validator
 
         class PlanStep(BaseModel):
             step_number: int
@@ -568,7 +736,17 @@ Respond with structured JSON."""
             reasoning: str
             steps: List[PlanStep]
             estimated_complexity: str
-            fallback_strategy: Optional[str] = None
+            fallback_strategy: Optional[Any] = None
+
+            @model_validator(mode="after")
+            def coerce_fields(self):
+                """Coerce dict/non-string values for fallback_strategy."""
+                if self.fallback_strategy and not isinstance(self.fallback_strategy, str):
+                    if isinstance(self.fallback_strategy, dict):
+                        self.fallback_strategy = self.fallback_strategy.get("description", str(self.fallback_strategy))
+                    else:
+                        self.fallback_strategy = str(self.fallback_strategy)
+                return self
 
         response = await self.services.inference.generate_structured(
             messages=[
@@ -749,7 +927,7 @@ Respond with structured JSON."""
             strategy: str = Field(description="retry, alternate, escalate, or fail")
             confidence: float = Field(description="Confidence in strategy (0-1)")
             reasoning: str = Field(description="Why this strategy")
-            fixes: Optional[Dict[str, Any]] = Field(
+            fixes: Optional[Any] = Field(
                 default=None,
                 description="Parameter adjustments for retry"
             )
@@ -769,6 +947,13 @@ Respond with structured JSON."""
                     self.alternative = str(self.alternative)
                 if self.user_question and not isinstance(self.user_question, str):
                     self.user_question = str(self.user_question)
+                # Coerce fixes: LLM sometimes returns a list of dicts instead of a dict
+                if isinstance(self.fixes, list):
+                    merged = {}
+                    for item in self.fixes:
+                        if isinstance(item, dict):
+                            merged.update(item)
+                    self.fixes = merged if merged else None
                 return self
 
         response = await self.services.inference.generate_structured(

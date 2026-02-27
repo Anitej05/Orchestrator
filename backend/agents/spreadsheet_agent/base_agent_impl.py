@@ -140,6 +140,24 @@ class SpreadsheetAgent(BaseAgent):
             "np": np,
         }
 
+    async def _get_step_context(self, request: AgentRequest, context: ExecutionContext, previous_results: List[Any]) -> Any:
+        """Provide detailed context about the active spreadsheets for the ReAct loop."""
+        thread_id = request.thread_id or "default"
+        session = self.state.get_or_create(thread_id)
+        
+        if not session.dataframes:
+            return "No data loaded yet. Use `load_file` or `upload_file` to load data."
+            
+        context_str = "CURRENTLY LOADED SPREADSHEETS:\n\n"
+        for file_id, df in session.dataframes.items():
+            context_str += f"--- File ID: {file_id} ---\n"
+            context_str += f"Shape: {df.shape[0]} rows, {df.shape[1]} columns\n"
+            context_str += f"Columns: {', '.join(df.columns)}\n"
+            context_str += f"dtypes:\n{df.dtypes.to_string()}\n\n"
+            context_str += f"Data Preview (First 3 rows):\n{df.head(3).to_markdown()}\n\n"
+            
+        return context_str
+
     async def _initialize_resources(self):
         """Initialize DataFrame client, LLM client, and resolver."""
         logger.info("Initializing Spreadsheet Agent resources...")
@@ -165,6 +183,113 @@ class SpreadsheetAgent(BaseAgent):
         metrics = self.state.get_stats()
         metrics["streaming_sessions"] = len(self._streaming_sessions)
         return metrics
+
+    async def _llm_synthesize_response(
+        self,
+        results: List[Any],
+        understanding: Dict[str, Any],
+        request: AgentRequest,
+    ) -> AgentResponse:
+        """Override to add Spreadsheet specific canvas and metadata formatting."""
+        
+        # 1. Base synthesis using standard BaseAgent fallback if desired or our own
+        # Actually, let's just use a simple structured generation for synthesis
+        final_answer = ""
+        success = True
+        
+        # Provide text synthesis first
+        from pydantic import BaseModel, Field
+        class Synthesis(BaseModel):
+            summary: str = Field(description="Summary of what was achieved.")
+            is_success: bool = Field(description="Did the agent succeed?")
+            
+        sys_prompt = "You are synthesizing the final outcome of the Spreadsheet Agent execution.\n"
+        sys_prompt += "Review the task and the results of the steps to provide a final summary."
+        
+        user_content = f"Task: {request.prompt}\n\nStep Results:\n"
+        for i, res in enumerate(results, 1):
+            msg = (res.metadata or {}).get('message', str(res.data)[:200] if res.data else res.error or 'No details')
+            user_content += f"Step {i} ({'Success' if res.success else 'Failed'}): {msg}\n"
+            
+        from langchain_core.messages import SystemMessage, HumanMessage
+        synthesis = await self.services.inference.generate_structured(
+            messages=[SystemMessage(content=sys_prompt), HumanMessage(content=user_content)],
+            schema=Synthesis,
+            temperature=0.0
+        )
+        
+        final_answer = synthesis.summary
+        success = synthesis.is_success
+        
+        # 2. Grab the canvas from the last successful step if one was provided
+        # or calculate dynamically
+        canvas_display = None
+        extracted_data = {}
+        
+        for res in reversed(results):
+            if res.success and isinstance(res.data, dict):
+                extracted_data.update(res.data)
+            # Also check metadata for extra keys (message, canvas_display, etc.)
+            if res.success and isinstance(res.metadata, dict):
+                extracted_data.update({k: v for k, v in res.metadata.items() if k != 'message'})
+                
+        # Some steps return explicit canvas displays, check the agent response data?
+        # Actually, capabilities returned CapabilityResult which doesn't natively have canvas_display...
+        # Let's see if we put canvas_display into CapabilityResult data?
+        # No, capability decorator drops things not in `Dict` or extracts it?
+        # Wait, inside base agent, we just return CapabilityResult(success=True, data=capability_result, ...)
+        # Let's check capabilities
+        
+        # Capability results are raw returns from our method. We did:
+        # return {"success": True, "data": ..., "canvas_display": canvas, ...}
+        # If capability decorator wraps it, it might pass through additional fields.
+        
+        # Let's extract canvas display from results if any
+        for res in reversed(results):
+            if res.success:
+                # Check both data and metadata for canvas_display
+                if isinstance(res.data, dict) and "canvas_display" in res.data:
+                    canvas_display = res.data["canvas_display"]
+                    break
+                if isinstance(res.metadata, dict) and "canvas_display" in res.metadata:
+                    canvas_display = res.metadata["canvas_display"]
+                    break
+                
+        # 3. Dynamic Canvas Generation Fallback
+        if not canvas_display:
+            canvas_display = await self._resolve_canvas_dynamic(output=final_answer)
+
+        # 4. Formulate Request
+        formatted_data = {
+            "task_summary": final_answer,
+            "extracted_data": extracted_data,
+            "canvas_display": canvas_display
+        }
+        
+        return AgentResponse(
+            status="complete" if success else "error",
+            result=formatted_data,
+            error=None if success else "Failed to complete some steps",
+        )
+
+    async def _update_state_post_step(self, step: Any, result: Any, context: ExecutionContext) -> None:
+        """Update session state with step execution outcome."""
+        thread_id = context.thread_id or "default"
+        session = self.state.get_or_create(thread_id)
+        
+        # Log action to session history using Session.add_operation
+        description = f"Params: {json.dumps(step.parameters, default=str)}\n"
+        if result.success:
+            msg = (result.metadata or {}).get('message', str(result.data)[:200] if result.data else 'OK')
+            description += f"Result: {msg}\n"
+        else:
+            description += f"Error: {result.error}\n"
+            
+        session.add_operation(
+            action=step.capability_name,
+            description=description,
+            result_summary=str(result.data)[:300] if result.data else None
+        )
 
     def _extract_prompt(self, params: Dict[str, Any]) -> Optional[str]:
         """Extract prompt from various parameter fields."""

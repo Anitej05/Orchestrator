@@ -111,11 +111,102 @@ class DocumentAgent(BaseAgent):
     async def _get_custom_metrics(self) -> Optional[Dict[str, Any]]:
         """Return document agent metrics."""
         return {
-            "sessions": len(self.session_manager._sessions)
-            if hasattr(self.session_manager, "_sessions")
+            "sessions": len(self.session_manager._active_sessions)
+            if hasattr(self.session_manager, "_active_sessions")
             else 0,
             "storage_dir": str(DEFAULT_STORAGE_DIR),
         }
+
+    async def _get_step_context(self, request: AgentRequest, context: ExecutionContext, previous_results: List[Any]) -> Any:
+        """Provide detailed context about the active document sessions for the ReAct loop."""
+        thread_id = request.thread_id or "default"
+        
+        # Get all active sessions for this thread (or all sessions if thread not uniquely identified)
+        active_sessions = []
+        if hasattr(self.session_manager, "_active_sessions"):
+            for session in self.session_manager._active_sessions.values():
+                # Just show the loaded documents for context
+                # session_id generation implies thread_id is part of it if provided
+                active_sessions.append(session)
+                
+        if not active_sessions:
+            return "No documents loaded or edited in this session yet. Provide a file path to create, edit, or analyze a document."
+            
+        context_str = "CURRENTLY ACTIVE DOCUMENT SESSIONS:\n\n"
+        for session in active_sessions:
+            context_str += f"--- Document: {session.document_name} ---\n"
+            context_str += f"Path: {session.document_path}\n"
+            context_str += f"Last Accessed: {session.last_accessed}\n"
+            if session.edit_history:
+                context_str += "Recent Edits:\n"
+                for idx, action in enumerate(session.edit_history[-5:], 1):
+                    status = "Success" if action.success else "Failed"
+                    context_str += f"  {idx}. [{status}] {action.action_type}: {action.instruction[:100]}\n"
+            context_str += "\n"
+            
+        return context_str
+
+    async def _update_state_post_step(self, step: Any, result: Any, context: ExecutionContext) -> None:
+        """Update state post capability execution (usually logging handled by capabilities, but we can log failed steps)."""
+        pass
+
+    async def _llm_synthesize_response(
+        self,
+        results: List[Any],
+        understanding: Dict[str, Any],
+        request: AgentRequest,
+    ) -> AgentResponse:
+        """Synthesize final response, extracting format and canvas dynamically."""
+        from pydantic import BaseModel, Field
+        class Synthesis(BaseModel):
+            summary: str = Field(description="Summary of what was achieved.")
+            is_success: bool = Field(description="Did the agent succeed?")
+            
+        sys_prompt = "You are synthesizing the final outcome of the Document Agent execution.\nReview the task and the results of the steps to provide a final summary."
+        user_content = f"Task: {request.prompt}\n\nStep Results:\n"
+        for i, res in enumerate(results, 1):
+            msg = (res.metadata or {}).get('message', str(res.data)[:200] if res.data else res.error or 'No details')
+            user_content += f"Step {i} ({'Success' if res.success else 'Failed'}): {msg}\n"
+            
+        from langchain_core.messages import SystemMessage, HumanMessage
+        synthesis = await self.services.inference.generate_structured(
+            messages=[SystemMessage(content=sys_prompt), HumanMessage(content=user_content)],
+            schema=Synthesis,
+            temperature=0.0
+        )
+        
+        final_answer = synthesis.summary
+        success = synthesis.is_success
+        
+        canvas_display = None
+        extracted_data = {}
+        
+        for res in reversed(results):
+            if res.success and isinstance(res.data, dict):
+                extracted_data.update(res.data)
+            if res.success and isinstance(res.metadata, dict):
+                extracted_data.update({k: v for k, v in res.metadata.items() if k != 'message'})
+                
+        for res in reversed(results):
+            if res.success:
+                if isinstance(res.data, dict) and "canvas_display" in res.data:
+                    canvas_display = res.data["canvas_display"]
+                    break
+                if isinstance(res.metadata, dict) and "canvas_display" in res.metadata:
+                    canvas_display = res.metadata["canvas_display"]
+                    break
+
+        formatted_data = {
+            "task_summary": final_answer,
+            "extracted_data": extracted_data,
+            "canvas_display": canvas_display
+        }
+        
+        return AgentResponse(
+            status="complete" if success else "error",
+            result=formatted_data,
+            error_message=None if success else "Failed to complete some steps",
+        )
 
     def _classify_edit_intent(self, instruction: str) -> Dict[str, Any]:
         """Assess risk of edit instruction."""

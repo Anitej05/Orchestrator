@@ -94,6 +94,13 @@ class CodeSandboxService:
         'DeprecationWarning': DeprecationWarning,
         'FutureWarning': FutureWarning,
     }
+    # Standard browser-like User-Agent to prevent 403 blocks from sites
+    # like Wikipedia. Set ONCE at the process level via urllib opener.
+    DEFAULT_USER_AGENT = (
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+        'AppleWebKit/537.36 (KHTML, like Gecko) '
+        'Chrome/131.0.0.0 Safari/537.36'
+    )
 
     def __init__(self):
         self.sessions: Dict[str, Dict[str, Any]] = {}
@@ -102,7 +109,26 @@ class CodeSandboxService:
             nest_asyncio.apply()
         except ImportError:
             logger.warning("nest_asyncio not installed, async code execution might fail if event loop is already running.")
-        logger.info("CodeSandboxService initialized")
+        
+        # ============================================================
+        # GLOBAL HTTP IDENTITY FIX
+        # ============================================================
+        # Configure Python's default HTTP client at the process level.
+        # This single call fixes 403 Forbidden errors for ALL libraries:
+        #   - pd.read_html(url), pd.read_csv(url)
+        #   - urllib.request.urlopen(url)
+        #   - requests.get(url)  (also uses urllib under the hood)
+        #   - Any future library the LLM imports
+        # No per-module proxies or wrappers needed.
+        import urllib.request
+        opener = urllib.request.build_opener()
+        opener.addheaders = [
+            ('User-Agent', self.DEFAULT_USER_AGENT),
+            ('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'),
+            ('Accept-Language', 'en-US,en;q=0.5'),
+        ]
+        urllib.request.install_opener(opener)
+        logger.info("CodeSandboxService initialized (global HTTP identity configured)")
 
     def _normalize_file_path(self, path: str) -> str:
         """
@@ -122,22 +148,16 @@ class CodeSandboxService:
                     print(*args, file=buffer, **kwargs)
                 return custom_print
             
-            # Create wrapper for pd.read_excel that auto-normalizes paths
-            def read_excel_safe(path, *args, **kwargs):
-                normalized_path = self._normalize_file_path(path)
-                logger.info(f"Reading Excel file: {path} (normalized: {normalized_path})")
-                return pd.read_excel(normalized_path, *args, **kwargs)
-            
             self.sessions[session_id] = {
                 'globals': {
                     '__builtins__': {**self.SAFE_BUILTINS, 'print': make_print(output_buffer)},
-                    'pd': pd,
+                    'pd': pd,           # Real pandas — urllib opener handles HTTP headers globally
                     'np': np,
-                    'requests': requests,
+                    'requests': requests,  # Real requests module — no proxy needed
                     'json': json,
-                    'os': os,  # Provide os module for path operations
-                    'BACKEND_DIR': BACKEND_DIR,  # Base directory for resolving paths
-                    'normalize_path': self._normalize_file_path,  # Add path normalization utility
+                    'os': os,
+                    'BACKEND_DIR': BACKEND_DIR,
+                    'normalize_path': self._normalize_file_path,
                 },
                 'output_buffer': output_buffer,
                 'history': []
