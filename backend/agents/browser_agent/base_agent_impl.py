@@ -97,7 +97,16 @@ class BrowserAgent(BaseAgent):
     async def _get_step_context(self, request: AgentRequest, context: ExecutionContext, previous_results: List[CapabilityResult]) -> Any:
         page = self._get_page()
         if not page:
-            return {"page_content": {}, "screenshot_b64": None, "url": ""}
+            # Auto-launch browser if not yet started
+            if self.browser and not self.browser.browser:
+                logger.info("Auto-launching browser for first ReAct step...")
+                headless = True  # Default to headless for on-demand spawning
+                if request.payload:
+                    headless = request.payload.get("headless", True)
+                await self.browser.launch(headless=headless)
+                page = self._get_page()
+            if not page:
+                return {"page_content": {}, "screenshot_b64": None, "url": ""}
         
         # Extract DOM
         try:

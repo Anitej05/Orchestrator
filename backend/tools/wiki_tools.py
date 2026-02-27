@@ -68,7 +68,7 @@ def get_wikipedia_summary(title: str = "", page_title: str = "") -> Dict:
 
 @tool
 def get_wikipedia_section(
-    title: str = "", page_title: str = "", section: str = "", section_name: str = ""
+    title: str = "", page_title: str = "", section: str = "", section_name: str = "", section_title: str = ""
 ) -> Dict:
     """
     Get content of a specific section from a Wikipedia page.
@@ -78,6 +78,7 @@ def get_wikipedia_section(
         page_title: Alias for title
         section: The section title to retrieve (e.g., 'History', 'Applications')
         section_name: Alias for section
+        section_title: Alias for section
 
     Returns:
         Dictionary with title, section name, and content
@@ -85,7 +86,7 @@ def get_wikipedia_section(
     try:
         # Accept both title and page_title parameters
         query_title = title or page_title
-        query_section = section or section_name
+        query_section = section or section_name or section_title
 
         if not query_title:
             return {"error": "No page title provided"}

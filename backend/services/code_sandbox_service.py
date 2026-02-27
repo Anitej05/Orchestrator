@@ -128,7 +128,17 @@ class CodeSandboxService:
             ('Accept-Language', 'en-US,en;q=0.5'),
         ]
         urllib.request.install_opener(opener)
-        logger.info("CodeSandboxService initialized (global HTTP identity configured)")
+        
+        # Also patch the requests library default headers
+        # The urllib opener only covers pd.read_html(url) and urllib.request,
+        # NOT requests.get() which uses its own HTTP adapter
+        requests.utils.default_headers = lambda: requests.structures.CaseInsensitiveDict({
+            'User-Agent': self.DEFAULT_USER_AGENT,
+            'Accept-Encoding': 'gzip, deflate',
+            'Accept': '*/*',
+            'Connection': 'keep-alive',
+        })
+        logger.info("CodeSandboxService initialized (global HTTP identity configured for urllib + requests)")
 
     def _normalize_file_path(self, path: str) -> str:
         """
