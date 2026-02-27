@@ -186,7 +186,8 @@ def save_conversation_history(state: dict, *args, **kwargs):
         logger.warning("No thread_id found in state, skipping history save")
         return
 
-    history_dir = os.path.join(BACKEND_DIR, "agent_conversations")
+    # Use BACKEND_DIR/conversation_history — the canonical location read by all API endpoints
+    history_dir = os.path.join(BACKEND_DIR, "conversation_history")
     os.makedirs(history_dir, exist_ok=True)
     history_path = os.path.join(history_dir, f"{thread_id}.json")
     
@@ -204,23 +205,57 @@ def save_conversation_history(state: dict, *args, **kwargs):
             # Fallback for already serialized or mixed content
             serialized_messages = [serialize_complex_object(m) for m in messages]
         
+        # Determine overall status
+        status = "completed"
+        if state.get("pending_user_input"):
+            status = "pending_user_input"
+        elif state.get("pending_action_approval") or state.get("pending_approval"):
+            status = "pending_approval"
+
         data = {
             "thread_id": thread_id,
+            "status": status,
             "original_prompt": state.get("original_prompt"),
             "messages": serialized_messages,
+            # Final / response fields
+            "final_response": state.get("final_response"),
+            "task_agent_pairs": serialize_complex_object(state.get("task_agent_pairs", [])),
+            "uploaded_files": serialize_complex_object(state.get("uploaded_files", [])),
+            # Plan / task fields
+            "task_plan": serialize_complex_object(state.get("task_plan", [])),
+            "plan": serialize_complex_object(state.get("task_plan", [])),  # alias for frontend
             "todo_list": serialize_complex_object(state.get("todo_list", [])),
             "execution_plan": serialize_complex_object(state.get("execution_plan")),
+            "task_statuses": serialize_complex_object(state.get("task_statuses", {})),
+            # Canvas fields
+            "has_canvas": state.get("has_canvas", False),
+            "canvas_type": state.get("canvas_type"),
+            "canvas_content": state.get("canvas_content"),
+            "canvas_data": serialize_complex_object(state.get("canvas_data")),
+            "canvas_title": state.get("canvas_title"),
+            "canvas_registry": serialize_complex_object(state.get("canvas_registry")),
+            "active_canvas_id": state.get("active_canvas_id"),
+            # Pending input / approval fields
+            "pending_user_input": state.get("pending_user_input", False),
+            "question_for_user": state.get("question_for_user"),
+            "pending_action_approval": state.get("pending_action_approval", False),
+            "pending_action": serialize_complex_object(state.get("pending_action")),
+            # Internal/memory fields
             "action_history": serialize_complex_object(state.get("action_history", [])),
             "insights": serialize_complex_object(state.get("insights", {})),
-            "memory": serialize_complex_object(state.get("memory", {}))
+            "memory": serialize_complex_object(state.get("memory", {})),
+            # For backward compatibility 
+            "metadata": {},
         }
         
         with open(history_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, cls=CustomJSONEncoder)
             
         logger.info(f"Conversation history saved to {history_path}")
+        return history_path
     except Exception as e:
         logger.error(f"Failed to save conversation history: {e}")
+        return None
 
 
 def get_serializable_state(state: dict, *args, **kwargs) -> dict:

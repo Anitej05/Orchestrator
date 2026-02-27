@@ -19,6 +19,7 @@ interface UseTaskExecutionWebSocketOptions {
   onTaskFail?: (taskName: string, error: string) => void;
   onFinalResponse?: (data: any) => void;
   onError?: (error: string) => void;
+  onMessage?: (data: any) => void;
 }
 
 interface UseTaskExecutionWebSocketReturn {
@@ -46,6 +47,7 @@ export function useTaskExecutionWebSocket({
   onTaskFail,
   onFinalResponse,
   onError,
+  onMessage,
 }: UseTaskExecutionWebSocketOptions = {}): UseTaskExecutionWebSocketReturn {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<NodeJS.Timeout | null>(null);
@@ -85,6 +87,9 @@ export function useTaskExecutionWebSocket({
       try {
         const data = JSON.parse(event.data);
         console.debug('[TaskExecutionWS] Message received:', data.type);
+
+        // Generic message callback — called for every message
+        if (onMessage) onMessage(data);
 
         switch (data.type) {
           case 'task_started':

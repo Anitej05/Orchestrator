@@ -153,7 +153,7 @@ export default function WorkflowDetailPage() {
           description: task.description || task.instructions || '',
           agent: task.assigned_to || 'N/A',
           status: task.status || 'pending',
-          id: task.id
+          id: task.task_id || task.id
         })),
         completedTasks: []
       };

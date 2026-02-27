@@ -23,7 +23,10 @@ from backend.schemas import PlanResponse
 router = APIRouter(tags=["Workflows"])
 logger = logging.getLogger("uvicorn.error")
 
-CONVERSATION_HISTORY_DIR = "conversation_history"
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))  # routers/
+BACKEND_DIR = os.path.dirname(CURRENT_DIR)  # backend/
+CONVERSATION_HISTORY_DIR = os.path.join(BACKEND_DIR, "conversation_history")
+AGENT_CONVERSATIONS_DIR = os.path.join(BACKEND_DIR, "agent_conversations")
 
 checkpointer = None
 
@@ -56,15 +59,32 @@ async def save_workflow(request: Request, thread_id: str, name: str, description
     user = get_user_from_request(request)
     user_id = user.get("sub") or user.get("user_id") or user.get("id")
     
+    # Try primary location first
     history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
+    logger.info(f"Looking for conversation at primary path: {os.path.abspath(history_path)}")
+    
     if not os.path.exists(history_path):
-        backend_dir = os.path.dirname(os.path.dirname(__file__))
-        fallback_dir = os.path.join(backend_dir, "agent_conversations")
-        fallback_path = os.path.join(fallback_dir, f"{thread_id}.json")
+        # Try fallback location (where orchestrator actually saves files)
+        fallback_path = os.path.join(AGENT_CONVERSATIONS_DIR, f"{thread_id}.json")
+        logger.info(f"Primary path not found, trying fallback: {os.path.abspath(fallback_path)}")
+        
         if os.path.exists(fallback_path):
             history_path = fallback_path
+            logger.info(f"✓ Found conversation at fallback path")
         else:
-            raise HTTPException(status_code=404, detail="Conversation not found")
+            # List files in both directories for debugging
+            files_primary = []
+            files_fallback = []
+            
+            if os.path.exists(CONVERSATION_HISTORY_DIR):
+                files_primary = os.listdir(CONVERSATION_HISTORY_DIR)
+            if os.path.exists(AGENT_CONVERSATIONS_DIR):
+                files_fallback = os.listdir(AGENT_CONVERSATIONS_DIR)
+            
+            logger.error(f"Conversation not found for thread_id: {thread_id}")
+            logger.error(f"  Primary dir ({CONVERSATION_HISTORY_DIR}): {files_primary[:5]}")
+            logger.error(f"  Fallback dir ({AGENT_CONVERSATIONS_DIR}): {files_fallback[:5]}")
+            raise HTTPException(status_code=404, detail=f"Conversation not found for thread_id: {thread_id}")
     
     with open(history_path, "r", encoding="utf-8") as f:
         history = json.load(f)
@@ -682,8 +702,7 @@ async def trigger_webhook(webhook_id: str, payload: Dict[str, Any], webhook_toke
 async def get_agent_plan(thread_id: str):
     """Retrieves the execution plan from conversation history (todo_list format)."""
     # Load from conversation history instead of legacy markdown files
-    history_dir = "agent_conversations"
-    history_path = os.path.join(history_dir, f"{thread_id}.json")
+    history_path = os.path.join(AGENT_CONVERSATIONS_DIR, f"{thread_id}.json")
     
     if os.path.exists(history_path):
         try:

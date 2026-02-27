@@ -226,7 +226,8 @@ export default function PlanGraph({ planData, todoList: externalTodoList, taskSt
             };
             const status = statusMap[task.status] || 'pending';
 
-            const nodeId = `todo-task-${task.id}`;
+            const taskId = task.task_id || task.id;
+            const nodeId = `todo-task-${taskId}`;
             const yPos = (index + 1) * ySpacing;
 
             initialNodes.push({
@@ -237,7 +238,7 @@ export default function PlanGraph({ planData, todoList: externalTodoList, taskSt
                     description: task.description || task.instructions || '',
                     agent: task.assigned_to || 'Unassigned',
                     status: status,
-                    taskId: task.id,
+                    taskId: taskId,
                     isTodoItem: true,
                     executionTime: taskStatus?.executionTime,
                     error: taskStatus?.error
@@ -295,7 +296,7 @@ export default function PlanGraph({ planData, todoList: externalTodoList, taskSt
                 const taskStatus = taskStatuses[taskName];
                 const status = taskStatus?.status || task.status || 'pending';
 
-                const nodeId = `task-${taskKey}`;
+                const nodeId = `task-${taskName}`;
                 currentLayerIds.push(nodeId);
 
                 const xPos = startX + (indexInBatch * 320);
@@ -320,12 +321,13 @@ export default function PlanGraph({ planData, todoList: externalTodoList, taskSt
 
                 // Edges from previous layer
                 previousLayerIds.forEach(prevId => {
-                    const edgeColor = getEdgeColor(status);
+                    const statusValue = status as string;
+                    const edgeColor = getEdgeColor(statusValue);
                     initialEdges.push({
                         id: `edge-${prevId}-${nodeId}`,
                         source: prevId,
                         target: nodeId,
-                        animated: status === 'pending' || status === 'running' || status === 'in-progress',
+                        animated: statusValue === 'pending' || statusValue === 'running' || statusValue === 'in-progress',
                         style: {
                             strokeWidth: 2,
                             stroke: edgeColor,

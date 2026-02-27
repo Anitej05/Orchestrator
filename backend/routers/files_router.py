@@ -17,10 +17,10 @@ from backend.schemas import FileObject
 router = APIRouter(prefix="/api", tags=["Files"])
 
 # Ensure storage directories exist
-# Ensure storage directories exist
 from pathlib import Path
-PROJECT_ROOT = Path(__file__).parent.parent.parent
-STORAGE_ROOT = PROJECT_ROOT / "storage"
+# Backend directory (where this router's parent is)
+BACKEND_DIR = Path(__file__).parent.parent
+STORAGE_ROOT = BACKEND_DIR / "storage"
 (STORAGE_ROOT / "images").mkdir(parents=True, exist_ok=True)
 (STORAGE_ROOT / "documents").mkdir(parents=True, exist_ok=True)
 (STORAGE_ROOT / "spreadsheets").mkdir(parents=True, exist_ok=True)
@@ -81,8 +81,8 @@ async def serve_file(file_path: str):
     if ".." in file_path or file_path.startswith("/"):
         raise HTTPException(status_code=400, detail="Invalid file path")
     
-    # Resolve path relative to PROJECT_ROOT (so 'storage/...' work)
-    full_path = PROJECT_ROOT / file_path
+    # Resolve path relative to backend directory (so 'storage/...' works)
+    full_path = BACKEND_DIR / file_path
     
     # Check if file exists
     if not full_path.exists():

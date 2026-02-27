@@ -43,7 +43,182 @@ interface Plan {
     // Modified to support parallel execution batches (array of arrays)
     pendingTasks: { task: string; description: string; agent: string; task_id?: string; status?: string; short_description?: string; icon_name?: string; agent_image_url?: string; }[][] | { task: string; description: string; agent: string; task_id?: string; status?: string; short_description?: string; icon_name?: string; agent_image_url?: string; }[];
     completedTasks: { task: string; result: string; }[];
+    todoList?: any[]; // Support for todo_list from new orchestrator system
 }
+
+// Task List View Component - Display real todo_list from Brain
+interface TaskListViewProps {
+    todoList: any[];
+    taskStatuses: Record<string, any>;
+    pendingTasks: any[];
+}
+
+const TaskListView: React.FC<TaskListViewProps> = ({ todoList, taskStatuses, pendingTasks }) => {
+    // Use todoList if available (new system from Brain), otherwise fall back to pendingTasks
+    const tasks = todoList.length > 0 ? todoList : pendingTasks.flat();
+    
+    const getStatusIcon = (status: any) => {
+        const statusStr = typeof status === 'string' ? status : String(status || '');
+        switch (statusStr.toLowerCase()) {
+            case 'completed':
+                return <span className="text-status-success text-lg">✓</span>;
+            case 'in_progress':
+            case 'in-progress':
+                return <span className="text-status-active text-lg animate-pulse">●</span>;
+            case 'failed':
+                return <span className="text-status-error text-lg">✕</span>;
+            case 'blocked':
+                return <span className="text-status-warning text-lg">⊘</span>;
+            case 'skipped':
+                return <span className="text-text-tertiary text-lg">-</span>;
+            case 'pending':
+            default:
+                return <span className="text-text-disabled text-lg">○</span>;
+        }
+    };
+
+    const getStatusColor = (status: any) => {
+        const statusStr = typeof status === 'string' ? status : String(status || '');
+        switch (statusStr.toLowerCase()) {
+            case 'completed':
+                return 'text-status-success';
+            case 'in_progress':
+            case 'in-progress':
+                return 'text-status-active';
+            case 'failed':
+                return 'text-status-error';
+            case 'blocked':
+                return 'text-status-warning';
+            case 'skipped':
+                return 'text-text-tertiary';
+            case 'pending':
+            default:
+                return 'text-text-secondary';
+        }
+    };
+
+    const getPriorityBadge = (priority?: any) => {
+        if (!priority) return null;
+        // Ensure priority is a string (handle enum, object, or string)
+        const priorityStr = typeof priority === 'string' ? priority : String(priority);
+        const priorityLower = priorityStr.toLowerCase();
+        const colors: Record<string, string> = {
+            'critical': 'bg-status-error-light text-status-error-dark',
+            'high': 'bg-status-warning-light text-status-warning-dark',
+            'medium': 'bg-status-pending-light text-status-pending-dark',
+            'low': 'bg-bg-subtle text-text-tertiary',
+        };
+        return (
+            <span className={`text-xs px-2 py-0.5 rounded-full font-medium capitalize ${colors[priorityLower] || colors['medium']}`}>
+                {priorityStr}
+            </span>
+        );
+    };
+
+    const getToolBadge = (assignedTool?: any) => {
+        if (!assignedTool) return null;
+        const toolStr = typeof assignedTool === 'string' ? assignedTool : String(assignedTool);
+        return (
+            <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-bg-card text-text-secondary border border-border-color">
+                {toolStr}
+            </span>
+        );
+    };
+
+    if (tasks.length === 0) {
+        return (
+            <div className="text-center text-text-tertiary py-8">
+                <p className="text-orbimesh-section-header font-semibold mb-2">No Tasks</p>
+                <p className="text-orbimesh-section-subtitle">Tasks will appear here once the workflow creates them</p>
+            </div>
+        );
+    }
+
+    return (
+        <div className="space-y-3">
+            {tasks.map((task: any, index: number) => {
+                // Real todo_list structure from Backend TaskItem
+                // Backend uses 'task_id' field, not 'id'
+                const taskId = task.task_id || task.id;
+                const description = task.description || 'Unknown task';
+                const status = task.status || 'pending';
+                const priority = task.priority;
+                const assignedTool = task.assigned_tool;
+                const dependencies = task.dependencies || [];
+                const result = task.result;
+                const error = task.error;
+                
+                return (
+                    <div
+                        key={taskId || index}
+                        className="p-4 rounded-lg border border-border-color bg-bg-card hover:bg-bg-hover transition-colors max-w-full overflow-hidden"
+                    >
+                        <div className="flex items-start gap-3 min-w-0">
+                            {/* Status Icon */}
+                            <div className="flex-shrink-0 mt-0.5">
+                                {getStatusIcon(status)}
+                            </div>
+                            
+                            <div className="flex-1 min-w-0 overflow-hidden">
+                                {/* Task Title + ID */}
+                                <div className="flex items-start justify-between gap-2 mb-2">
+                                    <h4 className={`font-semibold leading-snug break-words ${getStatusColor(status)}`}>
+                                        {description}
+                                    </h4>
+                                    <span className="flex-shrink-0 text-xs text-text-disabled font-mono bg-bg-subtle px-2 py-1 rounded">
+                                        #{taskId}
+                                    </span>
+                                </div>
+
+                                {/* Priority + Tool + Status badges */}
+                                <div className="flex flex-wrap items-center gap-2 mb-3">
+                                    {getPriorityBadge(priority)}
+                                    {getToolBadge(assignedTool)}
+                                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium capitalize ${
+                                        String(status).toLowerCase().includes('in_progress') || String(status).toLowerCase().includes('in-progress')
+                                            ? 'animate-pulse bg-status-active-light text-status-active-dark'
+                                            : 'bg-bg-subtle text-text-tertiary'
+                                    }`}>
+                                        {String(status).replace('_', ' ')}
+                                    </span>
+                                </div>
+
+                                {/* Dependencies info */}
+                                {dependencies && dependencies.length > 0 && (
+                                    <div className="text-xs text-text-tertiary mb-2">
+                                        <span className="font-medium">Depends on:</span> {dependencies.join(', ')}
+                                    </div>
+                                )}
+
+                                {/* Error Message */}
+                                {error && (
+                                    <div className="mt-2 p-2 bg-status-error-light rounded text-xs text-status-error-dark font-medium break-words overflow-hidden">
+                                        <span className="font-bold">Error:</span> {error}
+                                    </div>
+                                )}
+
+                                {/* Result Summary */}
+                                {result && String(status).toLowerCase() === 'completed' && (
+                                    <div className="mt-2 p-2 bg-status-success-light rounded text-xs text-status-success-dark break-words overflow-hidden">
+                                        <span className="font-bold">Result:</span>{' '}
+                                        <span className="break-all">
+                                            {typeof result === 'string' 
+                                                ? (result.length > 150 ? result.substring(0, 150) + '...' : result)
+                                                : (JSON.stringify(result, null, 2).length > 150 
+                                                    ? JSON.stringify(result).substring(0, 150) + '...' 
+                                                    : JSON.stringify(result, null, 2))
+                                            }
+                                        </span>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                );
+            })}
+        </div>
+    );
+};
 
 import { forwardRef, useImperativeHandle } from 'react';
 
@@ -54,8 +229,9 @@ export interface OrchestrationDetailsSidebarRef {
 
 const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, OrchestrationDetailsSidebarProps>(
     ({ executionResults, threadId, className, onThreadIdUpdate, onAcceptPlan, onRejectPlan }, ref) => {
-        const [plan, setPlan] = useState<Plan>({ pendingTasks: [], completedTasks: [] });
+        const [plan, setPlan] = useState<Plan>({ pendingTasks: [], completedTasks: [], todoList: undefined });
         const [isLoadingPlan, setIsLoadingPlan] = useState(false);
+        const [viewMode, setViewMode] = useState<'graph' | 'list'>('graph');
         const [activeTab, setActiveTab] = useState<string>("plan");
         const [lastCanvasContent, setLastCanvasContent] = useState<string | undefined>(undefined);
         // State for viewing specific canvas content from messages
@@ -71,7 +247,6 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
         const messages = conversationState.messages || [];
         const uploadedFiles = conversationState.uploaded_files || [];
         const planData = conversationState.plan || [];
-        const todoList = conversationState.todo_list || [];
         const hasCanvas = conversationState.has_canvas;
         const canvasContent = conversationState.canvas_content;
         const canvasData = (conversationState as any).canvas_data;
@@ -92,42 +267,17 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
             // This prevents duplicates in the graph
             const pendingTasks: Plan['pendingTasks'] = [];
 
-            if (todoList.length > 0) {
-                todoList.forEach((task: any) => {
-                    const taskId = task.id || task.task_id;
-                    const description = task.description || 'No description';
-                    // @ts-ignore
-                    pendingTasks.push([{
-                        task: description,
-                        description: description,
-                        agent: task.payload?.agent_name || 'Orchestrator',
-                        task_id: taskId,
-                        status: task.status,
-                        short_description: task.short_description,
-                        icon_name: task.icon_name,
-                        agent_image_url: task.agent_image_url,
-                    }]);
-                });
-
+            // Try todo_list first (new system) - pass directly to PlanGraph
+            if (todoList && todoList.length > 0) {
+                // For todo_list, we pass it directly to PlanGraph via todoList prop
+                // Set empty pendingTasks to avoid legacy batch processing
                 setPlan({
-                    pendingTasks: pendingTasks,
-                    completedTasks: []
+                    pendingTasks: [],
+                    completedTasks: [],
+                    todoList: todoList // Pass through directly
                 });
                 setIsLoadingPlan(false);
                 return;
-            }
-
-            // Try todo_list first (new system)
-            if (todoList && todoList.length > 0) {
-                const batchTasks = todoList.map((task: any) => ({
-                    task: task.title || 'Unknown Task',
-                    description: task.description || task.instructions || 'No description',
-                    agent: task.assigned_to || 'Unknown Agent',
-                    short_description: task.description,
-                    agent_image_url: undefined
-                }));
-                // @ts-ignore - We are changing the type of pendingTasks to allow nested arrays
-                pendingTasks.push(batchTasks);
             }
             // Fallback to process pending tasks from planData (the original plan structure for old system)
             // We want to PRESERVE the batch structure (list of lists) for valid parallel visualization
@@ -178,7 +328,6 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
             });
             setIsLoadingPlan(false);
         }, [planData, taskAgentPairs, todoList]);
-        }, [planData, taskAgentPairs, todoList]);
 
         // Auto-switch to Plan tab when plan is created (validate_plan_for_execution starts)
         useEffect(() => {
@@ -193,12 +342,22 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
             }
         }, [conversationState.metadata?.currentStage, plan.pendingTasks.length, plan.completedTasks.length]);
 
+        // Helper function to check if canvas type is a document/file viewer type
+        const isFileViewerType = (canvasType: string | undefined): boolean => {
+            if (!canvasType) return false;
+            
+            // File types that should show in attachments/document viewer instead of canvas
+            const fileViewerTypes = ['document', 'spreadsheet', 'pdf', 'image', 'csv', 'xlsx', 'docx', 'file'];
+            return fileViewerTypes.includes(canvasType.toLowerCase());
+        };
+
         // Auto-switch to canvas tab when NEW canvas content is created
         useEffect(() => {
             // Only switch if:
             // 1. We have canvas content OR canvas data
             // 2. The canvas content/data is different from what we've seen before (NEW content)
             // 3. Not currently executing (don't override plan view during execution)
+            // 4. Canvas type is NOT a document/file viewer type (those should stay in attachments)
             const currentStage = conversationState.metadata?.currentStage;
             const isExecuting = currentStage === 'executing' || currentStage === 'validating';
             const canvasData = (conversationState as any).canvas_data;
@@ -210,20 +369,31 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
             // This handles both canvas_content (string) and canvas_data (object) changes
             const currentCanvasIdentifier = canvasContent || (canvasData ? JSON.stringify(canvasData) : undefined);
 
-            if (hasCanvas && hasCanvasData && currentCanvasIdentifier !== lastCanvasContent && !isExecuting) {
+            // Check if this is a file type that should be shown in document viewer/attachments
+            const shouldShowAsFile = isFileViewerType(conversationState.canvas_type);
+
+            if (hasCanvas && hasCanvasData && currentCanvasIdentifier !== lastCanvasContent && !isExecuting && !shouldShowAsFile) {
                 console.log('Auto-switching to canvas tab due to NEW canvas content/data', {
                     hasCanvas,
                     hasCanvasContent: !!canvasContent,
                     hasCanvasData: !!canvasData,
-                    canvasType: conversationState.canvas_type
+                    canvasType: conversationState.canvas_type,
+                    shouldShowAsFile
                 });
                 setActiveTab('canvas');
                 setLastCanvasContent(currentCanvasIdentifier);
                 // Clear any viewed canvas content to show the latest
                 setViewedCanvasContent(undefined);
                 setViewedCanvasType(undefined);
+            } else if (hasCanvas && hasCanvasData && currentCanvasIdentifier !== lastCanvasContent && !isExecuting && shouldShowAsFile) {
+                // For file types, update the identifier but don't switch tab
+                console.log('Skipping canvas auto-switch for file type', {
+                    canvasType: conversationState.canvas_type,
+                    currentTab: activeTab
+                });
+                setLastCanvasContent(currentCanvasIdentifier);
             }
-        }, [hasCanvas, canvasContent, (conversationState as any).canvas_data, lastCanvasContent, conversationState.metadata?.currentStage]);
+        }, [hasCanvas, canvasContent, (conversationState as any).canvas_data, lastCanvasContent, conversationState.metadata?.currentStage, activeTab]);
 
         // Method to view specific canvas content from a message
         const viewCanvas = (canvasContent: string, canvasType: 'html' | 'markdown' | 'pdf' | 'spreadsheet' | 'email_preview' | 'document' | 'image' | 'json') => {
@@ -306,9 +476,9 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                             <div className="flex-1">
                                 <div className="flex items-center gap-2">
                                     <h3 className="text-orbimesh-section-header">Workflow Visualization</h3>
-                                    {plan.pendingTasks.length > 0 && (() => {
+                                    {((plan.todoList && plan.todoList.length > 0) || plan.pendingTasks.length > 0) && (() => {
                                         const completedCount = Object.values(taskStatuses).filter((t: any) => t.status === 'completed').length;
-                                        const totalTasks = plan.pendingTasks.flat().length;
+                                        const totalTasks = plan.todoList?.length || plan.pendingTasks.flat().length;
                                         return (
                                             <span className="text-orbimesh-badge px-2 py-1 bg-bg-subtle text-text-secondary rounded-full font-medium border border-border-color">
                                                 {completedCount} / {totalTasks} tasks
@@ -330,20 +500,67 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                             {/* Show save button after execution completes */}
                             {conversationState.status === 'completed' && (
                                 <SaveWorkflowButton
-                                    threadId={threadId || ''}
-                                    disabled={!threadId || plan.pendingTasks.flat().length === 0}
+                                    threadId={conversationState.thread_id || threadId || ''}
+                                    disabled={!conversationState.thread_id && !threadId}
                                 />
                             )}
                         </div>
 
+                        {/* View Toggle */}
+                        {/* TEMPORARILY DISABLED - Graph view needs fixing */}
+                        {/* <div className="px-4 pb-2 flex gap-2 border-b border-border-color">
+                            <button
+                                onClick={() => setViewMode('graph')}
+                                className={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${
+                                    viewMode === 'graph'
+                                        ? 'bg-primary text-white'
+                                        : 'bg-bg-subtle text-text-secondary hover:bg-bg-hover'
+                                }`}
+                            >
+                                📊 Graph View
+                            </button>
+                            <button
+                                onClick={() => setViewMode('list')}
+                                className={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${
+                                    viewMode === 'list'
+                                        ? 'bg-primary text-white'
+                                        : 'bg-bg-subtle text-text-secondary hover:bg-bg-hover'
+                                }`}
+                            >
+                                📋 List View
+                            </button>
+                        </div> */}
+
                         {/* Real-time Graph with Task Statuses */}
-                        <div className="flex-1 flex items-center justify-center">
-                            <PlanGraph
-                                key={JSON.stringify(plan)}
-                                planData={plan}
+                        {/* TEMPORARILY DISABLED - Using list view only */}
+                        {/* {viewMode === 'graph' ? (
+                            <div className="flex-1 flex items-center justify-center">
+                                <PlanGraph
+                                    key={JSON.stringify(plan)}
+                                    planData={plan}
+                                    todoList={plan.todoList}
+                                    taskStatuses={conversationState.task_statuses || {}}
+                                />
+                            </div>
+                        ) : (
+                            <div className="flex-1 overflow-y-auto p-4">
+                                <TaskListView
+                                    todoList={plan.todoList || []}
+                                    taskStatuses={conversationState.task_statuses || {}}
+                                    pendingTasks={plan.pendingTasks || []}
+                                />
+                            </div>
+                        )} */}
+                        
+                        {/* Showing only list view for now */}
+                        <div className="flex-1 overflow-y-auto p-4">
+                            <TaskListView
+                                todoList={plan.todoList || []}
                                 taskStatuses={conversationState.task_statuses || {}}
+                                pendingTasks={plan.pendingTasks || []}
                             />
                         </div>
+
                     </TabsContent>
                     <TabsContent value="attachments" className="flex-1 overflow-hidden mt-4 min-w-0 max-w-full">
                         {viewingFile ? (

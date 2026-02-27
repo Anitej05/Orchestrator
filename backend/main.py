@@ -47,7 +47,7 @@ import httpx
 # from sentence_transformers import SentenceTransformer
 
 # --- Local Application Imports ---
-CONVERSATION_HISTORY_DIR = "conversation_history"
+CONVERSATION_HISTORY_DIR = os.path.join(BACKEND_DIR, "conversation_history")
 from database import SessionLocal, get_db
 from models import Agent, StatusEnum, AgentCapability, AgentEndpoint, EndpointParameter, Workflow, WorkflowExecution, UserThread, WorkflowSchedule, WorkflowWebhook, AgentType
 from backend.schemas import AgentCard, ProcessRequest, ProcessResponse, PlanResponse, FileObject, ActionApprovalRequest, ActionRejectRequest
@@ -159,30 +159,56 @@ async def lifespan(app: FastAPI):
     logger.info("APPLICATION SHUTTING DOWN")
     logger.info("=" * 60)
     
-    # Cancel background health checker
+    # Cancel background health checker with timeout
     if _health_checker_task:
         logger.info("✓ Cancelling health checker task...")
         _health_checker_task.cancel()
         try:
-            await _health_checker_task
-        except asyncio.CancelledError:
+            await asyncio.wait_for(_health_checker_task, timeout=2.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
         logger.info("✓ Health checker stopped")
+    
+    # Cancel any pending async tasks
+    try:
+        logger.info("✓ Cancelling pending tasks...")
+        pending = [task for task in asyncio.all_tasks() if not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        logger.info(f"✓ Cancelled {len(pending)} pending tasks")
+    except Exception as e:
+        logger.warning(f"Warning during task cancellation: {e}")
     
     # Stop all agent processes
     logger.info("✓ Stopping agent processes...")
     cleanup_agents()
     logger.info("✓ Agent processes stopped")
     
-    # Shutdown workflow scheduler
+    # Shutdown workflow scheduler with timeout
     try:
         from backend.services.workflow_scheduler import get_scheduler
         scheduler = get_scheduler()
         logger.info("✓ Shutting down workflow scheduler...")
-        scheduler.shutdown()
+        await asyncio.wait_for(
+            asyncio.get_event_loop().run_in_executor(None, scheduler.shutdown, False),
+            timeout=5.0
+        )
         logger.info("✓ Workflow scheduler stopped")
+    except asyncio.TimeoutError:
+        logger.warning("⚠ Workflow scheduler shutdown timed out (forced)")
     except Exception as e:
         logger.error(f"✗ Error shutting down scheduler: {str(e)}")
+    
+    # Close database connections
+    try:
+        logger.info("✓ Closing database connections...")
+        from database import engine
+        engine.dispose()
+        logger.info("✓ Database connections closed")
+    except Exception as e:
+        logger.error(f"✗ Error closing database: {str(e)}")
     
     logger.info("=" * 60)
     logger.info("APPLICATION SHUTDOWN COMPLETE")
@@ -286,12 +312,12 @@ conversations_router.set_shared_state(conversation_store, store_lock)
 # workflows_router needs access to checkpointer
 workflows_router.set_checkpointer(checkpointer)
 
-# NOTE: files_router, workflows_router, and dashboard_router are NOT included here
+# NOTE: files_router and dashboard_router are NOT included here
 # because their routes are already defined inline in main.py (with additional logic).
 # Including them would cause Duplicate Operation ID warnings.
 # TODO: Migrate inline routes to routers and re-enable these includes.
 # app.include_router(files_router.router)
-# app.include_router(workflows_router.router)
+app.include_router(workflows_router.router)
 # app.include_router(dashboard_router.router)
 
 app.include_router(agents_router.router)
@@ -1087,23 +1113,28 @@ async def serve_file(file_path: str):
     """
     # Decode the file path
     from urllib.parse import unquote
+    from pathlib import Path
     file_path = unquote(file_path)
     
     # Security: ensure the path doesn't escape the storage directory
     if ".." in file_path or file_path.startswith("/"):
         raise HTTPException(status_code=400, detail="Invalid file path")
     
+    # Resolve path relative to backend directory
+    backend_dir = Path(__file__).parent
+    full_path = backend_dir / file_path
+    
     # Check if file exists
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File not found")
+    if not full_path.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
     
     # Determine media type based on file extension
     from mimetypes import guess_type
-    media_type, _ = guess_type(file_path)
+    media_type, _ = guess_type(str(full_path))
     
     # Return the file
     from fastapi.responses import FileResponse
-    return FileResponse(file_path, media_type=media_type)
+    return FileResponse(str(full_path), media_type=media_type)
 
 # --- Unified Orchestration Service ---
 async def execute_orchestration(
@@ -3485,6 +3516,38 @@ async def websocket_chat(websocket: WebSocket):
                     final_state["owner"] = owner_obj
                     save_conversation_history(final_state, {"configurable": {"thread_id": thread_id, "owner": owner_obj}})
                     logger.info(f"Conversation history saved for thread_id {thread_id} with owner_id {owner_id}")
+
+                    # ─── Register / refresh UserThread in DB so conversation appears in sidebar ───
+                    try:
+                        from database import SessionLocal as _SessionLocal
+                        _db = _SessionLocal()
+                        try:
+                            existing_thread = _db.query(UserThread).filter_by(thread_id=thread_id).first()
+                            if existing_thread:
+                                # Update updated_at so conversation moves to top of list
+                                existing_thread.updated_at = datetime.utcnow()
+                                logger.info(f"Updated UserThread timestamp for {thread_id}")
+                            else:
+                                # Generate a title from the original prompt
+                                raw_title = (
+                                    final_state.get("original_prompt")
+                                    or (prompt if prompt else "")
+                                    or "New Conversation"
+                                )
+                                conversation_title = raw_title[:100].strip()
+                                new_thread = UserThread(
+                                    thread_id=thread_id,
+                                    user_id=owner_id,
+                                    title=conversation_title,
+                                )
+                                _db.add(new_thread)
+                                logger.info(f"Created UserThread for {thread_id} (user={owner_id}, title='{conversation_title}')")
+                            _db.commit()
+                        finally:
+                            _db.close()
+                    except Exception as db_err:
+                        logger.error(f"Failed to register UserThread for {thread_id}: {db_err}")
+                        # Non-fatal — conversation is already saved to file
             except Exception as save_err:
                 logger.error(f"Failed to save conversation history for thread {thread_id}: {save_err}")
                 # Continue anyway - don't fail the request if history saving fails

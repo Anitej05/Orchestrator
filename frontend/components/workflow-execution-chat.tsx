@@ -11,6 +11,7 @@ import type { TaskStatus } from '@/lib/types';
 import { authFetch } from '@/lib/auth-fetch';
 import { toast } from 'sonner';
 import { useTaskExecutionWebSocket } from '@/hooks/use-task-execution-websocket';
+import { API_BASE_URL } from '@/lib/config';
 
 interface WorkflowExecutionChatProps {
   workflowId: string;
@@ -21,6 +22,7 @@ interface WorkflowExecutionChatProps {
       original_prompt: string;
       task_plan: any[];
       task_agent_pairs: any[];
+      todo_list?: any[];
     };
   };
   onCancel?: () => void;
@@ -41,6 +43,19 @@ export default function WorkflowExecutionChat({ workflowId, workflow, onCancel }
   const [isExecuting, setIsExecuting] = useState(false);
   const [executionThreadId, setExecutionThreadId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [taskStatuses, setTaskStatuses] = useState<Record<string, TaskStatus>>({});
+
+  // Initialize WebSocket hook
+  const { connect, disconnect, taskStatuses: wsTaskStatuses } = useTaskExecutionWebSocket({
+    onMessage: (data) => {
+      if (data.type === 'task_status') {
+        setTaskStatuses(prev => ({
+          ...prev,
+          [data.task_name]: data
+        }));
+      }
+    }
+  });
 
   // Build plan data from todo_list (new system) or task_plan (old system)
   const planData = {
@@ -49,7 +64,7 @@ export default function WorkflowExecutionChat({ workflowId, workflow, onCancel }
       description: task.description || task.instructions || '',
       agent: task.assigned_to || 'N/A',
       status: task.status || 'pending',
-      id: task.id
+      id: task.task_id || task.id
     })) || 
     workflow.blueprint.task_plan?.flatMap((batch: any[]) => 
       batch.map((task: any) => ({
@@ -81,9 +96,9 @@ export default function WorkflowExecutionChat({ workflowId, workflow, onCancel }
     ]);
 
     return () => {
-      disconnect();
+      if (disconnect) disconnect();
     };
-  }, [disconnect]);
+  }, []);
 
   useEffect(() => {
     // Auto-scroll to bottom when new messages arrive
@@ -110,7 +125,6 @@ export default function WorkflowExecutionChat({ workflowId, workflow, onCancel }
     
     try {
       // Execute workflow using the saved task_plan directly
-      import { API_BASE_URL } from '@/lib/config';
       const response = await authFetch(`${API_BASE_URL}/api/workflows/${workflowId}/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

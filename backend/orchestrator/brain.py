@@ -938,6 +938,39 @@ Return JSON with:
         except Exception as e:
             return f"Could not scan agent workspaces: {e}"
 
+    def _sync_execution_plan_to_todo_list(
+        self, execution_plan: List[Dict[str, Any]], current_phase_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Convert execution_plan phases into todo_list items for frontend visualization."""
+        todo_list = []
+        
+        for phase in execution_plan:
+            phase_id = phase.get("phase_id", "?")
+            name = phase.get("name", "Unnamed Phase")
+            goal = phase.get("goal", "")
+            status_str = phase.get("status", "pending")
+            
+            # Map phase status to TaskStatus
+            if status_str == "completed":
+                status = TaskStatus.COMPLETED
+            elif phase_id == current_phase_id:
+                status = TaskStatus.IN_PROGRESS
+            else:
+                status = TaskStatus.PENDING
+            
+            # Create descriptive task description
+            description = f"{name}: {goal}" if goal else name
+            
+            task = TaskItem(
+                task_id=f"phase_{phase_id}",
+                description=description,
+                status=status,
+                priority=int(phase_id) if phase_id.isdigit() else 5,
+            )
+            todo_list.append(task.model_dump())
+        
+        return todo_list
+
     def _build_execution_plan_view(self, state: Dict[str, Any]) -> str:
         """Build a view of the execution plan for complex tasks."""
         execution_plan = state.get("execution_plan")
@@ -1077,6 +1110,11 @@ Return JSON with:
             # Set first phase as current
             if decision.execution_plan:
                 updates["current_phase_id"] = decision.execution_plan[0].get("phase_id")
+            # Sync execution_plan to todo_list for frontend visualization
+            updates["todo_list"] = self._sync_execution_plan_to_todo_list(
+                decision.execution_plan, 
+                updates.get("current_phase_id")
+            )
             logger.info(
                 f"📋 Created execution plan with {len(decision.execution_plan)} phases"
             )
@@ -1107,6 +1145,12 @@ Return JSON with:
             )
             if first_pending:
                 updates["current_phase_id"] = first_pending.get("phase_id")
+
+            # Sync replanned execution_plan to todo_list
+            updates["todo_list"] = self._sync_execution_plan_to_todo_list(
+                new_plan, 
+                updates.get("current_phase_id")
+            )
 
             logger.info(
                 f"🔄 Re-planned: kept {len(completed_phases)} completed, added {len(validated_plan)} new phases"
@@ -1172,6 +1216,12 @@ Return JSON with:
 
             updates["execution_plan"] = updated_plan
             updates["current_phase_id"] = next_phase_id  # None if all done
+
+            # Resync todo_list after phase progression
+            updates["todo_list"] = self._sync_execution_plan_to_todo_list(
+                updated_plan, 
+                next_phase_id
+            )
 
             logger.info(
                 f"✅ Phase '{current_phase_id}' verified complete by LLM → Next: {next_phase_id or 'ALL DONE'}"

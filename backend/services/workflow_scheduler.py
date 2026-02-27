@@ -205,7 +205,9 @@ class WorkflowScheduler:
                     logger.info(f"Created new conversation thread {thread_id} for scheduled workflow {workflow_id}")
                 
                 # Save/update conversation JSON file
-                conversation_history_dir = "conversation_history"
+                _svc_dir = os.path.dirname(os.path.abspath(__file__))   # services/
+                _backend_dir = os.path.dirname(_svc_dir)                  # backend/
+                conversation_history_dir = os.path.join(_backend_dir, "conversation_history")
                 os.makedirs(conversation_history_dir, exist_ok=True)
                 history_path = os.path.join(conversation_history_dir, f"{thread_id}.json")
                 
@@ -409,10 +411,14 @@ class WorkflowScheduler:
         except Exception as e:
             logger.error(f"Failed to load active schedules: {str(e)}")
     
-    def shutdown(self):
+    def shutdown(self, wait=False):
         """Shutdown the scheduler"""
-        self.scheduler.shutdown(wait=True)
-        logger.info("Workflow scheduler shut down")
+        try:
+            # Don't wait for jobs to complete on forced shutdown
+            self.scheduler.shutdown(wait=wait)
+            logger.info("Workflow scheduler shut down")
+        except Exception as e:
+            logger.error(f"Error during scheduler shutdown: {e}")
 
 # Global scheduler instance
 _scheduler: Optional[WorkflowScheduler] = None

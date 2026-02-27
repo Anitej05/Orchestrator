@@ -267,9 +267,9 @@ class SpreadsheetAgent(BaseAgent):
         }
         
         return AgentResponse(
-            status="complete" if success else "error",
+            status="success" if success else "error",
             result=formatted_data,
-            error=None if success else "Failed to complete some steps",
+            error_message=None if success else "Failed to complete some steps",
         )
 
     async def _update_state_post_step(self, step: Any, result: Any, context: ExecutionContext) -> None:
