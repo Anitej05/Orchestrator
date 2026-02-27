@@ -31,11 +31,12 @@ import logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-app = create_agent_server(
+_server = create_agent_server(
     agent_class=DocumentAgent,
     agent_id="document_agent",
     agent_name="Document Agent"
 )
+app = _server.app  # Export the FastAPI instance, NOT the AgentServer wrapper
 
 def run_agent() -> None:
     import uvicorn
@@ -43,6 +44,7 @@ def run_agent() -> None:
     port = int(os.getenv("DOCUMENT_AGENT_PORT", "8050"))
     logger.info(f"Starting Document Agent server on port {port}...")
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 
 if __name__ == "__main__":
     run_agent()
