@@ -174,21 +174,27 @@ class BrowserAgent(BaseAgent):
         first_action = action_plan.actions[0] if action_plan.actions else None
         
         if first_action:
-            params = first_action.dict()
-            cap_name = params.pop("name", "unknown")
-            reasoning = params.pop("reasoning", action_plan.reasoning)
+            # CRITICAL: AtomicAction has {name: str, params: dict}.
+            # first_action.dict() returns {"name": "navigate", "params": {"url": "..."}}.
+            # Capabilities expect FLAT params like {"url": "..."}, NOT nested {"params": {"url": "..."}}.
+            # So we extract .params directly instead of using .dict().
+            cap_name = first_action.name
+            cap_params = dict(first_action.params)  # Flat copy of the params dict
             
-            # Legacy mapping: done -> finish, type -> type_text
-            if cap_name == "done":
-                cap_name = "finish"
-            elif cap_name == "type":
-                cap_name = "type_text"
+            # Legacy mapping: browser LLM action names → BaseAgent capability names
+            name_mapping = {
+                "done": "finish",
+                "type": "type_text",
+                "extract": "extract_data",
+                "run_js": "execute_javascript",
+            }
+            cap_name = name_mapping.get(cap_name, cap_name)
                 
             return ReactDecisionProxy(
-                reasoning=reasoning,
+                reasoning=action_plan.reasoning,
                 capability_name=cap_name,
-                description=str(params), 
-                parameters=params,
+                description=action_plan.next_goal or str(cap_params), 
+                parameters=cap_params,
                 expected_outcome="Expected page state change."
             )
         else:
@@ -699,3 +705,157 @@ class BrowserAgent(BaseAgent):
             return {"success": False, "error": "No page"}
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    # ========================================================================
+    # CAPABILITIES - Additional (LLM frequently generates these)
+    # ========================================================================
+
+    @capability(
+        name="hover",
+        description="Hover over an element on the page",
+        parameters=[
+            ParameterSchema(
+                name="selector",
+                type="string",
+                description="CSS selector of element to hover over",
+                required=True,
+            )
+        ],
+    )
+    async def hover(
+        self, params: Dict[str, Any], context: ExecutionContext
+    ) -> Dict[str, Any]:
+        """Hover over an element."""
+        selector = params.get("selector")
+        if not selector:
+            return {"success": False, "error": "Selector is required"}
+        try:
+            page = self._get_page()
+            if not page:
+                return {"success": False, "error": "Browser not initialized"}
+            await page.hover(selector)
+            return {"success": True, "message": f"Hovered over {selector}"}
+        except Exception as e:
+            return {"success": False, "error": f"Hover failed: {str(e)}"}
+
+    @capability(
+        name="press",
+        description="Press a keyboard key (Enter, Escape, Tab, ArrowDown, etc.)",
+        parameters=[
+            ParameterSchema(
+                name="key",
+                type="string",
+                description="Key to press (Enter, Escape, Tab, ArrowDown, etc.)",
+                required=True,
+            )
+        ],
+    )
+    async def press(
+        self, params: Dict[str, Any], context: ExecutionContext
+    ) -> Dict[str, Any]:
+        """Press a keyboard key."""
+        key = params.get("key", "")
+        if not key:
+            return {"success": False, "error": "Key is required"}
+        try:
+            page = self._get_page()
+            if not page:
+                return {"success": False, "error": "Browser not initialized"}
+            await page.keyboard.press(key)
+            await asyncio.sleep(0.3)
+            return {"success": True, "message": f"Pressed {key}"}
+        except Exception as e:
+            return {"success": False, "error": f"Press failed: {str(e)}"}
+
+    @capability(
+        name="wait",
+        description="Wait for a specified number of seconds",
+        parameters=[
+            ParameterSchema(
+                name="seconds",
+                type="integer",
+                description="Number of seconds to wait",
+                required=False,
+                default=2,
+            )
+        ],
+    )
+    async def wait(
+        self, params: Dict[str, Any], context: ExecutionContext
+    ) -> Dict[str, Any]:
+        """Wait for a specified duration."""
+        seconds = params.get("seconds", 2)
+        await asyncio.sleep(min(seconds, 10))  # Cap at 10s to prevent abuse
+        return {"success": True, "message": f"Waited {seconds}s"}
+
+    @capability(
+        name="save_info",
+        description="Save extracted information to agent memory for later use",
+        parameters=[
+            ParameterSchema(
+                name="key",
+                type="string",
+                description="Key/label for the saved information",
+                required=True,
+            ),
+            ParameterSchema(
+                name="value",
+                type="string",
+                description="The information to save",
+                required=True,
+            ),
+        ],
+    )
+    async def save_info(
+        self, params: Dict[str, Any], context: ExecutionContext
+    ) -> Dict[str, Any]:
+        """Save information to agent memory."""
+        key = params.get("key", "")
+        value = params.get("value", "")
+        if not key:
+            return {"success": False, "error": "Key is required"}
+        if self.memory:
+            self.memory.safe_add_extracted({
+                "structured_info": {"key": key, "value": value, "verified": True}
+            })
+        return {
+            "success": True,
+            "data": {"extracted": {"key": key, "value": value}},
+            "message": f"Saved: {key}",
+        }
+
+    @capability(
+        name="select",
+        description="Select an option from a dropdown/select element",
+        parameters=[
+            ParameterSchema(
+                name="selector",
+                type="string",
+                description="CSS selector for the select element",
+                required=True,
+            ),
+            ParameterSchema(
+                name="value",
+                type="string",
+                description="Value or label of the option to select",
+                required=True,
+            ),
+        ],
+    )
+    async def select(
+        self, params: Dict[str, Any], context: ExecutionContext
+    ) -> Dict[str, Any]:
+        """Select a dropdown option."""
+        selector = params.get("selector")
+        value = params.get("value", "")
+        if not selector:
+            return {"success": False, "error": "Selector is required"}
+        try:
+            page = self._get_page()
+            if not page:
+                return {"success": False, "error": "Browser not initialized"}
+            await page.select_option(selector, value)
+            return {"success": True, "message": f"Selected {value} in {selector}"}
+        except Exception as e:
+            return {"success": False, "error": f"Select failed: {str(e)}"}
+
