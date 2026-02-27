@@ -143,7 +143,7 @@ class BrowserAgent(BaseAgent):
             
         # Use native browser multi-modal unified LLM call
         action_plan = await self.llm.plan_action(
-            task_context=task_context,
+            task=task_context,
             page_content=page_content,
             history=self.memory.history,
             step=step_num,

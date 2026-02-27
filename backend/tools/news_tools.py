@@ -6,8 +6,13 @@ Converted from news_agent.py to direct function tools.
 import os
 import requests
 import logging
+from pathlib import Path
 from typing import List, Dict, Optional
 from langchain_core.tools import tool
+from dotenv import load_dotenv
+
+# Ensure .env is loaded before reading API keys
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 logger = logging.getLogger(__name__)
 
