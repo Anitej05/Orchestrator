@@ -83,6 +83,8 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
   task_statuses: {},
   current_executing_task: null,
   todo_list: [],
+  // NEW: Orchestration state from OMNI-DISPATCHER
+  action_history: [],
   isLoading: false,
   canvas_data: undefined,
 
@@ -455,6 +457,8 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
           uploaded_files: conversationData.uploaded_files || [],
           plan: conversationData.plan || conversationData.task_plan || [],
           todo_list: conversationData.todo_list || [],
+          // NEW: Load orchestration state from backend
+          action_history: conversationData.action_history || [],
           original_prompt: conversationData.original_prompt || undefined,
           canvas_content: conversationData.canvas_content,
           canvas_data: conversationData.canvas_data,
@@ -532,10 +536,8 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
         pending_confirmation: false,
         pending_confirmation_task: undefined,
         // Omni-Dispatcher fields
-        execution_plan: [],
         current_phase_id: undefined,
         action_history: [],
-        insights: {},
         pending_action_approval: false,
         pending_action: undefined,
       });

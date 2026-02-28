@@ -176,6 +176,15 @@
   --radius-orbimesh-md: 6px;
   --radius-orbimesh-lg: 8px;
   --radius-orbimesh-xl: 12px;
+
+  /* ================================================================
+     PLANGRAPH SPECIFIC STYLES
+     ================================================================ */
+
+  /* Status colors for plangraph nodes - explicit variables */
+  --color-status-success-dark: #059669;   /* For completed checkmark */
+  --color-status-active-dark: #1D4ED8;    /* For running spinner */
+  --color-status-error-dark: #DC2626;     /* For errors */
 }
 
 /* ================================================================
@@ -265,6 +274,11 @@
   --color-border-light: oklch(0.22 0.01 264);
   --color-border-DEFAULT: oklch(0.26 0.01 264);
   --color-border-medium: oklch(0.30 0.02 264);
+
+  /* Dark mode adjustments for plangraph - better contrast */
+  --color-status-success-dark: #10B981;
+  --color-status-active-dark: #3B82F6;
+  --color-status-error-dark: #EF4444;
 }
 
 /* ================================================================
@@ -847,4 +861,15 @@
   left: calc(100% - var(--circle-diameter) - var(--switch-offset));
   -webkit-box-shadow: var(--circle-checked-shadow);
   box-shadow: var(--circle-checked-shadow);
+}
+
+/* ================================================================
+   REACTFLOW CUSTOM STYLING
+   ================================================================ */
+
+/* ReactFlow custom handle styling */
+.react-flow__handle {
+  width: 8px !important;
+  height: 8px !important;
+  border: 2px solid var(--color-bg-card) !important;
 }

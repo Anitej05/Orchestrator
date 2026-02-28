@@ -10,6 +10,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.jobstores.base import JobLookupError
 import asyncio
 from sqlalchemy.orm import Session
+from langchain_core.messages import SystemMessage, HumanMessage, messages_from_dict
 
 logger = logging.getLogger(__name__)
 
@@ -217,16 +218,23 @@ class WorkflowScheduler:
                     try:
                         with open(history_path, "r", encoding="utf-8") as f:
                             existing_conv = json.load(f)
-                            existing_messages = existing_conv.get("messages", [])
+                            serialized_messages = existing_conv.get("messages", [])
+                            # Deserialize messages back to LangChain message objects
+                            if serialized_messages:
+                                try:
+                                    existing_messages = messages_from_dict(serialized_messages)
+                                except Exception as deser_err:
+                                    logger.warning(f"Could not deserialize messages: {deser_err}. Starting fresh.")
+                                    existing_messages = []
                     except Exception as e:
                         logger.warning(f"Could not load existing conversation: {e}")
                 
-                # Add execution start message
-                execution_start_message = {
-                    "role": "system",
-                    "content": f"Scheduled execution started at {datetime.utcnow().isoformat()}",
-                    "timestamp": datetime.utcnow().isoformat()
-                }
+                # Add execution start message as LangChain SystemMessage
+                execution_start_message = SystemMessage(
+                    content=f"Scheduled execution started at {datetime.utcnow().isoformat()}",
+                    additional_kwargs={"timestamp": datetime.utcnow().isoformat()}
+                )
+                # Append the message object - now all messages are proper LangChain objects
                 existing_messages.append(execution_start_message)
                 
                 # Pre-seed conversation with plan_approved=True for automatic execution

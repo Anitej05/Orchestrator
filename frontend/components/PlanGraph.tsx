@@ -1,12 +1,12 @@
 // components/PlanGraph.tsx
 /**
- * PlanGraph Component - Workflow Visualization
+ * SIMPLIFIED PlanGraph Component - For Non-Technical Users
  * 
- * Supports two execution models:
- * 1. NEW SYSTEM (todo_list): Sequential task execution (linear flow)
- * 2. LEGACY SYSTEM (task_plan): Parallel batch execution (multi-level flow)
- * 
- * Automatically detects the input format and renders appropriate visualization.
+ * Shows workflow as a simple visual timeline:
+ * - NO START/END nodes
+ * - Just agent name + simple description per step
+ * - Color-coded statuses with icons for instant recognition
+ * - Clean, minimal design
  */
 
 "use client"
@@ -22,446 +22,695 @@ import ReactFlow, {
     NodeProps
 } from 'reactflow';
 import 'reactflow/dist/style.css';
-import { Badge } from "@/components/ui/badge"
-import { ScrollArea } from "@/components/ui/scroll-area"
-import { CheckCircle, Clock, PlayCircle, Loader2, XCircle, Zap, AlertTriangle, ArrowRight } from "lucide-react"
-import { MdMail, MdTableChart, MdDescription } from "react-icons/md"
-import { cn } from "@/lib/utils"
-import type { TaskStatus } from "@/lib/types"
+import { CheckCircle, Loader2, Circle, XCircle } from "lucide-react";
+import { cn } from "@/lib/utils";
 
-interface LegacyPlanTask {
-    task: string;
+// ============================================================================
+// TYPE DEFINITIONS
+// ============================================================================
+
+// Agent Icon Mapping - 15+ agent types for visual recognition
+const AGENT_ICONS: Record<string, string> = {
+    // Email & Communication
+    'gmail': '📧',
+    'gmail_agent': '📧',
+    'mail': '📬',
+    'mail_agent': '📬',
+    
+    // Documents & Files
+    'document': '📄',
+    'document_agent': '📄',
+    'spreadsheet': '📊',
+    'spreadsheet_agent': '📊',
+    
+    // Web & Browser
+    'browser': '🌐',
+    'browser_agent': '🌐',
+    'web': '🕸️',
+    
+    // Code & Development
+    'coding': '💻',
+    'coding_agent': '💻',
+    'python': '🐍',
+    'code': '⚡',
+    
+    // System & Terminal
+    'terminal': '⌨️',
+    'system': '⚙️',
+    
+    // Business & Finance
+    'zoho_books': '💼',
+    'zoho_books_agent': '💼',
+    'finance': '💰',
+    
+    // General & Planning
+    'general': '🤖',
+    'general_agent': '🤖',
+    'universal': '🌟',
+    'universal_agent': '🌟',
+    'plan': '📋',
+    'planning': '🗓️',
+    
+    // Default fallback
+    'default': '🔷'
+};
+
+interface ActionHistoryEntry {
+    iteration: number;
+    action_type: string;
+    resource_id: string;     // Agent/tool name
+    instruction: string;
+    success: boolean;
+    result_summary: string;
+    execution_time_ms: number;
+}
+
+interface TodoItem {
+    task_id: string;
     description: string;
-    agent: string;
-    short_description?: string;
-    agent_image_url?: string;
-}
-
-interface TodoListTask {
-    id: string;
-    title: string;
-    description?: string;
-    instructions?: string;
-    status: 'pending' | 'in-progress' | 'completed' | 'failed';
-    assigned_to?: string;
-}
-
-interface CompletedTask {
-    task: string;
-    result: string;
-}
-
-interface Plan {
-    pendingTasks: (LegacyPlanTask | LegacyPlanTask[])[];
-    completedTasks: CompletedTask[];
-    // Optional: Support todo_list directly in plan
-    todoList?: TodoListTask[];
+    status: 'PENDING' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED';
+    priority: number;
 }
 
 interface PlanGraphProps {
-    planData: Plan;
-    todoList?: TodoListTask[]; // Can be passed directly
-    taskStatuses?: Record<string, TaskStatus>;
+    // NEW SYSTEM: Use these for real-time updates
+    actionHistory?: ActionHistoryEntry[];    // Detailed execution log
+    todoList?: TodoItem[];                   // High-level tasks
+    
+    // LEGACY SYSTEM: Old format (keep for backward compatibility)
+    planData?: {
+        pendingTasks: any[];
+        completedTasks: any[];
+    };
 }
 
-interface CustomNodeData {
-    label: string;
-    description: string;
-    agent: string;
-    status: 'completed' | 'pending' | 'running' | 'failed' | 'in-progress' | 'start';
-    executionTime?: number;
-    isDialogue?: boolean;
+interface SimpleNodeData {
+    // What to show (KEEP IT SIMPLE!)
+    agentName: string;        // "Gmail Agent" (formatted)
+    agentIcon: string;        // "📧" (emoji for visual recognition)
+    resourceId: string;       // Raw "gmail_agent" (for icon lookup)
+    description: string;      // One line: "Sending 5 emails..."
+    status: 'pending' | 'running' | 'completed' | 'failed';
+    
+    // Extra info (hidden until hover)
+    executionTime?: number;   // Milliseconds
     error?: string;
-    short_description?: string;
-    icon_name?: string;
-    taskId?: string; // For todo_list integration
-    isTodoItem?: boolean; // Indicates this is from todo_list
+    iteration?: number;
 }
 
-// Map icon names to React Icon components
-const iconMap: Record<string, React.ComponentType<any>> = {
-    'MdMail': MdMail,
-    'MdTableChart': MdTableChart,
-    'MdDescription': MdDescription,
-};
+// ============================================================================
+// SIMPLIFIED NODE COMPONENT
+// ============================================================================
 
-const getIconComponent = (iconName?: string) => {
-    if (!iconName) return null;
-    return iconMap[iconName] || null;
-};
+const SimpleNode: React.FC<NodeProps<SimpleNodeData>> = ({ data }) => {
+    const { agentName, agentIcon, description, status, executionTime, error } = data;
 
-// Custom Node Component with real-time status updates
-const CustomNode: React.FC<NodeProps<CustomNodeData>> = ({ data }) => {
-    const isCompleted = data.status === 'completed';
-    const isRunning = data.status === 'in-progress' || data.status === 'running';
-    const isFailed = data.status === 'failed';
-    const isPending = data.status === 'pending';
-    const isDialogue = data.isDialogue && isRunning;
-
-    // Get node color based on status - matches project color scheme
-    const getNodeColor = () => {
-        if (isDialogue) return 'bg-status-pending-light dark:bg-status-pending-dark/20 border-status-pending-dark dark:border-status-pending';
-        if (isRunning) return 'bg-status-active-light dark:bg-status-active-dark/20 border-status-active-dark dark:border-status-active animate-pulse';
-        if (isCompleted) return 'bg-status-success-light dark:bg-status-success-dark/20 border-status-success-dark dark:border-status-success';
-        if (isFailed) return 'bg-status-error-light dark:bg-status-error-dark/20 border-status-error-dark dark:border-status-error';
-        return 'bg-border-color-light dark:bg-bg-card border-border-color dark:border-border-color-strong';
+    // Status-based styling
+    const getNodeStyles = () => {
+        switch (status) {
+            case 'completed':
+                return {
+                    bg: 'bg-green-50 dark:bg-green-950/30',
+                    border: 'border-green-500',
+                    icon: <CheckCircle className="w-5 h-5 text-green-600 dark:text-green-400" />,
+                    iconColor: 'text-green-600 dark:text-green-400'
+                };
+            case 'running':
+                return {
+                    bg: 'bg-blue-50 dark:bg-blue-950/30',
+                    border: 'border-blue-500',
+                    icon: <Loader2 className="w-5 h-5 text-blue-600 dark:text-blue-400 animate-spin" />,
+                    iconColor: 'text-blue-600 dark:text-blue-400'
+                };
+            case 'failed':
+                return {
+                    bg: 'bg-red-50 dark:bg-red-950/30',
+                    border: 'border-red-500',
+                    icon: <XCircle className="w-5 h-5 text-red-600 dark:text-red-400" />,
+                    iconColor: 'text-red-600 dark:text-red-400'
+                };
+            case 'pending':
+            default:
+                return {
+                    bg: 'bg-gray-50 dark:bg-gray-900/30',
+                    border: 'border-gray-300 dark:border-gray-700',
+                    icon: <Circle className="w-5 h-5 text-gray-400" />,
+                    iconColor: 'text-gray-400'
+                };
+        }
     };
 
-    const getStatusIcon = () => {
-        if (isCompleted) return <CheckCircle className="w-4 h-4 text-status-success" />;
-        if (isRunning) return <Loader2 className="w-4 h-4 text-status-active animate-spin" />;
-        if (isFailed) return <XCircle className="w-4 h-4 text-status-error" />;
-        if (isDialogue) return <AlertTriangle className="w-4 h-4 text-status-pending-dark animate-pulse" />;
-        return <Clock className="w-4 h-4 text-text-tertiary" />;
-    };
+    const styles = getNodeStyles();
 
     return (
-        <div className={cn(
-            'px-4 py-3 rounded-lg border-2 bg-bg-card shadow-lg min-w-72 max-w-80',
-            getNodeColor()
-        )}>
-            <Handle type="target" position={Position.Top} />
-
-            <div className="flex items-start gap-3 mb-2">
-                <div className="flex-shrink-0 mt-1">
-                    {getStatusIcon()}
+        <div
+            className={cn(
+                "min-w-[280px] max-w-[320px] rounded-lg border-2 shadow-sm transition-all",
+                styles.bg,
+                styles.border,
+                "hover:shadow-md"
+            )}
+            title={error || `${agentName} - ${status}`}
+        >
+            <Handle type="target" position={Position.Top} className="!bg-gray-400" />
+            
+            <div className="p-3">
+                {/* Header: Icon + Agent Name + Status */}
+                <div className="flex items-center gap-3 mb-2">
+                    {/* Agent Icon - Large & Prominent */}
+                    <div className="text-2xl leading-none flex-shrink-0">
+                        {agentIcon}
+                    </div>
+                    
+                    {/* Agent Name */}
+                    <div className="flex-1 min-w-0">
+                        <div className="font-semibold text-sm text-gray-900 dark:text-gray-100 truncate">
+                            {agentName}
+                        </div>
+                    </div>
+                    
+                    {/* Status Icon */}
+                    <div className="flex-shrink-0">
+                        {styles.icon}
+                    </div>
                 </div>
-                <div className="flex-1 min-w-0">
-                    <h4 className="font-semibold text-text-primary truncate text-sm">
-                        {data.label}
-                    </h4>
-                    <p className="text-xs text-text-tertiary mt-1">
-                        {data.agent}
-                    </p>
+                
+                {/* Description - Simple one line */}
+                <div className="text-xs text-gray-600 dark:text-gray-400 line-clamp-2 mb-1">
+                    {description}
                 </div>
+                
+                {/* Execution Time - Subtle */}
+                {executionTime !== undefined && executionTime > 0 && (
+                    <div className="text-xs text-gray-500 dark:text-gray-500 text-right">
+                        {(executionTime / 1000).toFixed(1)}s
+                    </div>
+                )}
+                
+                {/* Error - Only if failed */}
+                {error && status === 'failed' && (
+                    <div className="mt-2 text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/50 p-2 rounded">
+                        {error}
+                    </div>
+                )}
             </div>
-
-            {data.description && (
-                <p className="text-xs text-text-secondary mb-2 line-clamp-2">
-                    {data.description}
-                </p>
-            )}
-
-            {data.executionTime && (
-                <div className="flex items-center gap-1 text-xs text-text-tertiary">
-                    <Clock className="w-3 h-3" />
-                    <span>{data.executionTime}s</span>
-                </div>
-            )}
-
-            {data.error && (
-                <div className="mt-2 p-2 bg-status-error-light rounded text-xs text-status-error-dark">
-                    {data.error}
-                </div>
-            )}
-
-            <Handle type="source" position={Position.Bottom} />
+            
+            <Handle type="source" position={Position.Bottom} className="!bg-gray-400" />
         </div>
     );
 };
 
-export default function PlanGraph({ planData, todoList: externalTodoList, taskStatuses = {} }: PlanGraphProps) {
+// ============================================================================
+// MAIN COMPONENT
+// ============================================================================
+
+export default function PlanGraph({
+    actionHistory = [],
+    todoList = [],
+    planData
+}: PlanGraphProps) {
     const [nodes, setNodes] = useState<Node[]>([]);
     const [edges, setEdges] = useState<Edge[]>([]);
-    const [executionModel, setExecutionModel] = useState<'todo-list' | 'batch-plan'>('batch-plan');
 
-    const nodeTypes = useMemo(() => ({ custom: CustomNode }), []);
+    const nodeTypes = useMemo(() => ({ simple: SimpleNode }), []);
 
+    // Use stringified versions in dependency array to avoid infinite loops from object reference changes
     useEffect(() => {
-        // Detect which execution model to use
-        const todoList = externalTodoList || planData.todoList || [];
-        const hasTodoList = todoList && todoList.length > 0;
-        const hasTaskPlan = planData.pendingTasks && planData.pendingTasks.length > 0;
-
-        if (hasTodoList) {
-            setExecutionModel('todo-list');
-            buildTodoListGraph(todoList, taskStatuses);
-        } else if (hasTaskPlan) {
-            setExecutionModel('batch-plan');
-            buildBatchPlanGraph(planData.pendingTasks, taskStatuses);
+        // Priority: action_history > todoList > legacy planData
+        if (actionHistory && actionHistory.length > 0) {
+            buildFromActionHistory(actionHistory);
+        } else if (todoList && todoList.length > 0) {
+            buildFromTodoList(todoList);
+        } else if (planData && (planData.pendingTasks?.length > 0 || planData.completedTasks?.length > 0)) {
+            buildFromLegacyPlan(planData);
         } else {
             setNodes([]);
             setEdges([]);
         }
-    }, [planData, externalTodoList, taskStatuses]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [JSON.stringify(actionHistory), JSON.stringify(todoList), JSON.stringify(planData)]);
 
     /**
-     * Build graph for NEW TODO_LIST system (sequential execution)
+     * Build graph from action_history (BEST - most detailed)
+     * FILTERS to show only agents/tools, not simple transactions
      */
-    const buildTodoListGraph = (todoList: TodoListTask[], taskStatuses: Record<string, TaskStatus>) => {
-        if (!todoList || todoList.length === 0) {
-            setNodes([]);
-            setEdges([]);
-            return;
-        }
+    const buildFromActionHistory = (history: ActionHistoryEntry[]) => {
+        const newNodes: Node[] = [];
+        const newEdges: Edge[] = [];
 
-        const initialNodes: Node[] = [];
-        const initialEdges: Edge[] = [];
+        // Filter to show only significant agent/tool actions
+        const significantActions = history.filter(action => isSignificantAction(action));
 
-        // Add START node
-        initialNodes.push({
-            id: 'start',
-            type: 'custom',
-            data: {
-                label: 'Start',
-                description: 'Workflow begins',
-                agent: 'System',
-                status: 'start'
-            },
-            position: { x: 200, y: 0 }
-        });
+        significantActions.forEach((action, index) => {
+            const agentIcon = getAgentIcon(action.resource_id);
+            const agentName = formatAgentName(action.resource_id);
+            const description = createDetailedDescription(action);
+            
+            // Determine status
+            let status: SimpleNodeData['status'] = 'completed';
+            if (index === significantActions.length - 1 && !action.success) {
+                status = 'running'; // Last action might still be running
+            } else if (!action.success) {
+                status = 'failed';
+            }
 
-        // Sequential layout: tasks in a vertical line
-        const xPos = 200;
-        const ySpacing = 180; // Vertical spacing between tasks
-
-        todoList.forEach((task, index) => {
-            const taskStatus = taskStatuses[task.title];
-            // Map todo_list status to component status
-            const statusMap: Record<string, any> = {
-                'pending': 'pending',
-                'in-progress': 'in-progress',
-                'completed': 'completed',
-                'failed': 'failed'
+            const nodeData: SimpleNodeData = {
+                agentName,
+                agentIcon,
+                resourceId: action.resource_id,
+                description,
+                status,
+                executionTime: action.execution_time_ms,
+                iteration: action.iteration,
+                error: !action.success ? action.result_summary : undefined
             };
-            const status = statusMap[task.status] || 'pending';
 
-            const taskId = task.task_id || task.id;
-            const nodeId = `todo-task-${taskId}`;
-            const yPos = (index + 1) * ySpacing;
-
-            initialNodes.push({
-                id: nodeId,
-                type: 'custom',
-                data: {
-                    label: task.title,
-                    description: task.description || task.instructions || '',
-                    agent: task.assigned_to || 'Unassigned',
-                    status: status,
-                    taskId: taskId,
-                    isTodoItem: true,
-                    executionTime: taskStatus?.executionTime,
-                    error: taskStatus?.error
-                },
-                position: { x: xPos, y: yPos }
+            newNodes.push({
+                id: `action-${action.iteration}`,
+                type: 'simple',
+                data: nodeData,
+                position: { x: 0, y: index * 150 }
             });
 
-            // Edge from previous task (or start)
-            const sourceId = index === 0 ? 'start' : `todo-task-${todoList[index - 1].id}`;
-            initialEdges.push({
-                id: `edge-${sourceId}-${nodeId}`,
-                source: sourceId,
-                target: nodeId,
-                animated: status === 'pending' || status === 'in-progress',
-                style: {
-                    strokeWidth: 2,
-                    stroke: getEdgeColor(status),
-                    transition: 'stroke 0.3s ease-in-out'
-                }
-            });
+            // Create edge from previous node
+            if (index > 0) {
+                newEdges.push({
+                    id: `edge-${index - 1}-${index}`,
+                    source: `action-${significantActions[index - 1].iteration}`,
+                    target: `action-${action.iteration}`,
+                    animated: status === 'running',
+                    style: { stroke: getEdgeColor(status) }
+                });
+            }
         });
 
-        setNodes(initialNodes);
-        setEdges(initialEdges);
+        setNodes(newNodes);
+        setEdges(newEdges);
     };
 
     /**
-     * Build graph for LEGACY BATCH_PLAN system (parallel execution)
+     * Build graph from todo_list (OKAY - task-level)
      */
-    const buildBatchPlanGraph = (pendingTasks: (LegacyPlanTask | LegacyPlanTask[])[], taskStatuses: Record<string, TaskStatus>) => {
-        if (!pendingTasks || pendingTasks.length === 0) {
-            setNodes([]);
-            setEdges([]);
-            return;
-        }
+    const buildFromTodoList = (todos: TodoItem[]) => {
+        const newNodes: Node[] = [];
+        const newEdges: Edge[] = [];
 
-        const initialNodes: Node[] = [];
-        const initialEdges: Edge[] = [];
+        // Sort by priority
+        const sortedTodos = [...todos].sort((a, b) => a.priority - b.priority);
 
-        const yOffset = 220;
-        const xNodeWidth = 320;
-        let currentY = 1;
-        let previousLayerIds: string[] = [];
+        sortedTodos.forEach((todo, index) => {
+            // Try to extract agent from description
+            const extractedAgent = extractAgentFromDescription(todo.description);
+            const agentIcon = getAgentIcon(extractedAgent || 'default');
+            const agentName = extractedAgent ? formatAgentName(extractedAgent) : 'Task';
+            const description = truncate(todo.description, 50);
+            
+            // Map todo status to node status
+            let status: SimpleNodeData['status'] = 'pending';
+            if (todo.status === 'IN_PROGRESS') status = 'running';
+            else if (todo.status === 'COMPLETED') status = 'completed';
+            else if (todo.status === 'FAILED') status = 'failed';
 
-        pendingTasks.forEach((batchOrTask, rankIndex) => {
-            // Normalize to array of tasks
-            const batch = Array.isArray(batchOrTask) ? batchOrTask : [batchOrTask];
-            const currentLayerIds: string[] = [];
-            const batchSize = batch.length;
+            const nodeData: SimpleNodeData = {
+                agentName,
+                agentIcon,
+                resourceId: extractedAgent || 'unknown',
+                description,
+                status
+            };
 
-            const startX = 400 - ((batchSize - 1) * 320) / 2;
+            newNodes.push({
+                id: todo.task_id,
+                type: 'simple',
+                data: nodeData,
+                position: { x: 0, y: index * 150 }
+            });
 
-            batch.forEach((task: any, indexInBatch: number) => {
-                const taskName = task.task;
-                const taskStatus = taskStatuses[taskName];
-                const status = taskStatus?.status || task.status || 'pending';
+            // Create edge from previous node
+            if (index > 0) {
+                newEdges.push({
+                    id: `edge-${sortedTodos[index - 1].task_id}-${todo.task_id}`,
+                    source: sortedTodos[index - 1].task_id,
+                    target: todo.task_id,
+                    animated: status === 'running',
+                    style: { stroke: getEdgeColor(status) }
+                });
+            }
+        });
 
-                const nodeId = `task-${taskName}`;
-                currentLayerIds.push(nodeId);
+        setNodes(newNodes);
+        setEdges(newEdges);
+    };
 
-                const xPos = startX + (indexInBatch * 320);
-                const yPos = (rankIndex + 1) * yOffset;
+    /**
+     * Build from legacy plan data (FALLBACK)
+     */
+    const buildFromLegacyPlan = (plan: any) => {
+        const newNodes: Node[] = [];
+        const newEdges: Edge[] = [];
+        let index = 0;
 
-                initialNodes.push({
-                    id: nodeId,
-                    type: 'custom',
-                    data: {
-                        label: taskName,
-                        description: task.description || 'Completed',
-                        agent: taskStatus?.agentName || task.agent || 'N/A',
-                        short_description: task.short_description,
-                        icon_name: task.icon_name,
-                        status: status,
-                        executionTime: taskStatus?.executionTime,
-                        error: taskStatus?.error,
-                        isDialogue: taskStatus?.is_dialogue
-                    },
-                    position: { x: xPos, y: yPos }
+        // Add completed tasks
+        if (plan.completedTasks && plan.completedTasks.length > 0) {
+            plan.completedTasks.forEach((task: any) => {
+                const resourceId = task.agent || 'unknown';
+                const agentIcon = getAgentIcon(resourceId);
+                const agentName = formatAgentName(resourceId);
+                const description = truncate(task.task || task.description || 'Completed task', 50);
+
+                const nodeData: SimpleNodeData = {
+                    agentName,
+                    agentIcon,
+                    resourceId,
+                    description,
+                    status: 'completed'
+                };
+
+                newNodes.push({
+                    id: `completed-${index}`,
+                    type: 'simple',
+                    data: nodeData,
+                    position: { x: 0, y: index * 150 }
                 });
 
-                // Edges from previous layer
-                previousLayerIds.forEach(prevId => {
-                    const statusValue = status as string;
-                    const edgeColor = getEdgeColor(statusValue);
-                    initialEdges.push({
-                        id: `edge-${prevId}-${nodeId}`,
-                        source: prevId,
-                        target: nodeId,
-                        animated: statusValue === 'pending' || statusValue === 'running' || statusValue === 'in-progress',
-                        style: {
-                            strokeWidth: 2,
-                            stroke: edgeColor,
-                            transition: 'stroke 0.3s ease-in-out'
-                        }
+                if (index > 0) {
+                    newEdges.push({
+                        id: `edge-${index - 1}-${index}`,
+                        source: `completed-${index - 1}`,
+                        target: `completed-${index}`,
+                        style: { stroke: getEdgeColor('completed') }
                     });
-                });
+                }
+                index++;
             });
+        }
 
-            previousLayerIds = currentLayerIds;
-            currentY++;
-        });
+        // Add pending tasks
+        if (plan.pendingTasks && plan.pendingTasks.length > 0) {
+            plan.pendingTasks.forEach((task: any) => {
+                const resourceId = task.agent || 'unknown';
+                const agentIcon = getAgentIcon(resourceId);
+                const agentName = formatAgentName(resourceId);
+                const description = truncate(task.task || task.description || 'Pending task', 50);
 
-        setNodes(initialNodes);
-        setEdges(initialEdges);
+                const nodeData: SimpleNodeData = {
+                    agentName,
+                    agentIcon,
+                    resourceId,
+                    description,
+                    status: 'pending'
+                };
+
+                newNodes.push({
+                    id: `pending-${index}`,
+                    type: 'simple',
+                    data: nodeData,
+                    position: { x: 0, y: index * 150 }
+                });
+
+                if (index > 0) {
+                    const prevId = index - 1 < plan.completedTasks?.length 
+                        ? `completed-${index - 1}` 
+                        : `pending-${index - 1}`;
+                    newEdges.push({
+                        id: `edge-${index - 1}-${index}`,
+                        source: prevId,
+                        target: `pending-${index}`,
+                        style: { stroke: getEdgeColor('pending') }
+                    });
+                }
+                index++;
+            });
+        }
+
+        setNodes(newNodes);
+        setEdges(newEdges);
     };
+
+    // ========================================================================
+    // HELPER FUNCTIONS
+    // ========================================================================
 
     /**
-     * Get edge color based on task status
+     * Get appropriate icon for an agent/resource
      */
-    const getEdgeColor = (status: string): string => {
-        switch (status) {
-            case 'in-progress':
-            case 'running':
-                return 'var(--color-status-active)';
-            case 'completed':
-                return 'var(--color-status-success)';
-            case 'failed':
-                return 'var(--color-status-error)';
-            case 'pending':
-            default:
-                return 'var(--color-text-tertiary)';
+    function getAgentIcon(resourceId: string): string {
+        if (!resourceId) return AGENT_ICONS.default;
+        
+        const lowerResource = resourceId.toLowerCase();
+        
+        // Direct match
+        if (AGENT_ICONS[lowerResource]) {
+            return AGENT_ICONS[lowerResource];
         }
-    };
+        
+        // Keyword matching for flexibility
+        if (lowerResource.includes('mail') || lowerResource.includes('gmail')) {
+            return '📧';
+        }
+        if (lowerResource.includes('doc') || lowerResource.includes('document')) {
+            return '📄';
+        }
+        if (lowerResource.includes('sheet') || lowerResource.includes('spreadsheet')) {
+            return '📊';
+        }
+        if (lowerResource.includes('browse') || lowerResource.includes('web')) {
+            return '🌐';
+        }
+        if (lowerResource.includes('code') || lowerResource.includes('coding')) {
+            return '💻';
+        }
+        if (lowerResource.includes('python')) {
+            return '🐍';
+        }
+        if (lowerResource.includes('terminal') || lowerResource.includes('shell')) {
+            return '⌨️';
+        }
+        if (lowerResource.includes('book') || lowerResource.includes('finance') || lowerResource.includes('zoho')) {
+            return '💼';
+        }
+        if (lowerResource.includes('plan')) {
+            return '📋';
+        }
+        
+        // Default fallback
+        return AGENT_ICONS.default;
+    }
+
+    /**
+     * Format agent names for display
+     * "gmail_agent" → "Gmail Agent"
+     */
+    function formatAgentName(resourceId: string): string {
+        if (!resourceId) return 'Agent';
+        
+        return resourceId
+            .replace(/_/g, ' ')
+            .split(' ')
+            .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+            .join(' ');
+    }
+
+    /**
+     * Check if action is significant (agent/tool invocation, not simple transaction)
+     * STRICT FILTER: Only show successful agent and major tool operations
+     */
+    function isSignificantAction(action: ActionHistoryEntry): boolean {
+        const resourceId = action.resource_id?.toLowerCase() || '';
+        const instruction = action.instruction?.toLowerCase() || '';
+        
+        // MUST be successful - no failed operations
+        if (!action.success) {
+            return false;
+        }
+        
+        // MUST be an agent or major tool
+        const isAgent = resourceId.includes('_agent');
+        const isMajorTool = resourceId.includes('spreadsheet') || 
+                           resourceId.includes('gmail') || 
+                           resourceId.includes('document') || 
+                           resourceId.includes('browser') || 
+                           resourceId.includes('coding') || 
+                           resourceId.includes('zoho') ||
+                           resourceId.includes('mail');
+        
+        if (!isAgent && !isMajorTool) {
+            return false;
+        }
+        
+        // Exclude: simple operations, intermediate steps, system operations
+        const excludeKeywords = ['print', 'log', 'debug', 'wait', 'sleep', 'file path', 'check', 'verify'];
+        const hasExcludeKeyword = excludeKeywords.some(kw => 
+            resourceId.includes(kw) || instruction.includes(kw)
+        );
+        
+        if (hasExcludeKeyword) {
+            return false;
+        }
+        
+        // Additional check: must have meaningful execution time
+        if (action.execution_time_ms < 50) {
+            return false;
+        }
+        
+        return true;
+    }
+
+    /**
+     * Create detailed description showing what the tool specifically does
+     * Parses result_summary to extract clean, user-friendly text
+     * Examples: "Analyzes CSV file and extracts invoice data"
+     *           "Sends 5 emails to clients with reports"
+     */
+    function createDetailedDescription(action: ActionHistoryEntry): string {
+        let description = '';
+        
+        // Try to parse result_summary if it exists
+        if (action.result_summary && action.result_summary.length > 0) {
+            // Extract content from various formats:
+            // Format 1: result: {'task_summary': "The spreadsheet..."}
+            // Format 2: {"task_summary": "Text here"}
+            // Format 3: Plain text
+            
+            const taskSummaryMatch = action.result_summary.match(/['"]task_summary['"]\s*:\s*['"]([^'"]+)['"]/i);
+            if (taskSummaryMatch && taskSummaryMatch[1]) {
+                description = taskSummaryMatch[1];
+            } else {
+                // Try to extract meaningful text after common prefixes
+                const cleanText = action.result_summary
+                    .replace(/^result:\s*/i, '')
+                    .replace(/^\{[^}]*\}\s*/, '')
+                    .replace(/^['"]/, '')
+                    .replace(/['"]$/, '')
+                    .trim();
+                
+                if (cleanText && cleanText.length > 10) {
+                    description = cleanText;
+                }
+            }
+        }
+        
+        // If we got a clean description, use it
+        if (description && description.length > 10) {
+            return truncate(description, 70);
+        }
+        
+        // Try instruction as fallback
+        if (action.instruction && action.instruction.length > 20) {
+            return truncate(action.instruction, 70);
+        }
+        
+        // Generate description based on resource type
+        const resourceId = action.resource_id?.toLowerCase() || '';
+        if (resourceId.includes('spreadsheet')) {
+            return 'Analyzing spreadsheet data';
+        } else if (resourceId.includes('gmail') || resourceId.includes('mail')) {
+            return 'Managing email operations';
+        } else if (resourceId.includes('document')) {
+            return 'Processing document content';
+        } else if (resourceId.includes('browser')) {
+            return 'Browsing and extracting web data';
+        } else if (resourceId.includes('coding') || resourceId.includes('python')) {
+            return 'Executing code analysis';
+        }
+        
+        return 'Processing your request';
+    }
+
+    /**
+     * Extract agent name from todo description
+     * "Use gmail_agent to send emails" → "gmail_agent"
+     */
+    function extractAgentFromDescription(desc: string): string | null {
+        // Look for common patterns
+        const agentMatch = desc.match(/\b(\w+_agent)\b/i);
+        if (agentMatch) return agentMatch[1].toLowerCase();
+        
+        // Check for specific keywords
+        if (desc.toLowerCase().includes('email') || desc.toLowerCase().includes('gmail')) return 'gmail_agent';
+        if (desc.toLowerCase().includes('spreadsheet') || desc.toLowerCase().includes('excel')) return 'spreadsheet_agent';
+        if (desc.toLowerCase().includes('document') || desc.toLowerCase().includes('doc')) return 'document_agent';
+        if (desc.toLowerCase().includes('browse') || desc.toLowerCase().includes('web')) return 'browser_agent';
+        
+        return null;
+    }
+
+    /**
+     * Truncate text to max length
+     */
+    function truncate(text: string, maxLength: number): string {
+        if (!text) return '';
+        return text.length > maxLength ? text.slice(0, maxLength) + '...' : text;
+    }
+
+    /**
+     * Get edge color based on status
+     */
+    function getEdgeColor(status: string): string {
+        switch (status) {
+            case 'completed': return '#10B981'; // green
+            case 'running': case 'in_progress': return '#3B82F6'; // blue
+            case 'failed': return '#EF4444'; // red
+            case 'pending': default: return '#9CA3AF'; // gray
+        }
+    }
+
+    // ========================================================================
+    // RENDER
+    // ========================================================================
 
     // Empty state
-    if (!planData || (planData.pendingTasks.flat().length === 0 && (!externalTodoList || externalTodoList.length === 0))) {
+    if (!nodes || nodes.length === 0) {
         return (
-            <div className="w-full h-full flex items-center justify-center bg-bg-subtle rounded-lg border-2 border-dashed border-border-color-medium">
-                <div className="text-center text-text-tertiary p-8">
-                    <div className="mb-4">
-                        <svg
-                            className="w-16 h-16 mx-auto text-text-disabled animate-pulse"
-                            fill="none"
-                            viewBox="0 0 24 24"
-                            stroke="currentColor"
-                        >
-                            <path
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                                strokeWidth={1.5}
-                                d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"
-                            />
-                        </svg>
-                    </div>
-                    <p className="font-semibold text-orbimesh-section-header mb-2 text-text-secondary">Workflow Plan</p>
-                    <p className="text-orbimesh-section-subtitle text-text-tertiary">
-                        {executionModel === 'todo-list'
-                            ? 'No tasks in the sequence yet'
-                            : 'The execution plan graph will appear here once tasks are identified'}
-                    </p>
+            <div className="w-full h-[500px] rounded-lg border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 flex items-center justify-center">
+                <div className="text-center text-gray-500 dark:text-gray-400">
+                    <div className="text-4xl mb-3">📋</div>
+                    <div className="text-sm">No workflow to display</div>
+                    <div className="text-xs mt-1">Start a conversation to see the execution flow</div>
                 </div>
             </div>
         );
     }
 
     // Calculate progress
-    const todoListToUse = externalTodoList || planData.todoList || [];
-    const totalTasks = todoListToUse.length || planData.pendingTasks.flat().length;
-    const completedCount = Object.values(taskStatuses).filter((t: any) => t.status === 'completed').length;
-    const runningCount = Object.values(taskStatuses).filter((t: any) => t.status === 'running' || t.status === 'in-progress').length;
-    const failedCount = Object.values(taskStatuses).filter((t: any) => t.status === 'failed').length;
-    const progress = totalTasks > 0 ? (completedCount / totalTasks) * 100 : 0;
+    const completedCount = nodes.filter((n: Node<SimpleNodeData>) => n.data.status === 'completed').length;
+    const totalCount = nodes.length;
+    const progress = totalCount > 0 ? (completedCount / totalCount) * 100 : 0;
 
     return (
-        <div className="w-full h-full rounded-lg border border-border-color bg-bg-card flex flex-col">
-            {/* Model Badge */}
-            <div className="px-4 py-2 border-b border-border-color bg-bg-subtle flex items-center justify-between">
-                <Badge
-                    variant={executionModel === 'todo-list' ? 'default' : 'secondary'}
-                    className="text-xs"
-                >
-                    {executionModel === 'todo-list' ? '📝 Sequential (Todo List)' : '⚡ Parallel (Batch Plan)'}
-                </Badge>
+        <div className="w-full h-[500px] rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950 flex flex-col">
+            {/* Progress Header */}
+            <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-800">
+                <div className="flex items-center justify-between mb-2">
+                    <div className="text-sm font-medium text-gray-900 dark:text-gray-100">
+                        Workflow Progress
+                    </div>
+                    <div className="text-xs text-gray-500 dark:text-gray-400">
+                        {completedCount} / {totalCount} completed
+                    </div>
+                </div>
+                <div className="w-full bg-gray-200 dark:bg-gray-800 rounded-full h-2">
+                    <div 
+                        className="bg-blue-500 dark:bg-blue-600 h-2 rounded-full transition-all duration-500"
+                        style={{ width: `${progress}%` }}
+                    />
+                </div>
             </div>
 
-            {/* Progress Bar */}
-            {totalTasks > 0 && progress < 100 && (
-                <div className="px-4 py-2 border-b border-border-color bg-bg-subtle">
-                    <div className="flex items-center justify-between mb-2">
-                        <span className="text-orbimesh-metadata-label font-medium text-text-secondary">
-                            Progress: {completedCount}/{totalTasks} tasks
-                        </span>
-                        <span className="text-orbimesh-file-meta text-text-tertiary">
-                            {runningCount > 0 && `${runningCount} running`}
-                            {failedCount > 0 && ` • ${failedCount} failed`}
-                        </span>
-                    </div>
-                    <div className="w-full bg-border-color-light rounded-full h-2 overflow-hidden">
-                        <div
-                            className="bg-status-success h-2 rounded-full transition-all duration-500 ease-out"
-                            style={{ width: `${progress}%` }}
-                        />
-                    </div>
-                </div>
-            )}
-
-            {/* Completion Banner */}
-            {progress === 100 && totalTasks > 0 && (
-                <div className="px-4 py-3 bg-status-success-light border-b border-status-success-border">
-                    <div className="flex items-center gap-2">
-                        <CheckCircle className="w-5 h-5 text-status-success-dark" />
-                        <span className="text-orbimesh-section-subtitle font-semibold text-status-success-dark">
-                            All tasks completed successfully!
-                        </span>
-                        <Zap className="w-4 h-4 text-status-pending animate-pulse" />
-                    </div>
-                </div>
-            )}
-
-            {/* Graph */}
-            <div className="flex-1 bg-bg-subtle">
+            {/* ReactFlow Graph */}
+            <div className="flex-1">
                 <ReactFlow
                     nodes={nodes}
                     edges={edges}
                     nodeTypes={nodeTypes}
                     fitView
-                    proOptions={{ hideAttribution: true }}
-                    className="bg-bg-subtle"
+                    attributionPosition="bottom-left"
                 >
-                    <Controls className="bg-bg-card border border-border-color" />
-                    <Background
-                        color="var(--color-border-medium)"
-                        className="bg-bg-subtle"
+                    <Controls className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800" />
+                    <Background 
+                        color="#e5e7eb" 
+                        className="dark:bg-gray-900" 
+                        gap={16} 
                     />
                 </ReactFlow>
             </div>

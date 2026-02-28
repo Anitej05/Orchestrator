@@ -175,7 +175,10 @@ export default function WorkflowExecutionChat({ workflowId, workflow, onCancel }
                   <CardContent>
                     {/* Plan Graph */}
                     <div className="h-[400px] mb-4 border rounded-lg overflow-hidden">
-                      <PlanGraph planData={msg.planData} taskStatuses={msg.taskStatuses || taskStatuses} />
+                      <PlanGraph 
+                        planData={msg.planData} 
+                        todoList={msg.planData?.todoList || workflow.blueprint.todo_list}
+                      />
                     </div>
                     
                     {/* Plan Details */}
@@ -257,7 +260,10 @@ export default function WorkflowExecutionChat({ workflowId, workflow, onCancel }
               </CardHeader>
               <CardContent>
                 <div className="h-[400px]">
-                  <PlanGraph planData={planData} taskStatuses={taskStatuses} />
+                  <PlanGraph 
+                    planData={planData} 
+                    todoList={workflow.blueprint.todo_list}
+                  />
                 </div>
               </CardContent>
             </Card>

@@ -74,6 +74,18 @@ export interface TodoItem {
   updated_at?: number | string;
 }
 
+// NEW: Action History Entry - Shows actual agent/tool execution
+export interface ActionHistoryEntry {
+  iteration: number;
+  action_type: string;
+  resource_id: string;       // Agent/tool name (e.g., "gmail_agent", "send_email")
+  instruction: string;
+  success: boolean;
+  result_summary: string;
+  execution_time_ms: number;
+  error?: string;
+}
+
 export interface ConversationState {
   thread_id?: string;
   status: 'pending_user_input' | 'completed' | 'processing' | 'idle' | 'error' | 'planning_complete';
@@ -91,6 +103,8 @@ export interface ConversationState {
   task_statuses?: Record<string, TaskStatus>;
   current_executing_task?: string | null;
   todo_list?: TodoItem[];
+  // NEW: Orchestration state from OMNI-DISPATCHER
+  action_history?: ActionHistoryEntry[];  // Complete execution log with agent/tool info
   // Canvas feature fields
   canvas_content?: string;  // Legacy: HTML/markdown string
   canvas_data?: Record<string, any>;  // Preferred: Structured data

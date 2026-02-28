@@ -173,6 +173,13 @@ export function useWebSocketManager({
             });
           }
 
+          // NEW: Handle action_history updates
+          if (eventData.data?.action_history) {
+            _setConversationState({
+              action_history: eventData.data.action_history,
+            });
+          }
+
           // Extract stage information from event data (sent by backend)
           const backendStage = eventData.data?.current_stage;
           const backendMessage = eventData.data?.stage_message;

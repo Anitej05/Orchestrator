@@ -7,6 +7,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
 import { DollarSign, Clock, FileIcon, FileText, Image as ImageIcon } from "lucide-react"
 import PlanGraph from "@/components/PlanGraph"
+import ActionHistoryTimeline from "@/components/action-history-timeline"
 import SaveWorkflowButton from "@/components/save-workflow-button"
 import { useEffect, useState } from "react"
 import { useConversationStore } from "@/lib/conversation-store"
@@ -244,6 +245,7 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
         const conversationState = useConversationStore();
         const taskAgentPairs = conversationState.task_agent_pairs || [];
         const todoList = conversationState.todo_list || [];
+        const actionHistory = (conversationState as any).action_history || [];
         const messages = conversationState.messages || [];
         const uploadedFiles = conversationState.uploaded_files || [];
         const planData = conversationState.plan || [];
@@ -456,8 +458,8 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
         return (
             <aside className={cn("border-l border-border-color bg-bg-card text-text-primary p-4 flex flex-col h-full overflow-hidden", className)}>
                 <Tabs value={activeTab} onValueChange={setActiveTab} className="h-full flex flex-col overflow-hidden min-w-0">
-                    <TabsList className="grid w-full grid-cols-3 bg-bg-subtle/80 backdrop-blur-xl border border-border-color/50 shadow-orbimesh-panel">
-                        <TabsTrigger value="plan" className="relative">
+                    <TabsList className="grid w-full grid-cols-4 bg-bg-subtle/80 backdrop-blur-xl border border-border-color/50 shadow-orbimesh-panel">
+                        <TabsTrigger value="plan" className="relative text-xs">
                             Plan
                             {(conversationState.metadata?.currentStage === 'executing' ||
                                 conversationState.metadata?.currentStage === 'validating') && (
@@ -466,8 +468,9 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                                     </span>
                                 )}
                         </TabsTrigger>
-                        <TabsTrigger value="attachments">Attachments</TabsTrigger>
-                        <TabsTrigger value="canvas">Canvas</TabsTrigger>
+                        <TabsTrigger value="history" className="text-xs">History</TabsTrigger>
+                        <TabsTrigger value="attachments" className="text-xs">Files</TabsTrigger>
+                        <TabsTrigger value="canvas" className="text-xs">Canvas</TabsTrigger>
                     </TabsList>
 
                     <TabsContent value="plan" className="flex-1 flex flex-col">
@@ -506,9 +509,8 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                             )}
                         </div>
 
-                        {/* View Toggle */}
-                        {/* TEMPORARILY DISABLED - Graph view needs fixing */}
-                        {/* <div className="px-4 pb-2 flex gap-2 border-b border-border-color">
+                        {/* View Toggle - Re-enabled with new simplified PlanGraph! */}
+                        <div className="px-4 pb-2 flex gap-2 border-b border-border-color">
                             <button
                                 onClick={() => setViewMode('graph')}
                                 className={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${
@@ -517,7 +519,7 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                                         : 'bg-bg-subtle text-text-secondary hover:bg-bg-hover'
                                 }`}
                             >
-                                📊 Graph View
+                                Graph View
                             </button>
                             <button
                                 onClick={() => setViewMode('list')}
@@ -527,19 +529,18 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                                         : 'bg-bg-subtle text-text-secondary hover:bg-bg-hover'
                                 }`}
                             >
-                                📋 List View
+                                List View
                             </button>
-                        </div> */}
+                        </div>
 
-                        {/* Real-time Graph with Task Statuses */}
-                        {/* TEMPORARILY DISABLED - Using list view only */}
-                        {/* {viewMode === 'graph' ? (
+                        {/* Real-time Graph with Task Statuses - Now with action_history! */}
+                        {viewMode === 'graph' ? (
                             <div className="flex-1 flex items-center justify-center">
                                 <PlanGraph
                                     key={JSON.stringify(plan)}
-                                    planData={plan}
+                                    actionHistory={actionHistory}
                                     todoList={plan.todoList}
-                                    taskStatuses={conversationState.task_statuses || {}}
+                                    planData={plan}
                                 />
                             </div>
                         ) : (
@@ -550,18 +551,15 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                                     pendingTasks={plan.pendingTasks || []}
                                 />
                             </div>
-                        )} */}
-                        
-                        {/* Showing only list view for now */}
-                        <div className="flex-1 overflow-y-auto p-4">
-                            <TaskListView
-                                todoList={plan.todoList || []}
-                                taskStatuses={conversationState.task_statuses || {}}
-                                pendingTasks={plan.pendingTasks || []}
-                            />
-                        </div>
+                        )}
 
                     </TabsContent>
+
+                    {/* Action History Tab - Shows detailed execution log */}
+                    <TabsContent value="history" className="flex-1 overflow-y-auto mt-4">
+                        <ActionHistoryTimeline history={actionHistory} />
+                    </TabsContent>
+
                     <TabsContent value="attachments" className="flex-1 overflow-hidden mt-4 min-w-0 max-w-full">
                         {viewingFile ? (
                             <div className="h-full overflow-hidden max-w-full">

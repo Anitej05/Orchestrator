@@ -3520,6 +3520,7 @@ async def websocket_chat(websocket: WebSocket):
                     # ─── Register / refresh UserThread in DB so conversation appears in sidebar ───
                     try:
                         from database import SessionLocal as _SessionLocal
+                        from models import UserThread
                         _db = _SessionLocal()
                         try:
                             existing_thread = _db.query(UserThread).filter_by(thread_id=thread_id).first()

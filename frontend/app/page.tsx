@@ -355,7 +355,7 @@ function HomeContent() {
                     continueConversation={continueConversation}
                     resetConversation={resetConversation}
                     onViewCanvas={handleViewCanvas}
-                    owner={user?.id}
+                    owner={clerkLoaded && user?.id ? user.id : undefined}
                     onAcceptPlan={handleAcceptPlan}
                   />
                 </div>
