@@ -8,13 +8,9 @@ import os
 import re
 import json
 import logging
-from typing import Any, Dict, List, Optional
-from pydantic import BaseModel
+from typing import Any, Dict, List
 from pydantic.networks import HttpUrl
 from langchain_core.messages import messages_to_dict
-from langchain_cerebras import ChatCerebras
-from langchain_nvidia_ai_endpoints import ChatNVIDIA
-from langchain_groq import ChatGroq
 
 logger = logging.getLogger("AgentOrchestrator")
 
@@ -256,14 +252,19 @@ def get_hf_embeddings():
 
 
 
-def save_conversation_history(state: dict, *args, **kwargs):
+def save_conversation_history(state: dict, config=None, *args, **kwargs):
     """Saves the conversation history to a JSON file. Accepts extra args for compatibility."""
-    thread_id = state.get("thread_id")
+    # Extract thread_id from LangGraph config (primary) or state (fallback)
+    thread_id = None
+    if config and isinstance(config, dict):
+        thread_id = config.get("configurable", {}).get("thread_id")
     if not thread_id:
-        logger.warning("No thread_id found in state, skipping history save")
+        thread_id = state.get("thread_id")
+    if not thread_id:
+        logger.warning("No thread_id found in state or config, skipping history save")
         return
 
-    history_dir = os.path.join(BACKEND_DIR, "agent_conversations")
+    history_dir = os.path.join(BACKEND_DIR, "conversation_history")
     os.makedirs(history_dir, exist_ok=True)
     history_path = os.path.join(history_dir, f"{thread_id}.json")
     
