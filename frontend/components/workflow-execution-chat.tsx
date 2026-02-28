@@ -11,6 +11,7 @@ import type { TaskStatus } from '@/lib/types';
 import { authFetch } from '@/lib/auth-fetch';
 import { toast } from 'sonner';
 import { useTaskExecutionWebSocket } from '@/hooks/use-task-execution-websocket';
+import { API_BASE_URL } from '@/lib/config';
 
 interface WorkflowExecutionChatProps {
   workflowId: string;
@@ -21,6 +22,7 @@ interface WorkflowExecutionChatProps {
       original_prompt: string;
       task_plan: any[];
       task_agent_pairs: any[];
+      todo_list?: any[];
     };
   };
   onCancel?: () => void;
@@ -41,42 +43,30 @@ export default function WorkflowExecutionChat({ workflowId, workflow, onCancel }
   const [isExecuting, setIsExecuting] = useState(false);
   const [executionThreadId, setExecutionThreadId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [taskStatuses, setTaskStatuses] = useState<Record<string, TaskStatus>>({});
 
-  // Use unified WebSocket hook for task execution monitoring
-  const { taskStatuses, isConnected, connect, disconnect } = useTaskExecutionWebSocket({
-    onTaskStart: (taskName, agentName) => {
-      addMessage('assistant', `🚀 Starting task: ${taskName} with ${agentName}`);
-    },
-    onTaskComplete: (taskName, result, executionTime) => {
-      addMessage('assistant', `✅ Completed: ${taskName} (${executionTime}ms)`);
-    },
-    onTaskFail: (taskName, error) => {
-      addMessage('assistant', `❌ Failed: ${taskName} - ${error}`);
-    },
-    onFinalResponse: (data) => {
-      setIsExecuting(false);
-      addMessage('system', '🎉 Workflow execution completed successfully!');
-      if (data.content) {
-        addMessage('assistant', data.content);
+  // Initialize WebSocket hook
+  const { connect, disconnect, taskStatuses: wsTaskStatuses } = useTaskExecutionWebSocket({
+    onMessage: (data) => {
+      if (data.type === 'task_status') {
+        setTaskStatuses(prev => ({
+          ...prev,
+          [data.task_name]: data
+        }));
       }
-    },
-    onError: (error) => {
-      setIsExecuting(false);
-      addMessage('system', `⚠️ Error: ${error}`);
-    },
-    onConnect: () => {
-      console.log('WebSocket connected for workflow execution');
-      addMessage('system', 'Connected to execution server. Starting workflow...');
-    },
-    onDisconnect: () => {
-      console.log('WebSocket closed');
-      setIsExecuting(false);
-    },
+    }
   });
 
-  // Build plan data from task_plan
+  // Build plan data from todo_list (new system) or task_plan (old system)
   const planData = {
-    pendingTasks: workflow.blueprint.task_plan?.flatMap((batch: any[]) => 
+    pendingTasks: workflow.blueprint.todo_list?.map((task: any) => ({
+      task: task.title || 'Untitled Task',
+      description: task.description || task.instructions || '',
+      agent: task.assigned_to || 'N/A',
+      status: task.status || 'pending',
+      id: task.task_id || task.id
+    })) || 
+    workflow.blueprint.task_plan?.flatMap((batch: any[]) => 
       batch.map((task: any) => ({
         task: task.task_name || task.name,
         description: task.task_description || task.description || '',
@@ -106,9 +96,9 @@ export default function WorkflowExecutionChat({ workflowId, workflow, onCancel }
     ]);
 
     return () => {
-      disconnect();
+      if (disconnect) disconnect();
     };
-  }, [disconnect]);
+  }, []);
 
   useEffect(() => {
     // Auto-scroll to bottom when new messages arrive
@@ -135,7 +125,6 @@ export default function WorkflowExecutionChat({ workflowId, workflow, onCancel }
     
     try {
       // Execute workflow using the saved task_plan directly
-      import { API_BASE_URL } from '@/lib/config';
       const response = await authFetch(`${API_BASE_URL}/api/workflows/${workflowId}/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

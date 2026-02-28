@@ -23,10 +23,8 @@ htmlcov/
 # Conversation History and Plans
 # Keep the directories but ignore all conversation and plan files
 conversation_history/*.json
-agent_plans/*.md
 # Keep the .gitkeep files
 !conversation_history/.gitkeep
-!agent_plans/.gitkeep
 
 # Logs
 logs/*.log

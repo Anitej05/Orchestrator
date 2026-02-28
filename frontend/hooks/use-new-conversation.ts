@@ -32,6 +32,8 @@ export function useNewConversation() {
       has_canvas: false,
       task_statuses: {},
       current_executing_task: null,
+      pending_action_approval: false,
+      pending_action: undefined,
       isLoading: false,
     });
 

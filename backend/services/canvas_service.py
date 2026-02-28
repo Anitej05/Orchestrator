@@ -440,9 +440,14 @@ class CanvasService:
         try:
             # Try template first
             if decision.template_id:
+                template_data = dict(decision.canvas_data or {})
+                # For markdown_viewer template: LLM may put content in canvas_content
+                # rather than canvas_data["content"]. Bridge the gap here.
+                if decision.template_id == "markdown_viewer" and not template_data.get("content") and decision.canvas_content:
+                    template_data["content"] = decision.canvas_content
                 display = CanvasService.build_from_template(
                     template_id=decision.template_id,
-                    data=decision.canvas_data or {},
+                    data=template_data,
                     title=decision.canvas_title,
                     requires_confirmation=decision.requires_confirmation,
                     confirmation_message=decision.confirmation_message,

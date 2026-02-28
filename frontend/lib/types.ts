@@ -108,6 +108,9 @@ export interface ConversationState {
   estimated_cost?: number;
   task_count?: number;
   task_plan?: any[];
+  // Action approval fields (Omni-Dispatcher)
+  pending_action_approval?: boolean;
+  pending_action?: any;
   // Canvas confirmation fields
   pending_confirmation?: boolean;
   pending_confirmation_task?: {

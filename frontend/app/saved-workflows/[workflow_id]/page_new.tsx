@@ -134,17 +134,33 @@ export default function WorkflowDetailPage() {
     }
   };
 
-  // Build plan data for graph from task_plan
+  // Build plan data for graph from todo_list (new system) or task_plan (old system)
   const planData = useMemo(() => {
     if (!workflow) return { pendingTasks: [], completedTasks: [] };
     
     console.log('Workflow blueprint:', workflow.blueprint);
+    console.log('Todo list:', workflow.blueprint.todo_list);
     console.log('Task plan:', workflow.blueprint.task_plan);
     console.log('Task agent pairs:', workflow.blueprint.task_agent_pairs);
     
-    // Use task_plan if available (preferred), fallback to task_agent_pairs
-    const taskPlan = workflow.blueprint.task_plan || [];
+    // Try todo_list first (new system)
+    const todoList = workflow.blueprint.todo_list || [];
+    if (todoList.length > 0) {
+      console.log('Building plan from todo_list:', todoList);
+      return {
+        pendingTasks: todoList.map((task: any) => ({
+          task: task.title || 'Untitled Task',
+          description: task.description || task.instructions || '',
+          agent: task.assigned_to || 'N/A',
+          status: task.status || 'pending',
+          id: task.task_id || task.id
+        })),
+        completedTasks: []
+      };
+    }
     
+    // Fallback to task_plan (old system)
+    const taskPlan = workflow.blueprint.task_plan || [];
     if (taskPlan.length > 0) {
       // task_plan is an array of batches (parallel tasks)
       const allTasks: any[] = [];
@@ -171,7 +187,7 @@ export default function WorkflowDetailPage() {
       return { pendingTasks: allTasks, completedTasks: [] };
     }
     
-    // Fallback to task_agent_pairs
+    // Fallback to task_agent_pairs (old system)
     const pendingTasks = (workflow.blueprint.task_agent_pairs || []).map((t: any) => ({
       task: t.task_name,
       description: t.task_description,

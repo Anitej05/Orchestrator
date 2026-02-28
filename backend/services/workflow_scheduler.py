@@ -158,13 +158,15 @@ class WorkflowScheduler:
                     execution.started_at = datetime.utcnow()
                     db.commit()
                 
-                # Get the saved plan from blueprint
+                # Get the saved plan from blueprint (try new system first, fall back to old)
+                todo_list = blueprint.get("todo_list", [])
                 task_plan = blueprint.get("task_plan", [])
                 task_agent_pairs = blueprint.get("task_agent_pairs", [])
                 original_prompt = blueprint.get("original_prompt", "")
                 
-                if not task_agent_pairs:
-                    raise Exception("Workflow has no saved task agent pairs")
+                # Require at least one execution plan format
+                if not todo_list and not task_agent_pairs:
+                    raise Exception("Workflow has no saved execution plan. Must have either todo_list or task_agent_pairs")
                 
                 # Check if schedule already has a conversation thread
                 schedule = db.query(WorkflowSchedule).filter(
@@ -203,7 +205,9 @@ class WorkflowScheduler:
                     logger.info(f"Created new conversation thread {thread_id} for scheduled workflow {workflow_id}")
                 
                 # Save/update conversation JSON file
-                conversation_history_dir = "conversation_history"
+                _svc_dir = os.path.dirname(os.path.abspath(__file__))   # services/
+                _backend_dir = os.path.dirname(_svc_dir)                  # backend/
+                conversation_history_dir = os.path.join(_backend_dir, "conversation_history")
                 os.makedirs(conversation_history_dir, exist_ok=True)
                 history_path = os.path.join(conversation_history_dir, f"{thread_id}.json")
                 
@@ -229,8 +233,12 @@ class WorkflowScheduler:
                 conversation_json = {
                     "thread_id": thread_id,
                     "original_prompt": original_prompt,
+                    # New system (primary)
+                    "todo_list": todo_list,
+                    # Old system (fallback)
                     "task_agent_pairs": task_agent_pairs,
                     "task_plan": task_plan,
+                    # Messages and status
                     "messages": existing_messages,
                     "completed_tasks": [],
                     "final_response": None,
@@ -403,10 +411,14 @@ class WorkflowScheduler:
         except Exception as e:
             logger.error(f"Failed to load active schedules: {str(e)}")
     
-    def shutdown(self):
+    def shutdown(self, wait=False):
         """Shutdown the scheduler"""
-        self.scheduler.shutdown(wait=True)
-        logger.info("Workflow scheduler shut down")
+        try:
+            # Don't wait for jobs to complete on forced shutdown
+            self.scheduler.shutdown(wait=wait)
+            logger.info("Workflow scheduler shut down")
+        except Exception as e:
+            logger.error(f"Error during scheduler shutdown: {e}")
 
 # Global scheduler instance
 _scheduler: Optional[WorkflowScheduler] = None

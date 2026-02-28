@@ -20,7 +20,10 @@ from models import UserThread
 router = APIRouter(tags=["Conversations"])
 logger = logging.getLogger("uvicorn.error")
 
-CONVERSATION_HISTORY_DIR = "conversation_history"
+# Use absolute path so this works regardless of the server's CWD
+_ROUTER_DIR = os.path.dirname(os.path.abspath(__file__))      # backend/routers/
+_BACKEND_DIR = os.path.dirname(_ROUTER_DIR)                    # backend/
+CONVERSATION_HISTORY_DIR = os.path.join(_BACKEND_DIR, "conversation_history")
 
 conversation_store: Dict[str, Dict[str, Any]] = {}
 store_lock = Lock()

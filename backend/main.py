@@ -47,7 +47,7 @@ import httpx
 # from sentence_transformers import SentenceTransformer
 
 # --- Local Application Imports ---
-CONVERSATION_HISTORY_DIR = "conversation_history"
+CONVERSATION_HISTORY_DIR = os.path.join(BACKEND_DIR, "conversation_history")
 from database import SessionLocal, get_db
 from models import Agent, StatusEnum, AgentCapability, AgentEndpoint, EndpointParameter, Workflow, WorkflowExecution, UserThread, WorkflowSchedule, WorkflowWebhook, AgentType
 from backend.schemas import AgentCard, ProcessRequest, ProcessResponse, PlanResponse, FileObject, ActionApprovalRequest, ActionRejectRequest
@@ -159,30 +159,56 @@ async def lifespan(app: FastAPI):
     logger.info("APPLICATION SHUTTING DOWN")
     logger.info("=" * 60)
     
-    # Cancel background health checker
+    # Cancel background health checker with timeout
     if _health_checker_task:
         logger.info("✓ Cancelling health checker task...")
         _health_checker_task.cancel()
         try:
-            await _health_checker_task
-        except asyncio.CancelledError:
+            await asyncio.wait_for(_health_checker_task, timeout=2.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
         logger.info("✓ Health checker stopped")
+    
+    # Cancel any pending async tasks
+    try:
+        logger.info("✓ Cancelling pending tasks...")
+        pending = [task for task in asyncio.all_tasks() if not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        logger.info(f"✓ Cancelled {len(pending)} pending tasks")
+    except Exception as e:
+        logger.warning(f"Warning during task cancellation: {e}")
     
     # Stop all agent processes
     logger.info("✓ Stopping agent processes...")
     cleanup_agents()
     logger.info("✓ Agent processes stopped")
     
-    # Shutdown workflow scheduler
+    # Shutdown workflow scheduler with timeout
     try:
         from backend.services.workflow_scheduler import get_scheduler
         scheduler = get_scheduler()
         logger.info("✓ Shutting down workflow scheduler...")
-        scheduler.shutdown()
+        await asyncio.wait_for(
+            asyncio.get_event_loop().run_in_executor(None, scheduler.shutdown, False),
+            timeout=5.0
+        )
         logger.info("✓ Workflow scheduler stopped")
+    except asyncio.TimeoutError:
+        logger.warning("⚠ Workflow scheduler shutdown timed out (forced)")
     except Exception as e:
         logger.error(f"✗ Error shutting down scheduler: {str(e)}")
+    
+    # Close database connections
+    try:
+        logger.info("✓ Closing database connections...")
+        from database import engine
+        engine.dispose()
+        logger.info("✓ Database connections closed")
+    except Exception as e:
+        logger.error(f"✗ Error closing database: {str(e)}")
     
     logger.info("=" * 60)
     logger.info("APPLICATION SHUTDOWN COMPLETE")
@@ -286,12 +312,12 @@ conversations_router.set_shared_state(conversation_store, store_lock)
 # workflows_router needs access to checkpointer
 workflows_router.set_checkpointer(checkpointer)
 
-# NOTE: files_router, workflows_router, and dashboard_router are NOT included here
+# NOTE: files_router and dashboard_router are NOT included here
 # because their routes are already defined inline in main.py (with additional logic).
 # Including them would cause Duplicate Operation ID warnings.
 # TODO: Migrate inline routes to routers and re-enable these includes.
 # app.include_router(files_router.router)
-# app.include_router(workflows_router.router)
+app.include_router(workflows_router.router)
 # app.include_router(dashboard_router.router)
 
 app.include_router(agents_router.router)
@@ -1087,23 +1113,28 @@ async def serve_file(file_path: str):
     """
     # Decode the file path
     from urllib.parse import unquote
+    from pathlib import Path
     file_path = unquote(file_path)
     
     # Security: ensure the path doesn't escape the storage directory
     if ".." in file_path or file_path.startswith("/"):
         raise HTTPException(status_code=400, detail="Invalid file path")
     
+    # Resolve path relative to backend directory
+    backend_dir = Path(__file__).parent
+    full_path = backend_dir / file_path
+    
     # Check if file exists
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File not found")
+    if not full_path.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
     
     # Determine media type based on file extension
     from mimetypes import guess_type
-    media_type, _ = guess_type(file_path)
+    media_type, _ = guess_type(str(full_path))
     
     # Return the file
     from fastapi.responses import FileResponse
-    return FileResponse(file_path, media_type=media_type)
+    return FileResponse(str(full_path), media_type=media_type)
 
 # --- Unified Orchestration Service ---
 async def execute_orchestration(
@@ -1549,13 +1580,6 @@ async def execute_orchestration(
             save_conversation_history(final_state, {"configurable": {"thread_id": thread_id}})
         except Exception as e:
             logger.error(f"Failed to save conversation history for {thread_id}: {e}")
-
-        # Ensure a plan file is saved for every conversation
-        try:
-            from backend.orchestrator.graph import save_plan_to_file
-            save_plan_to_file({**final_state, "thread_id": thread_id})
-        except Exception as e:
-            logger.error(f"Failed to save plan file for thread {thread_id}: {e}")
 
         logger.info(f"Orchestration completed for thread_id: {thread_id}")
 
@@ -2359,22 +2383,31 @@ async def execute_workflow(workflow_id: str, request: Request, inputs: Dict[str,
     db.add(execution)
     db.commit()
     
-    # Get the saved plan from blueprint
+    # Get the saved plan from blueprint (try new system first, fall back to old)
     blueprint = workflow.blueprint
+    todo_list = blueprint.get("todo_list", [])
     task_plan = blueprint.get("task_plan", [])
     task_agent_pairs = blueprint.get("task_agent_pairs", [])
     original_prompt = blueprint.get("original_prompt", "")
     
-    if not task_plan or not task_agent_pairs:
-        raise HTTPException(status_code=400, detail="Workflow has no saved execution plan")
+    # Require at least one execution plan format
+    if not todo_list and not (task_plan and task_agent_pairs):
+        raise HTTPException(
+            status_code=400, 
+            detail="Workflow has no saved execution plan. Please save a workflow with a todo_list or task_plan."
+        )
     
     # Create a memory saver for this thread
     memory = MemorySaver()
     
     # Pre-seed the thread state with the saved plan (bypass planning phase)
+    # Include both systems for compatibility with graph nodes
     initial_state = {
         "thread_id": new_thread_id,
         "original_prompt": original_prompt,
+        # New system (primary)
+        "todo_list": todo_list,
+        # Old system (fallback)
         "task_plan": task_plan,
         "task_agent_pairs": task_agent_pairs,
         "messages": [{"role": "user", "content": original_prompt}],
@@ -2392,12 +2425,15 @@ async def execute_workflow(workflow_id: str, request: Request, inputs: Dict[str,
         "next": ["execute_batch"]  # Start directly at execution
     })
     
-    logger.info(f"Pre-seeded workflow execution {workflow_id} as thread {new_thread_id} with {len(task_plan)} batches")
+    # Use appropriate task count
+    task_count = len(todo_list) if todo_list else len(task_agent_pairs)
+    logger.info(f"Pre-seeded workflow execution {workflow_id} as thread {new_thread_id} with {task_count} tasks (todo_list: {len(todo_list)}, task_plan: {len(task_plan)})")
+    
     return {
         "execution_id": execution_id, 
         "thread_id": new_thread_id, 
         "status": "running", 
-        "task_count": len(task_agent_pairs),
+        "task_count": task_count,
         "message": "Connect to /ws/chat with this thread_id - execution will start automatically"
     }
 
@@ -2524,30 +2560,22 @@ async def schedule_workflow(workflow_id: str, body: ScheduleWorkflowRequest, req
         raise HTTPException(status_code=404, detail="Workflow not found")
     
     # Check if workflow has a saved execution plan
-    # Accept either task_plan (preferred) or task_agent_pairs (fallback)
     if not workflow.blueprint:
         raise HTTPException(
             status_code=400, 
             detail="Workflow has no blueprint data. Please save the workflow again to capture the execution plan."
         )
     
+    # Accept either todo_list (new system) or task_plan (old system)
+    has_todo_list = workflow.blueprint.get("todo_list") and len(workflow.blueprint.get("todo_list", [])) > 0
     has_task_plan = workflow.blueprint.get("task_plan") and len(workflow.blueprint.get("task_plan", [])) > 0
     has_task_agent_pairs = workflow.blueprint.get("task_agent_pairs") and len(workflow.blueprint.get("task_agent_pairs", [])) > 0
     
-    if not has_task_plan and not has_task_agent_pairs:
-        # Provide helpful error message with recovery options
-        missing_fields = []
-        if not has_task_plan:
-            missing_fields.append("task_plan")
-        if not has_task_agent_pairs:
-            missing_fields.append("task_agent_pairs")
-        
+    if not has_todo_list and not (has_task_plan or has_task_agent_pairs):
         raise HTTPException(
             status_code=400, 
-            detail=f"Workflow has no execution plan. Missing: {', '.join(missing_fields)}. Recovery options: "
-                   f"1) Complete a new conversation with the same prompt and save it again, "
-                   f"2) Use a different workflow that has an execution plan, "
-                   f"3) Run the workflow once to generate a plan before scheduling."
+            detail="Workflow has no execution plan. A workflow must have either a todo_list or task_plan to be scheduled. "
+                   "Please complete a conversation and save it as a workflow."
         )
     
     schedule_id = str(uuid.uuid4())
@@ -2572,7 +2600,7 @@ async def schedule_workflow(workflow_id: str, body: ScheduleWorkflowRequest, req
             user_id=user_id,
             db_session_factory=SessionLocal
         )
-        logger.info(f"Scheduled workflow {workflow_id} with cron: {body.cron_expression}")
+        logger.info(f"Scheduled workflow {workflow_id} with cron: {body.cron_expression} (todo_list: {len(workflow.blueprint.get('todo_list', []))}, task_plan: {len(workflow.blueprint.get('task_plan', []))})")
         return {"schedule_id": schedule_id, "status": "scheduled", "cron": body.cron_expression}
     except Exception as e:
         # Rollback if scheduling fails
@@ -2881,35 +2909,43 @@ async def trigger_webhook(webhook_id: str, payload: Dict[str, Any], webhook_toke
 
 @app.get("/api/plan/{thread_id}", response_model=PlanResponse)
 async def get_agent_plan(thread_id: str):
-    """
-    Retrieves the markdown execution plan for a given conversation thread.
-    """
-    # Check both possible locations for plan files
-    plan_dirs = ["agent_plans", "backend/agent_plans"]  # Check root first, then backend/
-    file_path = None
+    """Retrieves the execution plan from conversation history (todo_list format)."""
+    history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
     
-    for plan_dir in plan_dirs:
-        temp_path = os.path.join(plan_dir, f"{thread_id}-plan.md")
-        if os.path.exists(temp_path):
-            file_path = temp_path
-            break
-
-    if not file_path:
+    if not os.path.exists(history_path):
         raise HTTPException(
             status_code=404,
-            detail=f"Plan file not found for thread_id: {thread_id} in any location: {plan_dirs}"
+            detail=f"Conversation history not found for thread_id: {thread_id}"
         )
-
+    
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        return PlanResponse(thread_id=thread_id, content=content)
+        with open(history_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            todo_list = data.get("todo_list", [])
+            
+            # Convert todo_list to markdown format
+            plan_content = f"# Execution Plan for Thread: {thread_id}\n\n"
+            if not todo_list:
+                plan_content += "- No tasks found.\n"
+            else:
+                for task in todo_list:
+                    status = task.get('status', 'pending')
+                    title = task.get('title', 'Untitled task')
+                    status_emoji = {
+                        "pending": "⏳",
+                        "in-progress": "🔄",
+                        "completed": "✅",
+                        "failed": "❌"
+                    }.get(status, "⏳")
+                    plan_content += f"- {status_emoji} **{title}** ({status})\n"
+            
+            return PlanResponse(thread_id=thread_id, content=plan_content)
+    except json.JSONDecodeError as e:
+        logger.error(f"Error parsing conversation history for thread_id {thread_id}: {e}")
+        raise HTTPException(status_code=500, detail="Error parsing conversation history")
     except Exception as e:
-        logger.error(f"Error reading plan file for thread_id {thread_id}: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"An internal server error occurred while reading the plan file."
-        )
+        logger.error(f"Error reading conversation history for thread_id {thread_id}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.websocket("/ws/workflow/{workflow_id}/execute")
 async def websocket_workflow_execute(websocket: WebSocket, workflow_id: str, token: str = None):
@@ -3480,6 +3516,38 @@ async def websocket_chat(websocket: WebSocket):
                     final_state["owner"] = owner_obj
                     save_conversation_history(final_state, {"configurable": {"thread_id": thread_id, "owner": owner_obj}})
                     logger.info(f"Conversation history saved for thread_id {thread_id} with owner_id {owner_id}")
+
+                    # ─── Register / refresh UserThread in DB so conversation appears in sidebar ───
+                    try:
+                        from database import SessionLocal as _SessionLocal
+                        _db = _SessionLocal()
+                        try:
+                            existing_thread = _db.query(UserThread).filter_by(thread_id=thread_id).first()
+                            if existing_thread:
+                                # Update updated_at so conversation moves to top of list
+                                existing_thread.updated_at = datetime.utcnow()
+                                logger.info(f"Updated UserThread timestamp for {thread_id}")
+                            else:
+                                # Generate a title from the original prompt
+                                raw_title = (
+                                    final_state.get("original_prompt")
+                                    or (prompt if prompt else "")
+                                    or "New Conversation"
+                                )
+                                conversation_title = raw_title[:100].strip()
+                                new_thread = UserThread(
+                                    thread_id=thread_id,
+                                    user_id=owner_id,
+                                    title=conversation_title,
+                                )
+                                _db.add(new_thread)
+                                logger.info(f"Created UserThread for {thread_id} (user={owner_id}, title='{conversation_title}')")
+                            _db.commit()
+                        finally:
+                            _db.close()
+                    except Exception as db_err:
+                        logger.error(f"Failed to register UserThread for {thread_id}: {db_err}")
+                        # Non-fatal — conversation is already saved to file
             except Exception as save_err:
                 logger.error(f"Failed to save conversation history for thread {thread_id}: {save_err}")
                 # Continue anyway - don't fail the request if history saving fails

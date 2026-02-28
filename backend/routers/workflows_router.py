@@ -23,7 +23,10 @@ from backend.schemas import PlanResponse
 router = APIRouter(tags=["Workflows"])
 logger = logging.getLogger("uvicorn.error")
 
-CONVERSATION_HISTORY_DIR = "conversation_history"
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))  # routers/
+BACKEND_DIR = os.path.dirname(CURRENT_DIR)  # backend/
+CONVERSATION_HISTORY_DIR = os.path.join(BACKEND_DIR, "conversation_history")
+AGENT_CONVERSATIONS_DIR = os.path.join(BACKEND_DIR, "agent_conversations")
 
 checkpointer = None
 
@@ -56,22 +59,40 @@ async def save_workflow(request: Request, thread_id: str, name: str, description
     user = get_user_from_request(request)
     user_id = user.get("sub") or user.get("user_id") or user.get("id")
     
+    # Try primary location first
     history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
+    logger.info(f"Looking for conversation at primary path: {os.path.abspath(history_path)}")
+    
     if not os.path.exists(history_path):
-        backend_dir = os.path.dirname(os.path.dirname(__file__))
-        fallback_dir = os.path.join(backend_dir, "agent_conversations")
-        fallback_path = os.path.join(fallback_dir, f"{thread_id}.json")
+        # Try fallback location (where orchestrator actually saves files)
+        fallback_path = os.path.join(AGENT_CONVERSATIONS_DIR, f"{thread_id}.json")
+        logger.info(f"Primary path not found, trying fallback: {os.path.abspath(fallback_path)}")
+        
         if os.path.exists(fallback_path):
             history_path = fallback_path
+            logger.info(f"✓ Found conversation at fallback path")
         else:
-            raise HTTPException(status_code=404, detail="Conversation not found")
+            # List files in both directories for debugging
+            files_primary = []
+            files_fallback = []
+            
+            if os.path.exists(CONVERSATION_HISTORY_DIR):
+                files_primary = os.listdir(CONVERSATION_HISTORY_DIR)
+            if os.path.exists(AGENT_CONVERSATIONS_DIR):
+                files_fallback = os.listdir(AGENT_CONVERSATIONS_DIR)
+            
+            logger.error(f"Conversation not found for thread_id: {thread_id}")
+            logger.error(f"  Primary dir ({CONVERSATION_HISTORY_DIR}): {files_primary[:5]}")
+            logger.error(f"  Fallback dir ({AGENT_CONVERSATIONS_DIR}): {files_fallback[:5]}")
+            raise HTTPException(status_code=404, detail=f"Conversation not found for thread_id: {thread_id}")
     
     with open(history_path, "r", encoding="utf-8") as f:
         history = json.load(f)
     
     workflow_id = str(uuid.uuid4())
     
-    task_agent_pairs = history.get("task_agent_pairs", [])
+    # Extract todo_list (new system) for the primary execution plan
+    todo_list = history.get("todo_list", [])
     original_prompt = history.get("original_prompt", "")
     todo_list = history.get("todo_list", [])
     
@@ -82,29 +103,39 @@ async def save_workflow(request: Request, thread_id: str, name: str, description
             if isinstance(first_msg, dict) and first_msg.get("type") == "user":
                 original_prompt = first_msg.get("content", "")
     
-    if not task_agent_pairs or not original_prompt or not todo_list:
+    # For backward compatibility, also extract old system fields
+    task_agent_pairs = history.get("task_agent_pairs", [])
+    task_plan = history.get("task_plan", []) or history.get("plan", [])
+    
+    # If missing critical fields, try to load from checkpointer
+    if (not todo_list and not task_plan and not task_agent_pairs) or not original_prompt:
         if checkpointer:
             try:
                 config = {"configurable": {"thread_id": thread_id}}
                 checkpoint = checkpointer.get(config)
                 if checkpoint:
                     checkpoint_state = checkpoint.get("values", {})
+                    todo_list = checkpoint_state.get("todo_list", todo_list)
                     task_agent_pairs = checkpoint_state.get("task_agent_pairs", task_agent_pairs)
+                    task_plan = checkpoint_state.get("task_plan", task_plan)
                     original_prompt = checkpoint_state.get("original_prompt", original_prompt)
                     todo_list = checkpoint_state.get("todo_list", todo_list)
                     history = {**history, **checkpoint_state}
+                    logger.info(f"✅ Retrieved workflow data from checkpointer")
             except Exception as e:
                 logger.warning(f"Could not load from checkpointer: {e}")
     
-    task_plan = history.get("task_plan", []) or history.get("plan", [])
-    
+    # Build comprehensive blueprint with both new (todo_list) and old (task_plan) systems
     blueprint = {
         "workflow_id": workflow_id,
         "thread_id": thread_id,
         "original_prompt": original_prompt,
+        # New system (primary)
+        "todo_list": todo_list,
+        # Old system (fallback for backward compatibility)
         "task_agent_pairs": task_agent_pairs,
         "task_plan": task_plan,
-        "todo_list": todo_list,
+        # Metadata
         "parsed_tasks": history.get("parsed_tasks", []),
         "candidate_agents": history.get("candidate_agents", {}),
         "user_expectations": history.get("user_expectations"),
@@ -113,8 +144,15 @@ async def save_workflow(request: Request, thread_id: str, name: str, description
         "created_at": datetime.utcnow().isoformat()
     }
     
+    # Generate plan_graph from todo_list (new system) or task_plan (old system)
     plan_graph = None
-    if task_plan:
+    if todo_list:
+        plan_graph = {
+            "nodes": [{"id": f"task_{i}", "title": task.get("title", ""), "status": task.get("status", "pending")} for i, task in enumerate(todo_list)],
+            "edges": [{"source": f"task_{i}", "target": f"task_{i+1}"} for i in range(len(todo_list)-1)],
+            "tasks": todo_list
+        }
+    elif task_plan:
         plan_graph = {"nodes": [], "edges": [], "tasks": task_plan}
     
     workflow = Workflow(
@@ -128,13 +166,17 @@ async def save_workflow(request: Request, thread_id: str, name: str, description
     db.add(workflow)
     db.commit()
     
-    logger.info(f"Workflow '{name}' ({workflow_id}) saved by user {user_id}")
+    logger.info(f"Workflow '{name}' ({workflow_id}) saved by user {user_id} with {len(todo_list)} todo_list items")
+    
+    # Use todo_list count if available, otherwise fall back to task_agent_pairs
+    task_count = len(todo_list) if todo_list else len(blueprint.get("task_agent_pairs", []))
+    
     return {
         "workflow_id": workflow_id,
         "name": name,
         "description": workflow.description,
         "status": "saved",
-        "task_count": len(blueprint.get("task_agent_pairs", [])),
+        "task_count": task_count,
         "created_at": blueprint["created_at"]
     }
 
@@ -238,21 +280,26 @@ async def execute_workflow(workflow_id: str, request: Request, inputs: Dict[str,
     db.commit()
     
     blueprint = workflow.blueprint
+    todo_list = blueprint.get("todo_list", [])
     task_plan = blueprint.get("task_plan", [])
     task_agent_pairs = blueprint.get("task_agent_pairs", [])
     original_prompt = blueprint.get("original_prompt", "")
     
-    if not task_plan or not task_agent_pairs:
-        raise HTTPException(status_code=400, detail="Workflow has no saved execution plan")
+    if not todo_list and not (task_plan and task_agent_pairs):
+        raise HTTPException(status_code=400, detail="Workflow has no saved execution plan. Please save a workflow with a todo_list or task_plan.")
     
     memory = MemorySaver()
     
     initial_state = {
         "thread_id": new_thread_id,
         "original_prompt": original_prompt,
+        # New system (primary)
+        "todo_list": todo_list,
+        # Old system (fallback)
         "task_plan": task_plan,
         "task_agent_pairs": task_agent_pairs,
-        "messages": [{"role": "user", "content": original_prompt}],
+        # Messages and status
+        "messages": [{"type": "user", "content": original_prompt}],
         "status": "executing",
         "planning_mode": False,
         "plan_approved": True,
@@ -263,12 +310,14 @@ async def execute_workflow(workflow_id: str, request: Request, inputs: Dict[str,
     config = {"configurable": {"thread_id": new_thread_id}}
     memory.put(config, {"values": initial_state, "next": ["execute_batch"]})
     
-    logger.info(f"Pre-seeded workflow execution {workflow_id} as thread {new_thread_id}")
+    task_count = len(todo_list) if todo_list else len(task_agent_pairs)
+    logger.info(f"Pre-seeded workflow execution {workflow_id} as thread {new_thread_id} with {task_count} tasks")
+    
     return {
         "execution_id": execution_id, 
         "thread_id": new_thread_id, 
         "status": "running", 
-        "task_count": len(task_agent_pairs),
+        "task_count": task_count,
         "message": "Connect to /ws/chat with this thread_id - execution will start automatically"
     }
 
@@ -366,11 +415,13 @@ async def schedule_workflow(workflow_id: str, body: ScheduleWorkflowRequest, req
     if not workflow.blueprint:
         raise HTTPException(status_code=400, detail="Workflow has no blueprint data.")
     
+    # Accept either todo_list (new system) or task_plan (old system)
+    has_todo_list = workflow.blueprint.get("todo_list") and len(workflow.blueprint.get("todo_list", [])) > 0
     has_task_plan = workflow.blueprint.get("task_plan") and len(workflow.blueprint.get("task_plan", [])) > 0
     has_task_agent_pairs = workflow.blueprint.get("task_agent_pairs") and len(workflow.blueprint.get("task_agent_pairs", [])) > 0
     
-    if not has_task_plan and not has_task_agent_pairs:
-        raise HTTPException(status_code=400, detail="Workflow has no saved execution plan.")
+    if not has_todo_list and not (has_task_plan or has_task_agent_pairs):
+        raise HTTPException(status_code=400, detail="Workflow has no saved execution plan. A workflow must have either a todo_list or task_plan.")
     
     schedule_id = str(uuid.uuid4())
     schedule = WorkflowSchedule(
@@ -649,23 +700,33 @@ async def trigger_webhook(webhook_id: str, payload: Dict[str, Any], webhook_toke
 # --- Plan Endpoint ---
 @router.get("/api/plan/{thread_id}", response_model=PlanResponse)
 async def get_agent_plan(thread_id: str):
-    """Retrieves the markdown execution plan for a given conversation thread."""
-    plan_dirs = ["agent_plans"]
-    file_path = None
+    """Retrieves the execution plan from conversation history (todo_list format)."""
+    # Load from conversation history instead of legacy markdown files
+    history_path = os.path.join(AGENT_CONVERSATIONS_DIR, f"{thread_id}.json")
     
-    for plan_dir in plan_dirs:
-        temp_path = os.path.join(plan_dir, f"{thread_id}-plan.md")
-        if os.path.exists(temp_path):
-            file_path = temp_path
-            break
-
-    if not file_path:
+    if os.path.exists(history_path):
+        try:
+            with open(history_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                todo_list = data.get("todo_list", [])
+                
+                # Convert todo_list to markdown for backward compatibility
+                plan_content = f"# Execution Plan for Thread: {thread_id}\n\n"
+                plan_content += f"**Original Prompt:** {data.get('original_prompt', 'N/A')}\n\n"
+                plan_content += "## Todo List\n"
+                
+                if todo_list:
+                    for task in todo_list:
+                        status = task.get('status', 'pending')
+                        title = task.get('title', 'Untitled task')
+                        status_emoji = {"pending": "⏳", "in-progress": "🔄", "completed": "✅", "failed": "❌"}.get(status, "⏳")
+                        plan_content += f"- {status_emoji} **{title}** ({status})\n"
+                else:
+                    plan_content += "- No tasks.\n"
+                
+                return PlanResponse(thread_id=thread_id, content=plan_content)
+        except Exception as e:
+            logger.error(f"Error reading plan file for thread_id {thread_id}: {e}")
+            raise HTTPException(status_code=500, detail="Error reading the plan file.")
+    else:
         raise HTTPException(status_code=404, detail=f"Plan file not found for thread_id: {thread_id}")
-
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        return PlanResponse(thread_id=thread_id, content=content)
-    except Exception as e:
-        logger.error(f"Error reading plan file for thread_id {thread_id}: {e}")
-        raise HTTPException(status_code=500, detail="Error reading the plan file.")

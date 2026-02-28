@@ -437,7 +437,25 @@ export function useWebSocketManager({
               }
             });
           }
-          else if (eventData.node === 'ask_user' || eventData.node === '__user_input_required__' || eventData.node === 'action_approval_required') {
+          else if (eventData.node === 'action_approval_required') {
+            const currentState = useConversationStore.getState();
+            const question = eventData.data?.question_for_user || 'Action approval required.';
+
+            _setConversationState({
+              isWaitingForUser: true,
+              currentQuestion: question,
+              pending_action_approval: true,
+              pending_action: eventData.data?.pending_decision,
+              isLoading: false,
+              metadata: {
+                ...currentState.metadata,
+                currentStage: 'approval_required',
+                stageMessage: 'Waiting for action approval...',
+                progress: 50
+              }
+            });
+          }
+          else if (eventData.node === 'ask_user' || eventData.node === '__user_input_required__') {
             const currentMessages = useConversationStore.getState().messages;
             const question = eventData.data?.question_for_user || eventData.data?.question || 'Please provide additional information';
 
@@ -737,6 +755,9 @@ export function useWebSocketManager({
                 approval_required: (finalState as any).approval_required !== undefined ? (finalState as any).approval_required : (currentState as any).approval_required,
                 estimated_cost: (finalState as any).estimated_cost !== undefined ? (finalState as any).estimated_cost : (currentState as any).estimated_cost,
                 task_count: (finalState as any).task_count !== undefined ? (finalState as any).task_count : (currentState as any).task_count,
+                // Action approval fields
+                pending_action_approval: (finalState as any).pending_action_approval !== undefined ? (finalState as any).pending_action_approval : (currentState as any).pending_action_approval,
+                pending_action: (finalState as any).pending_action !== undefined ? (finalState as any).pending_action : (currentState as any).pending_action,
                 // Canvas confirmation fields
                 pending_confirmation: (finalState as any).pending_confirmation !== undefined ? (finalState as any).pending_confirmation : (currentState as any).pending_confirmation,
                 canvas_requires_confirmation: (finalState as any).canvas_requires_confirmation !== undefined ? (finalState as any).canvas_requires_confirmation : (currentState as any).canvas_requires_confirmation,

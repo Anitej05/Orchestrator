@@ -52,7 +52,6 @@ DENISCO_CHEMICALS_PRIVATE_LIMITED*.xlsx
 
 
 # Runtime Data - Agents
-backend/agent_plans/
 backend/conversation_history/
 
 # Temporary / Generated

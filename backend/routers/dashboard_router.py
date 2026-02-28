@@ -17,7 +17,8 @@ from models import UserThread, Workflow, Agent, StatusEnum
 router = APIRouter(prefix="/api/metrics", tags=["Dashboard"])
 logger = logging.getLogger("uvicorn.error")
 
-CONVERSATION_HISTORY_DIR = "conversation_history"
+_DASHBOARD_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CONVERSATION_HISTORY_DIR = os.path.join(_DASHBOARD_BACKEND_DIR, "conversation_history")
 
 
 @router.get("/dashboard")
