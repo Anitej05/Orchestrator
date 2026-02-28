@@ -4,7 +4,7 @@ Converted from wiki_agent.py to direct function tools.
 """
 
 import wikipediaapi
-from typing import List, Dict
+from typing import Dict
 from langchain_core.tools import tool
 
 # Initialize Wikipedia API client

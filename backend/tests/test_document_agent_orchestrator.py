@@ -17,7 +17,7 @@ import time
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 
 
 # Add backend and project root to path
@@ -184,7 +184,7 @@ async def run_document_agent_through_orchestrator(
     print(f"  Test File: {test_file_path}")
     print(f"  Prompt: {prompt[:80]}...")
     print(f"\n  {'='*76}")
-    print(f"  ORCHESTRATOR EXECUTION LOG")
+    print("  ORCHESTRATOR EXECUTION LOG")
     print(f"  {'='*76}")
     
     start_time = time.time()
@@ -265,7 +265,7 @@ async def run_document_agent_through_orchestrator(
     
     # Print summary
     print(f"\n  {'='*76}")
-    print(f"  EXECUTION SUMMARY")
+    print("  EXECUTION SUMMARY")
     print(f"  {'='*76}")
     print(f"  Total Time:         {total_time:.1f}s")
     print(f"  Brain Iterations:   {iteration}")

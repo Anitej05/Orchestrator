@@ -3,7 +3,6 @@ Gmail Agent Integration Test Fixtures
 """
 import pytest
 import os
-from typing import Generator
 import sys
 
 # Add backend to path

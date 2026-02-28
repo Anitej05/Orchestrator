@@ -7,18 +7,14 @@ LLM reasoning, code execution, tool usage, and full file system access.
 
 import logging
 import json
-import os
-import glob
 import shutil
 import base64
-import asyncio
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, List, Optional
-from dataclasses import dataclass
 
-from backend.agents.base import BaseAgent, AgentRequest, AgentResponse, capability
-from backend.agents.utils.agent_file_manager import AgentFileManager, FileType, FileStatus
+from backend.agents.base import BaseAgent, AgentRequest, capability
+from backend.agents.utils.agent_file_manager import AgentFileManager
 from services.canvas_service import CanvasService
 
 logger = logging.getLogger(__name__)
@@ -538,7 +534,7 @@ Respond in JSON format:
 
         try:
             # Use the agent's LLM service for planning
-            from langchain_core.messages import HumanMessage, SystemMessage
+            from langchain_core.messages import HumanMessage
             response = await self.services.inference.generate(
                 messages=[HumanMessage(content=planning_prompt)],
                 temperature=0.3,

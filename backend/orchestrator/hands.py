@@ -13,22 +13,18 @@ import os
 import time
 import asyncio
 from typing import Dict, Any, Optional, List
-import httpx
 
 from langchain_core.runnables import RunnableConfig
 
 from .schemas import ActionResult, TaskStatus
 from .content_orchestrator import hooks
 from .workspace_manager import get_workspace_manager
-from backend.utils.retry_utils import RetryManager
 from backend.services.agent_registry_service import agent_registry
 from backend.services.tool_registry_service import tool_registry
 from backend.services.telemetry_service import telemetry_service
 from backend.services.code_sandbox_service import code_sandbox
 from backend.services.terminal_service import terminal_service
-from backend.services.credential_service import get_credentials_for_headers
 from services.canvas_service import CanvasService
-from database import SessionLocal
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +139,7 @@ class Hands:
                 canvas = self._auto_detect_canvas_from_text(user_response)
                 if canvas:
                     output_dict["canvas_display"] = canvas
-                    logger.info(f"🎨 Hands: Auto-detected canvas in finish response")
+                    logger.info("🎨 Hands: Auto-detected canvas in finish response")
             else:
                 output_dict = {"skipped": True}
 
@@ -357,7 +353,8 @@ class Hands:
             
             # Log telemetry
             telemetry_service.log_agent_call(
-                agent_name, success, (time.time() - start_time) * 1000
+                agent_name, success, (time.time() - start_time) * 1000, 
+                user_id=user_id, thread_id=payload.get("thread_id", "default")
             )
             
             # Extract error message
@@ -378,7 +375,9 @@ class Hands:
         except Exception as e:
             logger.error(f"❌ Agent {agent_name} execution failed: {e}")
             telemetry_service.log_agent_call(
-                agent_name, False, (time.time() - start_time) * 1000
+                agent_name, False, (time.time() - start_time) * 1000, 
+                user_id=user_id, thread_id=payload.get("thread_id", "default"),
+                error_message=str(e)
             )
             
             return ActionResult(
@@ -466,7 +465,9 @@ class Hands:
         output = result.get("stdout") or result.get("stderr") or ""
 
         telemetry_service.log_tool_call(
-            "Terminal", success, (time.time() - start_time) * 1000
+            "Terminal", success, (time.time() - start_time) * 1000,
+            user_id=payload.get("user_id", "system"),
+            thread_id=payload.get("thread_id", "default")
         )
 
         return ActionResult(
@@ -609,7 +610,8 @@ os.chdir(r'{workspace_path}')
                     from pathlib import Path
                     p = Path(fpath)
                     if p.suffix == ".csv":
-                        import csv, io
+                        import csv
+                        import io
                         content = p.read_text(encoding="utf-8", errors="replace")
                         reader = csv.reader(io.StringIO(content))
                         rows_all = list(reader)
@@ -774,7 +776,7 @@ os.chdir(r'{workspace_path}')
         if not canvas and isinstance(output, dict) and "canvas_display" in output:
             canvas = output["canvas_display"]
             if canvas:
-                logger.info(f"🎨 Hands: Found direct canvas_display in result output")
+                logger.info("🎨 Hands: Found direct canvas_display in result output")
 
         # Path 3: Nested in output.result dict
         if not canvas and isinstance(output, dict):
@@ -782,10 +784,10 @@ os.chdir(r'{workspace_path}')
             if isinstance(nested_result, dict) and "canvas_display" in nested_result:
                 canvas = nested_result["canvas_display"]
                 if canvas:
-                    logger.info(f"🎨 Hands: Found canvas_display in nested result")
+                    logger.info("🎨 Hands: Found canvas_display in nested result")
 
         if canvas:
-            logger.info(f"🎨 Hands: Registering canvas in Canvas Registry")
+            logger.info("🎨 Hands: Registering canvas in Canvas Registry")
             c_type = canvas.get("canvas_type") if isinstance(canvas, dict) else canvas.canvas_type
             c_content = canvas.get("canvas_content") if isinstance(canvas, dict) else canvas.canvas_content
             c_data = canvas.get("canvas_data") if isinstance(canvas, dict) else canvas.canvas_data
@@ -1009,7 +1011,7 @@ os.chdir(r'{workspace_path}')
             )
             if all_complete:
                 updates["current_phase_id"] = None
-                logger.info(f"🎉 All phases complete!")
+                logger.info("🎉 All phases complete!")
 
         return updates
 

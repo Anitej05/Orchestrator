@@ -4,7 +4,6 @@ MCP Service: Handles discovery, ingestion, and management of MCP servers.
 """
 
 import httpx
-import json
 import logging
 from typing import Dict, Any, Optional
 from sqlalchemy.orm import Session

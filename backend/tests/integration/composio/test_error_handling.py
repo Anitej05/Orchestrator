@@ -12,8 +12,7 @@ Tasks: 2.5.1, 2.5.2, 2.5.3
 
 import os
 import pytest
-from unittest.mock import Mock, patch, MagicMock
-from composio import Composio
+from unittest.mock import patch, MagicMock
 
 # Import the managers we're testing
 import sys

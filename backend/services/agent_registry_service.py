@@ -12,9 +12,8 @@ import re
 import yaml
 from typing import List, Dict, Optional, Any
 from sqlalchemy.orm import Session, joinedload
-from models import Agent, AgentEndpoint, AgentCapability, StatusEnum, AgentType
+from models import Agent, AgentEndpoint, StatusEnum, AgentType
 from database import SessionLocal, Base, engine
-import json
 from pathlib import Path
 
 logger = logging.getLogger("AgentRegistryService")

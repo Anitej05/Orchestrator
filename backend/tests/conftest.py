@@ -8,7 +8,6 @@ Provides:
 - sample_csv / sample_xlsx / sample_docx / sample_pdf: paths to test data
 """
 
-import asyncio
 import os
 import subprocess
 import sys

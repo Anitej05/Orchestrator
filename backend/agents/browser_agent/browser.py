@@ -229,7 +229,7 @@ class Browser:
             # or if it's the main page we just created
             is_startup_page = (self.page == page)
             if (new_url in ['about:blank', ''] or not new_url.startswith('http')) and not is_startup_page:
-                logger.info(f"🔕 Auto-closing blank popup tab")
+                logger.info("🔕 Auto-closing blank popup tab")
                 try:
                     await page.close()
                 except Exception:
@@ -602,11 +602,11 @@ class Browser:
         
         # Pre-flight checks
         if not self.page:
-            logger.warning(f"📸 SCREENSHOT DEBUG: self.page is None")
+            logger.warning("📸 SCREENSHOT DEBUG: self.page is None")
             return None
         
         if self.page.is_closed():
-            logger.warning(f"📸 SCREENSHOT DEBUG: page is closed")
+            logger.warning("📸 SCREENSHOT DEBUG: page is closed")
             return None
             
         try:

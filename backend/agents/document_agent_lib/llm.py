@@ -1,6 +1,5 @@
 import logging
-import os
-from typing import Dict, List, Any, Optional
+from typing import Dict, Any, Optional
 import json
 import re
 from pathlib import Path
@@ -11,7 +10,6 @@ orbimesh_root = Path(__file__).resolve().parents[3]
 if str(orbimesh_root) not in sys.path:
     sys.path.insert(0, str(orbimesh_root))
 
-from backend.utils.key_manager import get_cerebras_key, report_rate_limit, key_manager
 from backend.services.inference_service import inference_service, InferencePriority
 from langchain_core.messages import HumanMessage
 

@@ -3,7 +3,6 @@ Web search tools using Groq LLM.
 """
 
 import os
-import json
 from typing import Dict, List, Optional
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage

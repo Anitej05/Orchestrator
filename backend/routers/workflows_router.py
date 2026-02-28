@@ -11,7 +11,7 @@ import uuid
 import asyncio
 import logging
 from datetime import datetime
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException, Depends, Request, Body, Query
 from sqlalchemy.orm import Session
@@ -343,7 +343,7 @@ async def create_workflow_conversation(workflow_id: str, request: Request, db: S
     if isinstance(blueprint, str):
         try:
             blueprint = json.loads(blueprint)
-        except Exception as e:
+        except Exception:
             raise HTTPException(status_code=400, detail="Invalid workflow blueprint format")
     
     task_plan = blueprint.get("task_plan", [])

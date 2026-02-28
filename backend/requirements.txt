@@ -32,6 +32,11 @@ sentence-transformers>=3.0.0
 openai>=1.0.0
 groq>=0.9.0
 
+# Voice & Auto-Download Models
+kokoro-onnx>=0.1.0
+soundfile>=0.12.1
+huggingface-hub>=0.23.0
+
 # Document Processing
 python-docx==1.2.0
 pypdf==6.1.0

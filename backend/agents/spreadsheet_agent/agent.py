@@ -15,8 +15,8 @@ import uuid
 
 from .config import logger
 from .agent_schemas import (
-    ExecuteRequest, ExecuteResponse, ExecutionPlan, StepResult,
-    TaskStatus, FileInfo
+    ExecuteResponse, StepResult,
+    TaskStatus
 )
 from .state import session_state, Session
 from .client import df_client, SmartDataResolver
@@ -218,7 +218,7 @@ class SpreadsheetAgent:
                     )
             else:
                 if not file_path:
-                    logger.warning(f"[DEBUG] No file_path found in params or prompt")
+                    logger.warning("[DEBUG] No file_path found in params or prompt")
 
             
             # Complex prompt mode

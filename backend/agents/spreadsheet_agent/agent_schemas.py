@@ -5,7 +5,7 @@ Request/Response models for the redesigned spreadsheet agent.
 Follows the same patterns as mail_agent and browser_agent.
 """
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, model_validator
 from enum import Enum
 

@@ -12,7 +12,7 @@ import threading
 import asyncio
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Set
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from langchain_core.tools import BaseTool
 
@@ -259,7 +259,7 @@ class ToolRegistryService:
                     summary.append(f"  Use when: {t.use_when}")
         return "\n".join(summary)
 
-    async def execute_tool(self, tool_name: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute_tool(self, tool_name: str, parameters: Dict[str, Any], user_id: str = "system", thread_id: str = "default") -> Dict[str, Any]:
         """Execute a tool with telemetry."""
         self.initialize()
         
@@ -287,7 +287,7 @@ class ToolRegistryService:
                 
             # Telemetry Success
             duration = (asyncio.get_event_loop().time() - start_time) * 1000
-            telemetry.log_tool_call(tool_name, success=True, duration_ms=duration)
+            telemetry.log_tool_call(tool_name, success=True, duration_ms=duration, user_id=user_id, thread_id=thread_id)
             
             return {
                 "success": True, 
@@ -297,7 +297,7 @@ class ToolRegistryService:
         except Exception as e:
             # Telemetry Failure
             duration = (asyncio.get_event_loop().time() - start_time) * 1000
-            telemetry.log_tool_call(tool_name, success=False, duration_ms=duration)
+            telemetry.log_tool_call(tool_name, success=False, duration_ms=duration, user_id=user_id, thread_id=thread_id, error_message=str(e))
             telemetry.log_error("tool_execution", str(e), {"tool": tool_name})
             logger.error(f"Tool execution failed: {e}")
             return {

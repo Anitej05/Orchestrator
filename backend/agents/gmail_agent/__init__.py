@@ -23,9 +23,9 @@ for path in [str(PROJECT_ROOT), str(BACKEND_DIR)]:
 
 __version__ = "1.0.0"
 
-# Configure logging FIRST
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("gmail_agent")
+# Configure logging via centralized Mega Logger
+from backend.utils.mega_logger import setup_mega_logger
+logger = setup_mega_logger("GmailAgent")
 
 # ============================================================================
 # BASEAGENT IMPLEMENTATION

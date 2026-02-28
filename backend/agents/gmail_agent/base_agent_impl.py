@@ -6,15 +6,14 @@ Handles email search, send, reply, draft management, etc.
 """
 
 import logging
-import asyncio
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 from dataclasses import dataclass
 
 from backend.agents.base import BaseAgent, AgentServices, AgentConfig
-from backend.agents.base.types import AgentRequest, AgentResponse, ExecutionContext
+from backend.agents.base.types import AgentResponse, ExecutionContext
 from backend.agents.base.capability import capability, ParameterSchema
 
-from .config import logger, LLM_PROVIDER, LLM_MODEL
+from .config import logger
 from .service import GmailService
 from .memory import agent_memory
 

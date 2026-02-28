@@ -1246,7 +1246,7 @@ class DOMExtractor:
             if close_btns:
                 observations.append(f"⚠️ OVERLAY/POPUP blocking page! Close buttons: {[b['text'] for b in close_btns[:3]]}")
             else:
-                observations.append(f"⚠️ OVERLAY/POPUP blocking page (no close button found, try pressing Escape)")
+                observations.append("⚠️ OVERLAY/POPUP blocking page (no close button found, try pressing Escape)")
         
         # Key element types found
         # FIX: Check both role AND tag name for precise counts

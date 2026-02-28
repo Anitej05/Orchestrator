@@ -15,9 +15,7 @@ import logging
 import mimetypes
 import threading
 import asyncio
-import math
 import time
-import re
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List, Union, Tuple
@@ -32,7 +30,6 @@ except ImportError:
 
 # Local imports
 # Adjust as needed if these are used elsewhere
-from backend.agents.utils.standard_file_interface import AgentFileMetadata
 
 # Robust Import for KeyManager (Handles potential shadowing)
 import sys
@@ -40,7 +37,6 @@ orbimesh_root = Path(__file__).parent.parent.parent.resolve() # services -> back
 if str(orbimesh_root) not in sys.path:
     sys.path.insert(0, str(orbimesh_root))
 
-from backend.utils.key_manager import get_cerebras_key, report_rate_limit
 from backend.services.inference_service import inference_service, InferencePriority
 from langchain_core.messages import HumanMessage
 
@@ -877,7 +873,6 @@ Task: Answer the user's query using ONLY the retrieved history. If the answer is
             return final_res
         except Exception as e:
             logger.error(f"Retrieval synthesis failed: {e}")
-            return f"Error retrieving context: {e}"
             return f"Error retrieving context: {e}"
 
     async def cleanup_expired_content(self) -> Dict[str, Any]:

@@ -1,17 +1,16 @@
 
 import logging
 import json
-import traceback
 import uuid
 import time
-from typing import Dict, Any, List, Optional, Union
-from langchain_core.messages import SystemMessage, HumanMessage
+from typing import Dict, Any, List, Optional
+from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 
 from pydantic import BaseModel, Field
 
 from backend.orchestrator.state import State
-from backend.schemas import TaskItem, TaskStatus, TaskPriority
+from backend.schemas import TaskItem, TaskStatus
 from backend.services.inference_service import inference_service, InferencePriority
 
 
@@ -23,8 +22,6 @@ from backend.services.code_sandbox_service import code_sandbox
 from backend.services.telemetry_service import telemetry_service
 import httpx
 import re
-import time
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -357,7 +354,15 @@ async def execute_next_action(state: State, config: Optional[RunnableConfig] = N
             result_content = res['stdout'] or res['stderr']
             is_success = res['returncode'] == 0
             
-            telemetry_service.log_tool_call("Terminal", is_success, duration)
+            owner = (config or {}).get("configurable", {}).get("owner", {})
+            user_id = owner if isinstance(owner, str) else owner.get("user_id", "system")
+            thread_id = (config or {}).get("configurable", {}).get("thread_id", "default")
+            
+            telemetry_service.log_tool_call(
+                "Terminal", is_success, duration,
+                user_id=user_id,
+                thread_id=thread_id
+            )
             
         elif snippet.startswith("AGENT:"):
             # Greedy Match for multi-word agent names
@@ -425,7 +430,12 @@ async def execute_next_action(state: State, config: Optional[RunnableConfig] = N
                 is_success = False
             
             duration = (time.time() - start_time) * 1000
-            telemetry_service.log_agent_call(agent_name, is_success, duration)
+            
+            owner = (config or {}).get("configurable", {}).get("owner", {})
+            user_id = owner if isinstance(owner, str) else owner.get("user_id", "system")
+            thread_id = (config or {}).get("configurable", {}).get("thread_id", "default")
+            
+            telemetry_service.log_agent_call(agent_name, is_success, duration, user_id=user_id, thread_id=thread_id)
                 
         elif snippet.startswith("TOOL:"):
             parts = snippet[5:].strip().split(' ', 1)

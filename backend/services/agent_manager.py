@@ -14,9 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Optional, Set, Any
 import httpx
-import psutil
 
-from backend.services.agent_registry_service import agent_registry
 
 logger = logging.getLogger("AgentManager")
 
@@ -539,7 +537,7 @@ class AgentManager:
 
                 return instance
 
-            except Exception as e:
+            except Exception:
                 # Cleanup on failure
                 await self.port_pool.release(agent_id)
                 if "process" in locals():

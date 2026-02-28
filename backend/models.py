@@ -18,7 +18,7 @@ except ImportError:
         def get_col_spec(self, **kw):
             return "TEXT" # SQLite doesn't have a vector type, use TEXT as fallback
 from pydantic import BaseModel, Field, model_validator
-from typing import Dict, Any, Optional, Literal, Union
+from typing import Dict, Any, Optional, Literal
 import enum
 import uuid
 from datetime import datetime
@@ -414,6 +414,81 @@ class WorkflowExecutionAnalytics(Base):
     
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class LLMTelemetryRecord(Base):
+    """
+    Detailed tracking of every LLM call for cost, token usage, and analytics.
+    """
+    __tablename__ = "llm_telemetry_records"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    user_id = Column(String(255), nullable=True, index=True)
+    thread_id = Column(String(255), nullable=True, index=True)
+    agent_name = Column(String(100), nullable=True, index=True)
+    operation_type = Column(String(50), nullable=False) # e.g., 'agent', 'orchestrator', 'tool'
+    model_name = Column(String(100), nullable=False)
+    provider = Column(String(50), nullable=False)
+    prompt_tokens = Column(Integer, default=0)
+    completion_tokens = Column(Integer, default=0)
+    total_tokens = Column(Integer, default=0)
+    cost_usd = Column(Float, default=0.0)
+    latency_ms = Column(Float, default=0.0)
+    success = Column(Boolean, default=True)
+    error_message = Column(Text, nullable=True)
+
+class AgentExecutionRecord(Base):
+    """
+    Detailed tracking of agent executions per session.
+    """
+    __tablename__ = "agent_execution_records"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    user_id = Column(String(255), nullable=True, index=True)
+    thread_id = Column(String(255), nullable=True, index=True)
+    agent_name = Column(String(100), nullable=False, index=True)
+    duration_ms = Column(Float, default=0.0)
+    success = Column(Boolean, default=True)
+    error_message = Column(Text, nullable=True)
+
+class ToolExecutionRecord(Base):
+    """
+    Detailed tracking of specific tool calls per session.
+    """
+    __tablename__ = "tool_execution_records"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    user_id = Column(String(255), nullable=True, index=True)
+    thread_id = Column(String(255), nullable=True, index=True)
+    tool_name = Column(String(100), nullable=False, index=True)
+    duration_ms = Column(Float, default=0.0)
+    success = Column(Boolean, default=True)
+    error_message = Column(Text, nullable=True)
+
+
+class ArtifactEmbedding(Base):
+    """
+    Semantic vector index for the orchestrator's self-learning artifact memory.
+    Enables pgvector cosine similarity search across task results, knowledge,
+    playbooks, and error patterns — even when keywords don't overlap.
+    """
+    __tablename__ = "artifact_embeddings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String(255), nullable=False, index=True)
+    artifact_id = Column(String(255), nullable=False, unique=True, index=True)
+    artifact_type = Column(String(50), nullable=False, index=True)  # task_result, knowledge, playbook
+    summary = Column(Text, nullable=False)
+    embedding = Column(Vector(768))  # all-mpnet-base-v2 outputs 768-dim vectors
+    tags = Column(JSON, nullable=True)
+    source_objective = Column(Text, nullable=True)
+    source_agent = Column(String(255), nullable=True)
+    file_path = Column(Text, nullable=True)
+    use_count = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_used_at = Column(DateTime, default=datetime.utcnow)
 
 
 # ============================================================================

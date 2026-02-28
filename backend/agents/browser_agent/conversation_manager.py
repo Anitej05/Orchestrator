@@ -177,10 +177,10 @@ class ConversationManager:
                 missing = [f for f in required_fields if not any(f in k for k in saved_keys_lower)]
                 
                 parts.append(
-                    f"\n🎯 TASK REQUIREMENTS:\n" + "\n".join(checklist) +
+                    "\n🎯 TASK REQUIREMENTS:\n" + "\n".join(checklist) +
                     (f"\n→ Missing: {', '.join(missing)}. Extract these and call done."
                      if missing else
-                     f"\n→ ✅ ALL FIELDS FOUND. Call `done` NOW! Do NOT continue browsing.")
+                     "\n→ ✅ ALL FIELDS FOUND. Call `done` NOW! Do NOT continue browsing.")
                 )
             elif len(extracted_items) >= 2:
                 parts.append(
@@ -288,7 +288,7 @@ class ConversationManager:
         
         status = "✅ SUCCESS" if success else "❌ FAILED"
         lines = [
-            f"📋 RESULT OF YOUR PREVIOUS ACTION:",
+            "📋 RESULT OF YOUR PREVIOUS ACTION:",
             f"  Action: {action_name} → {status}",
             f"  Detail: {message}",
         ]

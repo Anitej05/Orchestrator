@@ -113,10 +113,10 @@ MAX_COLUMN_PREVIEW = 50
 # LOGGING
 # ============================================================================
 
-import logging
+import sys
+backend_root = Path(__file__).resolve().parents[3]
+if str(backend_root) not in sys.path:
+    sys.path.insert(0, str(backend_root))
 
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-
-# Configure logger
-logging.basicConfig(level=getattr(logging, LOG_LEVEL))
-logger = logging.getLogger("spreadsheet_agent")
+from backend.utils.mega_logger import setup_mega_logger
+logger = setup_mega_logger("SpreadsheetAgent")

@@ -6,7 +6,7 @@ based on context and user intent. Users don't need to explicitly say "share this
 """
 
 import re
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from pathlib import Path
 import logging
 
@@ -159,8 +159,7 @@ class AgentWorkspaceInterface:
     @staticmethod
     def prepare_file_for_agent(
         file_path: str,
-        agent_id: str,
-        shared_workspace_path: Path
+        agent_id: str
     ) -> Dict[str, Any]:
         """
         Prepare a shared file for an agent to use.
@@ -169,7 +168,6 @@ class AgentWorkspaceInterface:
         1. Copy from shared workspace to agent's workspace (if needed)
         2. Return file metadata for the agent
         """
-        from backend.orchestrator.workspace_manager import get_workspace_manager
         from backend.services.agent_registry_service import agent_registry
         
         source = Path(file_path)

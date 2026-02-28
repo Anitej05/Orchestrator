@@ -47,7 +47,7 @@ export function PlanApprovalModal({
   estimatedCost,
   taskCount
 }: PlanApprovalModalProps) {
-  
+
   // Flatten the task plan (it's an array of batches) and enrich with agent details
   const allTasks: PlanTask[] = [];
   if (taskPlan && Array.isArray(taskPlan)) {
@@ -56,13 +56,13 @@ export function PlanApprovalModal({
         batch.forEach((task: any) => {
           // Find matching agent pair for this task
           const agentPair = taskAgentPairs?.find((pair: any) => pair.task_name === task.task_name);
-          
+
           // Merge task with agent details
           const enrichedTask = {
             ...task,
             primary: agentPair?.primary || task.primary
           };
-          
+
           allTasks.push(enrichedTask);
         });
       }
@@ -105,7 +105,7 @@ export function PlanApprovalModal({
           <div className="space-y-3">
             {allTasks.map((task, index) => (
               <div
-                key={`plan-task-${index}-${task.task || ''}`}
+                key={`plan-task-${index}-${task.task_name || ''}`}
                 className="p-4 border rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
               >
                 <div className="flex items-start justify-between mb-2">
@@ -121,7 +121,7 @@ export function PlanApprovalModal({
                     </p>
                   </div>
                 </div>
-                
+
                 <div className="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
                   <div className="flex items-center gap-4">
                     <span className="flex items-center gap-1">

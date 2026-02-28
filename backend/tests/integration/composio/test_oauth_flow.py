@@ -13,7 +13,6 @@ import pytest
 import time
 import sys
 import os
-from typing import Dict, Any
 
 # Add backend to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../../"))
@@ -61,7 +60,7 @@ def test_start_auth_flow_returns_redirect_url(composio_client, test_user_id):
     assert "composio.dev" in redirect_url or "composio.com" in redirect_url, \
         "Redirect URL should be a Composio domain"
     
-    print(f"✓ Auth flow initiated successfully")
+    print("✓ Auth flow initiated successfully")
     print(f"  Redirect URL: {redirect_url}")
 
 
@@ -123,7 +122,7 @@ def test_start_auth_flow_service_wrapper(test_user_id):
     assert "poll_status_url" in result, "Result should contain 'poll_status_url'"
     assert isinstance(result["poll_status_url"], str), "Poll status URL should be a string"
     
-    print(f"✓ Service wrapper auth flow initiated successfully")
+    print("✓ Service wrapper auth flow initiated successfully")
     print(f"  Success: {result['success']}")
     print(f"  Redirect URL: {redirect_url}")
     print(f"  Connection ID: {connection_id}")
@@ -169,7 +168,7 @@ def test_check_connection_status_for_active_connections(
     assert gmail_conn.status.lower() in ["active", "connected"], \
         f"Connection should be active, got: {gmail_conn.status}"
     
-    print(f"✓ Connection status verified")
+    print("✓ Connection status verified")
     print(f"  Connection ID: {gmail_conn.id}")
     print(f"  Status: {gmail_conn.status}")
     print(f"  App: {gmail_conn.appName}")
@@ -236,7 +235,7 @@ def test_check_connection_status_service_wrapper(test_user_id, gmail_connection)
     assert "connected_account_id" in gmail_toolkit, "Toolkit should have connected_account_id"
     assert gmail_toolkit["connected_account_id"] is not None, "connected_account_id should not be None"
     
-    print(f"✓ Service wrapper check_connection_status verified")
+    print("✓ Service wrapper check_connection_status verified")
     print(f"  Success: {result['success']}")
     print(f"  Connected apps: {result['connected_apps']}")
     print(f"  Pending apps: {result['pending_apps']}")
@@ -252,7 +251,7 @@ def test_check_connection_status_service_wrapper(test_user_id, gmail_connection)
     assert "gmail" in gmail_result["connected_apps"], "Gmail should be connected"
     assert len(gmail_result["all_toolkits"]) >= 1, "Should have at least Gmail toolkit"
     
-    print(f"✓ App-specific status check verified")
+    print("✓ App-specific status check verified")
     print(f"  Gmail connected: {'gmail' in gmail_result['connected_apps']}")
 
 
@@ -332,7 +331,7 @@ def test_disconnect_app_removes_connection(composio_client, test_user_id):
     assert slack_conn_after is None, \
         "Slack connection should be removed from Composio after disconnect"
     
-    print(f"✓ Connection removed from Composio")
+    print("✓ Connection removed from Composio")
     
     # Step 5: Verify connection is removed from database
     db = SessionLocal()
@@ -345,7 +344,7 @@ def test_disconnect_app_removes_connection(composio_client, test_user_id):
         assert db_connection_after is None, \
             "Connection should be removed from database after disconnect"
         
-        print(f"✓ Connection removed from database")
+        print("✓ Connection removed from database")
         
         # Step 6: Verify disconnect event was logged
         disconnect_log = db.query(ConnectionLog).filter(
@@ -358,7 +357,7 @@ def test_disconnect_app_removes_connection(composio_client, test_user_id):
         assert disconnect_log is not None, \
             "Disconnect event should be logged in connection_logs"
         
-        print(f"✓ Disconnect event logged successfully")
+        print("✓ Disconnect event logged successfully")
         
     finally:
         db.close()
@@ -418,9 +417,9 @@ def test_disconnect_app_error_handling_nonexistent_connection(test_user_id):
         # Note: Logging might not happen for "not found" cases
         # This is just a verification if it does happen
         if error_log:
-            print(f"✓ Error logged to connection_logs")
+            print("✓ Error logged to connection_logs")
         else:
-            print(f"ℹ No error log created (acceptable for 'not found' case)")
+            print("ℹ No error log created (acceptable for 'not found' case)")
             
     finally:
         db.close()
@@ -491,10 +490,10 @@ def test_multiple_connections_same_user(composio_client, test_user_id):
     
     # Verify each connection has required properties
     for conn in connections:
-        assert hasattr(conn, "id"), f"Connection should have ID"
-        assert hasattr(conn, "app_name"), f"Connection should have app_name"
-        assert hasattr(conn, "status"), f"Connection should have status"
-        assert conn.id is not None, f"Connection ID should not be None"
-        assert conn.appName is not None, f"App name should not be None"
+        assert hasattr(conn, "id"), "Connection should have ID"
+        assert hasattr(conn, "app_name"), "Connection should have app_name"
+        assert hasattr(conn, "status"), "Connection should have status"
+        assert conn.id is not None, "Connection ID should not be None"
+        assert conn.appName is not None, "App name should not be None"
     
-    print(f"✓ All connections have valid structure")
+    print("✓ All connections have valid structure")

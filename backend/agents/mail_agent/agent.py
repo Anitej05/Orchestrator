@@ -4,23 +4,14 @@ Mail Agent - Gmail integration via Composio.
 Optimized for fast startup with lazy loading.
 """
 
-import re
-from fastapi import FastAPI, HTTPException
-from typing import Optional, Dict, Any
-import logging
+from fastapi import FastAPI
+from typing import Dict, Any
 
-from .config import COMPOSIO_API_KEY, CONNECTION_ID, logger
-from .agent_schemas import (
-    GmailRequest, SendEmailRequest, GmailResponse,
-    DownloadAttachmentsRequest, SemanticSearchRequest,
-    SummarizeRequest, DraftReplyRequest, ExtractActionItemsRequest,
-    ManageEmailsRequest, EmailAction
-)
+from .config import logger
 from backend.schemas import AgentResponse, StandardAgentResponse, AgentResponseStatus
 from .client import gmail_client
 from .llm import llm_client
 from .memory import agent_memory
-from agents.utils.agent_file_manager import FileStatus
 
 # Create FastAPI app immediately (lightweight)
 app = FastAPI(title="Mail Agent")
@@ -51,24 +42,6 @@ def init_agent():
     logger.info("Initializing Mail Agent dependencies...")
     
     # Import heavy dependencies only when needed
-    from .config import COMPOSIO_API_KEY, CONNECTION_ID
-    from .agent_schemas import (
-        GmailRequest,
-        SendEmailRequest,
-        GmailResponse,
-        DownloadAttachmentsRequest,
-        SemanticSearchRequest,
-        SummarizeRequest,
-        DraftReplyRequest,
-        ExtractActionItemsRequest,
-        ManageEmailsRequest,
-        EmailAction,
-    )
-    from backend.schemas import AgentResponse, StandardAgentResponse, AgentResponseStatus
-    from .client import gmail_client
-    from .llm import llm_client
-    from .memory import agent_memory
-    from backend.agents.utils.agent_file_manager import FileStatus
     
     # CMS Integration
     import sys
@@ -80,12 +53,7 @@ def init_agent():
     
     from backend.services.content_management_service import (
         ContentManagementService,
-        ProcessingTaskType,
-        ContentType,
-        ContentSource,
-        ContentPriority,
     )
-    from backend.services.canvas_service import CanvasService
     
     # Initialize services
     content_service = ContentManagementService()
@@ -196,7 +164,6 @@ def init_smart_resolver():
 @app.post("/execute")
 async def execute(request: Dict[str, Any]):
     """Execute email operations."""
-    from backend.schemas import AgentResponse, StandardAgentResponse, AgentResponseStatus
     from backend.services.canvas_service import CanvasService
     
     try:

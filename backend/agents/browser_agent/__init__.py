@@ -18,19 +18,15 @@ from pydantic import BaseModel, Field
 
 from .agent import BrowserAgent
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-# Import standardized schemas
 import sys
 from pathlib import Path
 backend_root = Path(__file__).resolve().parents[3]
 if str(backend_root) not in sys.path:
     sys.path.insert(0, str(backend_root))
+
+from backend.utils.mega_logger import setup_mega_logger
+logger = setup_mega_logger("BrowserAgent")
+
 from backend.schemas import AgentResponse, StandardAgentResponse, AgentResponseStatus
 
 

@@ -1,7 +1,6 @@
 # agents/gmail_agent/memory.py
 from typing import List, Dict, Any, Optional
 from datetime import datetime
-import json
 
 class AgentMemory:
     """

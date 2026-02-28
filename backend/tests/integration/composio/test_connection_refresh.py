@@ -12,7 +12,6 @@ and verify the ComposioAuthManager.refresh_connection() method.
 
 import pytest
 import time
-from datetime import datetime
 from database import SessionLocal
 from models import UserConnection
 from services.integrations.composio_auth import get_auth_manager
@@ -52,9 +51,9 @@ def test_refresh_connection_updates_timestamp(auth_manager, test_user_id, gmail_
         assert initial_conn is not None, "Connection should exist in database"
         initial_timestamp = initial_conn.auth_timestamp
         
-        print(f"Initial connection:")
+        print("Initial connection:")
         print(f"  User: {test_user_id}")
-        print(f"  App: gmail")
+        print("  App: gmail")
         print(f"  Status: {initial_conn.status}")
         print(f"  Auth timestamp: {initial_timestamp}")
         
@@ -71,7 +70,7 @@ def test_refresh_connection_updates_timestamp(auth_manager, test_user_id, gmail_
     assert result["success"], f"Refresh should succeed: {result.get('error')}"
     assert "refreshed_at" in result, "Result should include refresh timestamp"
     
-    print(f"✓ Refresh succeeded")
+    print("✓ Refresh succeeded")
     print(f"  Refreshed at: {result['refreshed_at']}")
     
     # Get updated timestamp from database
@@ -85,7 +84,7 @@ def test_refresh_connection_updates_timestamp(auth_manager, test_user_id, gmail_
         assert updated_conn is not None, "Connection should still exist in database"
         updated_timestamp = updated_conn.auth_timestamp
         
-        print(f"Updated connection:")
+        print("Updated connection:")
         print(f"  Status: {updated_conn.status}")
         print(f"  Auth timestamp: {updated_timestamp}")
         
@@ -97,7 +96,7 @@ def test_refresh_connection_updates_timestamp(auth_manager, test_user_id, gmail_
         assert updated_conn.status in ["active", "stale"], \
             f"Connection should remain active, got: {updated_conn.status}"
         
-        print(f"✓ Database timestamp updated successfully")
+        print("✓ Database timestamp updated successfully")
         print(f"  Time difference: {(updated_timestamp - initial_timestamp).total_seconds():.2f} seconds")
         
     finally:
@@ -139,7 +138,7 @@ def test_refresh_with_invalid_connection_id(auth_manager):
         "not found", "no connection", "reconnect"
     ]), f"Error message should be informative: {result['error']}"
     
-    print(f"✓ Invalid connection handled gracefully")
+    print("✓ Invalid connection handled gracefully")
     print(f"  Success: {result['success']}")
     print(f"  Error: {result['error']}")
     
@@ -159,7 +158,7 @@ def test_refresh_with_invalid_connection_id(auth_manager):
     assert result2["success"] is False, "Should indicate failure for invalid connection_id"
     assert "error" in result2, "Should include error message"
     
-    print(f"✓ Invalid connection ID handled gracefully")
+    print("✓ Invalid connection ID handled gracefully")
     print(f"  Success: {result2['success']}")
     print(f"  Error: {result2['error']}")
 

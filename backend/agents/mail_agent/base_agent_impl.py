@@ -5,16 +5,14 @@ Full Gmail integration with correct method names from actual client.py and llm.p
 """
 
 import logging
-import base64
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
-from datetime import datetime
 
 from backend.agents.base import BaseAgent, AgentServices, AgentConfig
-from backend.agents.base.types import AgentRequest, AgentResponse, ExecutionContext
+from backend.agents.base.types import ExecutionContext
 from backend.agents.base.capability import capability, ParameterSchema
 
-from .config import COMPOSIO_API_KEY, MCP_URL, CONNECTION_ID, logger
+from .config import COMPOSIO_API_KEY, MCP_URL, logger
 from .client import GmailClient
 from .llm import llm_client
 from .memory import AgentMemory

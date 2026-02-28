@@ -2,9 +2,7 @@
 Generate synthetic test data files for agent tests.
 Run once: python generate_test_data.py
 """
-import os
 import csv
-import json
 from pathlib import Path
 
 TEST_DATA_DIR = Path(__file__).parent

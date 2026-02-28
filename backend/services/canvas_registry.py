@@ -12,7 +12,6 @@ Replaces the single-slot canvas system with a full registry supporting:
 
 import asyncio
 import logging
-import time
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 from backend.schemas import CanvasEntry, CanvasRegistryState

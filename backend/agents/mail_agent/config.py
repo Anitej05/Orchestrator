@@ -3,20 +3,17 @@ import os
 import logging
 from pathlib import Path
 from dotenv import load_dotenv
-from pathlib import Path
 
 load_dotenv(Path(__file__).parent.parent.parent / ".env")
 
-# Configure logging - INFO level for clean output (like browser agent)
-log_file_path = Path(__file__).parent / "mail_agent.log"
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(log_file_path, mode='w')
-    ]
-)
+import sys
+backend_root = Path(__file__).resolve().parents[3]
+if str(backend_root) not in sys.path:
+    sys.path.insert(0, str(backend_root))
+
+# Configure logging via centralized Mega Logger
+from backend.utils.mega_logger import setup_mega_logger
+logger = setup_mega_logger("MailAgent")
 
 # Silence noisy third-party loggers
 logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
@@ -25,8 +22,6 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
 logging.getLogger("composio").setLevel(logging.WARNING)
-
-logger = logging.getLogger("agents.mail_agent.config")
 
 # Configuration
 COMPOSIO_API_KEY = os.getenv("COMPOSIO_API_KEY")

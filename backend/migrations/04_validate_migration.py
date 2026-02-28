@@ -17,7 +17,6 @@ import os
 import sys
 import argparse
 from pathlib import Path
-from typing import Dict, Any, List, Tuple
 
 # Add backend to path
 backend_dir = Path(__file__).parent.parent
@@ -214,7 +213,7 @@ class MigrationValidator:
                                     # Try parsing as string
                                     json.loads(row[1])
                                     logger.info(f"  ✓ {table}.{column} (id={row[0]}): valid JSON")
-                            except (json.JSONDecodeError, TypeError) as e:
+                            except (json.JSONDecodeError, TypeError):
                                 logger.error(f"  ✗ {table}.{column} (id={row[0]}): invalid JSON")
                                 self.errors.append(f"Invalid JSON in {table}.{column}")
                                 all_valid = False

@@ -12,12 +12,10 @@ Production-grade spreadsheet analysis with full feature set:
 
 import logging
 import os
-import re
 import json
 import uuid
-from typing import Dict, Any, Optional, List, Union
+from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
-from pathlib import Path
 import pandas as pd
 import numpy as np
 
@@ -25,11 +23,10 @@ from backend.agents.base import BaseAgent, AgentServices, AgentConfig
 from backend.agents.base.types import AgentRequest, AgentResponse, ExecutionContext
 from backend.agents.base.capability import capability, ParameterSchema
 
-from .config import logger, STORAGE_DIR, AGENT_VERSION
+from .config import logger, STORAGE_DIR
 from .client import DataFrameClient, SmartDataResolver
 from .llm import LLMClient
-from .state import session_state, Session
-from .agent_schemas import StepResult, TaskStatus, ExecuteResponse
+from .state import session_state
 
 # Try to import CanvasService
 try:

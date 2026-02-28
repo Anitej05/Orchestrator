@@ -16,14 +16,13 @@ import io
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
-import os
 import asyncio
 import logging
 import time
 import json
 import subprocess
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 
 # Path setup
 ROOT = Path(__file__).resolve().parent.parent
@@ -213,7 +212,7 @@ async def test_parallel_spawning():
     print(f"  Spawned {len(processes)}/{len(AGENTS_TO_TEST)} agents in {spawn_time:.1f}s")
 
     # Wait for all to become healthy (in parallel)
-    print(f"  Waiting for health checks...")
+    print("  Waiting for health checks...")
     health_start = time.time()
 
     health_tasks = [
@@ -299,9 +298,9 @@ async def test_multi_instance():
     unique_pids = len(set(pids))
     print(f"  Unique PIDs: {unique_pids}/{len(pids)} (should all be unique)")
     if unique_pids == len(pids):
-        print(f"  PASS: All instances are independent processes")
+        print("  PASS: All instances are independent processes")
     else:
-        print(f"  FAIL: Some instances share PIDs!")
+        print("  FAIL: Some instances share PIDs!")
 
     # Cleanup
     for inst in instances:

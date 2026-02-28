@@ -1,3 +1,4 @@
+﻿// @ts-nocheck
 /**
  * PlanGraph Component Unit Tests
  * 
@@ -218,7 +219,7 @@ describe('PlanGraph Component', () => {
       render(<PlanGraph planData={plan} taskStatuses={{}} />);
       
       const edgesCount = screen.getByTestId('edges-count');
-      expect(edgesCount).toHaveTextContent('1'); // 1 edge: Task 1 → Task 2
+      expect(edgesCount).toHaveTextContent('1'); // 1 edge: Task 1 â†’ Task 2
     });
 
     it('should create edges from parent to all parallel children', () => {
@@ -236,7 +237,7 @@ describe('PlanGraph Component', () => {
       render(<PlanGraph planData={plan} taskStatuses={{}} />);
       
       const edgesCount = screen.getByTestId('edges-count');
-      expect(edgesCount).toHaveTextContent('2'); // 2 edges: Task 1 → Task 2A, Task 1 → Task 2B
+      expect(edgesCount).toHaveTextContent('2'); // 2 edges: Task 1 â†’ Task 2A, Task 1 â†’ Task 2B
     });
 
     it('should create edges from all parallel parents to single child', () => {
@@ -254,7 +255,7 @@ describe('PlanGraph Component', () => {
       render(<PlanGraph planData={plan} taskStatuses={{}} />);
       
       const edgesCount = screen.getByTestId('edges-count');
-      expect(edgesCount).toHaveTextContent('2'); // 2 edges: Task 1A → Task 2, Task 1B → Task 2
+      expect(edgesCount).toHaveTextContent('2'); // 2 edges: Task 1A â†’ Task 2, Task 1B â†’ Task 2
     });
   });
 
@@ -388,3 +389,4 @@ describe('PlanGraph Component', () => {
     });
   });
 });
+

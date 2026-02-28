@@ -3,12 +3,11 @@ Workflow Scheduler Service
 Manages automated execution of workflows using APScheduler
 """
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Optional
 from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.jobstores.base import JobLookupError
-import asyncio
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)

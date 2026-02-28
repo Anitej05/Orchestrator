@@ -5,10 +5,9 @@ Coding Agent - BaseAgent Implementation
 via inference_service — no hardcoded canvas routing.
 """
 
-import logging
 import os
 import time
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 
 from backend.agents.base.agent import BaseAgent, AgentConfig
 from backend.agents.base.types import (

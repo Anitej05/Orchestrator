@@ -7,7 +7,6 @@ Designed for cloud deployment with efficient resource management.
 
 import logging
 import time
-import os
 import hashlib
 import re
 from typing import Dict, Any, Optional, List
@@ -36,7 +35,7 @@ AgentResponseStatus = backend_schemas.AgentResponseStatus
 
 from .agent_schemas import (
     AnalyzeDocumentRequest, EditDocumentRequest, CreateDocumentRequest,
-    UndoRedoRequest, VersionHistoryRequest, ExtractDataRequest, EditAction
+    UndoRedoRequest, ExtractDataRequest
 )
 from .agent_schemas import AgentResponseStatus as LocalAgentResponseStatus
 from .editors import DocumentEditor
@@ -72,7 +71,6 @@ from backend.services.content_management_service import (
     ContentType,
     ContentSource,
     ProcessingStrategy,
-    ContentPriority,
     ProcessingTaskType
 )
 from backend.services.canvas_service import CanvasService
@@ -476,16 +474,16 @@ class DocumentAgent:
         logger.info("=" * 80)
         logger.info(f"{status_emoji} DOCUMENT AGENT EXECUTION METRICS")
         logger.info("=" * 80)
-        logger.info(f"📊 Performance:")
+        logger.info("📊 Performance:")
         logger.info(f"  ⏱️  Total Latency:        {exec_metrics['latency_ms']:.2f} ms")
         logger.info(f"  🔍 RAG Retrieval Time:   {exec_metrics['rag_retrieval_ms']:.2f} ms")
         logger.info(f"  🤖 LLM Processing Time:  {exec_metrics['llm_call_ms']:.2f} ms")
-        logger.info(f"")
-        logger.info(f"📈 Statistics:")
+        logger.info("")
+        logger.info("📈 Statistics:")
         logger.info(f"  📚 Chunks Retrieved:     {exec_metrics['chunks_retrieved']}")
         logger.info(f"  💬 LLM API Calls:        {exec_metrics['llm_calls']}")
         logger.info(f"  💾 Cache Hit Rate:       {exec_metrics['cache_hit_rate']:.1f}%")
-        logger.info(f"")
+        logger.info("")
         
         # Session totals
         total_requests = self.metrics["performance"]["requests_completed"]
@@ -494,7 +492,7 @@ class DocumentAgent:
             self.metrics["errors"]["total"] / total_requests * 100, 1
         ) if total_requests > 0 else 0
         
-        logger.info(f"🎯 Session Totals:")
+        logger.info("🎯 Session Totals:")
         logger.info(f"  📝 Total Requests:       {total_requests}")
         logger.info(f"  ⏱️  Avg Latency:          {avg_latency:.2f} ms")
         logger.info(f"  ❌ Error Rate:           {error_rate}%")

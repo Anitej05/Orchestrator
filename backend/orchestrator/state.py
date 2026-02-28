@@ -7,14 +7,6 @@ from langchain_core.messages import BaseMessage
 
 # Import the Pydantic models from the single source of truth: schemas.py
 # This resolves the circular import error.
-from backend.schemas import (
-    Task,
-    AgentCard, # This is a Pydantic model
-    TaskAgentPair, # This is a Pydantic model
-    PlannedTask, # This is a Pydantic model
-    FileObject,
-    DialogueTask # For multi-turn agent conversations
-)
 
 def or_overwrite(a: bool | None, b: bool | None) -> bool:
     """Reducer that returns true if any value is true, handling Nones."""

@@ -3,7 +3,6 @@ import asyncio
 import base64
 import logging
 from typing import Dict, Any, Optional, List
-from pathlib import Path
 
 from .config import ATTACHMENT_DIR, MAX_CONCURRENT_FETCHES
 from .tools import ComposioToolManager

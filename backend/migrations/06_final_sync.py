@@ -100,12 +100,12 @@ def final_sync():
             elif diff > 0:
                 logger.warning(f"  ⚠ {table}: SQLite has {diff} more rows")
                 logger.warning(f"    SQLite: {sqlite_count}, PostgreSQL: {postgres_count}")
-                logger.warning(f"    Manual sync required for this table")
+                logger.warning("    Manual sync required for this table")
                 sync_results[table] = {'status': 'needs_sync', 'diff': diff}
             else:
                 logger.error(f"  ✗ {table}: PostgreSQL has {abs(diff)} more rows")
                 logger.error(f"    SQLite: {sqlite_count}, PostgreSQL: {postgres_count}")
-                logger.error(f"    This should not happen in dual-write mode!")
+                logger.error("    This should not happen in dual-write mode!")
                 sync_results[table] = {'status': 'error', 'diff': diff}
             
             total_synced += sqlite_count

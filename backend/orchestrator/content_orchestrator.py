@@ -11,17 +11,14 @@ This module provides:
 import os
 import json
 import logging
-import asyncio
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass
 
 from backend.services.content_management_service import (
     ContentManagementService,
-    UnifiedContentMetadata,
     ContentType,
     ContentSource,
-    ContentPriority,
-    ContentReference
+    ContentPriority
 )
 
 # Helper to get service instance
@@ -366,7 +363,7 @@ def inject_content_id_into_payload(
     logger.info(f"[CONTENT_INJECT] payload before injection={payload}")
     
     if not content_id_mapping:
-        logger.warning(f"[CONTENT_INJECT] No content_id_mapping available")
+        logger.warning("[CONTENT_INJECT] No content_id_mapping available")
         return payload
     
     # Try to find by filename first
@@ -601,7 +598,6 @@ async def expand_state_from_saved(state: Dict[str, Any]) -> Dict[str, Any]:
 def get_optimized_llm_context(
     state: Dict[str, Any],
     thread_id: str,
-    focus_fields: Optional[List[str]] = None,
     max_tokens: Optional[int] = None
 ) -> Dict[str, Any]:
     """

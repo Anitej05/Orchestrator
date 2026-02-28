@@ -1,9 +1,7 @@
 
 import subprocess
-import os
 import logging
-import uuid
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from pathlib import Path
 
 logger = logging.getLogger("TerminalService")

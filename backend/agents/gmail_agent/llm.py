@@ -4,8 +4,7 @@ import json
 import re
 import asyncio
 import logging
-from typing import List, Optional, Tuple, Dict, Any
-from datetime import datetime
+from typing import List, Dict, Any
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 from pathlib import Path

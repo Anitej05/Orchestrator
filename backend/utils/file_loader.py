@@ -4,9 +4,7 @@ Handles documents, images, and other file types.
 """
 
 import os
-import json
 import time
-from pathlib import Path
 from typing import Dict, List, Optional
 import logging
 

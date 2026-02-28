@@ -11,12 +11,11 @@ Capabilities:
 
 import logging
 import os
-import re
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 
 from backend.agents.base import BaseAgent, AgentServices, AgentConfig
-from backend.agents.base.types import AgentRequest, AgentResponse, ExecutionContext
+from backend.agents.base.types import ExecutionContext
 from backend.agents.base.capability import capability, ParameterSchema
 
 from .service import GeneralAgentService

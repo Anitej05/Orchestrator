@@ -4,7 +4,7 @@ Provides consistent, debug-friendly formatting for execution and session-level m
 """
 
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -32,8 +32,8 @@ def display_execution_metrics(metrics: Dict[str, Any], agent_name: str = "Agent"
     
     # Performance section
     if metrics.get('latency_ms') is not None:
-        logger.info(f"")
-        logger.info(f"⏱️  PERFORMANCE:")
+        logger.info("")
+        logger.info("⏱️  PERFORMANCE:")
         latency = metrics.get('latency_ms', 0)
         logger.info(f"    Total Latency:        {latency:.1f} ms")
         
@@ -45,8 +45,8 @@ def display_execution_metrics(metrics: Dict[str, Any], agent_name: str = "Agent"
     
     # Token usage section
     if metrics.get('tokens_input') is not None or metrics.get('tokens_output') is not None:
-        logger.info(f"")
-        logger.info(f"💬 TOKEN USAGE:")
+        logger.info("")
+        logger.info("💬 TOKEN USAGE:")
         input_tokens = metrics.get('tokens_input', 0)
         output_tokens = metrics.get('tokens_output', 0)
         logger.info(f"    Input Tokens:         {input_tokens}")
@@ -55,22 +55,22 @@ def display_execution_metrics(metrics: Dict[str, Any], agent_name: str = "Agent"
     
     # LLM calls section
     if metrics.get('llm_calls') is not None:
-        logger.info(f"")
-        logger.info(f"🤖 LLM CALLS:")
+        logger.info("")
+        logger.info("🤖 LLM CALLS:")
         logger.info(f"    Total Calls:          {metrics['llm_calls']}")
     
     # RAG section (document agent specific)
     if metrics.get('chunks_retrieved') is not None and metrics['chunks_retrieved'] > 0:
-        logger.info(f"")
-        logger.info(f"📚 RAG RETRIEVAL:")
+        logger.info("")
+        logger.info("📚 RAG RETRIEVAL:")
         logger.info(f"    Chunks Retrieved:     {metrics['chunks_retrieved']}")
         if metrics.get('avg_chunks_per_query'):
             logger.info(f"    Avg per Query:        {metrics['avg_chunks_per_query']:.1f}")
     
     # Cache section
     if metrics.get('cache_hit_rate') is not None:
-        logger.info(f"")
-        logger.info(f"💾 CACHE:")
+        logger.info("")
+        logger.info("💾 CACHE:")
         cache_rate = metrics.get('cache_hit_rate', 0)
         cache_status = "✅ HIT" if metrics.get('cache_hit') else "⚠️  MISS"
         logger.info(f"    Status:               {cache_status}")
@@ -78,14 +78,14 @@ def display_execution_metrics(metrics: Dict[str, Any], agent_name: str = "Agent"
     
     # Retry section (spreadsheet agent specific)
     if metrics.get('retry_success_rate') is not None:
-        logger.info(f"")
-        logger.info(f"🔄 RETRY METRICS:")
+        logger.info("")
+        logger.info("🔄 RETRY METRICS:")
         logger.info(f"    Success Rate:         {metrics['retry_success_rate']:.1f}%")
     
     # Resource section
     if metrics.get('memory_used_mb') is not None or metrics.get('peak_memory_mb') is not None:
-        logger.info(f"")
-        logger.info(f"💻 RESOURCES:")
+        logger.info("")
+        logger.info("💻 RESOURCES:")
         if metrics.get('memory_used_mb') is not None:
             logger.info(f"    Memory Used:          {metrics['memory_used_mb']:.1f} MB")
         if metrics.get('peak_memory_mb') is not None:
@@ -93,8 +93,8 @@ def display_execution_metrics(metrics: Dict[str, Any], agent_name: str = "Agent"
     
     # Error section (only if there are errors)
     if metrics.get('error') or not success:
-        logger.info(f"")
-        logger.info(f"⚠️  ERROR:")
+        logger.info("")
+        logger.info("⚠️  ERROR:")
         error_msg = metrics.get('error', 'Operation failed without specific error message')
         logger.info(f"    {error_msg}")
     
@@ -126,8 +126,8 @@ def display_session_metrics(session_metrics: Dict[str, Any], agent_name: str = "
         failed = queries.get('failed', 0)
         success_rate = (successful / total * 100) if total > 0 else 0
         
-        logger.info(f"")
-        logger.info(f"📝 QUERIES:")
+        logger.info("")
+        logger.info("📝 QUERIES:")
         logger.info(f"    Total:                {total}")
         logger.info(f"    Successful:           {successful}")
         logger.info(f"    Failed:               {failed}")
@@ -137,8 +137,8 @@ def display_session_metrics(session_metrics: Dict[str, Any], agent_name: str = "
     if 'api_calls' in session_metrics:
         api_calls = session_metrics['api_calls']
         if any(api_calls.values()):
-            logger.info(f"")
-            logger.info(f"📡 API CALLS:")
+            logger.info("")
+            logger.info("📡 API CALLS:")
             for api_type, count in api_calls.items():
                 if count > 0:
                     logger.info(f"    {api_type.capitalize():20s} {count}")
@@ -146,8 +146,8 @@ def display_session_metrics(session_metrics: Dict[str, Any], agent_name: str = "
     # Performance section
     if 'performance' in session_metrics:
         perf = session_metrics['performance']
-        logger.info(f"")
-        logger.info(f"⏱️  PERFORMANCE:")
+        logger.info("")
+        logger.info("⏱️  PERFORMANCE:")
         if perf.get('total_latency_ms'):
             logger.info(f"    Total Latency:        {perf['total_latency_ms']:.1f} ms")
         if perf.get('avg_latency_ms'):
@@ -164,8 +164,8 @@ def display_session_metrics(session_metrics: Dict[str, Any], agent_name: str = "
         llm_calls = session_metrics['llm_calls']
         total = llm_calls.get('total', 0)
         if total > 0:
-            logger.info(f"")
-            logger.info(f"🤖 LLM CALLS BREAKDOWN:")
+            logger.info("")
+            logger.info("🤖 LLM CALLS BREAKDOWN:")
             logger.info(f"    Total:                {total}")
             
             # Show provider breakdown if available
@@ -186,8 +186,8 @@ def display_session_metrics(session_metrics: Dict[str, Any], agent_name: str = "
         input_total = tokens.get('input_total', 0)
         output_total = tokens.get('output_total', 0)
         if input_total > 0 or output_total > 0:
-            logger.info(f"")
-            logger.info(f"💬 TOKEN USAGE (SESSION TOTAL):")
+            logger.info("")
+            logger.info("💬 TOKEN USAGE (SESSION TOTAL):")
             logger.info(f"    Input Tokens:         {input_total}")
             logger.info(f"    Output Tokens:        {output_total}")
             logger.info(f"    Total Tokens:         {input_total + output_total}")
@@ -201,8 +201,8 @@ def display_session_metrics(session_metrics: Dict[str, Any], agent_name: str = "
         cache_rate = (hits / total_cache * 100) if total_cache > 0 else 0
         
         if total_cache > 0:
-            logger.info(f"")
-            logger.info(f"💾 CACHE:")
+            logger.info("")
+            logger.info("💾 CACHE:")
             logger.info(f"    Hits:                 {hits}")
             logger.info(f"    Misses:               {misses}")
             logger.info(f"    Hit Rate:             {cache_rate:.1f}%")
@@ -215,8 +215,8 @@ def display_session_metrics(session_metrics: Dict[str, Any], agent_name: str = "
         success_rate = (successful_retries / total_retries * 100) if total_retries > 0 else 0
         
         if total_retries > 0:
-            logger.info(f"")
-            logger.info(f"🔄 RETRY METRICS:")
+            logger.info("")
+            logger.info("🔄 RETRY METRICS:")
             logger.info(f"    Total Retries:        {total_retries}")
             logger.info(f"    Successful:           {successful_retries}")
             logger.info(f"    Success Rate:         {success_rate:.1f}%")
@@ -226,8 +226,8 @@ def display_session_metrics(session_metrics: Dict[str, Any], agent_name: str = "
         rag = session_metrics['rag']
         chunks_total = rag.get('chunks_retrieved_total', 0)
         if chunks_total > 0:
-            logger.info(f"")
-            logger.info(f"📚 RAG RETRIEVAL (SESSION):")
+            logger.info("")
+            logger.info("📚 RAG RETRIEVAL (SESSION):")
             logger.info(f"    Chunks Retrieved:     {chunks_total}")
             if rag.get('avg_chunks_per_query'):
                 logger.info(f"    Avg per Query:        {rag['avg_chunks_per_query']:.1f}")
@@ -240,8 +240,8 @@ def display_session_metrics(session_metrics: Dict[str, Any], agent_name: str = "
     if 'processing' in session_metrics:
         processing = session_metrics['processing']
         if processing.get('files_processed', 0) > 0 or processing.get('batch_operations', 0) > 0:
-            logger.info(f"")
-            logger.info(f"⚙️  PROCESSING:")
+            logger.info("")
+            logger.info("⚙️  PROCESSING:")
             if processing.get('files_processed'):
                 logger.info(f"    Files Processed:      {processing['files_processed']}")
             if processing.get('batch_operations'):
@@ -259,8 +259,8 @@ def display_session_metrics(session_metrics: Dict[str, Any], agent_name: str = "
             error_info = errors
     
     if errors_exist:
-        logger.info(f"")
-        logger.info(f"⚠️  ERRORS:")
+        logger.info("")
+        logger.info("⚠️  ERRORS:")
         logger.info(f"    Total Errors:         {error_info.get('total', 0)}")
         for error_type, count in error_info.items():
             if error_type != 'total' and count > 0:
@@ -270,8 +270,8 @@ def display_session_metrics(session_metrics: Dict[str, Any], agent_name: str = "
     if 'resource' in session_metrics:
         resource = session_metrics['resource']
         if resource.get('peak_memory_mb') or resource.get('current_memory_mb'):
-            logger.info(f"")
-            logger.info(f"💻 RESOURCES:")
+            logger.info("")
+            logger.info("💻 RESOURCES:")
             if resource.get('current_memory_mb'):
                 logger.info(f"    Current Memory:       {resource['current_memory_mb']:.1f} MB")
             if resource.get('peak_memory_mb'):
