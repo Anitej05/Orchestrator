@@ -1570,14 +1570,71 @@ async def execute_orchestration(
             # Single response mode for HTTP
             final_state = await selected_graph.ainvoke(graph_input, config=config)
 
+        # Ensure thread_id is always present in state for persistence
+        if isinstance(final_state, dict):
+            final_state["thread_id"] = thread_id
+        else:
+            logger.warning(f"final_state for {thread_id} is not a dict ({type(final_state)}); persistence may be limited")
+
         # Store the final state after the graph run
         with store_lock:
             conversation_store[thread_id] = final_state.copy()
             
-        # Save conversation history using orchestrator's save routine
+        # Save conversation history using orchestrator's save routine with owner info
         try:
             from backend.orchestrator.graph import save_conversation_history
-            save_conversation_history(final_state, {"configurable": {"thread_id": thread_id}})
+            
+            # Extract owner_id from owner parameter
+            owner_id = None
+            if owner:
+                if isinstance(owner, str):
+                    owner_id = owner
+                else:
+                    owner_id = owner.get("user_id") or owner.get("sub") or owner.get("id")
+            
+            # Add owner to final_state and config for save
+            if owner_id:
+                owner_obj = {"user_id": owner_id}
+                final_state["owner"] = owner_obj
+                save_conversation_history(final_state, {"configurable": {"thread_id": thread_id, "owner": owner_obj}})
+                logger.info(f"Conversation history saved in execute_orchestration for thread_id {thread_id} with owner_id {owner_id}")
+                
+                # ─── Register / refresh UserThread in DB so conversation appears in sidebar ───
+                try:
+                    from database import SessionLocal as _SessionLocal
+                    from models import UserThread
+                    _db = _SessionLocal()
+                    try:
+                        existing_thread = _db.query(UserThread).filter_by(thread_id=thread_id).first()
+                        if existing_thread:
+                            # Update updated_at so conversation moves to top of list
+                            existing_thread.updated_at = datetime.utcnow()
+                            logger.info(f"Updated UserThread timestamp for {thread_id} in execute_orchestration")
+                        else:
+                            # Generate a title from the original prompt
+                            raw_title = (
+                                final_state.get("original_prompt")
+                                or (prompt if prompt else "")
+                                or "New Conversation"
+                            )
+                            conversation_title = raw_title[:100].strip()
+                            new_thread = UserThread(
+                                thread_id=thread_id,
+                                user_id=owner_id,
+                                title=conversation_title,
+                            )
+                            _db.add(new_thread)
+                            logger.info(f"Created UserThread for {thread_id} in execute_orchestration (user={owner_id}, title='{conversation_title}')")
+                        _db.commit()
+                    finally:
+                        _db.close()
+                except Exception as db_err:
+                    logger.error(f"Failed to register UserThread for {thread_id} in execute_orchestration: {db_err}")
+                    # Non-fatal — conversation is already saved to file
+            else:
+                # Save without owner (will still save but without user association)
+                save_conversation_history(final_state, {"configurable": {"thread_id": thread_id}})
+                logger.warning(f"Conversation history saved in execute_orchestration for thread_id {thread_id} WITHOUT owner_id")
         except Exception as e:
             logger.error(f"Failed to save conversation history for {thread_id}: {e}")
 
@@ -1672,7 +1729,30 @@ def process_node_data(node_name: str, node_output, progress: float, node_count: 
             
             # Extract adaptive planning fields for real-time UI updates
             elif node_name == "omni_brain" and key in ["execution_plan", "action_history", "insights"]:
-                node_specific_data[key] = serialize_complex_object(value)
+                if key == "action_history" and isinstance(value, list):
+                    # Deduplicate action_history to prevent frontend duplicate display
+                    seen_actions = set()
+                    unique_history = []
+                    for action in value:
+                        if isinstance(action, dict):
+                            # Create unique identifier from key fields
+                            action_id = f"{action.get('iteration')}-{action.get('resource_id')}-{action.get('action_type')}-{action.get('execution_time_ms')}"
+                            if action_id not in seen_actions:
+                                seen_actions.add(action_id)
+                                # Strip large result fields before sending to frontend
+                                cleaned_action = {k: v for k, v in action.items() if k not in ['result_raw', 'result_full']}
+                                unique_history.append(cleaned_action)
+                            else:
+                                logger.debug(f"⚠️ Filtered duplicate action: {action_id}")
+                        else:
+                            unique_history.append(action)
+                    
+                    if len(unique_history) < len(value):
+                        logger.warning(f"🔄 Removed {len(value) - len(unique_history)} duplicate actions from history (total: {len(value)} → {len(unique_history)})")
+                    node_specific_data[key] = serialize_complex_object(unique_history)
+                else:
+                    node_specific_data[key] = serialize_complex_object(value)
+                
                 if key == "execution_plan" and value:
                      node_specific_data["description"] = f"Brain created/updated plan with {len(value)} phases"
                     
@@ -3280,6 +3360,24 @@ async def websocket_chat(websocket: WebSocket):
                         }, thread_id)
                         sent_todo_snapshot = True
                     
+                    # Emit brain reasoning when Brain.think() completes
+                    if node_name == "omni_brain" and isinstance(node_output, dict):
+                        decision = node_output.get("decision")
+                        if decision and isinstance(decision, dict):
+                            reasoning = decision.get("reasoning")
+                            if reasoning:
+                                await safe_websocket_send(websocket, {
+                                    "node": "brain_thinking",
+                                    "thread_id": thread_id,
+                                    "data": {
+                                        "reasoning": reasoning,
+                                        "action_type": decision.get("action_type"),
+                                        "iteration": node_output.get("iteration")
+                                    },
+                                    "timestamp": time.time()
+                                }, thread_id)
+                                logger.debug(f"🧠 Emitted brain reasoning: {reasoning[:100]}...")
+                    
                     # Emit task status events for real-time UI updates
                     if node_name == "execute_batch" and isinstance(node_output, dict):
                         task_events = node_output.get("task_events", [])
@@ -3290,21 +3388,33 @@ async def websocket_chat(websocket: WebSocket):
                                 task_name = event.get("task_name")
                                 
                                 if event_type == "task_started":
+                                    # Generate activity description (clean one-liner for UI)
+                                    task_desc = event.get("task_description", "")
+                                    activity_desc = task_desc.split('.')[0] if task_desc else task_name
+                                    if len(activity_desc) > 80:
+                                        activity_desc = activity_desc[:77] + "..."
+                                    
                                     await safe_websocket_send(websocket, {
                                         "node": "task_started",
                                         "thread_id": thread_id,
                                         "task_name": task_name,
-                                        "task_description": event.get("task_description"),
+                                        "task_description": task_desc,
+                                        "activity_description": activity_desc,
                                         "agent_name": event.get("agent_name"),
                                         "timestamp": event.get("timestamp", time.time())
                                     }, thread_id)
                                     logger.debug(f"🚀 Emitted task_started for '{task_name}'")
                                     
                                 elif event_type == "task_completed":
+                                    # Include result summary if available  
+                                    result_summary = event.get("result_summary", "Completed successfully")
+                                    
                                     await safe_websocket_send(websocket, {
                                         "node": "task_completed",
                                         "thread_id": thread_id,
                                         "task_name": task_name,
+                                        "task_description": event.get("task_description"),
+                                        "result_summary": result_summary,
                                         "agent_name": event.get("agent_name"),
                                         "execution_time": event.get("execution_time", 0),
                                         "timestamp": event.get("timestamp", time.time())
@@ -3331,21 +3441,33 @@ async def websocket_chat(websocket: WebSocket):
                     task_name = event.get("task_name")
                     
                     if event_type == "task_started":
+                        # Generate activity description (clean one-liner for UI)
+                        task_desc = event.get("task_description", "")
+                        activity_desc = task_desc.split('.')[0] if task_desc else task_name
+                        if len(activity_desc) > 80:
+                            activity_desc = activity_desc[:77] + "..."
+                        
                         await safe_websocket_send(websocket, {
                             "node": "task_started",
                             "thread_id": thread_id,
                             "task_name": task_name,
-                            "task_description": event.get("task_description"),
+                            "task_description": task_desc,
+                            "activity_description": activity_desc,
                             "agent_name": event.get("agent_name"),
                             "timestamp": event.get("timestamp", time.time())
                         }, thread_id)
                         logger.info(f"📡 REAL-TIME: Task started - '{task_name}'")
                         
                     elif event_type == "task_completed":
+                        # Include result summary if available
+                        result_summary = event.get("result_summary", "Completed successfully")
+                        
                         await safe_websocket_send(websocket, {
                             "node": "task_completed",
                             "thread_id": thread_id,
                             "task_name": task_name,
+                            "task_description": event.get("task_description"),
+                            "result_summary": result_summary,
                             "agent_name": event.get("agent_name"),
                             "execution_time": event.get("execution_time", 0),
                             "timestamp": event.get("timestamp", time.time())
@@ -3498,60 +3620,8 @@ async def websocket_chat(websocket: WebSocket):
                 logger.info(f"WebSocket workflow paused for user input in thread_id {thread_id}, needs_approval: {needs_approval}, pending_approval: {pending_approval}")
                 continue  # Continue waiting for user response message
 
-            # Save conversation history with owner enforcement and error handling
-            owner_id = None
-            try:
-                if owner:
-                    if isinstance(owner, str):
-                        owner_id = owner
-                    else:
-                        owner_id = owner.get("user_id") or owner.get("sub") or owner.get("id")
-                if not owner_id:
-                    logger.error(f"Missing owner_id for thread {thread_id}. Conversation will NOT be saved.")
-                    # Don't raise error - allow workflow to continue, just log the issue
-                else:
-                    from backend.orchestrator.graph import save_conversation_history
-                    
-                    owner_obj = {"user_id": owner_id}
-                    final_state["owner"] = owner_obj
-                    save_conversation_history(final_state, {"configurable": {"thread_id": thread_id, "owner": owner_obj}})
-                    logger.info(f"Conversation history saved for thread_id {thread_id} with owner_id {owner_id}")
-
-                    # ─── Register / refresh UserThread in DB so conversation appears in sidebar ───
-                    try:
-                        from database import SessionLocal as _SessionLocal
-                        from models import UserThread
-                        _db = _SessionLocal()
-                        try:
-                            existing_thread = _db.query(UserThread).filter_by(thread_id=thread_id).first()
-                            if existing_thread:
-                                # Update updated_at so conversation moves to top of list
-                                existing_thread.updated_at = datetime.utcnow()
-                                logger.info(f"Updated UserThread timestamp for {thread_id}")
-                            else:
-                                # Generate a title from the original prompt
-                                raw_title = (
-                                    final_state.get("original_prompt")
-                                    or (prompt if prompt else "")
-                                    or "New Conversation"
-                                )
-                                conversation_title = raw_title[:100].strip()
-                                new_thread = UserThread(
-                                    thread_id=thread_id,
-                                    user_id=owner_id,
-                                    title=conversation_title,
-                                )
-                                _db.add(new_thread)
-                                logger.info(f"Created UserThread for {thread_id} (user={owner_id}, title='{conversation_title}')")
-                            _db.commit()
-                        finally:
-                            _db.close()
-                    except Exception as db_err:
-                        logger.error(f"Failed to register UserThread for {thread_id}: {db_err}")
-                        # Non-fatal — conversation is already saved to file
-            except Exception as save_err:
-                logger.error(f"Failed to save conversation history for thread {thread_id}: {save_err}")
-                # Continue anyway - don't fail the request if history saving fails
+            # NOTE: Conversation history is already saved in execute_orchestration()
+            # No need to save again here - avoid redundancy
             
             # Get serializable state with error handling
             try:

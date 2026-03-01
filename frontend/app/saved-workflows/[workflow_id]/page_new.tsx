@@ -8,7 +8,7 @@ import { Badge } from '@/components/ui/badge';
 import { ArrowLeft, Play, Trash2, Calendar, Clock, Users, ChevronDown, ChevronUp, Loader2, MessageSquare } from 'lucide-react';
 import { authFetch } from '@/lib/auth-fetch';
 import { toast } from 'sonner';
-import PlanGraph from '@/components/PlanGraph';
+import TaskCardList from '@/components/task-card-list';
 import WorkflowExecutionChat from '@/components/workflow-execution-chat';
 import type { TaskStatus } from '@/lib/types';
 import { useTaskExecutionWebSocket } from '@/hooks/use-task-execution-websocket';
@@ -336,13 +336,18 @@ export default function WorkflowDetailPage() {
           <div className="mb-6">
             <Card>
               <CardHeader>
-                <CardTitle>Workflow Plan Visualization</CardTitle>
+                <CardTitle>Workflow Tasks</CardTitle>
                 <CardDescription>
-                  Task execution flow
+                  Expand each task to view execution details
                 </CardDescription>
               </CardHeader>
-              <CardContent className="h-[500px]">
-                <PlanGraph planData={planData} taskStatuses={taskStatuses} />
+              <CardContent>
+                <TaskCardList
+                  todoList={workflow.blueprint.todo_list || []}
+                  taskStatuses={taskStatuses}
+                  fallbackTasks={planData.pendingTasks || []}
+                  emptySubtitle="No task data found in this saved workflow"
+                />
               </CardContent>
             </Card>
           </div>

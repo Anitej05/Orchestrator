@@ -13,9 +13,10 @@ from typing import Dict, Any, Optional, List
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException, Depends, Request
 from sqlalchemy.orm import Session
+from sqlalchemy import desc
 
 from database import get_db
-from models import UserThread
+from models import UserThread, ConversationSearch
 
 router = APIRouter(tags=["Conversations"])
 logger = logging.getLogger("uvicorn.error")
@@ -82,23 +83,32 @@ async def get_conversation_history_simple(thread_id: str):
     """
     Load the full conversation history from the saved JSON file.
     Returns all messages, metadata, plan, and uploaded files.
+    Fallback to in-memory store if JSON not yet persisted.
     """
     try:
+        from main import conversation_store
         backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         history_dir = os.path.join(backend_dir, "conversation_history")
         history_path = os.path.join(history_dir, f"{thread_id}.json")
         
         logger.info(f"Looking for conversation history at: {history_path}")
         
-        if not os.path.exists(history_path):
-            logger.warning(f"Conversation history not found at: {history_path}")
-            raise HTTPException(status_code=404, detail=f"Conversation history not found for thread_id: {thread_id}")
+        # Try to load from JSON file first
+        if os.path.exists(history_path):
+            with open(history_path, 'r', encoding='utf-8') as f:
+                conversation_data = json.load(f)
+            logger.info(f"✅ Successfully loaded conversation {thread_id} from JSON file")
+            return conversation_data
         
-        with open(history_path, 'r', encoding='utf-8') as f:
-            conversation_data = json.load(f)
+        # Fallback: Check in-memory store
+        if thread_id in conversation_store:
+            logger.info(f"⚡ Loaded conversation {thread_id} from in-memory store (not persisted to JSON yet)")
+            return conversation_store[thread_id]
         
-        logger.info(f"Successfully loaded conversation history for thread_id: {thread_id}")
-        return conversation_data
+        logger.warning(f"❌ Conversation history not found for thread_id: {thread_id}")
+        logger.warning(f"   → Checked JSON: {history_path} - NOT FOUND")
+        logger.warning(f"   → Checked in-memory store - NOT FOUND")
+        raise HTTPException(status_code=404, detail=f"Conversation history not found for thread_id: {thread_id}")
         
     except HTTPException as http_exc:
         raise http_exc
@@ -195,8 +205,8 @@ async def get_all_conversations(request: Request, db: Session = Depends(get_db))
                 "id": ut.thread_id,
                 "thread_id": ut.thread_id,
                 "title": title,
-                "created_at": ut.created_at.isoformat() if ut.created_at else None,
-                "updated_at": ut.updated_at.isoformat() if ut.updated_at else None,
+                "created_at": ut.created_at.isoformat() + 'Z' if ut.created_at else None,
+                "updated_at": ut.updated_at.isoformat() + 'Z' if ut.updated_at else None,
                 "last_message": last_message
             })
         
@@ -215,9 +225,12 @@ async def get_conversation_history_auth(thread_id: str, request: Request, db: Se
     Retrieves the full, standardized conversation state from its JSON file.
     This is the single source of truth for a conversation's history.
     Ensures user can only access their own conversations.
+    
+    Fallback to in-memory store if JSON file doesn't exist yet.
     """
     try:
         from auth import get_user_from_request
+        from main import conversation_store
         user = get_user_from_request(request)
         user_id = user.get("sub") or user.get("user_id") or user.get("id")
         
@@ -241,14 +254,81 @@ async def get_conversation_history_auth(thread_id: str, request: Request, db: Se
         
         history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
         
-        if not os.path.exists(history_path):
-            raise HTTPException(status_code=404, detail="Conversation history not found.")
-            
-        with open(history_path, "r", encoding="utf-8") as f:
-            history_data = json.load(f)
+        # Try to load from JSON file first (preferred)
+        if os.path.exists(history_path):
+            with open(history_path, "r", encoding="utf-8") as f:
+                history_data = json.load(f)
+            logger.info(f"✅ User {user_id} loaded conversation {thread_id} from JSON file (persistent storage)")
+            return history_data
         
-        logger.info(f"User {user_id} successfully accessed conversation {thread_id}")
-        return history_data
+        # Fallback: Check if conversation is in memory (for recently created conversations)
+        if thread_id in conversation_store:
+            memory_state = conversation_store[thread_id]
+            logger.info(f"⚡ Loaded conversation {thread_id} from in-memory store (not persisted to JSON yet)")
+
+            # Auto-persist memory state so future loads come from durable storage
+            try:
+                from backend.orchestrator.graph import save_conversation_history
+
+                if isinstance(memory_state, dict):
+                    state_to_save = dict(memory_state)
+                    state_to_save["thread_id"] = thread_id
+                    state_to_save["owner"] = {"user_id": user_id}
+                    save_conversation_history(
+                        state_to_save,
+                        {"configurable": {"thread_id": thread_id, "owner": {"user_id": user_id}}},
+                    )
+                    logger.info(f"✅ Auto-persisted in-memory conversation {thread_id} to JSON during load")
+                else:
+                    logger.warning(f"Could not auto-persist thread {thread_id}: state is not a dict")
+            except Exception as persist_err:
+                logger.warning(f"Auto-persist skipped for {thread_id}: {persist_err}")
+
+            return memory_state
+        
+        # If neither JSON nor in-memory, try to recover from database
+        logger.warning(f"⚠️  Conversation {thread_id} not found in JSON or memory")
+        logger.warning(f"   → JSON file missing: {history_path}")
+        
+        # Try to recover messages from ConversationSearch table
+        search_records = db.query(ConversationSearch).filter_by(
+            thread_id=thread_id,
+            user_id=user_id
+        ).order_by(ConversationSearch.message_index).all()
+        
+        if search_records:
+            logger.info(f"✅ Found {len(search_records)} messages in ConversationSearch table for {thread_id}")
+            # Reconstruct messages from database
+            recovered_messages = []
+            for record in search_records:
+                recovered_messages.append({
+                    "role": record.message_role or "assistant",
+                    "content": record.message_content,
+                    "timestamp": record.message_timestamp.isoformat() if record.message_timestamp else None
+                })
+            return {
+                "thread_id": thread_id,
+                "title": user_thread.title or "Untitled Conversation",
+                "status": "recovered_from_database",
+                "messages": recovered_messages,
+                "created_at": user_thread.created_at.isoformat() if user_thread.created_at else None,
+                "updated_at": user_thread.updated_at.isoformat() if user_thread.updated_at else None,
+                "note": "Conversation history recovered from database. It may be incomplete."
+            }
+        
+        # No recovery possible - return minimal state
+        logger.warning(f"   → No messages found in database either")
+        logger.warning(f"   → Returning minimal state with title: '{user_thread.title}'")
+        logger.warning(f"   → This conversation was likely created before save bugs were fixed")
+        return {
+            "thread_id": thread_id,
+            "title": user_thread.title or "Untitled Conversation",
+            "status": "empty",
+            "messages": [],
+            "created_at": user_thread.created_at.isoformat() if user_thread.created_at else None,
+            "updated_at": user_thread.updated_at.isoformat() if user_thread.updated_at else None,
+            "note": "This conversation was created before recent fixes. The detailed history was never saved and cannot be recovered. Start a new conversation to use the fixed save system."
+        }
         
     except HTTPException:
         raise

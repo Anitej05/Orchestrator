@@ -182,14 +182,44 @@ def get_hf_embeddings():
 def save_conversation_history(state: dict, *args, **kwargs):
     """Saves the conversation history to a JSON file. Accepts extra args for compatibility."""
     thread_id = state.get("thread_id")
+
+    # Fallback: extract thread_id from LangGraph-style config payload
+    if not thread_id:
+        config_payload = None
+        if args and isinstance(args[0], dict):
+            config_payload = args[0]
+        elif isinstance(kwargs.get("config"), dict):
+            config_payload = kwargs.get("config")
+        elif isinstance(kwargs.get("configurable"), dict):
+            config_payload = {"configurable": kwargs.get("configurable")}
+
+        if isinstance(config_payload, dict):
+            thread_id = (
+                config_payload.get("thread_id")
+                or config_payload.get("configurable", {}).get("thread_id")
+            )
+
+        # Keep state consistent for downstream serialization
+        if thread_id and isinstance(state, dict):
+            state["thread_id"] = thread_id
+
     if not thread_id:
         logger.warning("No thread_id found in state, skipping history save")
+        return
+
+    # Validate thread_id format
+    import re
+    uuid_pattern = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    if not re.match(uuid_pattern, str(thread_id), re.IGNORECASE):
+        logger.error(f"Invalid thread_id format: '{thread_id}' (length: {len(str(thread_id))})")
         return
 
     # Use BACKEND_DIR/conversation_history — the canonical location read by all API endpoints
     history_dir = os.path.join(BACKEND_DIR, "conversation_history")
     os.makedirs(history_dir, exist_ok=True)
     history_path = os.path.join(history_dir, f"{thread_id}.json")
+    
+    logger.info(f"Attempting to save conversation history: thread_id={thread_id}, path={history_path}")
     
     try:
         # Extract messages using LangChain utility
@@ -251,10 +281,10 @@ def save_conversation_history(state: dict, *args, **kwargs):
         with open(history_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, cls=CustomJSONEncoder)
             
-        logger.info(f"Conversation history saved to {history_path}")
+        logger.info(f"✅ Conversation history successfully saved: {history_path} (size: {os.path.getsize(history_path)} bytes)")
         return history_path
     except Exception as e:
-        logger.error(f"Failed to save conversation history: {e}")
+        logger.error(f"❌ Failed to save conversation history for thread_id={thread_id}: {type(e).__name__}: {e}", exc_info=True)
         return None
 
 

@@ -48,6 +48,12 @@ const Markdown: FC<MarkdownProps> = ({ content }) => {
   };
 
   const isLikelyCodeBlock = (text: string) => {
+    // Don't treat as code block if it contains markdown code blocks (triple backticks)
+    // This allows properly formatted markdown to be parsed correctly
+    if (text.includes('```')) {
+      return false;
+    }
+
     const lines = text.split('\n').filter((line) => line.trim().length > 0);
     if (lines.length < 3) return false;
 

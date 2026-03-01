@@ -15,6 +15,7 @@ interface ConversationsDropdownProps {
 interface ConversationItem {
   thread_id: string;
   created_at?: string;
+  updated_at?: string;
   title?: string;
   preview?: string;
 }
@@ -29,12 +30,24 @@ export default function ConversationsDropdown({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [authRetryCount, setAuthRetryCount] = useState(0);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   const hasClerkSession = () => {
     if (typeof window === 'undefined') return false;
     const anyWin: any = window as any;
     return Boolean(anyWin?.Clerk?.session);
   };
+
+  // Listen for new conversation events
+  useEffect(() => {
+    const handleNewConversation = () => {
+      console.log('📝 New conversation detected, refreshing list...');
+      setRefreshKey(prev => prev + 1);
+    };
+
+    window.addEventListener('conversation-created', handleNewConversation);
+    return () => window.removeEventListener('conversation-created', handleNewConversation);
+  }, []);
 
   useEffect(() => {
     const loadConversations = async () => {
@@ -79,6 +92,7 @@ export default function ConversationsDropdown({
           .map((conv: any) => ({
             thread_id: conv.id || conv.thread_id || '',
             created_at: conv.created_at,
+            updated_at: conv.updated_at,
             title: conv.title || 'Untitled',
             preview: conv.last_message || conv.title || 'No preview available'
           }));
@@ -102,7 +116,7 @@ export default function ConversationsDropdown({
       setAuthRetryCount(0);
       loadConversations();
     }
-  }, [isOpen]);
+  }, [isOpen, refreshKey]);
 
   const handleConversationClick = (threadId: string) => {
     onConversationSelect(threadId);
@@ -158,7 +172,7 @@ export default function ConversationsDropdown({
                     {conversation.title || 'Untitled'}
                   </div>
                   <div className="text-xs text-gray-500 dark:text-gray-400 truncate w-full mt-0.5">
-                    {new Date(conversation.created_at || Date.now()).toLocaleDateString()} {' '}
+                    {new Date(conversation.updated_at || conversation.created_at || Date.now()).toLocaleDateString()} {' '}
                     {new Date(conversation.created_at || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                   </div>
                 </div>

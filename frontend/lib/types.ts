@@ -50,6 +50,8 @@ export interface TaskStatus {
   taskName: string;
   taskId?: string;
   taskDescription?: string;
+  activityDescription?: string;  // Short, user-friendly one-liner for real-time display
+  resultSummary?: string;  // Brief outcome summary for completed tasks
   agentName?: string;
   startedAt?: Date;
   completedAt?: Date;
@@ -103,6 +105,8 @@ export interface ConversationState {
   task_statuses?: Record<string, TaskStatus>;
   current_executing_task?: string | null;
   todo_list?: TodoItem[];
+  // NEW: Brain thinking state for real-time AI reasoning display
+  brain_reasoning?: string;
   // NEW: Orchestration state from OMNI-DISPATCHER
   action_history?: ActionHistoryEntry[];  // Complete execution log with agent/tool info
   // Canvas feature fields
@@ -132,6 +136,8 @@ export interface ConversationState {
     agent_name: string;
     canvas_display: any;
   };
+  // Flag to track if this is a newly started conversation (vs loading old one)
+  isNewConversation?: boolean;
 }
 
 export interface Attachment {

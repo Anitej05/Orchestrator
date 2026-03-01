@@ -27,6 +27,15 @@ export default function SaveWorkflowButton({ threadId, disabled }: SaveWorkflowB
   const handleSave = async () => {
     if (!threadId || !name.trim()) return;
 
+    // Validate thread_id format (UUID should be 36 characters with 4 hyphens)
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(threadId)) {
+      console.error("Invalid thread_id format:", threadId, "Length:", threadId.length);
+      alert(`Invalid conversation ID format. Expected UUID but got: ${threadId}`);
+      return;
+    }
+
+    console.log("Saving workflow with thread_id:", threadId, "Length:", threadId.length);
     setSaving(true);
     try {
       const response = await authFetch(

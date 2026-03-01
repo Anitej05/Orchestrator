@@ -12,21 +12,12 @@ import { useConversationStore } from "@/lib/conversation-store"
 import { useWebSocketManager } from "@/hooks/use-websocket-conversation"
 import { useNewConversation } from "@/hooks/use-new-conversation"
 import { useUser } from "@clerk/nextjs"
+import { convertTasksToExecutionResults, type ExecutionResult } from "@/lib/execution-utils"
 import {
   ResizablePanelGroup,
   ResizablePanel,
   ResizableHandle,
 } from "@/components/ui/resizable"
-
-interface ExecutionResult {
-  taskId: string
-  taskDescription: string
-  agentName: string
-  status: string
-  output: string
-  cost: number
-  executionTime: number
-}
 
 interface ApiResponse {
   final_response: string | null
@@ -71,78 +62,37 @@ function HomeContent() {
   // Initialize the WebSocket manager. It will automatically connect and keep the Zustand store in sync with backend updates.
   useWebSocketManager();
 
-  // Save thread_id to localStorage and navigate when conversation is created
+  // Navigate to /c/[thread_id] when a NEW conversation starts
   useEffect(() => {
-    if (!clerkLoaded || isResetting) return;
+    if (!clerkLoaded || isResetting || isRestoring) return;
     
-    // Save thread_id to localStorage for page reload persistence
-    if (conversationState.thread_id && typeof window !== 'undefined') {
-      localStorage.setItem('thread_id', conversationState.thread_id);
-      console.log('Saved thread_id to localStorage:', conversationState.thread_id);
+    // Only navigate for newly created conversations, not when loading old ones
+    // isNewConversation is set to true by __start__ event, false when loadConversation is called
+    if (conversationState.thread_id && 
+        conversationState.isNewConversation &&
+        typeof window !== 'undefined' && 
+        window.location.pathname === '/' &&
+        !isConversationLoading) {
+      console.log('New conversation started, navigating to:', `/c/${conversationState.thread_id}`);
+      router.push(`/c/${conversationState.thread_id}`);
     }
-    
-    // Clear localStorage if thread_id is cleared
-    if (!conversationState.thread_id && typeof window !== 'undefined') {
-      localStorage.removeItem('thread_id');
-      console.log('Cleared thread_id from localStorage');
-    }
-  }, [conversationState.thread_id, clerkLoaded, router, isRestoring, isResetting]);
+  }, [conversationState.thread_id, conversationState.isNewConversation, clerkLoaded, router, isRestoring, isResetting, isConversationLoading]);
 
   // On initial load, if there's a saved thread_id in localStorage and we're on home page,
   // load that conversation into the store but DON'T redirect (stay on home page)
   useEffect(() => {
     if (!clerkLoaded) return;
     
-    // If user navigates directly to home, check if we should clear state
-    if (typeof window !== 'undefined' && window.location.pathname === '/') {
-      // If there's no query parameters and we have a thread_id in state but NOT in localStorage
-      const params = new URLSearchParams(window.location.search);
-      const hasQueryParams = params.has('threadId') || params.has('prompt');
-      const savedThreadId = localStorage.getItem('thread_id');
-      
-      if (!hasQueryParams && conversationState.thread_id && !savedThreadId) {
-        // User manually navigated to home - clear the state
-        console.log('User navigated to home manually - clearing state');
-        setIsResetting(true);
-        useConversationStore.setState({
-          metadata: {},
-          plan: [],
-          task_agent_pairs: [],
-          messages: [],
-          final_response: undefined,
-          thread_id: undefined,
-          status: 'idle',
-          canvas_content: undefined,
-          has_canvas: false,
-          task_statuses: {},
-          current_executing_task: null,
-        });
-        resetConversation();
-        setTaskAgentPairs([]);
-        setSelectedAgents({});
-        setExecutionResults([]);
-        setApiResponseData(null);
-        setCurrentThreadId(null);
-        setTimeout(() => setIsResetting(false), 200);
-        return;
-      }
-    }
-    
-    const savedThreadId = typeof window !== 'undefined' ? localStorage.getItem('thread_id') : null;
-    // Only load if we have a saved thread AND conversation state is empty AND we're on home page
-    if (savedThreadId && 
-        !conversationState.thread_id && 
-        typeof window !== 'undefined' && 
-        window.location.pathname === '/') {
-      console.log('Initial load: Loading saved conversation into state:', savedThreadId);
-      // Load the conversation but stay on home page
-      setIsRestoring(true);
-      loadConversation(savedThreadId)
-        .catch(err => console.error('Failed to restore conversation:', err))
-        .finally(() => setIsRestoring(false));
+    // If user navigates directly to home page with no thread_id, ensure state is clear
+    if (typeof window !== 'undefined' && 
+        window.location.pathname === '/' && 
+        conversationState.thread_id &&
+        !isResetting) {
+      // User manually navigated to home - they want a fresh start
+      console.log('User on home page - ready for new conversation');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clerkLoaded]); // Only run on Clerk load, not on state changes
+  }, [clerkLoaded]); // Only run on Clerk load
 
   useEffect(() => {
     if (isRestoring) return; // Avoid side-effects while restoring existing convo
@@ -161,15 +111,7 @@ function HomeContent() {
       
       // Generate execution results from task_agent_pairs (previously done by WorkflowOrchestration)
       if (result.task_agent_pairs.length > 0) {
-        const results: ExecutionResult[] = result.task_agent_pairs.map((pair) => ({
-          taskId: pair.task_name,
-          taskDescription: pair.task_name.replace(/_/g, " ").replace(/\b\w/g, (l: string) => l.toUpperCase()),
-          agentName: pair.primary?.name || "Unknown Agent",
-          status: "success",
-          output: conversationState.final_response || `Successfully completed: ${pair.task_name.replace(/_/g, " ")}`,
-          cost: pair.primary?.price_per_call_usd || 0,
-          executionTime: Math.floor((Math.random() * 5 + 3) * 10) / 10,
-        }));
+        const results = convertTasksToExecutionResults(result.task_agent_pairs, conversationState.final_response);
         
         setExecutionResults(results);
         setIsExecuting(false);
@@ -255,28 +197,9 @@ function HomeContent() {
 
 
   const handleConversationSelect = async (threadId: string) => {
-    // Don't navigate - just load the conversation into the store
-    // This gives us ChatGPT-like behavior: update content without full page reload
-    console.log('Loading conversation:', threadId);
-    setIsRestoring(true);
-    
-    try {
-      const { loadConversation: loadConv } = useConversationStore.getState().actions;
-      await loadConv(threadId);
-      
-      // Update URL without navigation (for sharing/bookmarking)
-      window.history.replaceState({}, '', `/c/${threadId}`);
-      
-    } catch (error) {
-      console.error('Failed to load conversation:', error);
-      toast({
-        title: "Error",
-        description: "Failed to load conversation. Please try again.",
-        variant: "destructive"
-      });
-    } finally {
-      setIsRestoring(false);
-    }
+    // Use router.push for smooth client-side navigation to conversation page
+    console.log('Navigating to conversation:', threadId);
+    router.push(`/c/${threadId}`);
   };
 
   const { startNewConversation } = useNewConversation()

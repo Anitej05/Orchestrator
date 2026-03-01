@@ -351,10 +351,37 @@ export function InteractiveChatInterface({
       <div className="flex-1 overflow-y-auto bg-bg-subtle w-full">
         {state.messages.length === 0 && !isBrowserRunning && (
           <div className="text-center py-8 h-full flex flex-col justify-center items-center">
-            <div className="p-6 rounded-full bg-bg-card/40 backdrop-blur-sm mb-6 border border-border-color-light">
-              <MessageCircle className="w-16 h-16 text-text-tertiary" />
-            </div>
-            <p className="ui-section-header">Start a conversation to orchestrate your workflow</p>
+            {state.metadata?.status === 'empty' ? (
+              <>
+                <div className="p-6 rounded-full bg-yellow-50/10 backdrop-blur-sm mb-6 border border-yellow-500/20">
+                  <AlertCircle className="w-16 h-16 text-yellow-600" />
+                </div>
+                <p className="ui-section-header mb-2">Conversation history unavailable</p>
+                <p className="text-text-tertiary max-w-md mb-6">
+                  This conversation was created before our save system improvements. The message history could not be recovered. Start a new conversation to keep your messages safe.
+                </p>
+                <Button onClick={resetConversation} variant="secondary" size="sm">
+                  Start a New Conversation
+                </Button>
+              </>
+            ) : state.metadata?.status === 'recovered_from_database' ? (
+              <>
+                <div className="p-6 rounded-full bg-blue-50/10 backdrop-blur-sm mb-6 border border-blue-500/20">
+                  <AlertCircle className="w-16 h-16 text-blue-600" />
+                </div>
+                <p className="ui-section-header mb-2">Conversation recovered</p>
+                <p className="text-text-tertiary max-w-md">
+                  Some messages were recovered from our database. This history may be incomplete.
+                </p>
+              </>
+            ) : (
+              <>
+                <div className="p-6 rounded-full bg-bg-card/40 backdrop-blur-sm mb-6 border border-border-color-light">
+                  <MessageCircle className="w-16 h-16 text-text-tertiary" />
+                </div>
+                <p className="ui-section-header">Start a conversation to orchestrate your workflow</p>
+              </>
+            )}
           </div>
         )}
 

@@ -59,16 +59,37 @@ export default function ActionHistoryTimeline({ history }: ActionHistoryTimeline
         );
     }
 
+    // Deduplicate action history by creating a Set of unique identifiers
+    // and filtering out duplicates while preserving order
+    const seenIds = new Set<string>();
+    const uniqueHistory = history.filter((action) => {
+        // Create unique ID from iteration + resource_id + action_type (most distinguishing factors)
+        const uniqueId = `${action.iteration}-${action.resource_id}-${action.action_type}-${action.execution_time_ms}`;
+        if (seenIds.has(uniqueId)) {
+            console.warn(`⚠️ Duplicate action detected and filtered: ${uniqueId}`, action);
+            return false;
+        }
+        seenIds.add(uniqueId);
+        return true;
+    });
+
+    // Log if duplicates were removed
+    if (uniqueHistory.length !== history.length) {
+        console.warn(`🔄 Removed ${history.length - uniqueHistory.length} duplicate entries from action history (total: ${history.length} → ${uniqueHistory.length})`);
+    }
+
     return (
         <div className="p-4 space-y-4">
-            {history.map((action, index) => {
+            {uniqueHistory.map((action) => {
                 const agentIcon = getAgentIcon(action.resource_id);
                 const agentName = formatResourceName(action.resource_id);
                 const actionIcon = getActionIcon(action.action_type);
+                // Create stable unique ID for React key (not dependent on index)
+                const stableId = `${action.iteration}-${action.resource_id}-${action.action_type}-${action.execution_time_ms}`;
                 
                 return (
                     <div 
-                        key={`action-${action.iteration}-${index}`}
+                        key={stableId}
                         className={cn(
                             "relative pl-8 pb-4 border-l-2",
                             action.success 

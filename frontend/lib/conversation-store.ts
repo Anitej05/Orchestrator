@@ -87,6 +87,8 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
   action_history: [],
   isLoading: false,
   canvas_data: undefined,
+  // Flag to indicate if this is a newly started conversation (should trigger navigation)
+  isNewConversation: false,
 
   actions: {
     startConversation: async (input: string, files: File[] = [], planningMode: boolean = false, owner?: string) => {
@@ -423,13 +425,91 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
         }
 
         const conversationData = await response.json();
-        console.log('Loaded conversation data:', conversationData);
+        console.log('📥 Loaded conversation data from API:', {
+          thread_id: conversationData.thread_id,
+          messagesCount: conversationData.messages?.length || 0,
+          messagesSample: conversationData.messages?.slice(0, 2),
+          hasTaskAgentPairs: !!conversationData.task_agent_pairs?.length,
+          status: conversationData.status
+        });
 
-        // Convert message timestamps from strings to Date objects
-        const messages = (conversationData.messages || []).map((msg: any) => ({
-          ...msg,
-          timestamp: new Date(msg.timestamp)
-        }));
+        const normalizeMessageType = (rawType?: string, rawRole?: string, nestedType?: string): Message['type'] => {
+          const value = (rawType || rawRole || nestedType || '').toLowerCase();
+          if (value === 'assistant' || value === 'ai') return 'assistant';
+          if (value === 'user' || value === 'human') return 'user';
+          return 'system';
+        };
+
+        const normalizeContent = (msg: any): string => {
+          const raw = msg?.content ?? msg?.data?.content;
+          if (typeof raw === 'string') return raw;
+          if (Array.isArray(raw)) {
+            return raw
+              .map((part: any) => {
+                if (typeof part === 'string') return part;
+                if (part?.text) return String(part.text);
+                return '';
+              })
+              .join('')
+              .trim();
+          }
+          if (raw == null) return '';
+          return String(raw);
+        };
+
+        const normalizeTimestamp = (msg: any): Date => {
+          const rawTs =
+            msg?.timestamp ??
+            msg?.data?.additional_kwargs?.timestamp ??
+            msg?.data?.timestamp ??
+            Date.now();
+
+          if (typeof rawTs === 'number') {
+            const ms = rawTs < 1e12 ? rawTs * 1000 : rawTs;
+            return new Date(ms);
+          }
+
+          const parsed = new Date(rawTs);
+          return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+        };
+
+        const messages: Message[] = (conversationData.messages || [])
+          .map((msg: any, index: number) => {
+            const content = normalizeContent(msg);
+            const type = normalizeMessageType(msg?.type, msg?.role, msg?.data?.type);
+            const timestamp = normalizeTimestamp(msg);
+            const id =
+              msg?.id ||
+              msg?.data?.id ||
+              msg?.data?.additional_kwargs?.id ||
+              createMessageId(content || `message-${index}`, type, timestamp.getTime());
+
+            return {
+              id,
+              type,
+              content,
+              timestamp,
+              attachments: msg?.attachments,
+              metadata: msg?.metadata,
+              canvas_content: msg?.canvas_content,
+              canvas_type: msg?.canvas_type,
+              has_canvas: msg?.has_canvas,
+              is_browser_task: msg?.is_browser_task,
+              browser_in_progress: msg?.browser_in_progress,
+              browsing_trace: msg?.browsing_trace,
+              screenshot_files: msg?.screenshot_files,
+              show_trace: msg?.show_trace,
+            } as Message;
+          })
+          .filter((msg: Message) => msg.content.trim() !== '' || (msg.attachments && msg.attachments.length > 0));
+
+        console.log('📝 Processed messages:', {
+          beforeFilter: conversationData.messages?.length || 0,
+          afterFilter: messages.length,
+          messageTypes: messages.map((m: Message) => m.type),
+          hasUserMessages: messages.some((m: Message) => m.type === 'user'),
+          hasAssistantMessages: messages.some((m: Message) => m.type === 'assistant'),
+        });
 
         let planView: string | undefined = conversationData.plan_view;
         if (!planView) {
@@ -453,7 +533,10 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
           currentQuestion: conversationData.question_for_user || undefined,
           task_agent_pairs: conversationData.task_agent_pairs || [],
           final_response: conversationData.final_response || undefined,
-          metadata: conversationData.metadata || {},
+          metadata: {
+            ...(conversationData.metadata || {}),
+            status: conversationData.status, // Include backend status for UI indicators
+          },
           uploaded_files: conversationData.uploaded_files || [],
           plan: conversationData.plan || conversationData.task_plan || [],
           todo_list: conversationData.todo_list || [],
@@ -467,7 +550,15 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
           plan_view: planView,
           pending_action_approval: conversationData.pending_action_approval || false,
           pending_action: conversationData.pending_action,
+          isNewConversation: false,
         };
+
+        console.log('🔄 Calling _setConversationState with:', {
+          thread_id: conversationState.thread_id,
+          messagesCount: conversationState.messages?.length,
+          taskAgentPairsCount: conversationState.task_agent_pairs?.length,
+          hasContent: !!conversationState.messages?.length
+        });
 
         get().actions._setConversationState(conversationState);
 

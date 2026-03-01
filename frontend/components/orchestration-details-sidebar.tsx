@@ -6,9 +6,9 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
 import { DollarSign, Clock, FileIcon, FileText, Image as ImageIcon } from "lucide-react"
-import PlanGraph from "@/components/PlanGraph"
 import ActionHistoryTimeline from "@/components/action-history-timeline"
 import SaveWorkflowButton from "@/components/save-workflow-button"
+import TaskCardList from "@/components/task-card-list"
 import { useEffect, useState } from "react"
 import { useConversationStore } from "@/lib/conversation-store"
 import Markdown from '@/components/ui/markdown'
@@ -232,7 +232,6 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
     ({ executionResults, threadId, className, onThreadIdUpdate, onAcceptPlan, onRejectPlan }, ref) => {
         const [plan, setPlan] = useState<Plan>({ pendingTasks: [], completedTasks: [], todoList: undefined });
         const [isLoadingPlan, setIsLoadingPlan] = useState(false);
-        const [viewMode, setViewMode] = useState<'graph' | 'list'>('graph');
         const [activeTab, setActiveTab] = useState<string>("plan");
         const [lastCanvasContent, setLastCanvasContent] = useState<string | undefined>(undefined);
         // State for viewing specific canvas content from messages
@@ -266,13 +265,12 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
         useEffect(() => {
             // ONLY use planData for the workflow structure
             // Real-time status comes from task_statuses, NOT from completed_tasks
-            // This prevents duplicates in the graph
+            // This prevents duplicates in the task cards
             const pendingTasks: Plan['pendingTasks'] = [];
 
-            // Try todo_list first (new system) - pass directly to PlanGraph
+            // Try todo_list first (new system) - pass directly to task cards
             if (todoList && todoList.length > 0) {
-                // For todo_list, we pass it directly to PlanGraph via todoList prop
-                // Set empty pendingTasks to avoid legacy batch processing
+                // For todo_list, pass it directly and keep legacy pending tasks empty
                 setPlan({
                     pendingTasks: [],
                     completedTasks: [],
@@ -509,49 +507,15 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                             )}
                         </div>
 
-                        {/* View Toggle - Re-enabled with new simplified PlanGraph! */}
-                        <div className="px-4 pb-2 flex gap-2 border-b border-border-color">
-                            <button
-                                onClick={() => setViewMode('graph')}
-                                className={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${
-                                    viewMode === 'graph'
-                                        ? 'bg-primary text-white'
-                                        : 'bg-bg-subtle text-text-secondary hover:bg-bg-hover'
-                                }`}
-                            >
-                                Graph View
-                            </button>
-                            <button
-                                onClick={() => setViewMode('list')}
-                                className={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${
-                                    viewMode === 'list'
-                                        ? 'bg-primary text-white'
-                                        : 'bg-bg-subtle text-text-secondary hover:bg-bg-hover'
-                                }`}
-                            >
-                                List View
-                            </button>
+                        <div className="flex-1 overflow-y-auto p-4">
+                            <TaskCardList
+                                todoList={plan.todoList || []}
+                                taskStatuses={taskStatuses}
+                                actionHistory={actionHistory}
+                                fallbackTasks={Array.isArray(plan.pendingTasks) ? plan.pendingTasks.flat() : []}
+                                emptySubtitle="Tasks will appear here once the workflow creates them"
+                            />
                         </div>
-
-                        {/* Real-time Graph with Task Statuses - Now with action_history! */}
-                        {viewMode === 'graph' ? (
-                            <div className="flex-1 flex items-center justify-center">
-                                <PlanGraph
-                                    key={JSON.stringify(plan)}
-                                    actionHistory={actionHistory}
-                                    todoList={plan.todoList}
-                                    planData={plan}
-                                />
-                            </div>
-                        ) : (
-                            <div className="flex-1 overflow-y-auto p-4">
-                                <TaskListView
-                                    todoList={plan.todoList || []}
-                                    taskStatuses={conversationState.task_statuses || {}}
-                                    pendingTasks={plan.pendingTasks || []}
-                                />
-                            </div>
-                        )}
 
                     </TabsContent>
 

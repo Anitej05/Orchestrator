@@ -173,11 +173,23 @@ export function useWebSocketManager({
             });
           }
 
-          // NEW: Handle action_history updates
-          if (eventData.data?.action_history) {
-            _setConversationState({
-              action_history: eventData.data.action_history,
-            });
+          // NEW: Handle action_history updates with deduplication
+          if (eventData.data?.action_history && Array.isArray(eventData.data.action_history)) {
+            const newHistory = eventData.data.action_history;
+            const currentHistory = useConversationStore.getState().action_history || [];
+            
+            // Deep compare to detect if action_history has actually changed
+            if (JSON.stringify(newHistory) !== JSON.stringify(currentHistory)) {
+              console.debug(`📊 Action history updated: ${newHistory.length} total actions`, {
+                added: newHistory.length - (currentHistory.length || 0),
+                from_node: eventData.node
+              });
+              _setConversationState({
+                action_history: newHistory,
+              });
+            } else {
+              console.debug(`⏭️ Action history unchanged, skipping update`);
+            }
           }
 
           // Extract stage information from event data (sent by backend)
@@ -186,10 +198,19 @@ export function useWebSocketManager({
           const backendProgress = eventData.data?.progress_percentage;
 
           if (eventData.node === '__start__') {
+            // Notify that a new conversation has been created
+            if (eventData.thread_id && typeof window !== 'undefined') {
+              window.dispatchEvent(new CustomEvent('conversation-created', { 
+                detail: { thread_id: eventData.thread_id } 
+              }));
+              console.log('📝 Dispatched conversation-created event for thread:', eventData.thread_id);
+            }
+            
             _setConversationState({
               thread_id: eventData.thread_id,
               status: 'processing',
               messages: currentMessages,
+              isNewConversation: true,
               metadata: {
                 ...currentState.metadata,
                 currentStage: backendStage || 'initializing',
@@ -309,12 +330,25 @@ export function useWebSocketManager({
               }
             });
           }
+          else if (eventData.node === 'brain_thinking') {
+            // Brain reasoning update - show what the AI is thinking
+            const reasoning = eventData.data?.reasoning;
+            
+            if (reasoning) {
+              console.log('🧠 Brain thinking:', reasoning.substring(0, 100) + '...');
+              
+              _setConversationState({
+                brain_reasoning: reasoning,
+              });
+            }
+          }
           else if (eventData.node === 'task_started') {
             // Real-time task execution tracking - task started
             const taskName = eventData.data?.task_name || eventData.task_name;
             const agentName = eventData.data?.agent_name || eventData.agent_name;
+            const activityDescription = eventData.data?.activity_description || eventData.activity_description;
 
-            console.log('📨 WebSocket task_started event received:', { taskName, agentName, eventData });
+            console.log('📨 WebSocket task_started event received:', { taskName, agentName, activityDescription, eventData });
 
             if (taskName) {
               const currentState = useConversationStore.getState();
@@ -325,6 +359,7 @@ export function useWebSocketManager({
                   taskName,
                   agentName,
                   taskDescription: eventData.data?.task_description || eventData.task_description,
+                  activityDescription,
                   startedAt: new Date(),
                 }
               };
@@ -332,10 +367,11 @@ export function useWebSocketManager({
               _setConversationState({
                 task_statuses: updatedTaskStatuses,
                 current_executing_task: taskName,
+                brain_reasoning: undefined,  // Clear brain thinking when hands start executing
               });
 
               console.log('✅ Updated task_statuses in store:', updatedTaskStatuses);
-              console.debug('Task started:', { taskName, agentName });
+              console.debug('Task started:', { taskName, agentName, activityDescription });
             }
           }
           else if (eventData.node === 'task_completed') {
@@ -344,9 +380,10 @@ export function useWebSocketManager({
             const executionTime = eventData.data?.execution_time || eventData.execution_time;
             const agentName = eventData.data?.agent_name || eventData.agent_name;
             const result = eventData.data?.result || eventData.result;
+            const resultSummary = eventData.data?.result_summary || eventData.result_summary;
             const cost = eventData.data?.cost || eventData.cost;
 
-            console.log('📨 WebSocket task_completed event received:', { taskName, executionTime, agentName });
+            console.log('📨 WebSocket task_completed event received:', { taskName, executionTime, agentName, resultSummary });
 
             if (taskName) {
               const currentState = useConversationStore.getState();
@@ -362,6 +399,7 @@ export function useWebSocketManager({
                   completedAt: new Date(),
                   executionTime,
                   cost,
+                  resultSummary,
                   // MEMORY FIX: Don't store full result, just a summary
                   result: typeof result === 'string'
                     ? result.substring(0, 500)
@@ -375,7 +413,7 @@ export function useWebSocketManager({
               });
 
               console.log('✅ Updated task_statuses in store:', updatedTaskStatuses);
-              console.debug('Task completed:', { taskName, executionTime, agentName });
+              console.debug('Task completed:', { taskName, executionTime, agentName, resultSummary });
             }
           }
           else if (eventData.node === 'task_failed') {
@@ -571,7 +609,7 @@ export function useWebSocketManager({
               if (!eventData.data) {
                 console.warn('__end__ event received but no data field!');
                 // Set isLoading to false even if there's no data
-                useConversationStore.setState({ isLoading: false, status: 'completed' });
+                useConversationStore.setState({ isLoading: false, status: 'completed', brain_reasoning: undefined });
                 return;
               }
 
@@ -775,6 +813,12 @@ export function useWebSocketManager({
               console.debug('Setting isLoading to false after __end__ event');
               useConversationStore.setState({ isLoading: false });
               console.debug('Final state updated, isLoading:', useConversationStore.getState().isLoading);
+              
+              // Notify conversation list to refresh
+              console.debug('Dispatching conversation-created event for thread_id:', eventData.thread_id);
+              window.dispatchEvent(new CustomEvent('conversation-created', { 
+                detail: { thread_id: eventData.thread_id } 
+              }));
             } catch (endError) {
               console.warn('Error processing __end__ event:', endError);
               // Always set isLoading to false even if there's an error
@@ -892,6 +936,7 @@ export function useWebSocketManager({
             _setConversationState({
               messages: [...currentMessages, errorSystemMessage],
               status: 'idle', // Keep status as 'idle' so conversation can continue
+              brain_reasoning: undefined,  // Clear brain thinking on error
               metadata: {
                 ...useConversationStore.getState().metadata,
                 currentStage: 'ready',

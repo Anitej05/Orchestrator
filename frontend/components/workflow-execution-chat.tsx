@@ -3,10 +3,9 @@
 import { useState, useRef, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { CheckCircle, XCircle, Loader2, Play, Edit, MessageSquare } from 'lucide-react';
-import PlanGraph from '@/components/PlanGraph';
+import { CheckCircle, Loader2, Edit, MessageSquare } from 'lucide-react';
+import TaskCardList from '@/components/task-card-list';
 import type { TaskStatus } from '@/lib/types';
 import { authFetch } from '@/lib/auth-fetch';
 import { toast } from 'sonner';
@@ -173,29 +172,13 @@ export default function WorkflowExecutionChat({ workflowId, workflow, onCancel }
                     <CardDescription>{msg.content}</CardDescription>
                   </CardHeader>
                   <CardContent>
-                    {/* Plan Graph */}
-                    <div className="h-[400px] mb-4 border rounded-lg overflow-hidden">
-                      <PlanGraph 
-                        planData={msg.planData} 
-                        todoList={msg.planData?.todoList || workflow.blueprint.todo_list}
-                      />
-                    </div>
-                    
-                    {/* Plan Details */}
                     <div className="mb-4">
-                      <h4 className="font-semibold mb-2">Tasks ({msg.planData?.pendingTasks?.length || 0})</h4>
-                      <div className="space-y-2 max-h-48 overflow-y-auto">
-                        {msg.planData?.pendingTasks?.map((task: any, idx: number) => (
-                          <div key={`task-${idx}-${task.task || ''}`} className="flex items-start gap-2 text-sm p-2 bg-gray-50 dark:bg-gray-800 rounded">
-                            <span className="font-semibold min-w-6">{idx + 1}.</span>
-                            <div className="flex-1">
-                              <p className="font-medium">{task.task}</p>
-                              <p className="text-gray-600 dark:text-gray-400 text-xs">{task.description}</p>
-                              <Badge variant="secondary" className="mt-1 text-xs">{task.agent}</Badge>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
+                      <TaskCardList
+                        todoList={workflow.blueprint.todo_list || []}
+                        taskStatuses={taskStatuses}
+                        fallbackTasks={msg.planData?.pendingTasks || []}
+                        emptySubtitle="No planned tasks found for this workflow"
+                      />
                     </div>
                     
                     {/* Action Buttons */}
@@ -259,12 +242,11 @@ export default function WorkflowExecutionChat({ workflowId, workflow, onCancel }
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="h-[400px]">
-                  <PlanGraph 
-                    planData={planData} 
-                    todoList={workflow.blueprint.todo_list}
-                  />
-                </div>
+                <TaskCardList
+                  todoList={workflow.blueprint.todo_list || []}
+                  taskStatuses={{ ...wsTaskStatuses, ...taskStatuses }}
+                  fallbackTasks={planData.pendingTasks || []}
+                />
               </CardContent>
             </Card>
           )}
