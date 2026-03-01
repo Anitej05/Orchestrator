@@ -6,7 +6,6 @@ Core type definitions for the Base Agent architecture.
 from typing import Dict, Any, List, Optional, Callable, Literal
 from dataclasses import dataclass, field
 from enum import Enum
-from abc import ABC, abstractmethod
 
 
 class AgentStatus(str, Enum):

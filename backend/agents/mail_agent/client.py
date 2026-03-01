@@ -3,14 +3,13 @@ import asyncio
 import base64
 import re
 import time
-import logging
 import psutil
 import httpx
 import json
 from typing import Dict, Any, Optional, List
 from pathlib import Path
 
-from .config import COMPOSIO_API_KEY, MCP_URL, CONNECTION_ID, logger
+from .config import COMPOSIO_API_KEY, MCP_URL, logger
 from .llm import llm_client
 
 # Standardized file manager import

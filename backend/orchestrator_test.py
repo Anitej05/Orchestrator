@@ -40,7 +40,7 @@ async def run_stress_test():
 Give me all the deliverables when done."""
 
     print(f"{'='*80}")
-    print(f"  ORBIMESH ORCHESTRATOR - MULTI-AGENT STRESS TEST v3")
+    print("  ORBIMESH ORCHESTRATOR - MULTI-AGENT STRESS TEST v3")
     print(f"{'='*80}")
     print(f"  Thread ID:     {thread_id}")
     print(f"  Prompt:        {len(PROMPT)} chars")
@@ -246,7 +246,7 @@ Give me all the deliverables when done."""
                         print(f"  [{elapsed:6.1f}s]  {node:8s}")
 
                 except asyncio.TimeoutError:
-                    print(f"\n  TIMEOUT after 10 minutes!")
+                    print("\n  TIMEOUT after 10 minutes!")
                     errors.append("Timeout after 10 minutes")
                     break
                 except Exception as recv_err:
@@ -263,7 +263,7 @@ Give me all the deliverables when done."""
     #  SUMMARY
     # ========================================================================
     print(f"\n{'='*80}")
-    print(f"  TEST RESULTS SUMMARY")
+    print("  TEST RESULTS SUMMARY")
     print(f"{'='*80}")
     print(f"  Total Time:         {total_time:.1f}s ({total_time/60:.1f} min)")
     print(f"  Brain Iterations:   {iteration}")
@@ -278,14 +278,14 @@ Give me all the deliverables when done."""
 
     if final_response:
         print(f"\n{'='*80}")
-        print(f"  FINAL RESPONSE (first 1500 chars)")
+        print("  FINAL RESPONSE (first 1500 chars)")
         print(f"{'='*80}")
         print(final_response[:1500])
         if len(final_response) > 1500:
             print(f"\n  ... ({len(final_response) - 1500} more chars)")
         print(f"{'='*80}")
 
-    print(f"\n  ACTION LOG:")
+    print("\n  ACTION LOG:")
     print(f"  {'Time':>7s}  {'Action':<35s}  {'OK?':<6s}  Summary")
     print(f"  {'-'*7}  {'-'*35}  {'-'*6}  {'-'*40}")
     for t, action, ok, summary in action_log:
@@ -300,7 +300,7 @@ if __name__ == "__main__":
     
     print(f"{'='*80}")
     if result:
-        print(f"  TEST PASSED")
+        print("  TEST PASSED")
     else:
-        print(f"  TEST COMPLETED WITH ISSUES")
+        print("  TEST COMPLETED WITH ISSUES")
     print(f"{'='*80}")

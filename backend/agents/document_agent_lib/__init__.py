@@ -27,9 +27,8 @@ for path in [str(PROJECT_ROOT), str(BACKEND_DIR)]:
 from backend.agents.base.server import create_agent_server
 from .base_agent_impl import DocumentAgent
 
-import logging
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+from backend.utils.mega_logger import setup_mega_logger
+logger = setup_mega_logger("DocumentAgent")
 
 _server = create_agent_server(
     agent_class=DocumentAgent,

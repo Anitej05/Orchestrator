@@ -190,7 +190,7 @@ class ComposioToolManager:
             # Provide troubleshooting hints
             troubleshooting_hint = None
             if "not connected" in error_msg.lower():
-                troubleshooting_hint = f"User needs to connect the app at /connections page"
+                troubleshooting_hint = "User needs to connect the app at /connections page"
             elif "401" in error_msg or "unauthorized" in error_msg.lower():
                 troubleshooting_hint = "User may need to refresh or reconnect the app"
             

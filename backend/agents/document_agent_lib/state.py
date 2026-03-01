@@ -604,7 +604,7 @@ class DocumentVersionManager:
         current_idx = doc_history["current_version"]
         
         if current_idx <= 0:
-            logger.warning(f"Cannot undo - already at oldest version")
+            logger.warning("Cannot undo - already at oldest version")
             return None
         
         # Move to previous version
@@ -639,7 +639,7 @@ class DocumentVersionManager:
         current_idx = doc_history["current_version"]
         
         if current_idx >= len(doc_history["versions"]) - 1:
-            logger.warning(f"Cannot redo - already at newest version")
+            logger.warning("Cannot redo - already at newest version")
             return None
         
         # Move to next version

@@ -11,8 +11,6 @@ Full document analysis and management with:
 """
 
 import logging
-import time
-import os
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,7 +19,6 @@ from backend.agents.base import BaseAgent, AgentServices, AgentConfig
 from backend.agents.base.types import AgentRequest, AgentResponse, ExecutionContext
 from backend.agents.base.capability import capability, ParameterSchema
 
-from .agent_schemas import EditAction
 from .editors import DocumentEditor
 from .state import DocumentSessionManager, DocumentVersionManager
 from .llm import DocumentLLMClient

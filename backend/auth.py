@@ -209,62 +209,7 @@ def get_current_user_id(request: Request) -> str:
             detail="Failed to authenticate user"
         )
 
-    """
-    Verify the Clerk JWT and return claims.
-    Uses the same working JWKS verification as get_user_from_request.
-    """
-    token = _extract_bearer_token(authorization_header)
-    
-    try:
-        # Fetch JWKS
-        jwks_response = requests.get(os.getenv("CLERK_JWKS_URL"))
-        jwks = jwks_response.json()
-        public_key = None
-        from jose.utils import base64url_decode
-        
-        def jwk_to_pem(jwk):
-            # Only supports RSA keys
-            if jwk["kty"] != "RSA":
-                raise ValueError("Only RSA keys are supported")
-            n = int.from_bytes(base64url_decode(jwk["n"].encode()), "big")
-            e = int.from_bytes(base64url_decode(jwk["e"].encode()), "big")
-            from cryptography.hazmat.primitives.asymmetric import rsa
-            from cryptography.hazmat.primitives import serialization
-            pubkey = rsa.RSAPublicNumbers(e, n).public_key()
-            return pubkey.public_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PublicFormat.SubjectPublicKeyInfo
-            )
-        
-        for key in jwks["keys"]:
-            if key["kid"] == jwt.get_unverified_header(token)["kid"]:
-                public_key = jwk_to_pem(key)
-                break
-        
-        if not public_key:
-            logger.error("Invalid token: No matching key")
-            raise HTTPException(status_code=401, detail="Invalid token: No matching key")
-        
-        # Decode and verify
-        payload = jwt.decode(
-            token,
-            public_key,
-            algorithms=["RS256"],
-            audience=os.getenv("CLERK_JWT_AUDIENCE"),
-            issuer=os.getenv("CLERK_JWT_ISSUER")
-        )
-        logger.info(f"User authenticated via verify_clerk_token: user_id={payload.get('sub')}")
-        return payload
-        
-    except jwt.ExpiredSignatureError:
-        logger.error("JWT expired")
-        raise HTTPException(status_code=401, detail="Token expired")
-    except JWTError as e:
-        logger.error(f"JWT error: {e}")
-        raise HTTPException(status_code=401, detail=f"JWT error: {str(e)}")
-    except Exception as e:
-        logger.error(f"Token verification error: {e}")
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
 
 
 def get_user_from_request(request: Request):

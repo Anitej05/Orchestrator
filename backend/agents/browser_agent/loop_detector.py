@@ -68,7 +68,7 @@ class ActionLoopDetector:
         repetition_count = self.recent_action_hashes.count(latest_hash)
         
         if repetition_count >= 10:
-            logger.warning(f"🔄 Loop Detector: Hard force-done (10 repetitions)")
+            logger.warning("🔄 Loop Detector: Hard force-done (10 repetitions)")
             # This triggers the hard restriction in agent.py
             return None 
             

@@ -4,10 +4,9 @@ Replaces the keyword-based creation_handler.py.
 """
 
 import os
-import json
 import logging
 import httpx
-from typing import Dict, Any, Optional, Type
+from typing import Dict, Any, Type
 from pydantic import BaseModel, Field
 from langchain_core.tools import BaseTool
 
@@ -89,7 +88,6 @@ class CreateSpreadsheetTool(BaseTool):
 
 async def _execute_creation_api(endpoint_type: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     """Helper to call local API."""
-    import os
     from dotenv import load_dotenv
     load_dotenv()
     

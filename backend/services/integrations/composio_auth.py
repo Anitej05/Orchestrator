@@ -14,13 +14,11 @@ from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
-from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import UserConnection, ConnectionLog
 from cryptography.fernet import Fernet
 import base64
 import hashlib
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 load_dotenv()
 
@@ -152,7 +150,7 @@ class ComposioAuthManager:
         except Exception:
             # If decryption fails, assume it's already plain text (backwards compatibility)
             # This handles migration from unencrypted to encrypted storage
-            logger.warning(f"Connection ID appears to be unencrypted (or wrong key). Using as-is.")
+            logger.warning("Connection ID appears to be unencrypted (or wrong key). Using as-is.")
             return encrypted_id
     
     def _get_auth_config_id(self, app_slug: str) -> str:
@@ -309,7 +307,7 @@ class ComposioAuthManager:
                     status="INITIATED"
                 )
             else:
-                logger.warning(f"⚠️ No connection_id returned")
+                logger.warning("⚠️ No connection_id returned")
             
             redirect_url = None
             if hasattr(connection_request, "redirectUrl"):

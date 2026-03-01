@@ -1,7 +1,6 @@
 import logging
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 from pydantic import BaseModel, Field
-import json
 
 # Add backend to path if needed
 import sys

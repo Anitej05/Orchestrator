@@ -4,7 +4,7 @@ Converted from finance_agent.py to direct function tools.
 """
 
 import yfinance as yf
-from typing import Dict, Optional
+from typing import Dict
 from langchain_core.tools import tool
 
 

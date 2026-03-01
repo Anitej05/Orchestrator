@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Depends, Request
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import UserThread, Workflow, Agent, StatusEnum
+from models import UserThread, Workflow, Agent, StatusEnum, LLMTelemetryRecord, AgentExecutionRecord
 
 router = APIRouter(prefix="/api/metrics", tags=["Dashboard"])
 logger = logging.getLogger("uvicorn.error")
@@ -80,7 +80,7 @@ async def get_dashboard_metrics(request: Request, db: Session = Depends(get_db))
             for conv in recent_conversations
         ]
         
-        # Cost and performance metrics
+        # Cost and performance metrics fetched from SQLAlchemy DB natively
         cost_today = 0.0
         cost_week = 0.0
         cost_month = 0.0
@@ -92,49 +92,42 @@ async def get_dashboard_metrics(request: Request, db: Session = Depends(get_db))
         agent_costs = {}
         hourly_usage = [0] * 24
         
+        llm_records = db.query(LLMTelemetryRecord).filter(LLMTelemetryRecord.user_id == user_id).all()
+        agent_records = db.query(AgentExecutionRecord).filter(AgentExecutionRecord.user_id == user_id).all()
         all_conversations = db.query(UserThread).filter(UserThread.user_id == user_id).all()
         
+        for record in llm_records:
+            total_cost += record.cost_usd
+            
+            if record.timestamp >= today_start:
+                cost_today += record.cost_usd
+            if record.timestamp >= week_start:
+                cost_week += record.cost_usd
+            if record.timestamp >= month_start:
+                cost_month += record.cost_usd
+                
+            agent_name = record.agent_name or "Unknown"
+            if agent_name not in agent_costs:
+                agent_costs[agent_name] = 0.0
+            agent_costs[agent_name] += record.cost_usd
+
+        for agent_rec in agent_records:
+            agent_name = agent_rec.agent_name or "Unknown"
+            total_tasks += 1
+            if agent_rec.success:
+                successful_tasks += 1
+            else:
+                failed_tasks += 1
+                
+            if agent_name not in agent_usage:
+                agent_usage[agent_name] = 0
+                if agent_name not in agent_costs:
+                    agent_costs[agent_name] = 0.0
+            agent_usage[agent_name] += 1
+            
         for conv in all_conversations:
-            history_file = os.path.join(CONVERSATION_HISTORY_DIR, f"{conv.thread_id}.json")
-            if os.path.exists(history_file):
-                try:
-                    with open(history_file, 'r') as f:
-                        history_data = json.load(f)
-                        task_pairs = history_data.get('task_agent_pairs', [])
-                        
-                        for pair in task_pairs:
-                            agent_name = pair.get('primary', {}).get('name', 'Unknown')
-                            agent_id = pair.get('primary', {}).get('id')
-                            
-                            if agent_id:
-                                agent = db.query(Agent).filter(Agent.id == agent_id).first()
-                                if agent:
-                                    cost = agent.price_per_call_usd
-                                    total_cost += cost
-                                    
-                                    if agent_name not in agent_usage:
-                                        agent_usage[agent_name] = 0
-                                        agent_costs[agent_name] = 0.0
-                                    agent_usage[agent_name] += 1
-                                    agent_costs[agent_name] += cost
-                                    
-                                    if conv.created_at >= today_start:
-                                        cost_today += cost
-                                    if conv.created_at >= week_start:
-                                        cost_week += cost
-                                    if conv.created_at >= month_start:
-                                        cost_month += cost
-                            
-                            total_tasks += 1
-                        
-                        if history_data.get('final_response'):
-                            successful_tasks += len(task_pairs)
-                        
-                        hour = conv.created_at.hour
-                        hourly_usage[hour] += 1
-                        
-                except Exception as e:
-                    logger.warning(f"Could not parse history file {history_file}: {e}")
+            hour = conv.created_at.hour
+            hourly_usage[hour] += 1
         
         success_rate = (successful_tasks / total_tasks * 100) if total_tasks > 0 else 0
         avg_response_time = 2.5  # placeholder
@@ -151,29 +144,8 @@ async def get_dashboard_metrics(request: Request, db: Session = Depends(get_db))
         cost_trend = []
         for i in range(6, -1, -1):
             date = now - timedelta(days=i)
-            day_cost = 0.0
-            day_conversations = db.query(UserThread).filter(
-                UserThread.user_id == user_id,
-                UserThread.created_at >= date,
-                UserThread.created_at < date + timedelta(days=1)
-            ).all()
-            
-            for conv in day_conversations:
-                history_file = os.path.join(CONVERSATION_HISTORY_DIR, f"{conv.thread_id}.json")
-                if os.path.exists(history_file):
-                    try:
-                        with open(history_file, 'r') as f:
-                            history_data = json.load(f)
-                            task_pairs = history_data.get('task_agent_pairs', [])
-                            for pair in task_pairs:
-                                agent_id = pair.get('primary', {}).get('id')
-                                if agent_id:
-                                    agent = db.query(Agent).filter(Agent.id == agent_id).first()
-                                    if agent:
-                                        day_cost += agent.price_per_call_usd
-                    except:
-                        pass
-            
+            day_end = date + timedelta(days=1)
+            day_cost = sum(r.cost_usd for r in llm_records if date <= r.timestamp < day_end)
             cost_trend.append({"date": date.strftime('%b %d'), "cost": round(day_cost, 4)})
         
         return {

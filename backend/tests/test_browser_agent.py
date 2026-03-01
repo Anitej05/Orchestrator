@@ -18,7 +18,6 @@ Test Levels:
 
 import asyncio
 import json
-import os
 import sys
 import time
 import traceback
@@ -121,7 +120,7 @@ async def test_schema_validation():
     """Test that Pydantic schemas parse correctly."""
     print_header("TEST 2: SCHEMA VALIDATION")
     
-    from agents.browser_agent.agent_schemas import AtomicAction, ActionPlan, ActionResult, BrowserResult
+    from agents.browser_agent.agent_schemas import AtomicAction, ActionPlan, BrowserResult
     
     # Test 2a: AtomicAction - basic construction
     start = time.time()
@@ -498,7 +497,7 @@ async def test_agent_instantiation():
         assert agent.dom is not None
         
         print_test("BrowserAgent construction", True, 
-                   f"All components initialized: memory, llm, vision, browser, executor, dom", 
+                   "All components initialized: memory, llm, vision, browser, executor, dom", 
                    time.time() - start)
         save_result("BrowserAgent construction", True, "OK", time.time() - start)
     except Exception as e:
@@ -741,7 +740,7 @@ async def run_all_tests():
     print(f"  Time:    {total_duration:.2f}s")
     
     if failed > 0:
-        print(f"\n  Failed tests:")
+        print("\n  Failed tests:")
         for r in test_results:
             if not r["success"]:
                 print(f"    ❌ {r['test']}: {r['message'][:80]}")

@@ -14,7 +14,6 @@ import sys
 import time
 import tempfile
 from pathlib import Path
-from typing import Dict, Any, List
 
 # Add backend to path
 backend_dir = Path(__file__).parent.parent

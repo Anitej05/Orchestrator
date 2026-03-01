@@ -8,11 +8,11 @@ Handles ANY CSV/Excel format reliably.
 import io
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any, Union
+from typing import Dict, List, Optional, Tuple, Any
 import pandas as pd
 import numpy as np
 
-from .config import STORAGE_DIR, MAX_FILE_SIZE_MB, ALLOWED_EXTENSIONS, LARGE_FILE_THRESHOLD_MB
+from .config import STORAGE_DIR, MAX_FILE_SIZE_MB
 
 logger = logging.getLogger("spreadsheet_agent.client")
 
@@ -146,7 +146,7 @@ class DataFrameClient:
         context_parts = []
         
         # 1. Basic info (lightweight schema)
-        context_parts.append(f"DataFrame Info:")
+        context_parts.append("DataFrame Info:")
         context_parts.append(f"- Shape: {df.shape[0]} rows × {df.shape[1]} columns")
         context_parts.append(f"- Columns: {list(df.columns)}")
         context_parts.append(f"- Dtypes: {dict(df.dtypes.astype(str))}")
@@ -523,7 +523,6 @@ class DataFrameClient:
         Extract structural view of Excel file for LLM analysis.
         """
         from openpyxl import load_workbook
-        from openpyxl.utils import get_column_letter
         
         wb = load_workbook(file_path, data_only=True)
         

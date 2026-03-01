@@ -7,7 +7,7 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -23,7 +23,7 @@ from .types import (
     CapabilityResult,
 )
 from .services import AgentServices
-from .capability import Capability, CapabilityRegistry, capability
+from .capability import CapabilityRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -222,6 +222,8 @@ class BaseAgent(ABC):
                     agent_name=self.agent_name,
                     success=result.status != "error",
                     duration_ms=duration_ms,
+                    user_id=request.user_id,
+                    thread_id=request.thread_id
                 )
 
             self.status = AgentStatus.READY
@@ -691,7 +693,7 @@ Respond with structured JSON."""
                 "Extract the file path from the user's request and use it in load_file."
             )
 
-        system_prompt = f"""You are an intelligent agent planning system.
+        system_prompt = """You are an intelligent agent planning system.
 You are running LOCALLY on the user's machine with FULL access to the local filesystem.
 You CAN read and write files at any path. Never ask the user to upload or share files — just use load_file with the path.
 Create a step-by-step plan to accomplish the task using available capabilities.
@@ -722,7 +724,7 @@ Create an execution plan with:
 
 Respond with structured JSON."""
 
-        from pydantic import BaseModel, Field, model_validator
+        from pydantic import BaseModel, model_validator
 
         class PlanStep(BaseModel):
             step_number: int

@@ -3,8 +3,8 @@ Message Manager - Single source of truth for conversation messages
 Handles all message operations to prevent duplicates and ensure consistency
 """
 import logging
-from typing import List, Dict, Any
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
+from typing import List
+from langchain_core.messages import BaseMessage
 
 logger = logging.getLogger("MessageManager")
 

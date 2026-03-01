@@ -18,14 +18,12 @@ import io
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
-import os
 import asyncio
 import logging
 import time
-import json
 import uuid
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any
 
 # Path setup
 ROOT = Path(__file__).resolve().parent.parent
@@ -213,7 +211,7 @@ async def run_e2e_test(
             a_status = "ok" if a["success"] else "err"
             print(f"    Agent: {a['agent']} [{a_status}] ({a['time_ms']}ms)")
     else:
-        print(f"    No agents dispatched (Brain answered directly or used tools)")
+        print("    No agents dispatched (Brain answered directly or used tools)")
 
     if results["has_final_response"]:
         resp_preview = results["final_response"][:120].replace('\n', ' ')

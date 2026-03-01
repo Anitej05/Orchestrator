@@ -24,8 +24,7 @@ import os
 import re
 import textwrap
 import threading
-import builtins
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 # ---------------------------------------------------------------------------
 # Pre-import heavy libraries ONCE at module level

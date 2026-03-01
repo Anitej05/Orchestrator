@@ -3,7 +3,6 @@ Test Gmail Agent - Attachment Handling
 Task 3.2.4: Test attachment handling up to 25MB
 """
 import pytest
-import os
 from pathlib import Path
 from agents.gmail_agent.service import GmailService
 

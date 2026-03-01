@@ -1,9 +1,9 @@
 from typing import Dict, Any, Optional, List, Union, Literal
 from pydantic import ValidationError
-from backend.schemas import CanvasDisplay, StandardAgentResponse
+from backend.schemas import CanvasDisplay
 from services.canvas_templates import (
     get_template, list_templates, get_template_ids,
-    validate_template_data, get_canvas_type_for_template, CANVAS_TEMPLATES
+    validate_template_data
 )
 import logging
 

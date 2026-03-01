@@ -1,21 +1,20 @@
 
 import os
 import logging
-import asyncio
 import time
 import re
-from typing import Optional, List, Dict, Any, Union
+from typing import Optional, List, Dict, Any
 from enum import Enum
-from pydantic import BaseModel
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, AIMessage
+from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_cerebras import ChatCerebras
 from langchain_groq import ChatGroq
-from langchain_nvidia_ai_endpoints import ChatNVIDIA
 from dataclasses import dataclass, asdict
 
 from backend.utils.key_manager import key_manager, get_cerebras_key, report_rate_limit, ollama_key_manager, get_ollama_key, report_ollama_rate_limit
+from backend.services.telemetry_service import telemetry_service
+from utils.mega_logger import setup_mega_logger
 
-logger = logging.getLogger("InferenceService")
+logger = setup_mega_logger("InferenceService")
 
 class ProviderType(str, Enum):
     CEREBRAS = "cerebras"
@@ -72,20 +71,40 @@ class InferenceService:
         """Return usage statistics."""
         return {k: asdict(v) for k, v in self._metrics.items()}
 
-    def _update_metrics(self, provider: str, input_len: int, output_len: int, is_error: bool = False):
-        """Update usage metrics for a provider."""
-        # Estimated token counts (chars / 4)
-        in_tokens = input_len // 4
-        out_tokens = output_len // 4
-        
-        # Approximate costs (USD per 1M tokens) - generic mix
-        COST_MAP = {
-            ProviderType.CEREBRAS: 0.0, # Currently free-ish or low
-            ProviderType.GROQ: 0.0, # Free tier
-            ProviderType.NVIDIA: 0.0, # Free tier
-            ProviderType.OPENAI: 5.0 # Placeholder
+    def _update_metrics(self, provider: str, model_name: str, in_tokens: int, out_tokens: int, latency_ms: float, is_error: bool = False, error_message: Optional[str] = None, telemetry_metadata: Optional[Dict[str, Any]] = None):
+        """Update usage metrics for a provider and log to Postgres."""
+        # Dynamic Model-Specific Pricing (USD per 1M tokens)
+        # Format: "model_keyword": (input_price, output_price)
+        MODEL_PRICING = {
+            "llama-3.3-70b": (0.0, 0.0),      # Groq free tier
+            "gpt-oss": (0.0, 0.0),            # Cerebras
+            "minimax": (0.0, 0.0),            # NVIDIA NIM free tier
+            "gpt-4o-mini": (0.150, 0.600),    # OpenAI
+            "gpt-4o": (2.50, 10.00),          # OpenAI
+            "claude-3-5-sonnet": (3.00, 15.00),# Anthropic
+            "claude-3-5-haiku": (0.25, 1.25), # Anthropic
+            # Fallbacks by provider if model doesn't match
+            ProviderType.OPENAI: (2.50, 10.00), 
+            ProviderType.CEREBRAS: (0.0, 0.0),
+            ProviderType.GROQ: (0.0, 0.0),
+            ProviderType.NVIDIA: (0.0, 0.0),
         }
-        cost = (in_tokens + out_tokens) / 1_000_000 * COST_MAP.get(provider, 0.0)
+        
+        # Determine exact pricing
+        in_price, out_price = 0.0, 0.0
+        pricing_found = False
+        lower_model = model_name.lower()
+        
+        for key, prices in MODEL_PRICING.items():
+            if isinstance(key, str) and key in lower_model:
+                in_price, out_price = prices
+                pricing_found = True
+                break
+                
+        if not pricing_found:
+            in_price, out_price = MODEL_PRICING.get(provider, (0.0, 0.0))
+            
+        cost = (in_tokens / 1_000_000 * in_price) + (out_tokens / 1_000_000 * out_price)
         
         # Update Provider Metrics
         if provider in self._metrics:
@@ -109,6 +128,23 @@ class InferenceService:
             t.output_tokens += out_tokens
             t.total_tokens += (in_tokens + out_tokens)
             t.estimated_cost_usd += cost
+            
+        # Log to DB
+        telemetry_service.log_llm_call({
+            "user_id": telemetry_metadata.get("user_id") if telemetry_metadata else None,
+            "thread_id": telemetry_metadata.get("thread_id") if telemetry_metadata else None,
+            "agent_name": telemetry_metadata.get("agent_name") if telemetry_metadata else None,
+            "operation_type": telemetry_metadata.get("operation_type", "inference") if telemetry_metadata else "inference",
+            "model_name": model_name,
+            "provider": provider,
+            "prompt_tokens": in_tokens,
+            "completion_tokens": out_tokens,
+            "total_tokens": in_tokens + out_tokens,
+            "cost_usd": cost,
+            "latency_ms": latency_ms,
+            "success": not is_error,
+            "error_message": error_message
+        })
 
     def _get_cache_key(self, messages: List[BaseMessage], model: str, temperature: float) -> str:
         """Generate a deterministic cache key."""
@@ -125,11 +161,11 @@ class InferenceService:
         temperature: float = 0.7,
         max_tokens: int = 4000,
         images: Optional[List[str]] = None,  # New: Base64 strings or URLs
-        strip_think_tags: bool = True,
         strip_markdown: bool = False,
         json_mode: bool = False,
         fallback_enabled: bool = True,
-        use_cache: bool = True
+        use_cache: bool = True,
+        telemetry_metadata: Optional[Dict[str, Any]] = None
     ) -> str:
         """
         Main generation method. Supports Text and Vision.
@@ -176,7 +212,6 @@ class InferenceService:
         input_len_estimate = 0 # Difficult to estimate with images
         
         for current_provider in provider_order:
-            from backend.utils.key_manager import key_manager, report_rate_limit, ollama_key_manager, report_ollama_rate_limit
             if current_provider == ProviderType.CEREBRAS:
                 max_attempts = len(key_manager._keys) if key_manager._keys else 1
             elif current_provider == ProviderType.OPENAI:
@@ -195,13 +230,42 @@ class InferenceService:
                     
                     start_time = time.time()
                     response = await llm.ainvoke(messages)
-                    duration = time.time() - start_time
+                    duration_ms = (time.time() - start_time) * 1000
                     
                     content = response.content
                     
+                    # Extract Tokens (defensive — response metadata varies by provider)
+                    in_tokens = sum(len(str(m.content)) for m in messages) // 4
+                    out_tokens = len(str(content)) // 4
+                    tokens_estimated = True
+                    try:
+                        um = getattr(response, 'usage_metadata', None)
+                        if um and isinstance(um, dict):
+                            in_tokens = um.get('input_tokens', in_tokens)
+                            out_tokens = um.get('output_tokens', out_tokens)
+                            tokens_estimated = False
+                        elif um and hasattr(um, 'input_tokens'):
+                            in_tokens = getattr(um, 'input_tokens', in_tokens)
+                            out_tokens = getattr(um, 'output_tokens', out_tokens)
+                            tokens_estimated = False
+                        else:
+                            rm = getattr(response, 'response_metadata', None)
+                            if rm and isinstance(rm, dict):
+                                tu = rm.get('token_usage')
+                                if tu and isinstance(tu, dict):
+                                    in_tokens = tu.get('prompt_tokens', in_tokens)
+                                    out_tokens = tu.get('completion_tokens', out_tokens)
+                                    tokens_estimated = False
+                    except Exception as token_err:
+                        logger.warning(f"⚠️ Could not extract token counts: {token_err}")
+                    
+                    if tokens_estimated:
+                        logger.warning(f"⚠️ Token counts estimated via char/4 heuristic for {current_provider} — real usage metadata unavailable")
+                    
                     # Update Metrics
-                    self._update_metrics(current_provider, input_len_estimate, len(content))
-                    logger.info(f"✅ Inference Success: {current_provider} ({duration:.2f}s)")
+                    actual_model_name = getattr(llm, 'model', getattr(llm, 'model_name', model_name or 'unknown'))
+                    self._update_metrics(current_provider, actual_model_name, in_tokens, out_tokens, duration_ms, is_error=False, telemetry_metadata=telemetry_metadata)
+                    logger.info(f"✅ Inference Success: {current_provider} ({duration_ms/1000:.2f}s) - {in_tokens}in/{out_tokens}out")
                     
                     # Post-processing
                     if strip_think_tags:
@@ -221,7 +285,8 @@ class InferenceService:
                     
                 except Exception as e:
                     logger.error(f"❌ Inference Failed with {current_provider}: {e}")
-                    self._update_metrics(current_provider, 0, 0, is_error=True)
+                    actual_model_name = getattr(llm, 'model', getattr(llm, 'model_name', model_name or 'unknown')) if 'llm' in locals() and llm else 'unknown'
+                    self._update_metrics(current_provider, actual_model_name, 0, 0, 0, is_error=True, error_message=str(e), telemetry_metadata=telemetry_metadata)
                     last_error = e
                     
                     # Handle 429 Quota / Rate Limits for Key Rotation
@@ -236,7 +301,7 @@ class InferenceService:
                         if ollama_key_manager._current_key:
                             report_ollama_rate_limit(ollama_key_manager._current_key)
                         if attempt < max_attempts - 1:
-                            logger.warning(f"🔄 Retrying Ollama with a different key...")
+                            logger.warning("🔄 Retrying Ollama with a different key...")
                             continue
                     
                     if not fallback_enabled:
@@ -253,7 +318,8 @@ class InferenceService:
         provider: Optional[ProviderType] = None,
         priority: InferencePriority = InferencePriority.SPEED,
         temperature: float = 0.1,
-        fallback_enabled: bool = True
+        fallback_enabled: bool = True,
+        telemetry_metadata: Optional[Dict[str, Any]] = None
     ) -> Any:
         """
         Generate structured output conforming to a Pydantic schema.
@@ -263,7 +329,6 @@ class InferenceService:
         input_char_len = sum(len(m.content) for m in messages)
         
         for current_provider in provider_order:
-            from backend.utils.key_manager import key_manager, report_rate_limit
             max_attempts = len(key_manager._keys) if current_provider == ProviderType.CEREBRAS and key_manager._keys else 1
             
             for attempt in range(max_attempts):
@@ -281,11 +346,16 @@ class InferenceService:
                     # Use standard LangChain structured output interface (skip for NVIDIA)
                     if not use_json_fallback and hasattr(llm, "with_structured_output"):
                         structured_llm = llm.with_structured_output(schema)
+                        start_time = time.time()
                         result = await structured_llm.ainvoke(messages)
+                        duration_ms = (time.time() - start_time) * 1000
                         
                         if result:
                             # Update Metrics (Rough estimate for structured obj)
-                            self._update_metrics(current_provider, input_char_len, 500) 
+                            actual_model_name = getattr(llm, 'model', getattr(llm, 'model_name', model_name or 'unknown'))
+                            out_tokens = len(str(result)) // 4
+                            in_tokens = input_char_len // 4
+                            self._update_metrics(current_provider, actual_model_name, in_tokens, out_tokens, duration_ms, is_error=False, telemetry_metadata=telemetry_metadata) 
                             return result
                         else:
                             logger.warning(f"⚠️ {current_provider} returned None for structured output, trying fallback...")
@@ -300,11 +370,35 @@ class InferenceService:
                     else:
                         formatted_messages.append(HumanMessage(content=instruction))
                     
+                    start_time = time.time()
                     response = await llm.ainvoke(formatted_messages)
-                    content = self._strip_think_tags(response.content)
+                    duration_ms = (time.time() - start_time) * 1000
+                    content = self._strip_think_tags(response.content if response and response.content else "")
                     content = self._strip_markdown(content)
                     
-                    self._update_metrics(current_provider, input_char_len, len(content))
+                    # Extract Tokens (defensive — response metadata varies by provider)
+                    in_tokens = sum(len(str(m.content)) for m in formatted_messages) // 4
+                    out_tokens = len(str(content)) // 4
+                    try:
+                        um = getattr(response, 'usage_metadata', None)
+                        if um and isinstance(um, dict):
+                            in_tokens = um.get('input_tokens', in_tokens)
+                            out_tokens = um.get('output_tokens', out_tokens)
+                        elif um and hasattr(um, 'input_tokens'):
+                            in_tokens = getattr(um, 'input_tokens', in_tokens)
+                            out_tokens = getattr(um, 'output_tokens', out_tokens)
+                        else:
+                            rm = getattr(response, 'response_metadata', None)
+                            if rm and isinstance(rm, dict):
+                                tu = rm.get('token_usage')
+                                if tu and isinstance(tu, dict):
+                                    in_tokens = tu.get('prompt_tokens', in_tokens)
+                                    out_tokens = tu.get('completion_tokens', out_tokens)
+                    except Exception as token_err:
+                        logger.warning(f"⚠️ Could not extract token counts: {token_err}")
+                    
+                    actual_model_name = getattr(llm, 'model', getattr(llm, 'model_name', model_name or 'unknown'))
+                    self._update_metrics(current_provider, actual_model_name, in_tokens, out_tokens, duration_ms, is_error=False, telemetry_metadata=telemetry_metadata)
                     
                     # Parse JSON
                     import json
@@ -365,7 +459,8 @@ class InferenceService:
     
                 except Exception as e:
                     logger.error(f"❌ Structured Inference Failed with {current_provider}: {e}")
-                    self._update_metrics(current_provider, input_char_len, 0, is_error=True)
+                    actual_model_name = getattr(llm, 'model', getattr(llm, 'model_name', model_name or 'unknown')) if 'llm' in locals() and llm else 'unknown'
+                    self._update_metrics(current_provider, actual_model_name, 0, 0, 0, is_error=True, error_message=str(e), telemetry_metadata=telemetry_metadata)
                     last_error = e
                     
                     # Handle Rate Limits / Quotas for Key Rotation

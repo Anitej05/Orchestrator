@@ -49,8 +49,8 @@ async def run_direct_test():
     print("🧪 DIRECT BROWSER AGENT TEST (Non-Headless)")
     print("=" * 70)
     print(f"📝 Task: {task}")
-    print(f"🖥️  Mode: Non-headless (visible browser)")
-    print(f"🧠 Architecture: Conversational multi-turn")
+    print("🖥️  Mode: Non-headless (visible browser)")
+    print("🧠 Architecture: Conversational multi-turn")
     print("=" * 70 + "\n")
     
     # Create agent in non-headless mode
@@ -90,7 +90,7 @@ async def run_direct_test():
         # Print conversation stats
         try:
             stats = agent.llm.conversation.get_stats()
-            print(f"\n🧠 Conversation Stats:")
+            print("\n🧠 Conversation Stats:")
             print(f"  Turns: {stats['total_turns']}")
             print(f"  Tokens: {stats['total_tokens']} ({stats['budget_used_pct']:.0f}% budget)")
             print(f"  Has summary: {stats['has_summary']}")
@@ -100,14 +100,14 @@ async def run_direct_test():
             
             # Print the conversation data inventory
             if agent.llm.conversation.data_inventory:
-                print(f"\n📦 Conversation Data Inventory:")
+                print("\n📦 Conversation Data Inventory:")
                 for k, v in agent.llm.conversation.data_inventory.items():
                     print(f"  • {k}: {v}")
         except Exception as e:
             print(f"\n⚠️ Could not get conversation stats: {e}")
         
         # Print agent metrics
-        print(f"\n📈 Agent Metrics:")
+        print("\n📈 Agent Metrics:")
         print(f"  Actions: {agent.metrics['actions']['total']} total, "
               f"{agent.metrics['actions']['successful']} success, "
               f"{agent.metrics['actions']['failed']} failed")
@@ -126,7 +126,7 @@ async def run_direct_test():
         # Still print conversation stats
         try:
             stats = agent.llm.conversation.get_stats()
-            print(f"\n🧠 Conversation Stats at interruption:")
+            print("\n🧠 Conversation Stats at interruption:")
             print(f"  Turns: {stats['total_turns']}")
             print(f"  Tokens: {stats['total_tokens']} ({stats['budget_used_pct']:.0f}% budget)")
             print(f"  Has summary: {stats['has_summary']}")

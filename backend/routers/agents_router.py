@@ -7,7 +7,7 @@ Includes: registration, search, get, rate.
 
 import logging
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, Depends, status, Query, Response, Body
+from fastapi import APIRouter, HTTPException, Depends, status, Query, Response
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_, select
 

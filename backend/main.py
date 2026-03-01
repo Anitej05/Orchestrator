@@ -8,12 +8,9 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
-from pydantic.networks import HttpUrl
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-import shutil
 from fastapi import UploadFile, File
 from aiofiles import open as aio_open
-from typing import Literal
 
 
 import os
@@ -35,26 +32,23 @@ from dotenv import load_dotenv
 load_dotenv(dotenv_path=os.path.join(BACKEND_DIR, ".env"), override=True)
 
 # --- Third-party Imports ---
-from fastapi import FastAPI, HTTPException, Depends, status, Query, Response, WebSocket, WebSocketDisconnect, Body, Request
+from fastapi import FastAPI, HTTPException, Depends, Query, WebSocket, WebSocketDisconnect, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import or_, cast, String, select
-from pathlib import Path as PathlibPath
-import pandas as pd
+from sqlalchemy.orm import Session
 import httpx
 # Lazy import SentenceTransformer to avoid jaxlib dependency issues
 # from sentence_transformers import SentenceTransformer
 
 # --- Local Application Imports ---
-CONVERSATION_HISTORY_DIR = os.path.join(BACKEND_DIR, "conversation_history")
+CONVERSATION_HISTORY_DIR = "conversation_history"
 from database import SessionLocal, get_db
-from models import Agent, StatusEnum, AgentCapability, AgentEndpoint, EndpointParameter, Workflow, WorkflowExecution, UserThread, WorkflowSchedule, WorkflowWebhook, AgentType
-from backend.schemas import AgentCard, ProcessRequest, ProcessResponse, PlanResponse, FileObject, ActionApprovalRequest, ActionRejectRequest
-from backend.orchestrator.graph import ForceJsonSerializer, create_graph_with_checkpointer, create_execution_subgraph, messages_from_dict, messages_to_dict, serialize_complex_object
-from backend.orchestrator.state import State
+from models import Agent, StatusEnum, Workflow, WorkflowExecution, UserThread, WorkflowSchedule, WorkflowWebhook
+from backend.schemas import ProcessRequest, ProcessResponse, PlanResponse, FileObject, ActionApprovalRequest, ActionRejectRequest
+from backend.orchestrator.graph import create_graph_with_checkpointer, create_execution_subgraph, serialize_complex_object
 from langgraph.checkpoint.memory import MemorySaver
 from routers import connect_router
+from utils.mega_logger import setup_mega_logger, mega_log_block
 from routers import credentials_router
 from routers import integrations_router
 
@@ -96,6 +90,15 @@ async def lifespan(app: FastAPI):
         logger.info("✅ Database tables ready")
     except Exception as e:
         logger.error(f"❌ Failed to create tables: {str(e)}", exc_info=True)
+        
+    # Download missing models
+    try:
+        logger.info("⬇️ Checking and downloading required AI models...")
+        from utils.model_downloader import download_models_if_missing
+        download_models_if_missing()
+        logger.info("✅ AI models check completed")
+    except Exception as e:
+        logger.error(f"❌ Failed to download models: {str(e)}", exc_info=True)
     
     # Sync agent definitions from SKILL.md files (UAP) to database
     try:
@@ -159,56 +162,30 @@ async def lifespan(app: FastAPI):
     logger.info("APPLICATION SHUTTING DOWN")
     logger.info("=" * 60)
     
-    # Cancel background health checker with timeout
+    # Cancel background health checker
     if _health_checker_task:
         logger.info("✓ Cancelling health checker task...")
         _health_checker_task.cancel()
         try:
-            await asyncio.wait_for(_health_checker_task, timeout=2.0)
-        except (asyncio.CancelledError, asyncio.TimeoutError):
+            await _health_checker_task
+        except asyncio.CancelledError:
             pass
         logger.info("✓ Health checker stopped")
-    
-    # Cancel any pending async tasks
-    try:
-        logger.info("✓ Cancelling pending tasks...")
-        pending = [task for task in asyncio.all_tasks() if not task.done()]
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-        logger.info(f"✓ Cancelled {len(pending)} pending tasks")
-    except Exception as e:
-        logger.warning(f"Warning during task cancellation: {e}")
     
     # Stop all agent processes
     logger.info("✓ Stopping agent processes...")
     cleanup_agents()
     logger.info("✓ Agent processes stopped")
     
-    # Shutdown workflow scheduler with timeout
+    # Shutdown workflow scheduler
     try:
         from backend.services.workflow_scheduler import get_scheduler
         scheduler = get_scheduler()
         logger.info("✓ Shutting down workflow scheduler...")
-        await asyncio.wait_for(
-            asyncio.get_event_loop().run_in_executor(None, scheduler.shutdown, False),
-            timeout=5.0
-        )
+        scheduler.shutdown()
         logger.info("✓ Workflow scheduler stopped")
-    except asyncio.TimeoutError:
-        logger.warning("⚠ Workflow scheduler shutdown timed out (forced)")
     except Exception as e:
         logger.error(f"✗ Error shutting down scheduler: {str(e)}")
-    
-    # Close database connections
-    try:
-        logger.info("✓ Closing database connections...")
-        from database import engine
-        engine.dispose()
-        logger.info("✓ Database connections closed")
-    except Exception as e:
-        logger.error(f"✗ Error closing database: {str(e)}")
     
     logger.info("=" * 60)
     logger.info("APPLICATION SHUTDOWN COMPLETE")
@@ -222,47 +199,18 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Configure logging
-# Backend logger - only for backend/main.py logs
-logger = logging.getLogger("uvicorn.error")
+# ================================================================================================= #
+# 🚀 Configure Global Mega Logger Strategy (Writes every orchestrator and API event to daily logs)
+# ================================================================================================= #
 
-# Configure root logger for backend only (not orchestrator)
-# Use UTF-8 encoding for console output to handle emojis
-import io
-console_handler = logging.StreamHandler(io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace'))
-console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-logging.basicConfig(
-    level=logging.INFO,
-    handlers=[console_handler]
-)
-
-# Set up orchestrator logger to write to temp file only (not console)
-# This keeps backend console clean and stores orchestrator logs separately
-orchestrator_logger = logging.getLogger("AgentOrchestrator")
-orchestrator_logger.setLevel(logging.INFO)
-orchestrator_logger.propagate = False  # Don't propagate to root logger
-
-# Create logs directory if it doesn't exist
-os.makedirs("logs", exist_ok=True)
-
-# File handler for orchestrator logs - overwrites on each run (last conversation only)
-orchestrator_log_file = "logs/orchestrator_temp.log"
-file_handler = logging.FileHandler(orchestrator_log_file, mode='w', encoding='utf-8')  # UTF-8 encoding for emojis
-file_handler.setLevel(logging.INFO)
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-file_handler.setFormatter(formatter)
-orchestrator_logger.addHandler(file_handler)
-
-logger.info(f"Orchestrator logs will be saved to: {orchestrator_log_file}")
+logger = setup_mega_logger("OrchestratorAPI")
 
 def clear_orchestrator_log():
-    """Clear the orchestrator log file for a new conversation."""
-    try:
-        with open(orchestrator_log_file, 'w') as f:
-            f.write('')  # Clear the file
-        orchestrator_logger.info("=== New Conversation Started ===")
-    except Exception as e:
-        logger.error(f"Failed to clear orchestrator log: {e}")
+    """Clear the orchestrator log file for a new conversation.
+    WARNING: Now deprecated because MegaLogger persists everything forever across days. 
+    We just log a distinct boundary instead.
+    """
+    mega_log_block(logger, "NEW CONVERSATION STARTED", "Starting a fresh thread in the Mega Logger.", level=logging.INFO)
 
 # Initialize memory for persistent conversations
 checkpointer = MemorySaver()
@@ -304,7 +252,7 @@ from routers import content_router
 app.include_router(content_router.router)
 
 # Import and include the new modular routers
-from routers import files_router, agents_router, conversations_router, workflows_router, dashboard_router
+from routers import agents_router, conversations_router, workflows_router
 
 # Inject shared state into routers that need it
 # conversations_router needs access to conversation_store and store_lock
@@ -312,12 +260,12 @@ conversations_router.set_shared_state(conversation_store, store_lock)
 # workflows_router needs access to checkpointer
 workflows_router.set_checkpointer(checkpointer)
 
-# NOTE: files_router and dashboard_router are NOT included here
+# NOTE: files_router, workflows_router, and dashboard_router are NOT included here
 # because their routes are already defined inline in main.py (with additional logic).
 # Including them would cause Duplicate Operation ID warnings.
 # TODO: Migrate inline routes to routers and re-enable these includes.
 # app.include_router(files_router.router)
-app.include_router(workflows_router.router)
+# app.include_router(workflows_router.router)
 # app.include_router(dashboard_router.router)
 
 app.include_router(agents_router.router)
@@ -488,7 +436,7 @@ async def serve_file(file_path: str, request: Request):
 # - Integration with the file serving route (/files)
 # ============================================================================
 
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 class CreateDocumentRequest(BaseModel):
     """Request to create a new document via orchestrator."""
@@ -556,7 +504,7 @@ async def create_document_unified(request: CreateDocumentRequest, req: Request):
                 user = get_user_from_request(req)
                 user_id = user.get("sub") or user.get("user_id") or user.get("id")
                 logger.info(f"Document creation requested by: user_id={user_id}")
-            except HTTPException as auth_error:
+            except HTTPException:
                 raise HTTPException(
                     status_code=401,
                     detail="Authentication required"
@@ -602,7 +550,6 @@ async def create_document_unified(request: CreateDocumentRequest, req: Request):
         
         # ===== GENERATE PREVIEW =====
         from pathlib import Path as PathlibPath
-        from backend.utils.file_server import find_file_in_storage, get_mime_type
         
         canvas_display = None
         relative_path = None
@@ -736,7 +683,7 @@ async def create_spreadsheet_unified(request: CreateSpreadsheetRequest, req: Req
                 user = get_user_from_request(req)
                 user_id = user.get("sub") or user.get("user_id") or user.get("id")
                 logger.info(f"Spreadsheet creation requested by: user_id={user_id}")
-            except HTTPException as auth_error:
+            except HTTPException:
                 raise HTTPException(status_code=401, detail="Authentication required")
         else:
             logger.info("Internal orchestrator request - bypassing auth")
@@ -1113,28 +1060,23 @@ async def serve_file(file_path: str):
     """
     # Decode the file path
     from urllib.parse import unquote
-    from pathlib import Path
     file_path = unquote(file_path)
     
     # Security: ensure the path doesn't escape the storage directory
     if ".." in file_path or file_path.startswith("/"):
         raise HTTPException(status_code=400, detail="Invalid file path")
     
-    # Resolve path relative to backend directory
-    backend_dir = Path(__file__).parent
-    full_path = backend_dir / file_path
-    
     # Check if file exists
-    if not full_path.exists():
-        raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
     
     # Determine media type based on file extension
     from mimetypes import guess_type
-    media_type, _ = guess_type(str(full_path))
+    media_type, _ = guess_type(file_path)
     
     # Return the file
     from fastapi.responses import FileResponse
-    return FileResponse(str(full_path), media_type=media_type)
+    return FileResponse(file_path, media_type=media_type)
 
 # --- Unified Orchestration Service ---
 async def execute_orchestration(
@@ -1171,7 +1113,7 @@ async def execute_orchestration(
     config = {"recursion_limit": 80, "configurable": {"thread_id": thread_id}}
     if task_event_callback:
         config["configurable"]["task_event_callback"] = task_event_callback
-        logger.info(f"✅ Task event callback registered for real-time streaming")
+        logger.info("✅ Task event callback registered for real-time streaming")
     if owner:
         config["configurable"]["owner"] = owner
         logger.info(f"✅ Owner information provided for orchestration: {owner}")
@@ -1266,9 +1208,9 @@ async def execute_orchestration(
             logger.info(f"Processing approval response: '{user_response_lower}'")
             
             if user_response_lower in ["approve", "yes", "proceed", "continue", "execute", "go", "ok"]:
-                print(f"!!! USER APPROVED - Setting planning_mode=False and plan_approved=True !!!")
+                print("!!! USER APPROVED - Setting planning_mode=False and plan_approved=True !!!")
                 logger.info(f"User APPROVED execution plan for thread_id: {thread_id}")
-                logger.info(f"Clearing approval flags and continuing execution")
+                logger.info("Clearing approval flags and continuing execution")
                 # Simply turn off planning mode and clear approval flags
                 initial_state["needs_approval"] = False
                 initial_state["approval_required"] = False
@@ -1280,13 +1222,13 @@ async def execute_orchestration(
                 # Don't modify original_prompt - keep everything as is
             elif user_response_lower in ["cancel", "no", "stop", "abort", "reject"]:
                 logger.info(f"User CANCELLED execution plan for thread_id: {thread_id}")
-                print(f"!!! USER CANCELLED - Stopping execution !!!")
+                print("!!! USER CANCELLED - Stopping execution !!!")
                 initial_state["final_response"] = "Execution cancelled by user."
                 return initial_state
             else:
                 # User wants to modify the plan - treat as a new prompt with modifications
                 logger.info(f"User wants to MODIFY plan with: '{user_response}'")
-                print(f"!!! USER MODIFICATION REQUEST - Replanning with modifications !!!")
+                print("!!! USER MODIFICATION REQUEST - Replanning with modifications !!!")
                 print(f"!!! CURRENT STATE HAS original_prompt: {'original_prompt' in initial_state}")
                 if "original_prompt" in initial_state:
                     print(f"!!! ORIGINAL PROMPT VALUE: '{initial_state['original_prompt'][:200]}...'")
@@ -1308,7 +1250,7 @@ async def execute_orchestration(
                     print(f"!!! COMBINED PROMPT: '{initial_state['original_prompt'][:300]}...'")
                 else:
                     initial_state["original_prompt"] = user_response
-                    print(f"!!! NO ORIGINAL PROMPT - USING USER RESPONSE AS NEW PROMPT !!!")
+                    print("!!! NO ORIGINAL PROMPT - USING USER RESPONSE AS NEW PROMPT !!!")
                 
                 # Clear the plan and restart planning with the modified prompt
                 initial_state["task_plan"] = []
@@ -1335,7 +1277,7 @@ async def execute_orchestration(
 
     elif prompt and current_conversation:
         # A new prompt is sent in an existing conversation thread
-        logger.info(f"NEW PROMPT IN EXISTING CONVERSATION BRANCH")
+        logger.info("NEW PROMPT IN EXISTING CONVERSATION BRANCH")
         logger.info(f"Continuing conversation for thread_id: {thread_id} with new prompt, planning_mode: {planning_mode}")
         logger.info(f"Prompt content: '{prompt[:100]}'")
         
@@ -1421,7 +1363,7 @@ async def execute_orchestration(
         # A brand new conversation
         if not prompt:
             raise ValueError("Prompt is required for new conversations")
-        logger.info(f"NEW CONVERSATION BRANCH")
+        logger.info("NEW CONVERSATION BRANCH")
         logger.info(f"Starting new conversation for thread_id: {thread_id}, planning_mode: {planning_mode}")
         
         # Clear orchestrator log for new conversation
@@ -1469,6 +1411,28 @@ async def execute_orchestration(
             "pending_approval": False,
             "pending_decision": None,
         }
+        
+        # --- NEW THREAD DB PERSISTENCE ---
+        if owner and owner.get("user_id"):
+            try:
+                from database import get_db_session
+                from models import UserThread
+                with get_db_session() as db:
+                    # Check if thread already exists
+                    existing = db.query(UserThread).filter_by(thread_id=thread_id).first()
+                    if not existing:
+                        logger.info(f"Creating new UserThread record in SQL for {thread_id} (user: {owner['user_id']})")
+                        # Create title from prompt (max 100 chars)
+                        clean_title = (prompt[:97] + "...") if len(prompt) > 100 else prompt
+                        new_thread = UserThread(
+                            thread_id=thread_id,
+                            user_id=owner["user_id"],
+                            title=clean_title
+                        )
+                        db.add(new_thread)
+                        db.commit()
+            except Exception as e:
+                logger.error(f"Failed to save new UserThread for {thread_id}: {e}")
 
     # --- File Merging Logic ---
     # This block runs for EVERY turn, ensuring new files are always added to the state
@@ -1521,13 +1485,13 @@ async def execute_orchestration(
         
         # Select the appropriate graph
         if is_post_approval:
-            logger.info(f"Graph execution mode: POST-APPROVAL EXECUTION using subgraph")
-            print(f"!!! GRAPH EXECUTION: POST-APPROVAL - Using execution subgraph !!!")
+            logger.info("Graph execution mode: POST-APPROVAL EXECUTION using subgraph")
+            print("!!! GRAPH EXECUTION: POST-APPROVAL - Using execution subgraph !!!")
             selected_graph = execution_subgraph
             graph_input = initial_state
         else:
-            logger.info(f"Graph execution mode: NORMAL execution using main graph")
-            print(f"!!! GRAPH EXECUTION: NORMAL - Using main graph !!!")
+            logger.info("Graph execution mode: NORMAL execution using main graph")
+            print("!!! GRAPH EXECUTION: NORMAL - Using main graph !!!")
             selected_graph = graph
             graph_input = initial_state
         
@@ -1638,6 +1602,13 @@ async def execute_orchestration(
         except Exception as e:
             logger.error(f"Failed to save conversation history for {thread_id}: {e}")
 
+        # Ensure a plan file is saved for every conversation
+        try:
+            from backend.orchestrator.graph import save_plan_to_file
+            save_plan_to_file({**final_state, "thread_id": thread_id})
+        except Exception as e:
+            logger.error(f"Failed to save plan file for thread {thread_id}: {e}")
+
         logger.info(f"Orchestration completed for thread_id: {thread_id}")
 
         # === ARTIFACT DISTILLATION: Distill learnings from this conversation ===
@@ -1705,6 +1676,14 @@ def process_node_data(node_name: str, node_output, progress: float, node_count: 
             serializable_data[key] = serialize_complex_object(value)
 
             # Extract node-specific meaningful data
+            
+            # --- NEW MEGA LOG RECORD ---
+            mega_log_block(
+                logger, 
+                f"NODE EXECUTION | {node_name.upper()} | Thread: {thread_id}", 
+                f"Progress: {progress}%\nStage: {stage_info['stage']}\nKey modified: {key}\nPayload Preview:\n{str(value)[:1000]}",
+                level=logging.INFO
+            )
             
             # --- NEW ORCHESTRATOR NODES ---
             if node_name in ["omni_brain", "manage_todo_list"] and key == "todo_list":
@@ -1920,7 +1899,7 @@ async def reject_action_endpoint(request: ActionRejectRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/chat", response_model=ProcessResponse)
-async def find_agents(request: ProcessRequest):
+async def find_agents(request: ProcessRequest, api_request: Request):
     """
     Receives a prompt, runs it through the agent-finding graph,
     and returns the selected primary and fallback agents for each task.
@@ -1928,14 +1907,33 @@ async def find_agents(request: ProcessRequest):
     """
     thread_id = request.thread_id or str(uuid.uuid4())
     logger.info(f"Starting agent search with thread_id: {thread_id}")
-    logger.info(f"🔍 /api/chat RECEIVED: files={request.files}, files_count={len(request.files) if request.files else 0}")
+    
+    # 🔴 RECORD TO MEGA LOGGER -> THE CORE USER REQUEST
+    mega_log_block(
+        logger, 
+        f"API CHAT REQUEST | Thread: {thread_id}", 
+        f"Prompt: {request.prompt}\nFiles Count: {len(request.files) if request.files else 0}"
+    )
+
+    # Get user auth
+    owner = None
+    try:
+        from auth import get_user_from_request
+        user = get_user_from_request(api_request)
+        if user:
+             user_id = user.get("sub") or user.get("user_id") or user.get("id")
+             if user_id:
+                 owner = {"user_id": user_id}
+    except Exception as e:
+        logger.warning(f"Could not extract user from request: {e}")
 
     try:
         final_state = await execute_orchestration(
             prompt=request.prompt,
             thread_id=thread_id,
             files=request.files,  # Pass the files to the orchestrator
-            stream_callback=None
+            stream_callback=None,
+            owner=owner
         )
 
         # Check if workflow is paused for user input
@@ -2023,11 +2021,18 @@ async def find_agents(request: ProcessRequest):
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {e}")
 
 @app.post("/api/chat/continue", response_model=ProcessResponse)
-async def continue_conversation(user_response: UserResponse):
+async def continue_conversation(user_response: UserResponse, api_request: Request):
     """
     Continue a paused conversation by providing user response to a question.
     """
     logger.info(f"Continuing conversation for thread_id: {user_response.thread_id} with response: {user_response.response[:100]}...")
+    
+    # 🔴 RECORD TO MEGA LOGGER -> THE CORE USER RESPONSE
+    mega_log_block(
+        logger, 
+        f"API CHAT CONTINUE | Thread: {user_response.thread_id}", 
+        f"User Response: {user_response.response}\nFiles Count: {len(user_response.files) if user_response.files else 0}"
+    )
 
     # Check if conversation exists
     with store_lock:
@@ -2039,13 +2044,26 @@ async def continue_conversation(user_response: UserResponse):
 
     logger.info(f"Found existing conversation for thread_id: {user_response.thread_id}, pending_input: {existing_conversation.get('pending_user_input', False)}")
 
+    # Get user auth
+    owner = None
+    try:
+        from auth import get_user_from_request
+        user = get_user_from_request(api_request)
+        if user:
+             user_id = user.get("sub") or user.get("user_id") or user.get("id")
+             if user_id:
+                 owner = {"user_id": user_id}
+    except Exception as e:
+        logger.warning(f"Could not extract user from request: {e}")
+
     try:
         final_state = await execute_orchestration(
             prompt=None, # No new prompt needed
             thread_id=user_response.thread_id,
             user_response=user_response.response,
             files=user_response.files,  # Pass files if provided
-            stream_callback=None
+            stream_callback=None,
+            owner=owner
         )
 
         # Check if workflow is paused again for more user input
@@ -2305,7 +2323,7 @@ async def save_workflow(request: Request, thread_id: str, name: str, description
                 todo_list = checkpoint_state.get("todo_list", todo_list)
                 # Also get other fields from checkpoint
                 history = {**history, **checkpoint_state}
-                logger.info(f"✅ Retrieved workflow data from checkpointer")
+                logger.info("✅ Retrieved workflow data from checkpointer")
         except Exception as e:
             logger.warning(f"Could not load from checkpointer: {e}")
     
@@ -2463,31 +2481,22 @@ async def execute_workflow(workflow_id: str, request: Request, inputs: Dict[str,
     db.add(execution)
     db.commit()
     
-    # Get the saved plan from blueprint (try new system first, fall back to old)
+    # Get the saved plan from blueprint
     blueprint = workflow.blueprint
-    todo_list = blueprint.get("todo_list", [])
     task_plan = blueprint.get("task_plan", [])
     task_agent_pairs = blueprint.get("task_agent_pairs", [])
     original_prompt = blueprint.get("original_prompt", "")
     
-    # Require at least one execution plan format
-    if not todo_list and not (task_plan and task_agent_pairs):
-        raise HTTPException(
-            status_code=400, 
-            detail="Workflow has no saved execution plan. Please save a workflow with a todo_list or task_plan."
-        )
+    if not task_plan or not task_agent_pairs:
+        raise HTTPException(status_code=400, detail="Workflow has no saved execution plan")
     
     # Create a memory saver for this thread
     memory = MemorySaver()
     
     # Pre-seed the thread state with the saved plan (bypass planning phase)
-    # Include both systems for compatibility with graph nodes
     initial_state = {
         "thread_id": new_thread_id,
         "original_prompt": original_prompt,
-        # New system (primary)
-        "todo_list": todo_list,
-        # Old system (fallback)
         "task_plan": task_plan,
         "task_agent_pairs": task_agent_pairs,
         "messages": [{"role": "user", "content": original_prompt}],
@@ -2505,15 +2514,12 @@ async def execute_workflow(workflow_id: str, request: Request, inputs: Dict[str,
         "next": ["execute_batch"]  # Start directly at execution
     })
     
-    # Use appropriate task count
-    task_count = len(todo_list) if todo_list else len(task_agent_pairs)
-    logger.info(f"Pre-seeded workflow execution {workflow_id} as thread {new_thread_id} with {task_count} tasks (todo_list: {len(todo_list)}, task_plan: {len(task_plan)})")
-    
+    logger.info(f"Pre-seeded workflow execution {workflow_id} as thread {new_thread_id} with {len(task_plan)} batches")
     return {
         "execution_id": execution_id, 
         "thread_id": new_thread_id, 
         "status": "running", 
-        "task_count": task_count,
+        "task_count": len(task_agent_pairs),
         "message": "Connect to /ws/chat with this thread_id - execution will start automatically"
     }
 
@@ -2551,7 +2557,7 @@ async def create_workflow_conversation(workflow_id: str, request: Request, db: S
     if isinstance(blueprint, str):
         try:
             blueprint = json.loads(blueprint)
-            logger.info(f"Deserialized blueprint from JSON string")
+            logger.info("Deserialized blueprint from JSON string")
         except Exception as e:
             logger.error(f"Failed to deserialize blueprint JSON: {e}")
             raise HTTPException(status_code=400, detail="Invalid workflow blueprint format")
@@ -2578,7 +2584,7 @@ async def create_workflow_conversation(workflow_id: str, request: Request, db: S
     )
     db.add(user_thread)
     db.commit()
-    logger.info(f"UserThread created successfully")
+    logger.info("UserThread created successfully")
     
     # Save the conversation JSON file so it persists and frontend can load it
     # This pre-seeds the plan so it displays immediately in the sidebar
@@ -2640,22 +2646,30 @@ async def schedule_workflow(workflow_id: str, body: ScheduleWorkflowRequest, req
         raise HTTPException(status_code=404, detail="Workflow not found")
     
     # Check if workflow has a saved execution plan
+    # Accept either task_plan (preferred) or task_agent_pairs (fallback)
     if not workflow.blueprint:
         raise HTTPException(
             status_code=400, 
             detail="Workflow has no blueprint data. Please save the workflow again to capture the execution plan."
         )
     
-    # Accept either todo_list (new system) or task_plan (old system)
-    has_todo_list = workflow.blueprint.get("todo_list") and len(workflow.blueprint.get("todo_list", [])) > 0
     has_task_plan = workflow.blueprint.get("task_plan") and len(workflow.blueprint.get("task_plan", [])) > 0
     has_task_agent_pairs = workflow.blueprint.get("task_agent_pairs") and len(workflow.blueprint.get("task_agent_pairs", [])) > 0
     
-    if not has_todo_list and not (has_task_plan or has_task_agent_pairs):
+    if not has_task_plan and not has_task_agent_pairs:
+        # Provide helpful error message with recovery options
+        missing_fields = []
+        if not has_task_plan:
+            missing_fields.append("task_plan")
+        if not has_task_agent_pairs:
+            missing_fields.append("task_agent_pairs")
+        
         raise HTTPException(
             status_code=400, 
-            detail="Workflow has no execution plan. A workflow must have either a todo_list or task_plan to be scheduled. "
-                   "Please complete a conversation and save it as a workflow."
+            detail=f"Workflow has no execution plan. Missing: {', '.join(missing_fields)}. Recovery options: "
+                   f"1) Complete a new conversation with the same prompt and save it again, "
+                   f"2) Use a different workflow that has an execution plan, "
+                   f"3) Run the workflow once to generate a plan before scheduling."
         )
     
     schedule_id = str(uuid.uuid4())
@@ -2680,7 +2694,7 @@ async def schedule_workflow(workflow_id: str, body: ScheduleWorkflowRequest, req
             user_id=user_id,
             db_session_factory=SessionLocal
         )
-        logger.info(f"Scheduled workflow {workflow_id} with cron: {body.cron_expression} (todo_list: {len(workflow.blueprint.get('todo_list', []))}, task_plan: {len(workflow.blueprint.get('task_plan', []))})")
+        logger.info(f"Scheduled workflow {workflow_id} with cron: {body.cron_expression}")
         return {"schedule_id": schedule_id, "status": "scheduled", "cron": body.cron_expression}
     except Exception as e:
         # Rollback if scheduling fails
@@ -2989,43 +3003,35 @@ async def trigger_webhook(webhook_id: str, payload: Dict[str, Any], webhook_toke
 
 @app.get("/api/plan/{thread_id}", response_model=PlanResponse)
 async def get_agent_plan(thread_id: str):
-    """Retrieves the execution plan from conversation history (todo_list format)."""
-    history_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{thread_id}.json")
+    """
+    Retrieves the markdown execution plan for a given conversation thread.
+    """
+    # Check both possible locations for plan files
+    plan_dirs = ["agent_plans", "backend/agent_plans"]  # Check root first, then backend/
+    file_path = None
     
-    if not os.path.exists(history_path):
+    for plan_dir in plan_dirs:
+        temp_path = os.path.join(plan_dir, f"{thread_id}-plan.md")
+        if os.path.exists(temp_path):
+            file_path = temp_path
+            break
+
+    if not file_path:
         raise HTTPException(
             status_code=404,
-            detail=f"Conversation history not found for thread_id: {thread_id}"
+            detail=f"Plan file not found for thread_id: {thread_id} in any location: {plan_dirs}"
         )
-    
+
     try:
-        with open(history_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            todo_list = data.get("todo_list", [])
-            
-            # Convert todo_list to markdown format
-            plan_content = f"# Execution Plan for Thread: {thread_id}\n\n"
-            if not todo_list:
-                plan_content += "- No tasks found.\n"
-            else:
-                for task in todo_list:
-                    status = task.get('status', 'pending')
-                    title = task.get('title', 'Untitled task')
-                    status_emoji = {
-                        "pending": "⏳",
-                        "in-progress": "🔄",
-                        "completed": "✅",
-                        "failed": "❌"
-                    }.get(status, "⏳")
-                    plan_content += f"- {status_emoji} **{title}** ({status})\n"
-            
-            return PlanResponse(thread_id=thread_id, content=plan_content)
-    except json.JSONDecodeError as e:
-        logger.error(f"Error parsing conversation history for thread_id {thread_id}: {e}")
-        raise HTTPException(status_code=500, detail="Error parsing conversation history")
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        return PlanResponse(thread_id=thread_id, content=content)
     except Exception as e:
-        logger.error(f"Error reading conversation history for thread_id {thread_id}: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        logger.error(f"Error reading plan file for thread_id {thread_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="An internal server error occurred while reading the plan file."
+        )
 
 @app.websocket("/ws/workflow/{workflow_id}/execute")
 async def websocket_workflow_execute(websocket: WebSocket, workflow_id: str, token: str = None):
@@ -3533,7 +3539,7 @@ async def websocket_chat(websocket: WebSocket):
                         planning_mode=planning_mode,
                         owner=owner  # Pass owner for user thread registration
                     )
-                except asyncio.TimeoutError as timeout_err:
+                except asyncio.TimeoutError:
                     logger.error(f"Orchestration execution timed out for thread_id {thread_id}")
                     await websocket.send_json({
                         "node": "__error__",
@@ -4002,7 +4008,6 @@ async def wait_for_agent_ready(agent_name: str, port: int, timeout: float = 30.0
     Wait for a specific agent to be ready by checking its health endpoint.
     Returns True if agent is ready, False if timeout or failed.
     """
-    import httpx
     import time
     
     start_time = time.time()
@@ -4039,7 +4044,6 @@ async def wait_for_agent_ready(agent_name: str, port: int, timeout: float = 30.0
 
 async def check_agent_health_background():
     """Background task to check agent health and update status"""
-    import httpx
     
     while True:
         await asyncio.sleep(3)  # Check every 3 seconds (reduced frequency)
@@ -4140,7 +4144,7 @@ def start_agents_async():
                     'status': 'starting'
                 }
         
-        except Exception as e:
+        except Exception:
             agent_status[agent_name] = {
                 'port': port,
                 'process': None,
@@ -4151,7 +4155,7 @@ def start_agents_async():
     import atexit
     atexit.register(cleanup_agents)
     
-    logger.info(f"Agent servers started. Ready for requests.")
+    logger.info("Agent servers started. Ready for requests.")
 
 # Note: Startup logic has been moved to the lifespan context manager above.
 # The @app.on_event("startup") decorator is deprecated in favor of lifespan.

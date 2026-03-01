@@ -5,7 +5,6 @@ Tests the General Fallback Agent with real Composio connections.
 """
 
 import pytest
-import asyncio
 from unittest.mock import Mock, patch, AsyncMock, MagicMock
 import sys
 import os

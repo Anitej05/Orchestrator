@@ -15,12 +15,9 @@ sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='repla
 
 
 
-import os
-import json
 import asyncio
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional
 
 # Path setup
 ROOT = Path(__file__).resolve().parent.parent
@@ -535,7 +532,7 @@ def test_template_registry():
     invalid, err = validate_template_data("spreadsheet_viewer", {})
     assert not invalid, "Validation should fail with empty data"
     
-    logger.info(f"  ✅ Template data validation works correctly")
+    logger.info("  ✅ Template data validation works correctly")
 
 
 # ============================================================================
@@ -609,7 +606,7 @@ async def run_all_tests():
     try:
         await test_fallback_decision()
         results["passed"] += 1
-        print(f"  ✅ PASS: Fallback decisions (4 scenarios)")
+        print("  ✅ PASS: Fallback decisions (4 scenarios)")
     except Exception as e:
         results["failed"] += 1
         results["errors"].append(("Fallback decisions", str(e)))
@@ -620,7 +617,7 @@ async def run_all_tests():
     print("\n" + "=" * 72)
     print(f"  RESULTS: {results['passed']}/{total} passed")
     if results["errors"]:
-        print(f"\n  Failures:")
+        print("\n  Failures:")
         for name, err in results["errors"]:
             print(f"    ❌ {name}: {err[:120]}")
     print("=" * 72 + "\n")

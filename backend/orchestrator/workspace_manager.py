@@ -7,7 +7,6 @@ Manages file tracking across:
 - Files created during conversation (persisted per thread)
 """
 
-import os
 import json
 from pathlib import Path
 from typing import Dict, List, Any, Optional

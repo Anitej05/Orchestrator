@@ -617,7 +617,7 @@ class BrowserAgent:
                         
                         # If no active page found, try to recover with a new page
                         if not active_page:
-                            logger.warning(f"⚠️ All pages are stale - attempting recovery...")
+                            logger.warning("⚠️ All pages are stale - attempting recovery...")
                             self._recovering = True
                             try:
                                 active_page = await self.browser.recover_page(last_known_url)
@@ -738,11 +738,11 @@ class BrowserAgent:
                     last_error = (last_error or "") + f"\n{nudge}"
                     
                 if self.loop_detector.should_force_done():
-                    logger.warning(f"🛑 Loop Detector: HARD FORCE-DONE")
+                    logger.warning("🛑 Loop Detector: HARD FORCE-DONE")
                     last_error = (last_error or "") + (
-                        f"\n🛑 CRITICAL: You are helplessly stuck in a loop or the page is stagnant. "
-                        f"You MUST save any data you have and call `done` NOW. "
-                        f"Your ONLY allowed actions are: save_info and done."
+                        "\n🛑 CRITICAL: You are helplessly stuck in a loop or the page is stagnant. "
+                        "You MUST save any data you have and call `done` NOW. "
+                        "Your ONLY allowed actions are: save_info and done."
                     )
 
                 # Action Planning
@@ -881,7 +881,7 @@ class BrowserAgent:
                     try:
                         await refreshed_page.wait_for_load_state('domcontentloaded', timeout=10000)
                         await asyncio.sleep(2.0)  # Extra wait for SPAs/dynamic content
-                        logger.info(f"✅ Page loaded and ready")
+                        logger.info("✅ Page loaded and ready")
                     except Exception as load_err:
                         logger.debug(f"Page load wait skipped: {load_err}")
                 
@@ -941,11 +941,11 @@ class BrowserAgent:
                             # If we crash after this point but before next loop, we want to restore THIS page, not the old one
                             self.previous_url = post_state['url']
                         elif visual_changed:
-                            logger.info(f"✅ Visual change detected (modal/overlay/content update)")
+                            logger.info("✅ Visual change detected (modal/overlay/content update)")
                             self._last_no_effect_action = None  # Clear - action had effect
                             self._no_effect_count = 0  # Reset counter
                         elif visual_changed is None:
-                            logger.info(f"⚠️ Could not verify visual change (screenshot comparison unavailable)")
+                            logger.info("⚠️ Could not verify visual change (screenshot comparison unavailable)")
                         else:
                             # BOTH URL and visual unchanged = TRUE no effect
                             failed_action_desc = f"{action_types} on {[a.params for a in action.actions]}"
@@ -1220,12 +1220,12 @@ class BrowserAgent:
                             ):
                                 self.memory.add_observation("final_reasoning", action.reasoning[:500])
                         
-                        logger.info(f"✅ Task marked complete (Done).")
+                        logger.info("✅ Task marked complete (Done).")
                         break  # Break execution loop on done
                     elif has_extract or has_save:
                         # Mark complete if we have data
                         if result.data:
-                            logger.info(f"✅ Data extracted/saved.")
+                            logger.info("✅ Data extracted/saved.")
                     
                     # Update conversation with actual execution result
                     current_url = page_content.get('url', '')
@@ -1483,14 +1483,14 @@ class BrowserAgent:
         if 'sort' in desc_lower and 'low' in desc_lower:
             # Must have EXPLICIT sort indicators, not just search params
             if 'price-asc' in url_lower or 's=price-asc' in url_lower:
-                logger.info(f"✅ URL-based completion: Sort by Low to High detected")
+                logger.info("✅ URL-based completion: Sort by Low to High detected")
                 return True
             # Don't auto-complete sort just because search is done - need actual sort URL param
             return False
         
         if 'sort' in desc_lower and 'high' in desc_lower:
             if 'price-desc' in url_lower or 's=price-desc' in url_lower:
-                logger.info(f"✅ URL-based completion: Sort by High to Low detected")
+                logger.info("✅ URL-based completion: Sort by High to Low detected")
                 return True
             return False
         
@@ -1500,13 +1500,13 @@ class BrowserAgent:
             # EXCLUDE blocked/CAPTCHA pages (Google /sorry/, reCAPTCHA, etc.)
             blocked_patterns = ['/sorry/', '/captcha', 'recaptcha', '/challenge/', 'blocked', 'unusual traffic']
             if any(bp in url_lower for bp in blocked_patterns):
-                logger.info(f"⚠️ URL-based completion SKIPPED: blocked/CAPTCHA page detected")
+                logger.info("⚠️ URL-based completion SKIPPED: blocked/CAPTCHA page detected")
                 return False
             # Check if we're on a search results page (has search query in URL)
             if 'k=' in url_lower or 'q=' in url_lower or 'query=' in url_lower or 'search=' in url_lower:
                 # Verify we're not on about:blank or login page
                 if url_lower.startswith('http') and 'signin' not in url_lower and 'login' not in url_lower:
-                    logger.info(f"✅ URL-based completion: Search results page detected")
+                    logger.info("✅ URL-based completion: Search results page detected")
                     return True
         
         return False
@@ -1519,7 +1519,7 @@ class BrowserAgent:
         verified_count = sum(1 for i in self.memory.extracted_items if i.get('structured_info', {}).get('verified'))
         
         # === SECTION 1: TASK SUMMARY (human readable) ===
-        summary = f"✅ Task Complete\n\n" if has_data else f"⚠️ Task Incomplete — no data extracted\n\n"
+        summary = "✅ Task Complete\n\n" if has_data else "⚠️ Task Incomplete — no data extracted\n\n"
         
         # List extracted data
         if self.memory.extracted_items:

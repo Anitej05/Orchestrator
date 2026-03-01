@@ -14,9 +14,7 @@ Run:
 """
 
 import base64
-import os
 import sys
-import time
 from pathlib import Path
 from typing import Any, Dict
 
@@ -26,7 +24,7 @@ import pytest_asyncio
 
 # ── path setup ─────────────────────────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
-from backend.tests.conftest import start_agent, execute_agent
+from backend.tests.conftest import start_agent
 
 # ── constants ──────────────────────────────────────────────────────────────────
 PORT = 9000
@@ -331,7 +329,7 @@ async def test_aggregate_sum_by_product(spreadsheet_server, client):
     data = result["data"]
     # Should have 3 unique products (Widget A, B, C)
     shape = data.get("shape", [0])
-    assert shape[0] <= 4, f"Expected ≤4 groups"
+    assert shape[0] <= 4, "Expected ≤4 groups"
     print(f"   aggregated to {shape} groups")
 
 

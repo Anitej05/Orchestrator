@@ -41,5 +41,6 @@ test_detailed_continuity.py
 /agents/zoho_books/temp.json
 /tests/spreadsheet_agent/edge_case_datasets
 
-
-
+# ML Models
+*.onnx
+*.bin

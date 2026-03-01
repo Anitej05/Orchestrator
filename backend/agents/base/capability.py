@@ -4,12 +4,10 @@ Defines capabilities and the decorator pattern for registration.
 """
 
 import logging
-from abc import ABC, abstractmethod
-from typing import Dict, Any, List, Optional, Callable, Set
+from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass, field
 
 from .types import CapabilityType, ParameterSchema, ExecutionContext, CapabilityResult
-from .services import AgentServices
 
 logger = logging.getLogger(__name__)
 

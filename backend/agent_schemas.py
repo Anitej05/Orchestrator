@@ -6,9 +6,8 @@ All agent JSON files must conform to these models before being synced to the dat
 """
 
 from pydantic import BaseModel, Field, field_validator, model_validator
-from typing import List, Optional, Dict, Any, Literal
+from typing import List, Optional, Dict, Any
 from enum import Enum
-import re
 
 
 # ============================================================================

@@ -6,9 +6,7 @@ Optimized for cloud deployment with minimal memory footprint.
 """
 
 from docx import Document
-from docx.shared import Pt, RGBColor, Inches, Cm
-from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_COLOR_INDEX, WD_UNDERLINE
-from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
+from docx.shared import Pt, RGBColor, Inches
 from docx.oxml import OxmlElement
 from typing import Dict, List, Any, Optional, Tuple
 import logging
@@ -133,7 +131,7 @@ class DocumentEditor:
             mapped_style = self._map_style(style)
             self.doc.add_paragraph(text, style=mapped_style)
             logger.info(f"Added paragraph with style {mapped_style}")
-            return f"✓ Added paragraph"
+            return "✓ Added paragraph"
         except Exception as e:
             logger.error(f"Failed to add paragraph: {e}")
             return f"✗ Failed to add paragraph: {e}"
@@ -175,7 +173,7 @@ class DocumentEditor:
                 p = self.doc.paragraphs[index]._element
                 p.getparent().remove(p)
                 logger.info(f"Deleted paragraph at index {index}")
-                return f"✓ Deleted paragraph"
+                return "✓ Deleted paragraph"
             return "✗ Invalid paragraph index"
         except Exception as e:
             logger.error(f"Failed to delete paragraph: {e}")
@@ -206,7 +204,7 @@ class DocumentEditor:
                 self.doc.add_picture(image_path)
 
             logger.info(f"Added image: {image_path}")
-            return f"✓ Added image"
+            return "✓ Added image"
         except Exception as e:
             logger.error(f"Failed to add image: {e}")
             return f"✗ Failed to add image: {e}"

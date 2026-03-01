@@ -1,0 +1,3 @@
+# This file is used to keep the directory in git
+# The agent_plans directory stores execution plan markdown files
+# Plan files in this directory are gitignored but the directory itself is kept

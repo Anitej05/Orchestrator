@@ -1,6 +1,6 @@
 # In Orbimesh Backend/schemas.py
 
-from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import List, Literal, Optional, Dict, Any
 from enum import Enum
 import uuid
@@ -86,7 +86,7 @@ class AgentCard(BaseModel):
             raise ValueError('Invalid PEM format.')
         try:
             serialization.load_pem_public_key(clean_pem.encode())
-        except Exception as e:
+        except Exception:
             # If validation fails, return None instead of raising error (for development)
             return None
         

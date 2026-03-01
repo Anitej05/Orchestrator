@@ -6,7 +6,7 @@ that persists across all conversations for a user.
 """
 
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from .workspace_manager import FileMetadata, WorkspaceManager, STORAGE_BASE
 import logging
 

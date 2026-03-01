@@ -7,7 +7,7 @@ import os
 import requests
 import logging
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import Dict
 from langchain_core.tools import tool
 from dotenv import load_dotenv
 

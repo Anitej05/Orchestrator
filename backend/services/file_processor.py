@@ -23,7 +23,6 @@ from backend.schemas import FileObject
 
 # CMS Integration
 import sys
-from pathlib import Path
 backend_root = Path(__file__).parent.parent.resolve() # services -> backend -> Orbimesh (wait, services is in backend)
 # file_processor is in backend/services. __file__ is backend/services/file_processor.py
 # parent -> backend/services

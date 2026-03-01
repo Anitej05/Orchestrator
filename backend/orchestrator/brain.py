@@ -14,11 +14,10 @@ The Hands node will execute that decision and return a new state.
 import logging
 import json
 import uuid
-import time
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel, Field
 
-from langchain_core.messages import HumanMessage, BaseMessage, AIMessage
+from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 
 from .schemas import TaskItem, TaskStatus
@@ -613,12 +612,18 @@ Return JSON with:
                 schema=BrainDecision,
                 priority=InferencePriority.SPEED,
                 temperature=0.5,
+                telemetry_metadata={
+                    "thread_id": thread_id,
+                    "user_id": state.get("user_id") or state.get("owner_id"),
+                    "agent_name": "Brain",
+                    "operation_type": "brain_decision",
+                },
             )
 
             logger.info(f"🧠 Brain Decision: {decision.model_dump_json(indent=2)}")
             return decision
         except Exception as e:
-            logger.error(f"Brain LLM failed: {e}")
+            logger.error(f"Brain LLM failed: {e}", exc_info=True)
             return BrainDecision(
                 action_type="finish",
                 user_response=f"Brain error: {str(e)}",

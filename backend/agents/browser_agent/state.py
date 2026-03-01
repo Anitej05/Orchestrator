@@ -157,7 +157,7 @@ PREVIOUSLY SAVED DATA (use this info - don't re-extract what you already have!):
             
             # Stuck
             if entry.get("stuck"):
-                lines.append(f"  ⚠️ Stuck: Yes")
+                lines.append("  ⚠️ Stuck: Yes")
             
             # Reasoning
             if entry.get("reasoning"):

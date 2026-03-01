@@ -8,7 +8,6 @@ All logic lives in services/agent_registry_service.py.
 
 import sys
 import logging
-from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)

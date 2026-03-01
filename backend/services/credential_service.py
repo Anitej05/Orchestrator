@@ -4,9 +4,9 @@ Helper functions for managing agent credentials
 """
 
 from sqlalchemy.orm import Session
-from models import Agent, AgentCredential
+from models import AgentCredential
 from backend.utils.encryption import encrypt, decrypt
-from typing import Dict, Optional
+from typing import Dict
 import logging
 
 logger = logging.getLogger("uvicorn.error")

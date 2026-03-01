@@ -11,7 +11,6 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from services.integrations.composio_auth import get_auth_manager
-from services.integrations.composio_tools import get_tool_manager
 
 # Set up logging for integrations
 logger = logging.getLogger("integrations")
@@ -84,7 +83,7 @@ async def start_auth(user_id: str, request: StartAuthRequest):
     logger.info(f"🔵 START AUTH - user_id={user_id}, app_slug={request.app_slug}")
     try:
         manager = get_auth_manager()
-        logger.debug(f"✓ Auth manager loaded")
+        logger.debug("✓ Auth manager loaded")
         
         result = manager.start_auth_flow(user_id, request.app_slug, request.callback_url)
         logger.info(f"🟢 Auth flow started - success={result['success']}")

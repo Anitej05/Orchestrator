@@ -186,7 +186,7 @@ async def test_complex_multi_step_pipeline(spreadsheet_server, client):
         "Then give me a count of employees per department."
     )
     result = await _nl(client, port, prompt, thread)
-    print(f"\n🌍 [Complex 1] Multi-step: fill missing + aggregate")
+    print("\n🌍 [Complex 1] Multi-step: fill missing + aggregate")
     print(f"   → {result.get('message')}")
     _assert_success(result, "Fill missing + count by dept")
     print(f"   ✅ data keys={list(result.get('data', {}).keys())}")
@@ -208,7 +208,7 @@ async def test_complex_add_column_filter_aggregate(spreadsheet_server, client):
         "Then group by Region and show me the total Profit per region."
     )
     result = await _nl(client, port, prompt, thread)
-    print(f"\n🌍 [Complex 2] Add Profit col → filter → agg by Region")
+    print("\n🌍 [Complex 2] Add Profit col → filter → agg by Region")
     print(f"   → {result.get('message')}")
     _assert_success(result, "Add col + filter + groupby pipeline")
     print(f"   ✅ data={str(result.get('data', {}))[:300]}")
@@ -238,7 +238,7 @@ async def test_complex_export_pipeline(spreadsheet_server, client):
         "Export the result as an Excel file named 'revenue_report'."
     )
     result = await _nl(client, port, prompt, thread)
-    print(f"\n🌍 [Complex 3] Transform → sort → export XLSX")
+    print("\n🌍 [Complex 3] Transform → sort → export XLSX")
     print(f"   → {result.get('message')}")
     _assert_success(result, "Transform + sort + export")
     print(f"   ✅ data={str(result.get('data', {}))[:300]}")

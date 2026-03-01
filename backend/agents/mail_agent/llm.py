@@ -8,8 +8,8 @@ from datetime import datetime
 from dotenv import load_dotenv
 from pathlib import Path
 
-from langchain_core.messages import HumanMessage, SystemMessage
-from backend.services.inference_service import inference_service, InferencePriority, ProviderType
+from langchain_core.messages import HumanMessage
+from backend.services.inference_service import inference_service, InferencePriority
 
 load_dotenv(Path(__file__).parent.parent.parent / ".env")
 logger = logging.getLogger(__name__)

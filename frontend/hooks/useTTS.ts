@@ -120,7 +120,7 @@ export function useTTS(options: UseTTSOptions = {}): UseTTSReturn {
                     }
 
                     const audioBuffer = ctx.createBuffer(1, e.data.audio.length, e.data.samplingRate);
-                    audioBuffer.copyToChannel(e.data.audio as Float32Array, 0);
+                    audioBuffer.copyToChannel(e.data.audio as any, 0);
 
                     const source = ctx.createBufferSource();
                     source.buffer = audioBuffer;

@@ -75,7 +75,7 @@ class ActionExecutor:
                 # CRITICAL: If navigation occurred, STOP the sequence immediately
                 # The page reference is now stale - let the agent loop get a fresh page
                 if result.success and action.name in ('navigate', 'click') and 'context changed' in result.message.lower():
-                    logger.info(f"🛑 Navigation occurred - stopping sequence to get fresh page")
+                    logger.info("🛑 Navigation occurred - stopping sequence to get fresh page")
                     return ActionResult(
                         success=True,
                         action="sequence",
@@ -105,7 +105,7 @@ class ActionExecutor:
                     result = await self._execute_single(page, action)
                     if result.success:
                         results_log[-1] = f"{action.name}: {result.message} (after retry)"
-                        logger.info(f"✅ Retry after wait succeeded!")
+                        logger.info("✅ Retry after wait succeeded!")
                     
                     # Strategy 2: JS click fallback for text-based clicks
                     if not result.success:
@@ -380,7 +380,7 @@ class ActionExecutor:
             return ActionResult(
                 success=True, 
                 action="query_page_content", 
-                message=f"Query successful",
+                message="Query successful",
                 data={'result': final_answer, 'structured_info': {'key': f"query_{query}", 'value': final_answer}}
             )
             
@@ -443,7 +443,7 @@ class ActionExecutor:
             
             if hovered:
                 await page.wait_for_timeout(500)
-                return ActionResult(success=True, action="hover", message=f"Hovered successfully")
+                return ActionResult(success=True, action="hover", message="Hovered successfully")
             
             return ActionResult(success=False, action="hover", message="Element not found for hover")
         except Exception as e:
@@ -705,9 +705,9 @@ class ActionExecutor:
                             clicked = True
                             logger.info(f"✅ Clicked via XPath (robust): {xpath[:50]}")
                         else:
-                            attempts.append(f"xpath(robust_failed)")
+                            attempts.append("xpath(robust_failed)")
                     else:
-                        attempts.append(f"xpath(not found)")
+                        attempts.append("xpath(not found)")
                         logger.warning(f"XPath not found: {xpath[:50]}")
                 except Exception as xpath_err:
                     attempts.append(f"xpath:{str(xpath_err)[:30]}")
@@ -737,7 +737,7 @@ class ActionExecutor:
                                 clicked = True
                                 logger.info(f"✅ Clicked via role+name (robust): [{role}] {name_to_try}")
                             else:
-                                attempts.append(f"role_robust_fail")
+                                attempts.append("role_robust_fail")
                                     
                     if not clicked:
                         attempts.append(f"role({role}):{name[:20]}(not found)")
@@ -760,10 +760,10 @@ class ActionExecutor:
                                 clicked = True
                                 logger.info(f"✅ Clicked via text (exact={exact_match}, robust): {text[:30]}")
                             else:
-                                attempts.append(f"text_robust_fail")
+                                attempts.append("text_robust_fail")
                         
                     if not clicked:
-                        attempts.append(f"text(not found)")
+                        attempts.append("text(not found)")
                 except Exception as text_err:
                     attempts.append(f"text:{str(text_err)[:30]}")
                     logger.warning(f"Text click failed: {text[:30]} - {text_err}")
@@ -777,9 +777,9 @@ class ActionExecutor:
                             clicked = True
                             logger.info(f"✅ Clicked via CSS selector (robust): {selector[:30]}")
                         else:
-                            attempts.append(f"selector_robust_fail")
+                            attempts.append("selector_robust_fail")
                     else:
-                        attempts.append(f"selector(not found)")
+                        attempts.append("selector(not found)")
                 except Exception as sel_err:
                     attempts.append(f"selector:{str(sel_err)[:30]}")
                     logger.warning(f"CSS selector click failed: {selector[:30]}")
@@ -1843,13 +1843,13 @@ class ActionExecutor:
             
             # Step 2: Fallback to native window.find()
             # This is the literal Ctrl+F browser API, but it might miss ShadowDOM elements
-            result = await page.evaluate(f'''(query) => {{
+            result = await page.evaluate('''(query) => {
                 // Reset search to top if we've reached the bottom
-                if (window.scrollY + window.innerHeight >= document.body.scrollHeight) {{
+                if (window.scrollY + window.innerHeight >= document.body.scrollHeight) {
                     window.scrollTo(0, 0);
-                }}
+                }
                 return window.find(query);
-            }}''', query)
+            }''', query)
             
             if result:
                 logger.info(f"✅ Found and scrolled to text via window.find: '{query[:30]}'")

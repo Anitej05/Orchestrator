@@ -13,7 +13,6 @@ Docs: https://opencode.ai/docs/sdk
 
 import asyncio
 import json
-import logging
 import subprocess
 import shutil
 import os

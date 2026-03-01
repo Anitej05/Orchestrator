@@ -24,6 +24,7 @@ __all__ = [
     'serialize_complex_object',
     'transform_payload_types',
     'get_hf_embeddings',
+    'get_hf_embeddings',
     'CustomJSONEncoder',
     
     # New Nodes
