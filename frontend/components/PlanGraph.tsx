@@ -66,6 +66,8 @@ const AGENT_ICONS: Record<string, string> = {
     // General & Planning
     'general': '🤖',
     'general_agent': '🤖',
+    'integrations': '🤖',
+    'integrations_agent': '🤖',
     'universal': '🌟',
     'universal_agent': '🌟',
     'plan': '📋',

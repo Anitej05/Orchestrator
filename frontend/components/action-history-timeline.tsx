@@ -27,7 +27,7 @@ const AGENT_ICONS: Record<string, string> = {
     // Business & Finance
     'zoho_books': '💼', 'zoho_books_agent': '💼', 'finance': '💰',
     // General & Planning
-    'general': '🤖', 'general_agent': '🤖', 'universal': '🌟', 'universal_agent': '🌟',
+    'general': '🤖', 'general_agent': '🤖', 'integrations': '🤖', 'integrations_agent': '🤖', 'universal': '🌟', 'universal_agent': '🌟',
     'plan': '📋', 'planning': '🗓️',
     // Default fallback
     'default': '🔷'

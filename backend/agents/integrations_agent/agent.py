@@ -1,4 +1,4 @@
-# agents/general_agent/agent.py
+# agents/integrations_agent/agent.py
 """
 General Fallback Agent
 
@@ -28,11 +28,11 @@ from orchestrator.uap_schemas import UAPExecuteRequest, UAPResponse
 from .service import GeneralAgentService
 from .tool_cache import ToolCache
 
-logger = logging.getLogger("general_agent")
+logger = logging.getLogger("integrations_agent")
 
 # Create FastAPI app
 app = FastAPI(
-    title="General Fallback Agent",
+    title="Integrations Agent",
     description="Universal agent for Composio-powered integrations (Slack, Notion, etc.)",
     version="1.0.0"
 )
@@ -64,7 +64,7 @@ def get_service(user_id: str) -> GeneralAgentService:
 async def root():
     """Root endpoint - agent info"""
     return {
-        "agent": "General Fallback Agent",
+        "agent": "Integrations Agent",
         "version": "1.0.0",
         "description": "Universal agent for Composio integrations (Slack, Notion, GitHub, etc.)",
         "status": "operational",
@@ -84,7 +84,7 @@ async def root():
 @app.get("/health")
 async def health():
     """Health check endpoint"""
-    return {"status": "healthy", "agent": "general_agent"}
+    return {"status": "healthy", "agent": "integrations_agent"}
 
 # === UAP Execute Endpoint ===
 

@@ -1,4 +1,4 @@
-# agents/general_agent/service.py
+# agents/integrations_agent/service.py
 """
 General Agent Service
 
@@ -15,7 +15,7 @@ import os
 
 from backend.agents.base.types import ExecutionContext
 
-logger = logging.getLogger("general_agent")
+logger = logging.getLogger("integrations_agent")
 
 class GeneralAgentService:
     """

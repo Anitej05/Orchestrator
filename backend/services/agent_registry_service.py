@@ -23,6 +23,7 @@ AGENT_DIRS = [
     "spreadsheet_agent",
     "mail_agent",
     "gmail_agent",
+    "integrations_agent",
     "browser_agent",
     "document_agent_lib",
     "zoho_books",
@@ -66,6 +67,8 @@ AGENT_ALIASES = {
     "universal_agent": "Universal Agent",
     "general": "Universal Agent",
     "general_agent": "Universal Agent",
+    "integrations": "Universal Agent",
+    "integrations_agent": "Universal Agent",
     # Coding agent aliases
     "coding": "Coding Agent",
     "coding_agent": "Coding Agent",

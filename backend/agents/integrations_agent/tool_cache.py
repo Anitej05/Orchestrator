@@ -1,4 +1,4 @@
-# agents/general_agent/tool_cache.py
+# agents/integrations_agent/tool_cache.py
 """
 Tool Cache for General Agent
 
@@ -11,7 +11,7 @@ import logging
 from typing import Dict, Any, Optional, List, Tuple
 from collections import defaultdict
 
-logger = logging.getLogger("general_agent")
+logger = logging.getLogger("integrations_agent")
 
 class ToolCache:
     """

@@ -21,7 +21,7 @@ from backend.agents.base.capability import capability, ParameterSchema
 from .service import GeneralAgentService
 from .tool_cache import ToolCache
 
-logger = logging.getLogger("agents.general_agent")
+logger = logging.getLogger("agents.integrations_agent")
 
 
 @dataclass
@@ -52,8 +52,8 @@ class GeneralAgent(BaseAgent):
     
     def __init__(
         self,
-        agent_id: str = "general_agent",
-        agent_name: str = "General Agent",
+        agent_id: str = "integrations_agent",
+        agent_name: str = "Integrations Agent",
         services: Optional[AgentServices] = None,
         config: Optional[GeneralAgentConfig] = None,
     ):

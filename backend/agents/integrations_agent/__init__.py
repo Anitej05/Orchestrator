@@ -1,5 +1,5 @@
 """
-General Agent - Universal Composio Integration Handler
+Integrations Agent - Universal Composio Integration Handler
 BaseAgent-compliant implementation for any Composio-powered app.
 
 Version: 2.0.0 (BaseAgent Migration Complete)
@@ -9,7 +9,7 @@ __version__ = "2.0.0"
 
 
 def run_agent() -> None:
-    """Run the General Agent server on port 8085."""
+    """Run the Integrations Agent server on port 8085."""
     from backend.agents.base.server import create_agent_server
     from .base_agent_impl import get_agent
     
