@@ -9,7 +9,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.jobstores.base import JobLookupError
 from sqlalchemy.orm import Session
-from langchain_core.messages import SystemMessage, HumanMessage, messages_from_dict
+from langchain_core.messages import SystemMessage, HumanMessage, messages_from_dict, messages_to_dict
 
 logger = logging.getLogger(__name__)
 
@@ -237,6 +237,8 @@ class WorkflowScheduler:
                 existing_messages.append(execution_start_message)
                 
                 # Pre-seed conversation with plan_approved=True for automatic execution
+                # Serialize LangChain message objects → plain dicts for JSON storage
+                serialized_messages = messages_to_dict(existing_messages) if existing_messages else []
                 conversation_json = {
                     "thread_id": thread_id,
                     "original_prompt": original_prompt,
@@ -246,7 +248,7 @@ class WorkflowScheduler:
                     "task_agent_pairs": task_agent_pairs,
                     "task_plan": task_plan,
                     # Messages and status
-                    "messages": existing_messages,
+                    "messages": serialized_messages,
                     "completed_tasks": [],
                     "final_response": None,
                     "pending_user_input": False,

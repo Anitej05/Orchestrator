@@ -10,6 +10,17 @@ import {
 } from '@/lib/api-client';
 import { API_BASE_URL } from './config';
 
+// WebSocket retry configuration — single source of truth
+const WS_RETRY = {
+  maxAttempts: 30,
+  baseDelayMs: 300,
+  maxDelayMs: 5000,
+} as const;
+
+/** Exponential backoff delay capped at maxDelayMs. */
+const wsBackoffDelay = (attempt: number): number =>
+  Math.min(WS_RETRY.baseDelayMs * Math.pow(1.5, attempt), WS_RETRY.maxDelayMs);
+
 // Helper to read a file as a Data URL for image previews
 const readFileAsDataURL = (file: File): Promise<string> => {
   return new Promise((resolve, reject) => {
@@ -85,6 +96,8 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
   todo_list: [],
   // NEW: Orchestration state from OMNI-DISPATCHER
   action_history: [],
+  // Chronological Brain→Hands flow events for the execution timeline
+  flow_events: [],
   isLoading: false,
   canvas_data: undefined,
   // Flag to indicate if this is a newly started conversation (should trigger navigation)
@@ -106,6 +119,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
         todo_list: [],
         task_statuses: {},
         current_executing_task: null,
+        flow_events: [],
         pending_action_approval: false,
         pending_action: undefined,
         canvas_content: undefined,
@@ -155,10 +169,6 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
 
         // Send message to WebSocket with connection wait and enhanced error handling
         const sendMessageToWebSocket = async () => {
-          const maxAttempts = 50; // Increase attempts
-          const delayMs = 300; // Reduce delay
-          const maxWaitTime = (maxAttempts * delayMs); // ~15 seconds total
-
           // Check if WebSocket is closed and trigger reconnection
           const ws = (window as any).__websocket;
           if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
@@ -169,7 +179,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
             await new Promise(resolve => setTimeout(resolve, 500));
           }
 
-          for (let attempt = 0; attempt < maxAttempts; attempt++) {
+          for (let attempt = 0; attempt < WS_RETRY.maxAttempts; attempt++) {
             try {
               const ws = (window as any).__websocket;
 
@@ -178,7 +188,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
                 if (attempt === 0) {
                   console.log('⏳ WebSocket not yet initialized, waiting for connection...');
                 } else if (attempt % 10 === 0) {
-                  console.log(`⏳ Still waiting for WebSocket... (attempt ${attempt + 1}/${maxAttempts})`);
+                  console.log(`⏳ Still waiting for WebSocket... (attempt ${attempt + 1}/${WS_RETRY.maxAttempts})`);
                 }
               } else if (ws.readyState === WebSocket.OPEN) {
                 // Successfully connected, send the message
@@ -210,26 +220,26 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
                 }
               } else if (ws.readyState === WebSocket.CONNECTING) {
                 if (attempt % 5 === 0) {
-                  console.log(`🔄 WebSocket connecting (attempt ${attempt + 1}/${maxAttempts})...`);
+                  console.log(`🔄 WebSocket connecting (attempt ${attempt + 1}/${WS_RETRY.maxAttempts})...`);
                 }
               } else if (ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) {
                 console.warn(`❌ WebSocket in ${ws.readyState === WebSocket.CLOSING ? 'closing' : 'closed'} state`);
               }
 
-              // Wait before retrying
-              if (attempt < maxAttempts - 1) {
-                await new Promise(resolve => setTimeout(resolve, delayMs));
+              // Wait before retrying with exponential backoff
+              if (attempt < WS_RETRY.maxAttempts - 1) {
+                await new Promise(resolve => setTimeout(resolve, wsBackoffDelay(attempt)));
               }
             } catch (retryErr) {
               console.error(`Error during send attempt ${attempt + 1}: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`);
-              if (attempt < maxAttempts - 1) {
-                await new Promise(resolve => setTimeout(resolve, delayMs));
+              if (attempt < WS_RETRY.maxAttempts - 1) {
+                await new Promise(resolve => setTimeout(resolve, wsBackoffDelay(attempt)));
               }
             }
           }
 
           // If we've exhausted all attempts, show an error
-          console.error(`❌ WebSocket not connected after ${maxAttempts} attempts (~${maxWaitTime}ms)`);
+          console.error(`❌ WebSocket not connected after ${WS_RETRY.maxAttempts} attempts`);
           console.error('Backend might not be running. Please check: http://localhost:8000');
           set({ status: 'error', isLoading: false });
 
@@ -237,7 +247,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
           const errorSystemMessage: Message = {
             id: Date.now().toString(),
             type: 'system',
-            content: `Error: Failed to establish connection after ${Math.round(maxWaitTime / 1000)} seconds. Please check if the backend server is running at http://localhost:8000 and refresh the page to try again.`,
+            content: `Error: Failed to establish connection after ${WS_RETRY.maxAttempts} attempts. Please check if the backend server is running at http://localhost:8000 and refresh the page to try again.`,
             timestamp: new Date()
           };
           set((state: ConversationStore) => ({ messages: [...state.messages, errorSystemMessage] }));
@@ -272,7 +282,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
       const wasWaitingForUser = get().isWaitingForUser;
 
       console.log(`Continuing conversation with thread_id: ${thread_id}, planning_mode: ${planningMode}, wasWaitingForUser: ${wasWaitingForUser}`);
-      set({ isLoading: true, status: 'processing', isWaitingForUser: false, task_statuses: {}, current_executing_task: null });
+      set({ isLoading: true, status: 'processing', isWaitingForUser: false, task_statuses: {}, current_executing_task: null, todo_list: [], brain_reasoning: undefined, flow_events: [] });
 
       try {
         let uploadedFiles: FileObject[] = [];
@@ -319,10 +329,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
 
         // Send message to WebSocket with connection wait
         const sendMessageToWebSocket = async () => {
-          const maxAttempts = 30; // Increased from 10 to 30 attempts
-          const delayMs = 500; // Increased from 200ms to 500ms
-
-          for (let attempt = 0; attempt < maxAttempts; attempt++) {
+          for (let attempt = 0; attempt < WS_RETRY.maxAttempts; attempt++) {
             const ws = (window as any).__websocket;
             if (ws && ws.readyState === WebSocket.OPEN) {
               // Use the captured state from before we modified it
@@ -358,21 +365,20 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
               }
             }
 
-            console.debug(`WebSocket not ready, attempt ${attempt + 1}/${maxAttempts}, waiting ${delayMs}ms...`);
-            // Wait before retrying
-            await new Promise(resolve => setTimeout(resolve, delayMs));
+            console.debug(`WebSocket not ready, attempt ${attempt + 1}/${WS_RETRY.maxAttempts}, waiting...`);
+            // Wait before retrying with exponential backoff
+            await new Promise(resolve => setTimeout(resolve, wsBackoffDelay(attempt)));
           }
 
           // If we've exhausted all attempts, show an error
-          const maxWaitTime = maxAttempts * delayMs;
-          console.error(`WebSocket not connected after ${maxAttempts} attempts (~${maxWaitTime}ms)`);
+          console.error(`WebSocket not connected after ${WS_RETRY.maxAttempts} attempts`);
           set({ status: 'error', isLoading: false });
 
           // Add detailed error message to chat
           const errorSystemMessage: Message = {
             id: Date.now().toString(),
             type: 'system',
-            content: `Error: Failed to send response after ${Math.round(maxWaitTime / 1000)} seconds. Connection may have been lost. Please refresh the page and try again.`,
+            content: `Error: Failed to send response after ${WS_RETRY.maxAttempts} attempts. Connection may have been lost. Please refresh the page and try again.`,
             timestamp: new Date()
           };
           set((state: ConversationStore) => ({ messages: [...state.messages, errorSystemMessage] }));
@@ -551,6 +557,10 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
           pending_action_approval: conversationData.pending_action_approval || false,
           pending_action: conversationData.pending_action,
           isNewConversation: false,
+          // Always reset ephemeral execution state when loading a historical conversation
+          task_statuses: {},
+          current_executing_task: null,
+          brain_reasoning: undefined,
         };
 
         console.log('🔄 Calling _setConversationState with:', {
@@ -652,10 +662,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
 
       // Send confirmation message via WebSocket
       const sendConfirmation = async () => {
-        const maxAttempts = 30;
-        const delayMs = 500;
-
-        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        for (let attempt = 0; attempt < WS_RETRY.maxAttempts; attempt++) {
           const ws = (window as any).__websocket;
           if (ws && ws.readyState === WebSocket.OPEN) {
             try {
@@ -705,8 +712,8 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
             }
           }
 
-          if (attempt < maxAttempts - 1) {
-            await new Promise(resolve => setTimeout(resolve, delayMs));
+          if (attempt < WS_RETRY.maxAttempts - 1) {
+            await new Promise(resolve => setTimeout(resolve, wsBackoffDelay(attempt)));
           }
         }
 

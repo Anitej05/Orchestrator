@@ -51,15 +51,18 @@ export default function ConversationsDropdown({
 
   useEffect(() => {
     const loadConversations = async () => {
+      // Wait a short time for Clerk to initialise, but don't block indefinitely.
+      // The backend now supports a dev-mode fallback when Clerk isn't configured,
+      // so we proceed even without an active Clerk session after a brief wait.
       if (!hasClerkSession()) {
-        if (authRetryCount < 6) {
+        if (authRetryCount < 4) {
           setAuthRetryCount((count) => count + 1);
           setLoading(false);
           setTimeout(() => loadConversations(), 400);
           return;
         }
-        setError('Unable to connect to authentication session. Please sign in.');
-        return;
+        // After 4 retries (~1.6s), proceed anyway — backend handles dev mode.
+        console.warn('[ConversationsDropdown] Clerk session not found; proceeding without auth token (dev mode).');
       }
 
       setLoading(true);

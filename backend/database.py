@@ -1,6 +1,8 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
+from contextlib import contextmanager
 import os
+from urllib.parse import quote_plus
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -22,7 +24,7 @@ DB_NAME = os.getenv("DB_NAME", "agentdb")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not DATABASE_URL:
-    DATABASE_URL = f"postgresql+psycopg2://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{DB_NAME}"
+    DATABASE_URL = f"postgresql+psycopg2://{quote_plus(PG_USER)}:{quote_plus(PG_PASSWORD)}@{PG_HOST}:{PG_PORT}/{DB_NAME}"
 
 # If using SQLite, ensure it's an absolute path to the backend directory
 if DATABASE_URL.startswith("sqlite:///"):
@@ -40,6 +42,15 @@ Base = declarative_base()
 
 # Dependency for FastAPI routes
 def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# Context manager for use outside FastAPI (e.g. background tasks, main.py)
+@contextmanager
+def get_db_session():
     db = SessionLocal()
     try:
         yield db

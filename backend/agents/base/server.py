@@ -3,10 +3,14 @@ Agent HTTP Server
 FastAPI wrapper for BaseAgent to expose HTTP endpoints.
 """
 
+import asyncio
+import json
 import logging
 from typing import Type, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.encoders import jsonable_encoder
 import uvicorn
 
 from .agent import BaseAgent
@@ -78,7 +82,7 @@ class AgentServer:
             
             return await self.agent.health_check()
         
-        @self.app.post("/execute", response_model=AgentResponse)
+        @self.app.post("/execute")
         async def execute(request: AgentRequest):
             """Execute a task."""
             # Lazy initialization
@@ -90,14 +94,98 @@ class AgentServer:
                     services=self.services
                 )
                 await self.agent.initialize()
-            
+
             try:
                 result = await self.agent.execute(request)
-                return result
+                # AgentResponse is a plain Python @dataclass, NOT a Pydantic BaseModel.
+                # FastAPI's default JSONResponse can't serialize dataclasses directly and
+                # would raise a TypeError. jsonable_encoder converts the dataclass to a
+                # plain dict first, which JSONResponse can safely serialize.
+                # Do NOT add a response_model= to this endpoint — that forces Pydantic
+                # validation on the return value and breaks dataclass responses.
+                return JSONResponse(content=jsonable_encoder(result))
             except Exception as e:
-                logger.error(f"Error executing task: {e}")
-                raise HTTPException(status_code=500, detail=str(e))
+                logger.error(f"Error executing task: {e}", exc_info=True)
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        "status": "error",
+                        "error_message": str(e),
+                        "summary": "Execution failed",
+                        "result": None,
+                        "data": None,
+                    }
+                )
         
+        @self.app.post("/execute/stream")
+        async def execute_stream(request: AgentRequest):
+            """
+            Execute a task and stream progress events as SSE.
+
+            Each event is a JSON-encoded line in the format:
+                data: {"type": "progress", "message": "..."}\n\n
+            A final event signals completion:
+                data: {"type": "done", "result": {...}}\n\n
+            Errors send:
+                data: {"type": "error", "message": "..."}\n\n
+            """
+            # Lazy initialization (same as /execute)
+            if self.agent is None:
+                logger.info(f"Lazy initializing agent: {self.agent_name}")
+                self.agent = self.agent_class(
+                    agent_id=self.agent_id,
+                    agent_name=self.agent_name,
+                    services=self.services
+                )
+                await self.agent.initialize()
+
+            # Bounded queue for progress messages (max 64 items — never blocks)
+            progress_queue: asyncio.Queue = asyncio.Queue(maxsize=64)
+            self.agent._progress_queue = progress_queue
+
+            async def _event_generator():
+                try:
+                    execute_task = asyncio.create_task(self.agent.execute(request))
+
+                    while not execute_task.done():
+                        try:
+                            msg = await asyncio.wait_for(
+                                progress_queue.get(), timeout=0.4
+                            )
+                            yield f"data: {json.dumps({'type': 'progress', 'message': msg})}\n\n"
+                        except asyncio.TimeoutError:
+                            # Heartbeat so the client knows we're alive
+                            yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
+
+                    # Drain any remaining messages
+                    while not progress_queue.empty():
+                        try:
+                            msg = progress_queue.get_nowait()
+                            yield f"data: {json.dumps({'type': 'progress', 'message': msg})}\n\n"
+                        except asyncio.QueueEmpty:
+                            break
+
+                    result = execute_task.result()
+                    # Same dataclass → dict conversion needed here as in /execute above.
+                    yield f"data: {json.dumps({'type': 'done', 'result': jsonable_encoder(result)})}\n\n"
+
+                except Exception as e:
+                    logger.error(f"Error in execute/stream: {e}", exc_info=True)
+                    yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+                finally:
+                    # Always clear the queue reference so the agent stops emitting
+                    if self.agent is not None:
+                        self.agent._progress_queue = None
+
+            return StreamingResponse(
+                _event_generator(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
         @self.app.get("/capabilities")
         async def capabilities():
             """Get list of available capabilities."""

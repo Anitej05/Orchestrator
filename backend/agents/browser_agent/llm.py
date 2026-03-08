@@ -140,6 +140,12 @@ class LLMClient:
         logger.error(f"❌ All {MAX_RETRIES} attempts failed to get valid action")
         return self._get_fallback_plan(task, page_content)
     
+    def reset_for_new_task(self):
+        """Reset conversation state for a fresh task. Keeps the system prompt cached."""
+        self.conversation.reset()
+        self._system_prompt_set = False  # Re-inject system prompt on next call
+        logger.info("🔄 LLMClient reset for new task")
+
     def update_last_turn_result(
         self,
         success: bool,
@@ -536,8 +542,15 @@ Respond with JSON: {{"decision": "...", "multiplier": 2.0, "reasoning": "..."}}"
                              try:
                                 actions.append(AtomicAction(name=act['name'], params=act.get('params',{})))
                              except Exception: pass
-                elif 'action' in data: # Old format support
-                     actions.append(AtomicAction(name=data.get('action'), params=data.get('params', {})))
+                elif 'action' in data:  # Old format support
+                    # Some LLMs put params like "script", "url" at the top level instead of inside "params"
+                    params = dict(data.get('params') or {})
+                    for flat_key in ('script', 'url', 'selector', 'text', 'direction',
+                                     'seconds', 'key', 'value', 'extract_type', 'full_page',
+                                     'wait_for_load', 'timeout', 'press_enter', 'wait_for_navigation'):
+                        if flat_key in data and flat_key not in params:
+                            params[flat_key] = data[flat_key]
+                    actions.append(AtomicAction(name=data.get('action'), params=params))
 
                 return ActionPlan(
                     reasoning=data.get('reasoning', ''),

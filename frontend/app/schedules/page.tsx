@@ -212,11 +212,11 @@ function SchedulesContent() {
   return (
       <SidebarInset>
       <div className="min-h-screen bg-bg-page dark:bg-background text-text-primary">
-        <main className="p-6 space-y-6">
-          <div className="flex items-center justify-between">
+        <main className="p-6 max-w-6xl mx-auto space-y-6">
+          <div className="flex items-center justify-between pb-4 border-b border-border-color">
             <div>
-              <h1 className="text-3xl font-bold text-brand-teal">Scheduled Workflows</h1>
-              <p className="text-text-secondary mt-1">Manage automated workflow executions</p>
+              <h1 className="text-2xl font-semibold text-text-primary">Scheduled Workflows</h1>
+              <p className="text-sm text-text-tertiary mt-1">Manage automated workflow executions</p>
             </div>
             <Button variant="outline" onClick={() => router.push("/saved-workflows")}> 
               <Calendar className="mr-2 h-4 w-4" />

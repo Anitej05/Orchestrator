@@ -3,6 +3,8 @@ import os
 import logging
 import time
 import re
+import asyncio
+import random
 from typing import Optional, List, Dict, Any
 from enum import Enum
 from langchain_core.messages import BaseMessage, HumanMessage
@@ -162,6 +164,7 @@ class InferenceService:
         max_tokens: int = 4000,
         images: Optional[List[str]] = None,  # New: Base64 strings or URLs
         strip_markdown: bool = False,
+        strip_think_tags: bool = False,
         json_mode: bool = False,
         fallback_enabled: bool = True,
         use_cache: bool = True,
@@ -292,16 +295,35 @@ class InferenceService:
                     # Handle 429 Quota / Rate Limits for Key Rotation
                     e_str = str(e).lower()
                     if current_provider == ProviderType.CEREBRAS and ("429" in e_str or "quota" in e_str or "rate limit" in e_str):
-                        if key_manager._current_key:
-                            report_rate_limit(key_manager._current_key)
+                        exhausted_key = key_manager._current_key
+                        if exhausted_key:
+                            report_rate_limit(exhausted_key)
                         if attempt < max_attempts - 1:
-                            logger.warning(f"🔄 Retrying {current_provider} with a different key...")
-                            continue # Try next attempt within this provider
+                            # Check whether key rotation actually gave us a different key
+                            next_key = key_manager.get_current_key()
+                            if next_key and next_key != exhausted_key:
+                                logger.warning(f"🔄 Rotated Cerebras key, retrying immediately...")
+                            else:
+                                # Single key or all keys exhausted — non-blocking backoff
+                                backoff = min(2 ** attempt + random.uniform(0, 1), 30)
+                                logger.warning(
+                                    f"🔄 All Cerebras keys exhausted. "
+                                    f"Waiting {backoff:.1f}s before retry (attempt {attempt+1}/{max_attempts})..."
+                                )
+                                await asyncio.sleep(backoff)
+                            continue  # Try next attempt within this provider
                     elif current_provider == ProviderType.OPENAI and ("429" in e_str or "quota" in e_str or "rate limit" in e_str or "too many" in e_str):
-                        if ollama_key_manager._current_key:
-                            report_ollama_rate_limit(ollama_key_manager._current_key)
+                        exhausted_ollama_key = ollama_key_manager._current_key
+                        if exhausted_ollama_key:
+                            report_ollama_rate_limit(exhausted_ollama_key)
                         if attempt < max_attempts - 1:
-                            logger.warning("🔄 Retrying Ollama with a different key...")
+                            next_ollama = ollama_key_manager.get_current_key()
+                            if not next_ollama or next_ollama == exhausted_ollama_key:
+                                backoff = min(2 ** attempt + random.uniform(0, 1), 30)
+                                logger.warning(f"🔄 All Ollama keys exhausted. Waiting {backoff:.1f}s...")
+                                await asyncio.sleep(backoff)
+                            else:
+                                logger.warning("🔄 Rotated Ollama key, retrying...")
                             continue
                     
                     if not fallback_enabled:
@@ -503,7 +525,8 @@ class InferenceService:
                 
                 # Model validation: Groq models typically start with llama, mixtral, or gemma
                 # Use llama-3.3-70b-versatile as default (fast and capable)
-                model_to_use = model if model and any(x in model.lower() for x in ["llama", "mixtral", "gemma", "gpt", "qwen", "deepseek"]) else "llama-3.3-70b-versatile"
+                # Exclude Cerebras-only models (gpt-oss-*) that don't exist on Groq
+                model_to_use = model if model and not model.startswith("gpt-oss") and any(x in model.lower() for x in ["llama", "mixtral", "gemma", "gpt", "qwen", "deepseek"]) else "llama-3.3-70b-versatile"
                 return ChatGroq(model=model_to_use, api_key=api_key, temperature=temp, max_tokens=max_tokens, max_retries=0)
                 
             elif provider == ProviderType.NVIDIA:

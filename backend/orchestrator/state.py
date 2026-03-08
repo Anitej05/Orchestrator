@@ -98,6 +98,10 @@ class State(TypedDict):
     question_for_user: Annotated[Optional[str], overwrite_reducer]
     pending_approval: Annotated[bool, overwrite_reducer]  # True = waiting for user approval
     pending_decision: Annotated[Optional[Dict], overwrite_reducer]  # Snapshot of decision awaiting approval
+    # The action awaiting approval (serialized in utils.py / omni_dispatcher approve/reject flows)
+    pending_action: Annotated[Optional[Dict], overwrite_reducer]
+    # Legacy alias checked alongside pending_approval in utils.py
+    pending_action_approval: Annotated[bool, overwrite_reducer]
     
     # Error tracking
     error: Annotated[Optional[str], overwrite_reducer]
@@ -106,6 +110,8 @@ class State(TypedDict):
     # Metadata
     thread_id: str
     user_id: str
+    # Fallback identity field — brain.py reads `state.get("owner_id") or state.get("user_id")`
+    owner_id: Annotated[Optional[str], overwrite_reducer]
     uploaded_files: Annotated[List[Dict], overwrite_reducer]
     
     # --- FILE TRACKING ---
@@ -131,3 +137,9 @@ class State(TypedDict):
     browser_view: Annotated[Optional[str], overwrite_reducer]
     plan_view: Annotated[Optional[Any], overwrite_reducer]
     current_view: Annotated[Optional[str], overwrite_reducer]
+
+    # --- LAST AGENT RESULT (for MANDATORY FINISH) ---
+    # Stores the uncompressed result of the most recent successful agent/tool call.
+    # Brain reads this to finish immediately instead of retrying the agent.
+    # Set by hands._update_state_with_result; cleared on failed calls.
+    last_agent_result: Annotated[Optional[Dict], overwrite_reducer]

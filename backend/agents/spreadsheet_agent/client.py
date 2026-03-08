@@ -209,7 +209,27 @@ class DataFrameClient:
         
         # 4. Remove fully empty rows
         df = df.dropna(how='all')
-        
+
+        # 4b. Remove totals/summary trailing rows.
+        # Pattern: last few rows where most text columns are NaN and any remaining
+        # text cell contains a keyword like "Total", "Grand Total", "Subtotal", etc.
+        text_cols = df.select_dtypes(include=['object']).columns.tolist()
+        if len(text_cols) >= 2 and len(df) > 1:
+            TOTALS_WORDS = {'total', 'grand total', 'subtotal', 'sum', 'totals',
+                            'total:', 'grand total:'}
+            drop_idx = []
+            for idx in df.index[-10:]:  # only scan last 10 rows
+                row_texts = df.loc[idx, text_cols]
+                null_count = row_texts.isnull().sum()
+                non_null = row_texts.dropna().astype(str).str.lower().str.strip()
+                has_keyword = any(v in TOTALS_WORDS for v in non_null.values)
+                # Drop if almost all text cols are NaN AND a totals keyword is present
+                if null_count >= max(len(text_cols) - 2, 1) and has_keyword:
+                    drop_idx.append(idx)
+            if drop_idx:
+                logger.info(f"Dropping {len(drop_idx)} totals/summary row(s)")
+                df = df.drop(index=drop_idx).copy()
+
         # 5. Trim string values
         for col in df.select_dtypes(include=['object']).columns:
             df[col] = df[col].astype(str).str.strip()
@@ -370,43 +390,97 @@ class DataFrameClient:
             logger.warning(f"Complexity detection failed: {e}")
             return False
     
+    def _detect_header_row(self, file_path: str, sheet: str) -> int:
+        """
+        Scan the first 15 rows and return the row index that looks most like
+        a header (most non-empty, non-numeric string cells).
+
+        Returns 0 if no better row found (default pandas behaviour).
+        """
+        try:
+            engine = 'openpyxl' if file_path.endswith('.xlsx') else None
+            probe = pd.read_excel(
+                file_path, sheet_name=sheet, header=None,
+                nrows=15, engine=engine
+            )
+            best_row, best_score = 0, -1
+            for idx in range(len(probe)):
+                row = probe.iloc[idx]
+                non_null = row.dropna()
+                if len(non_null) == 0:
+                    continue
+                # Score: fraction of cells that are non-empty strings
+                string_count = sum(
+                    1 for v in non_null
+                    if isinstance(v, str) and v.strip()
+                )
+                score = string_count / max(len(non_null), 1)
+                # Prefer rows with higher string fraction, breaking ties by row order
+                if score > best_score:
+                    best_score, best_row = score, idx
+            return best_row
+        except Exception as e:
+            logger.warning(f"Header row detection failed: {e}")
+            return 0
+
     async def _simple_load_excel(
-        self, 
-        file_path: str, 
+        self,
+        file_path: str,
         detection_info: Dict,
         **kwargs
     ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-        """Simple pandas-based Excel loading."""
+        """Simple pandas-based Excel loading with automatic header detection."""
         try:
             # Explicitly specify engine for xlsx to allow detection even if extension is ambiguous
             engine = 'openpyxl' if file_path.endswith('.xlsx') else None
             excel = pd.ExcelFile(file_path, engine=engine)
             sheets = excel.sheet_names
             detection_info['sheets'] = sheets
-            
+
             df = None
             for sheet in sheets:
                 # Explicitly specify engine for xlsx files to avoid "format cannot be determined" errors
                 read_kwargs = kwargs.copy()
                 if file_path.endswith('.xlsx') and 'engine' not in read_kwargs:
                     read_kwargs['engine'] = 'openpyxl'
-                
+
                 temp_df = pd.read_excel(file_path, sheet_name=sheet, **read_kwargs)
                 if not temp_df.empty and len(temp_df.columns) > 0:
                     df = temp_df
                     detection_info['loaded_sheet'] = sheet
+
+                    # --- F2: auto-detect correct header row ---
+                    # If >50% of columns are "Unnamed: N", the default header=0 is wrong.
+                    unnamed_count = sum(
+                        1 for c in df.columns
+                        if str(c).startswith("Unnamed:")
+                    )
+                    unnamed_ratio = unnamed_count / max(len(df.columns), 1)
+                    if unnamed_ratio > 0.5 and 'header' not in read_kwargs:
+                        header_row = self._detect_header_row(file_path, sheet)
+                        if header_row > 0:
+                            logger.info(
+                                f"Auto-detected header at row {header_row} "
+                                f"(unnamed ratio={unnamed_ratio:.0%}) — reloading"
+                            )
+                            detection_info['detected_header_row'] = header_row
+                            read_kwargs['header'] = header_row
+                            temp_df = pd.read_excel(
+                                file_path, sheet_name=sheet, **read_kwargs
+                            )
+                            df = temp_df
                     break
-            
+
             if df is None:
                 raise ValueError("No data found in any sheet")
-            
+
             df = self.normalize_dataframe(df)
             detection_info['final_shape'] = df.shape
             detection_info['load_method'] = 'simple'
-            
+
             logger.info(f"Loaded Excel (simple): {df.shape}")
             return df, detection_info
-            
+
         except Exception as e:
             logger.error(f"Simple Excel load failed: {e}")
             raise ValueError(f"Failed to load Excel file: {e}")

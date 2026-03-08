@@ -1002,7 +1002,7 @@ async def upload_files(files: List[UploadFile] = File(...)):
             
             # **FIX 3: Use pathlib for cross-platform path handling**
             from pathlib import Path as PathlibPath
-            save_dir = PathlibPath("storage") / f"{file_type}s"
+            save_dir = PathlibPath(__file__).parent / "storage" / f"{file_type}s"
             
             # Create storage directory if it doesn't exist
             try:
@@ -1341,15 +1341,17 @@ async def execute_orchestration(
             "canvas_title": current_conversation.get("canvas_title"),
 
             # --- NEW ORCHESTRATOR FIELDS ---
-            "todo_list": current_conversation.get("todo_list", []),
+            # Reset todo_list/execution state fresh for each new turn so the planner
+            # creates a new task plan rather than carrying over the previous turn's completed tasks.
+            "todo_list": [],
             "memory": current_conversation.get("memory", {}),
-            "iteration_count": current_conversation.get("iteration_count", 0),
-            "failure_count": current_conversation.get("failure_count", 0),
+            "iteration_count": 0,
+            "failure_count": 0,
             "max_iterations": 25,
             "action_history": current_conversation.get("action_history", []),
             "insights": current_conversation.get("insights", {}),
-            "execution_plan": current_conversation.get("execution_plan"),
-            "current_phase_id": current_conversation.get("current_phase_id"),
+            "execution_plan": None,
+            "current_phase_id": None,
             "pending_approval": current_conversation.get("pending_approval", False),
             "pending_decision": current_conversation.get("pending_decision"),
         }
@@ -1602,12 +1604,7 @@ async def execute_orchestration(
         except Exception as e:
             logger.error(f"Failed to save conversation history for {thread_id}: {e}")
 
-        # Ensure a plan file is saved for every conversation
-        try:
-            from backend.orchestrator.graph import save_plan_to_file
-            save_plan_to_file({**final_state, "thread_id": thread_id})
-        except Exception as e:
-            logger.error(f"Failed to save plan file for thread {thread_id}: {e}")
+        # Note: save_plan_to_file was removed (function no longer exists in graph.py)
 
         logger.info(f"Orchestration completed for thread_id: {thread_id}")
 
@@ -2261,6 +2258,7 @@ async def screenshots_websocket(websocket: WebSocket, thread_id: str):
 
 # NOTE: Workflow routes (/api/workflows/*, /api/schedules/*, /api/plan/*) are defined in routers/workflows_router.py
 # and included via app.include_router(workflows_router.router)
+@app.post("/api/workflows", tags=["Workflows"])
 async def save_workflow(request: Request, thread_id: str, name: str, description: str = "", db: Session = Depends(get_db)):
     """Save conversation as reusable workflow"""
     from auth import get_user_from_request
@@ -2453,6 +2451,71 @@ async def get_workflow(workflow_id: str, request: Request, db: Session = Depends
         "plan_graph": workflow.plan_graph,
         "created_at": workflow.created_at.isoformat()
     }
+
+@app.delete("/api/workflows/{workflow_id}", tags=["Workflows"])
+async def delete_workflow(workflow_id: str, request: Request, db: Session = Depends(get_db)):
+    """Delete a saved workflow and its associated schedules"""
+    from auth import get_user_from_request
+
+    user = get_user_from_request(request)
+    user_id = user.get("sub") or user.get("user_id") or user.get("id")
+
+    workflow = db.query(Workflow).filter_by(workflow_id=workflow_id, user_id=user_id).first()
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    # Cancel any active schedules for this workflow
+    try:
+        from backend.services.workflow_scheduler import get_scheduler
+        scheduler = get_scheduler()
+        schedules = db.query(WorkflowSchedule).filter_by(workflow_id=workflow_id).all()
+        for schedule in schedules:
+            try:
+                scheduler.remove_schedule(str(schedule.schedule_id))
+            except Exception:
+                pass
+    except Exception as e:
+        logger.warning(f"Could not cancel schedules for workflow {workflow_id}: {e}")
+
+    db.delete(workflow)
+    db.commit()
+    logger.info(f"Workflow {workflow_id} deleted by user {user_id}")
+    return {"status": "deleted", "workflow_id": workflow_id}
+
+
+@app.post("/api/workflows/{workflow_id}/clone", tags=["Workflows"])
+async def clone_workflow(workflow_id: str, request: Request, body: Dict[str, Any] = Body(default={}), db: Session = Depends(get_db)):
+    """Clone an existing workflow with an optional new name"""
+    from auth import get_user_from_request
+
+    user = get_user_from_request(request)
+    user_id = user.get("sub") or user.get("user_id") or user.get("id")
+
+    source = db.query(Workflow).filter_by(workflow_id=workflow_id, user_id=user_id).first()
+    if not source:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    new_id = str(uuid.uuid4())
+    new_name = body.get("new_name") or f"Copy of {source.name}"
+
+    clone = Workflow(
+        workflow_id=new_id,
+        user_id=user_id,
+        name=new_name,
+        description=source.description,
+        blueprint={**(source.blueprint or {}), "workflow_id": new_id},
+        plan_graph=source.plan_graph,
+    )
+    db.add(clone)
+    db.commit()
+    logger.info(f"Workflow {workflow_id} cloned as {new_id} by user {user_id}")
+    return {
+        "workflow_id": new_id,
+        "name": new_name,
+        "description": clone.description,
+        "status": "cloned",
+    }
+
 
 @app.post("/api/workflows/{workflow_id}/execute", tags=["Workflows"])
 async def execute_workflow(workflow_id: str, request: Request, inputs: Dict[str, Any] = Body(default={}), db: Session = Depends(get_db)):
@@ -3100,12 +3163,27 @@ async def websocket_workflow_execute(websocket: WebSocket, workflow_id: str, tok
         if db:
             db.close()
 
+def _sanitize_for_json(obj):
+    """Recursively replace NaN/Infinity float values with None (JSON null).
+    Python's json module serializes float('nan') as NaN which is invalid JSON."""
+    import math
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_for_json(v) for v in obj]
+    return obj
+
+
 async def safe_websocket_send(websocket: WebSocket, data: dict, thread_id: str = "unknown"):
     """
     Safely send JSON data through WebSocket, handling closed connections gracefully.
     """
     try:
-        await websocket.send_json(data)
+        await websocket.send_json(_sanitize_for_json(data))
         return True
     except Exception as e:
         # Connection is closed or broken - log as error to debug issues
@@ -3162,6 +3240,8 @@ async def websocket_chat(websocket: WebSocket):
             files_data = data.get("files", [])  # Get files from WebSocket message
             # Pass through owner info if frontend sends Clerk-verified identity
             owner = data.get("owner")  # Expected shape: { user_id, email }
+            if isinstance(owner, str):
+                owner = {"user_id": owner}
             planning_mode = data.get("planning_mode", False)  # Get planning mode flag
 
             logger.info(f"WebSocket received message with thread_id: {thread_id}, planning_mode: {planning_mode}")
@@ -3192,7 +3272,7 @@ async def websocket_chat(websocket: WebSocket):
                     try:
                         user_thread = db.query(UserThread).filter_by(thread_id=thread_id).first()
                         if user_thread:
-                            owner = user_thread.user_id
+                            owner = {"user_id": user_thread.user_id}
                             logger.info(f"Retrieved owner from database for existing thread {thread_id}: {owner}")
                         else:
                             logger.warning(f"No user-thread relationship found for thread {thread_id}")
@@ -3307,6 +3387,28 @@ async def websocket_chat(websocket: WebSocket):
                 continue  # Continue waiting for messages
 
             logger.info(f"Received {'prompt' if prompt else 'user response'} for thread_id {thread_id}")
+
+            # Register UserThread in DB BEFORE sending __start__ so that the
+            # 'conversation-created' event that the frontend dispatches on __start__
+            # can immediately find this conversation in GET /api/conversations.
+            if owner and prompt:
+                owner_id_for_reg = owner.get("user_id") or owner.get("sub") if isinstance(owner, dict) else str(owner)
+                if owner_id_for_reg:
+                    try:
+                        from database import SessionLocal as _SL
+                        from models import UserThread as _UT
+                        _db = _SL()
+                        try:
+                            existing = _db.query(_UT).filter_by(thread_id=thread_id).first()
+                            if not existing:
+                                clean_title = (prompt[:97] + "...") if len(prompt) > 100 else prompt
+                                _db.add(_UT(thread_id=thread_id, user_id=owner_id_for_reg, title=clean_title))
+                                _db.commit()
+                                logger.info(f"Pre-registered UserThread {thread_id} for user {owner_id_for_reg}")
+                        finally:
+                            _db.close()
+                    except Exception as _pre_reg_err:
+                        logger.warning(f"Pre-registration of UserThread failed (non-fatal): {_pre_reg_err}")
 
             # Send acknowledgment
             await websocket.send_json({
@@ -3439,58 +3541,96 @@ async def websocket_chat(websocket: WebSocket):
                 except Exception as e:
                     logger.error(f"Error in stream_callback: {e}", exc_info=True)
             
+            # Monotonic sequence counter for task events — lets the frontend
+            # enforce delivery order (task_started always before task_completed).
+            _task_event_seq = {"n": 0}
+
+            def _next_seq() -> int:
+                _task_event_seq["n"] += 1
+                return _task_event_seq["n"]
+
             # Define task event callback for REAL-TIME task status streaming
             async def task_event_callback(event: dict):
                 """Stream task events in real-time as tasks start/complete"""
                 try:
                     event_type = event.get("event_type")
                     task_name = event.get("task_name")
-                    
+                    seq = _next_seq()
+
                     if event_type == "task_started":
                         # Generate activity description (clean one-liner for UI)
                         task_desc = event.get("task_description", "")
-                        activity_desc = task_desc.split('.')[0] if task_desc else task_name
-                        if len(activity_desc) > 80:
+                        activity_desc = event.get("activity_description") or (
+                            task_desc.split('.')[0] if task_desc else task_name
+                        )
+                        if activity_desc and len(activity_desc) > 80:
                             activity_desc = activity_desc[:77] + "..."
-                        
+
                         await safe_websocket_send(websocket, {
                             "node": "task_started",
+                            "seq": seq,
                             "thread_id": thread_id,
                             "task_name": task_name,
                             "task_description": task_desc,
                             "activity_description": activity_desc,
                             "agent_name": event.get("agent_name"),
-                            "timestamp": event.get("timestamp", time.time())
+                            "timestamp": event.get("timestamp", time.time()),
                         }, thread_id)
-                        logger.info(f"📡 REAL-TIME: Task started - '{task_name}'")
-                        
+                        logger.info(f"📡 REAL-TIME: Task started - '{task_name}' (seq={seq})")
+
                     elif event_type == "task_completed":
-                        # Include result summary if available
                         result_summary = event.get("result_summary", "Completed successfully")
-                        
+
                         await safe_websocket_send(websocket, {
                             "node": "task_completed",
+                            "seq": seq,
                             "thread_id": thread_id,
                             "task_name": task_name,
                             "task_description": event.get("task_description"),
                             "result_summary": result_summary,
                             "agent_name": event.get("agent_name"),
                             "execution_time": event.get("execution_time", 0),
-                            "timestamp": event.get("timestamp", time.time())
+                            "timestamp": event.get("timestamp", time.time()),
                         }, thread_id)
-                        logger.info(f"📡 REAL-TIME: Task completed - '{task_name}' ({event.get('execution_time', 0):.2f}s)")
-                        
+                        logger.info(
+                            f"📡 REAL-TIME: Task completed - '{task_name}' "
+                            f"({event.get('execution_time', 0):.2f}s, seq={seq})"
+                        )
+
                     elif event_type == "task_failed":
                         await safe_websocket_send(websocket, {
                             "node": "task_failed",
+                            "seq": seq,
                             "thread_id": thread_id,
                             "task_name": task_name,
+                            "task_description": event.get("task_description"),
                             "error": event.get("error"),
+                            "agent_name": event.get("agent_name"),
                             "execution_time": event.get("execution_time", 0),
-                            "timestamp": event.get("timestamp", time.time())
+                            "timestamp": event.get("timestamp", time.time()),
                         }, thread_id)
-                        logger.warning(f"📡 REAL-TIME: Task failed - '{task_name}': {event.get('error')}")
-                        
+                        logger.warning(
+                            f"📡 REAL-TIME: Task failed - '{task_name}': "
+                            f"{event.get('error')} (seq={seq})"
+                        )
+
+                    elif event_type == "task_progress":
+                        # Real-time agent progress message (from SSE stream)
+                        message = event.get("message", "")
+                        if message:
+                            await safe_websocket_send(websocket, {
+                                "node": "task_progress",
+                                "seq": seq,
+                                "thread_id": thread_id,
+                                "task_name": task_name,
+                                "activity_description": message,
+                                "agent_name": event.get("agent_name"),
+                                "timestamp": event.get("timestamp", time.time()),
+                            }, thread_id)
+                            logger.debug(
+                                f"📡 REAL-TIME: Task progress - '{task_name}': {message} (seq={seq})"
+                            )
+
                 except Exception as e:
                     logger.error(f"Error in task_event_callback: {e}", exc_info=True)
 
@@ -3645,14 +3785,27 @@ async def websocket_chat(websocket: WebSocket):
 
             # Try to send the __end__ event, but handle if connection is already closed
             try:
-                await websocket.send_json({
+                # Explicitly surface the most important fields so the frontend
+                # doesn't have to dig through the nested state dict.
+                end_payload = {
                     "node": "__end__",
                     "thread_id": thread_id,
-                    "data": serializable_state, # Send the entire state object
+                    # --- Top-level convenience fields ---
+                    "final_response": final_state.get("final_response"),
+                    "canvas_display": (
+                        final_state.get("canvas_data")
+                        or final_state.get("canvas_display")
+                    ),
+                    "canvas_type": final_state.get("canvas_type"),
+                    "canvas_title": final_state.get("canvas_title"),
+                    "has_canvas": final_state.get("has_canvas", False),
+                    # --- Full serialized state for components that need it ---
+                    "data": serializable_state,
                     "message": "Agent orchestration completed successfully.",
                     "status": "completed",
-                    "timestamp": time.time()
-                })
+                    "timestamp": time.time(),
+                }
+                await safe_websocket_send(websocket, end_payload, thread_id)
                 logger.info(f"WebSocket stream completed successfully for thread_id {thread_id}")
             except Exception as send_error:
                 # Connection might be closed already - that's okay, the data is saved in the database

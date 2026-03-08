@@ -27,6 +27,19 @@ from backend.services.inference_service import inference_service, InferencePrior
 logger = logging.getLogger(__name__)
 
 
+class _PlanPhase(BaseModel):
+    """Single phase returned by the dedicated planning LLM call."""
+    phase_id: str = Field(..., description="String number: '1', '2', etc.")
+    name: str = Field(..., description="Short label (3-6 words)")
+    goal: str = Field(..., description="One sentence describing what this step achieves")
+    depends_on: List[str] = Field(default_factory=list, description="phase_ids this depends on")
+
+
+class _PlanningOutput(BaseModel):
+    """Structured output from the planning LLM call (wraps list for generate_structured)."""
+    phases: List[_PlanPhase] = Field(..., description="List of 2-6 concrete plan phases")
+
+
 class BrainDecision(BaseModel):
     """
     The Brain's output - what resource to activate and with what parameters.
@@ -97,8 +110,44 @@ class Brain:
     Analyzes the current state and decides the next action.
     """
 
+    # Iteration budgets indexed by rough task complexity
+    _ITER_BUDGETS = {
+        "simple": 12,   # single-agent factual queries
+        "medium": 18,   # multi-step analysis, reports
+        "complex": 25,  # multi-agent, fetch+merge+generate
+    }
+
     def __init__(self):
-        self.max_iterations = 15
+        self.max_iterations = self._ITER_BUDGETS["medium"]  # default
+
+    def _compute_max_iterations(self, original_prompt: str) -> int:
+        """
+        Heuristically scale the iteration budget with task complexity so
+        simple queries finish faster and complex multi-step tasks don't get
+        cut short.
+        """
+        text = (original_prompt or "").lower()
+
+        # Signals of high complexity
+        complex_signals = [
+            "create", "generate", "build", "write", "report",
+            "compare", "combine", "merge", "multiple", "all agents",
+            "chart", "graph", "visuali", "dashboard",
+        ]
+        # Signals of low complexity (direct lookup / single-question)
+        simple_signals = [
+            "how many", "what is", "list", "show me", "count",
+            "average", "total", "sum", "max", "min",
+        ]
+
+        complex_score = sum(1 for s in complex_signals if s in text)
+        simple_score = sum(1 for s in simple_signals if s in text)
+
+        if complex_score >= 2:
+            return self._ITER_BUDGETS["complex"]
+        if simple_score >= 2 and complex_score == 0:
+            return self._ITER_BUDGETS["simple"]
+        return self._ITER_BUDGETS["medium"]
 
     async def think(
         self, state: Dict[str, Any], config: Optional[RunnableConfig] = None
@@ -116,7 +165,21 @@ class Brain:
         # Initialize state FIRST if this is a new conversation with no tasks
         # This must happen before failure checks to avoid fallback on new conversations
         if not todo_list and state.get("original_prompt"):
+            # Set adaptive iteration budget on first entry
+            self.max_iterations = self._compute_max_iterations(
+                state.get("original_prompt", "")
+            )
             return self._initialize_initial_state(state)
+
+        # MANDATORY PLANNING STEP: If the only task is the sentinel placeholder,
+        # run a dedicated planning call to decompose the request before any execution.
+        # This is enforced in code (not the prompt) for reliability.
+        if (
+            len(todo_list) == 1
+            and todo_list[0].get("task_id") == "__initial__"
+            and state.get("original_prompt")
+        ):
+            return await self._decompose_into_tasks(state, config)
 
         # Check iteration limit — the ONLY hard safety net
         if iteration_count >= self.max_iterations:
@@ -161,6 +224,44 @@ class Brain:
             }
         
         decision = self._apply_stagnation_guard(state, decision)
+
+        # Python-level MANDATORY FINISH — code-level enforcement of the prompt rule.
+        #
+        # WHY THIS EXISTS:
+        # When the planner auto-decomposes a request it creates tasks with IDs like
+        # "phase_1", "phase_2". These are planning artifacts, NOT user-specified steps.
+        # Once the agent returns success the full question has already been answered
+        # (the agent received the complete question verbatim as its goal).
+        #
+        # Without this check the LLM sometimes ignores the MANDATORY FINISH prompt and
+        # picks a python/terminal/tool action to "verify" or "compile" results — causing
+        # an extra wasted iteration before it finally finishes.
+        #
+        # THREE CONDITIONS must all be true to trigger the force-finish:
+        #   1. last_agent_result.success=True  — the agent actually succeeded
+        #   2. action_type not in (finish, agent) — LLM chose something unnecessary
+        #      ('agent' is allowed through so genuine multi-agent workflows still work)
+        #   3. all task IDs start with "phase_" — confirms these are auto-decomposed
+        #      tasks, not user-written "Step 1 / Step 2" instructions
+        last_agent_result = state.get("last_agent_result")
+        if (
+            last_agent_result
+            and last_agent_result.get("success")
+            and isinstance(decision, BrainDecision)
+            and decision.action_type not in ("finish", "agent")
+        ):
+            all_auto_phases = all(
+                t.get("task_id", "").startswith("phase_")
+                for t in todo_list
+            )
+            if all_auto_phases and todo_list:
+                logger.info(
+                    f"🧠 Brain: Python-level force FINISH — agent succeeded, "
+                    f"LLM chose '{decision.action_type}' on auto-decomposed plan (blocked)"
+                )
+                decision.action_type = "finish"
+                if not decision.user_response:
+                    decision.user_response = last_agent_result.get("result", "")
 
         updates = self._apply_decision_to_state(state, decision)
 
@@ -242,6 +343,17 @@ class Brain:
         # Build FULL action history view (never compressed)
         action_history_str = self._build_action_history_view(action_history)
 
+        # Build LATEST AGENT RESULT block — shown prominently so Brain can finish immediately
+        last_agent_result = state.get("last_agent_result")
+        if last_agent_result and last_agent_result.get("success"):
+            last_agent_result_str = (
+                f"Agent/Tool: **{last_agent_result.get('agent', 'unknown')}** "
+                f"(iteration {last_agent_result.get('iteration', '?')})\n"
+                f"```\n{last_agent_result.get('result', '')}\n```"
+            )
+        else:
+            last_agent_result_str = None
+
         # Build conversation history view (NEW)
         conversation_history_str = self._build_conversation_history_view(
             state.get("messages", [])
@@ -294,8 +406,12 @@ You are a helpful, intelligent, and expressive AI assistant.
 ## UPLOADED FILES (Available for tools/agents)
 {files_str}
 - **CRITICAL**: You can see that files exist, but you DO NOT have their content yet.
-- To read or process these files, you MUST use an appropriate Agent (e.g., `DocumentAgent` for PDFs/Docs) or a Tool (e.g., `read_file` or `Python` code).
+- To read or process these files, you MUST use an appropriate Agent (e.g., `DocumentAgent` for PDFs/Docs) or a Tool.
 - **NEVER** hallucinate or guess the contents of a file if it has not been explicitly read in the Action History.
+- **AGENT-FIRST RULE**: If uploaded files are present AND a matching agent exists (spreadsheet → SpreadsheetAgent, PDF/doc → DocumentAgent), your **VERY FIRST action** MUST be to call that agent. DO NOT run Python to explore the filesystem before calling the agent — the agent reads the file directly using its path.
+- **COMPLETE QUESTION REQUIRED**: When calling an agent for an uploaded file, include the user's COMPLETE question with ALL filtering, grouping, aggregation, and analysis needed — in a SINGLE call. **DO NOT** call the agent just to get column headers, schema, or a sample first. A schema-only probe is a wasted iteration. Ask the full question directly.
+- **NO PYTHON AFTER AGENT SUCCESS**: If a SpreadsheetAgent or DocumentAgent call succeeded, **DO NOT** run Python to re-read the spreadsheet, filter data, or "verify" the answer. The agent already did the analysis. Read the `task_summary` from action history and call finish.
+- **DO NOT** use Python `os.walk`, `os.listdir`, `glob`, or file-reading code to inspect uploaded files. The agent handles that. Python file exploration BEFORE calling an agent wastes iterations and provides no useful information.
 
 ## YOUR FILES
 
@@ -334,6 +450,17 @@ You are a helpful, intelligent, and expressive AI assistant.
 6. **Be efficient.** The user values results, not exhaustive retries. One good search is better than five similar ones.
 7. **NEVER repeat the same action.** If you already called python to read a file, DO NOT call python again to read the same file. The result is in your action history above.
 8. **Iteration awareness.** You are on iteration {iteration_count}/{self.max_iterations}. If you're past iteration 8, you MUST prioritize finishing over gathering more data.
+9. **MANDATORY PLANNING STEP — do this before anything else.**
+   If the TO-DO LIST above contains exactly ONE task with `task_id = '__initial__'`, you MUST respond with `action_type='plan'`. This is NOT optional and has NO exceptions.
+   - Break the user's objective into **2 to 6 concrete, specific steps** — each one a real, named action (e.g. "Fetch Q4 supplier data from spreadsheet", "Calculate total spend per supplier", "Identify top 5 by volume", "Write summary report").
+   - Steps must be specific enough that a person reading the list knows exactly what will happen.
+   - Do NOT use vague steps like "Gather data", "Process information", or "Analyse results" — name the actual operation.
+   - Do NOT jump straight to execution. This planning step runs in under 1 second and gives the user a clear preview of exactly what the agent will do.
+   - Format: `action_type='plan'`, `execution_plan=[{{"phase_id":"1","name":"Short label","goal":"What this step achieves","depends_on":[]}},...`]
+
+10. **AGENT-FIRST for uploaded files.** If uploaded files are listed above AND the action history is empty (iteration 1), your FIRST action MUST be calling the appropriate agent — NOT Python file exploration. The agent reads the file using its full path. **Include the user's COMPLETE question with ALL filtering/grouping/analysis needed — NOT just a schema/header probe. One agent call should answer the full question.**
+11. **Agent results stay in action history.** After an agent completes successfully, its result is in your action history above. DO NOT write Python to load JSON files to retrieve agent output. DO NOT run Python to filter the spreadsheet or "verify" the answer. Read the `task_summary` from action history and call `action_type='finish'` immediately.
+12. **PROHIBITION on Python after agent success.** If the action history contains a successful SpreadsheetAgent or DocumentAgent result, you are FORBIDDEN from using `action_type='python'` on the next step. The Python filter will FAIL (no Excel header auto-detection), and you already have the answer in action history.
 
 ## CONVERSATION HISTORY (Recent interactions)
 {conversation_history_str}
@@ -354,6 +481,22 @@ You are a helpful, intelligent, and expressive AI assistant.
 ## USER PROFILE
 {user_profile_str}
 
+{f"""## ✅ LATEST AGENT/TOOL RESULT — MANDATORY FINISH REQUIRED
+{last_agent_result_str}
+
+**MANDATORY FINISH — applies when the task is SINGLE-STEP or ALL steps are done:**
+The agent returned `"status": "success"`. If the user's request is now fully satisfied, you MUST call `action_type='finish'` RIGHT NOW.
+
+Rules that CANNOT be overridden:
+1. **`task_summary` IS the answer.** Even if `extracted_data` is empty or `canvas_display` is null, the `task_summary` text contains what the agent accomplished. Present it to the user.
+2. **Do NOT call the same agent again** for the same purpose. Calling it again will produce the same result. You already have the answer for this step.
+3. **Do NOT run Python to re-read the spreadsheet, load JSON files, or "verify" the numbers.** The agent already filtered and analyzed the data correctly. Running Python on the raw file will FAIL because it cannot auto-detect Excel headers. Trust the agent's success status.
+4. **Do NOT check if data "looks right".** Trust the agent's success status.
+5. **Do NOT read `spreadsheet_agent_result.json` or any `*_result.json` file.** The answer is already in your action history above — use it directly.
+6. **Phase tasks are planning artifacts, not user-specified steps.** Tasks named `phase_1`, `phase_2`, etc. are internal decompositions — when the agent successfully answers the original question, ALL phase tasks are considered done. Call `action_type='finish'` immediately. Only continue to the next step if the user explicitly wrote "Step 1:", "Step 2:", etc. in their original request AND the agent's result only covers Step 1.
+
+How to finish: Call `action_type='finish'` with `user_response` = the `task_summary` text formatted nicely for the user. Include any numbers or tables you can see in the result.
+""" if last_agent_result_str else ""}
 ## RESOURCE SELECTION — PICK THE RIGHT ACTION TYPE
 
 **Match the current step to the RIGHT resource.** Each action type has a specific purpose — read the agent skills, tool descriptions, and Python scope below to decide which one fits.
@@ -392,9 +535,7 @@ Available tools:
 
 **Sandbox details:**
 - Modules: pandas, numpy, json, datetime, re, math, statistics, csv, os, requests
-- `tool_results` dict is pre-loaded with data from previous tool/agent calls
-  - Keys are tool/agent names, values are the result data
-  - Also available as JSON files: `<tool_name>_result.json` in workspace
+- Agent and tool results are in your **ACTION HISTORY** above — read them there directly. DO NOT write Python code to load `<agent>_result.json` files to retrieve agent results; those files may not exist or may contain a raw dump that is already in your history.
 - Files created in the sandbox persist and are tracked automatically
 - HTTP calls use proper browser headers (no 403 issues)
 
@@ -682,7 +823,8 @@ Return JSON with:
                 f"[{archived} earlier actions archived | budget: {max_tokens} tokens]"
             )
 
-        for entry in entries_to_show:
+        last_entry_idx = len(entries_to_show) - 1
+        for idx, entry in enumerate(entries_to_show):
             status = "✅" if entry.get("success") else "❌"
             action_type = entry.get("action_type", "?")
             resource = entry.get("resource_id") or ""
@@ -696,8 +838,14 @@ Return JSON with:
             # Show what was requested (helps Brain detect its own repetition)
             if instruction:
                 lines.append(f"   Code/Instruction: {instruction[:150]}")
-            # Result truncation: 400 chars for data-heavy types, 200 for others
-            max_result_len = 400 if action_type in ("tool", "python", "agent") else 200
+            # Last successful agent/tool entry: show more so Brain can finish from it
+            is_last = idx == last_entry_idx
+            if is_last and entry.get("success") and action_type in ("agent", "tool"):
+                max_result_len = 1200
+            elif action_type in ("tool", "python", "agent"):
+                max_result_len = 400
+            else:
+                max_result_len = 200
             lines.append(f"   Result: {result[:max_result_len]}")
 
         # === REDUNDANCY DETECTION ===
@@ -737,20 +885,46 @@ Return JSON with:
         return str(output).strip()
 
     def _normalize_signature(self, value: str) -> str:
-        """Normalize signature strings to compare repeated actions robustly."""
-        return " ".join(str(value or "").split())
+        """Normalize signature strings to compare repeated actions robustly.
+
+        Collapses all whitespace and lowercases so that capitalisation and minor
+        formatting differences (extra spaces, newlines) don't fool the guard.
+
+        WHY: The LLM sometimes paraphrases the same instruction slightly differently
+        on each iteration (e.g. different whitespace, capitalised first word). Without
+        normalisation these would hash to different signatures and the stagnation guard
+        would never fire, allowing infinite loops on tasks like "keep checking the file".
+        """
+        import re as _re
+        return _re.sub(r'\s+', ' ', str(value or "").lower()).strip()
+
+    def _extract_primary_content(self, payload_dict: Dict[str, Any]) -> str:
+        """Pull the most meaningful text field from a payload for signature comparison.
+
+        Prefers semantic content (prompt/code/command) over raw JSON so that
+        superficially different but semantically identical payloads hash the same.
+        Falls back to sorted JSON when no primary field is present.
+        """
+        content = (
+            payload_dict.get("prompt") or
+            payload_dict.get("instruction") or
+            payload_dict.get("code") or
+            payload_dict.get("command") or
+            ""
+        )
+        if content:
+            return str(content)
+        try:
+            return json.dumps(payload_dict, sort_keys=True, separators=(",", ":"), default=str)
+        except Exception:
+            return str(payload_dict)
 
     def _build_decision_signature(self, decision: BrainDecision) -> str:
         """Build a stable signature for a proposed decision."""
         payload = decision.payload or {}
-        try:
-            payload_str = json.dumps(
-                payload, sort_keys=True, separators=(",", ":"), default=str
-            )
-        except Exception:
-            payload_str = str(payload)
+        content = self._extract_primary_content(payload)
         return self._normalize_signature(
-            f"{decision.action_type}|{decision.resource_id or ''}|{payload_str}"
+            f"{decision.action_type}|{decision.resource_id or ''}|{content}"
         )
 
     def _build_history_signature(self, entry: Dict[str, Any]) -> str:
@@ -759,13 +933,12 @@ Return JSON with:
         resource_id = entry.get("resource_id") or ""
         instruction = entry.get("instruction") or ""
         try:
-            # instruction is typically json.dumps(payload)
             parsed = json.loads(instruction)
-            instruction = json.dumps(parsed, sort_keys=True, separators=(",", ":"))
+            content = self._extract_primary_content(parsed)
         except Exception:
             # Keep raw instruction when it is truncated or non-JSON
-            pass
-        return self._normalize_signature(f"{action_type}|{resource_id}|{instruction}")
+            content = instruction
+        return self._normalize_signature(f"{action_type}|{resource_id}|{content}")
 
     def _is_open_ended_objective(self, objective: str) -> bool:
         """
@@ -786,14 +959,39 @@ Return JSON with:
         ]
         return any(k in text for k in keywords)
 
-    def _build_stagnation_response(self, output_text: str) -> str:
-        """Build a concise final response from the latest successful output."""
+    def _build_stagnation_response(
+        self, state: Dict[str, Any], output_text: str
+    ) -> str:
+        """
+        Build a user-facing final response when stagnation is detected.
+        Tries to extract a clean structured answer before falling back to
+        the raw output text.
+        """
+        action_history = state.get("action_history", [])
+
+        # Walk history in reverse to find the most meaningful answer
+        for entry in reversed(action_history):
+            if not entry.get("success"):
+                continue
+            result = entry.get("result") or {}
+            if isinstance(result, dict):
+                answer = (
+                    result.get("data", {}).get("answer")
+                    or result.get("answer")
+                    or result.get("response")
+                    or result.get("output")
+                )
+                if answer and isinstance(answer, str) and len(answer.strip()) > 10:
+                    return answer.strip()
+            summary = entry.get("result_summary", "")
+            if summary and not summary.startswith("{") and len(summary) > 20:
+                return summary[:600]
+
+        # Fall back to cleaning the raw output_text (no truncation at 400 chars)
         cleaned = " ".join((output_text or "").split())
         if not cleaned:
             return "Task complete."
-        if len(cleaned) <= 400:
-            return f"Here is the latest result: {cleaned}"
-        return f"Here is the latest result: {cleaned[:400]}..."
+        return cleaned[:800] if len(cleaned) > 800 else cleaned
 
     def _apply_stagnation_guard(
         self, state: Dict[str, Any], decision: BrainDecision
@@ -850,7 +1048,7 @@ Return JSON with:
         )
         return BrainDecision(
             action_type="finish",
-            user_response=self._build_stagnation_response(output_text),
+            user_response=self._build_stagnation_response(state, output_text),
             reasoning="Repeated identical successful actions detected without new progress; finalized using the latest successful result.",
         )
 
@@ -963,8 +1161,9 @@ Return JSON with:
             else:
                 status = TaskStatus.PENDING
             
-            # Create descriptive task description
-            description = f"{name}: {goal}" if goal else name
+            # Use the short phase name as the task title — goal is full question verbatim
+            # and is too long for the task card. Name is already 3-6 words per planner rules.
+            description = name
             
             task = TaskItem(
                 task_id=f"phase_{phase_id}",
@@ -1021,42 +1220,158 @@ Return JSON with:
         """
         Extract key insights from the last execution result.
         These insights are preserved and never compressed.
+
+        Reads both sources:
+        - last_agent_result (richer: task_summary, answer, tables from agents)
+        - execution_result  (Python/tool raw output)
         """
-        execution_result = state.get("execution_result", {})
-        if not execution_result or not execution_result.get("success"):
-            return current_insights
-
-        iteration = state.get("iteration_count", 0)
-        output = execution_result.get("output")
-
-        if not output:
-            return current_insights
-
-        # Create a copy to avoid mutating
         updated_insights = dict(current_insights)
+        iteration = state.get("iteration_count", 0)
 
-        # Extract insight from significant results
-        insight_key = f"step_{iteration}"
-
-        # Extract meaningful data from common result patterns
-        if isinstance(output, dict):
-            # Look for data/result/message fields
-            for key in ["result", "data", "message", "response", "summary"]:
-                if key in output and output[key]:
-                    val = str(output[key])
-                    if len(val) > 20:  # Only significant results
-                        updated_insights[insight_key] = val[:200]
+        # 1. Agent result — highest signal, prioritise task_summary / answer fields
+        last_agent_result = state.get("last_agent_result")
+        if last_agent_result and last_agent_result.get("success"):
+            result = last_agent_result.get("result", "")
+            agent_name = last_agent_result.get("agent", "agent")
+            text = ""
+            if isinstance(result, str) and len(result) > 20:
+                text = result[:200]
+            elif isinstance(result, dict):
+                for key in ["task_summary", "answer", "result", "output", "response"]:
+                    val = result.get(key)
+                    if val and isinstance(val, str) and len(val) > 20:
+                        text = val[:200]
                         break
-        elif isinstance(output, str) and len(output) > 20:
-            updated_insights[insight_key] = output[:200]
+            if text:
+                updated_insights[f"agent_{iteration}_{agent_name}"] = text
+
+        # 2. Python / tool execution result
+        execution_result = state.get("execution_result", {})
+        if execution_result and execution_result.get("success"):
+            output = execution_result.get("output")
+            if output:
+                insight_key = f"step_{iteration}"
+                if isinstance(output, dict):
+                    for key in ["result", "data", "message", "response", "summary"]:
+                        if key in output and output[key]:
+                            val = str(output[key])
+                            if len(val) > 20:
+                                updated_insights[insight_key] = val[:200]
+                                break
+                elif isinstance(output, str) and len(output) > 20:
+                    updated_insights[insight_key] = output[:200]
 
         return updated_insights
 
+    async def _decompose_into_tasks(
+        self, state: Dict[str, Any], config: Optional[RunnableConfig]
+    ) -> Dict[str, Any]:
+        """
+        Mandatory planning step — runs when only the __initial__ sentinel is present.
+
+        Calls the LLM with a short, focused prompt to decompose the user's request
+        into 2-6 concrete, named tasks. The result is applied exactly as if the
+        brain had returned action_type='plan', populating the todo_list with real
+        phase entries so the UI shows a Manus-style task list from the start.
+
+        Falls back to a single generic task if the LLM fails.
+        """
+        prompt = state.get("original_prompt", "")
+        uploaded = state.get("uploaded_files", [])
+        files_note = ""
+        if uploaded:
+            names = ", ".join(f.get("file_name", "?") for f in uploaded[:5])
+            files_note = f"\nUploaded files available: {names}"
+
+        # Get available agents for context
+        try:
+            from backend.services.agent_registry_service import agent_registry
+            agents = agent_registry.list_active_agents()
+            agent_names = ", ".join(a["id"] for a in agents) if agents else "python, terminal"
+        except Exception:
+            agent_names = "python, terminal"
+
+        planning_prompt = f"""You are a task planner. Break the user's request into 2 to 6 concrete, specific steps.
+
+USER REQUEST:
+{prompt}{files_note}
+
+AVAILABLE AGENTS/TOOLS: {agent_names}
+
+Output a JSON array of steps. Each step must have:
+- "phase_id": "1", "2", ... (string numbers)
+- "name": short label (3-6 words, e.g. "Fetch supplier data")
+- "goal": one sentence describing exactly what this step does
+- "depends_on": [] for first step, ["1"] for second, etc.
+
+Rules:
+- 2 steps minimum, 6 steps maximum
+- Every step must be a concrete, named action — NOT vague ("Process data", "Gather info")
+- Name the actual operation: "Calculate top 5 suppliers by spend", "Generate bar chart of results"
+- The last step should always be "Compile and present results" or similar
+
+CRITICAL RULE FOR SINGLE-AGENT TASKS (spreadsheet, document, data analysis):
+- If the task requires a specialized agent (spreadsheet analysis, document reading, etc.), create EXACTLY 2 phases:
+  1. One phase where the agent does ALL the analysis — set the goal to the COMPLETE user question verbatim
+  2. One phase: "Compile and present results"
+- Do NOT split a single-agent task into sub-steps like "Load file", "Extract columns", "Compute X", "Compute Y".
+  The agent answers everything in ONE call when given the full question. Splitting forces multiple agent calls
+  and breaks the analysis.
+
+Respond with ONLY the JSON array, no explanation.
+
+Example for "summarise a PDF and email it":
+[
+  {{"phase_id": "1", "name": "Read and summarise PDF", "goal": "Extract key points from the uploaded document", "depends_on": []}},
+  {{"phase_id": "2", "name": "Draft email body", "goal": "Write a concise email containing the summary", "depends_on": ["1"]}},
+  {{"phase_id": "3", "name": "Send email", "goal": "Deliver the email to the specified recipient", "depends_on": ["2"]}}
+]"""
+
+        phases = None
+        try:
+            result = await inference_service.generate_structured(
+                messages=[HumanMessage(content=planning_prompt)],
+                schema=_PlanningOutput,
+                priority=InferencePriority.HIGH,
+                max_tokens=800,
+                telemetry_metadata={
+                    "agent_name": "Brain",
+                    "operation_type": "task_planning",
+                },
+            )
+            if result.phases:
+                phases = [p.model_dump() for p in result.phases]
+        except Exception as e:
+            logger.warning(f"Planning LLM call failed, using fallback: {e}")
+
+        if not phases:
+            # Fallback: two-step plan so the UI always shows something meaningful
+            phases = [
+                {"phase_id": "1", "name": "Complete request", "goal": prompt[:200], "depends_on": []},
+                {"phase_id": "2", "name": "Compile and present results", "goal": "Present the final answer to the user", "depends_on": ["1"]},
+            ]
+
+        # Apply as a plan decision — reuse existing plan→todo_list machinery
+        fake_decision = BrainDecision(
+            action_type="plan",
+            execution_plan=phases,
+            reasoning="Decomposed request into concrete steps",
+        )
+        updates = self._apply_decision_to_state(state, fake_decision)
+        updates["iteration_count"] = state.get("iteration_count", 0)
+        logger.info(f"Decomposed into {len(phases)} tasks: {[p.get('name') for p in phases]}")
+        return updates
+
     def _initialize_initial_state(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """Initialize the todo list with the first task."""
+        """Initialize the todo list with a sentinel placeholder task.
+
+        The sentinel task_id '__initial__' is detected by the brain prompt on the
+        very next think() call, which forces action_type='plan' to decompose the
+        request into concrete steps before any execution begins.
+        """
         initial_task = TaskItem(
-            task_id=str(uuid.uuid4())[:8],
-            description="Initialize objective analysis",
+            task_id="__initial__",
+            description="Analysing request…",
             status=TaskStatus.PENDING,
             priority=10,
         )
@@ -1166,6 +1481,12 @@ Return JSON with:
 
         # Handle direct execution actions
         if decision.action_type not in ("finish", "skip", "plan", "replan", "parallel"):
+            # If current_task_id is stale (sentinel or doesn't exist in current todo_list),
+            # reset it so the next block picks the first pending task.
+            existing_ids = {t.get("task_id") for t in todo_list}
+            if current_task_id not in existing_ids:
+                current_task_id = None
+
             # If no task is active, pick the first pending one
             if not current_task_id:
                 next_pending = next(
@@ -1490,7 +1811,60 @@ Return JSON with:
     def _force_finish_with_error(
         self, state: Dict[str, Any], error: str
     ) -> Dict[str, Any]:
+        """
+        Force the graph to terminate by emitting action_type='finish'.
+
+        Previously this only set final_response without updating `decision`,
+        so omni_route_condition never saw action_type='finish' and the graph
+        kept looping indefinitely.  This fix makes the routing condition see
+        the finish signal and route to END.
+
+        When the graph has collected successful action results we attempt to
+        surface the most useful one as the user-facing response rather than
+        dumping raw internal summaries.
+        """
+        action_history = state.get("action_history", [])
+
+        # Try to find a meaningful answer from the last successful action
+        user_response = None
+        for entry in reversed(action_history):
+            if not entry.get("success"):
+                continue
+            # Prefer structured data fields over raw summary strings
+            result = entry.get("result") or {}
+            if isinstance(result, dict):
+                # agent results often have data.answer or answer
+                answer = (
+                    result.get("data", {}).get("answer")
+                    or result.get("answer")
+                    or result.get("response")
+                    or result.get("output")
+                )
+                if answer and isinstance(answer, str) and len(answer.strip()) > 10:
+                    user_response = answer.strip()
+                    break
+            # Fall back to result_summary if it looks like prose (not a dict repr)
+            summary = entry.get("result_summary", "")
+            if summary and not summary.startswith("{") and len(summary) > 20:
+                user_response = summary[:500]
+                break
+
+        if not user_response:
+            original_prompt = state.get("original_prompt", "")
+            user_response = (
+                "I was unable to complete the task within the allowed steps. "
+                "Please try rephrasing your request or breaking it into smaller parts."
+            )
+            if original_prompt:
+                user_response += f'\n\nOriginal request: "{original_prompt[:200]}"'
+
+        finish_decision = BrainDecision(
+            action_type="finish",
+            user_response=user_response,
+            reasoning=error,
+        )
         return {
-            "final_response": f"Process stopped: {error}",
+            "final_response": user_response,
+            "decision": finish_decision.model_dump(),
             "current_task_id": None,
         }

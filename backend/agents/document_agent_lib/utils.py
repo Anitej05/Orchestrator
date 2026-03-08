@@ -15,6 +15,50 @@ import mimetypes
 logger = logging.getLogger(__name__)
 
 
+def _extract_image_pdf_with_vision(file_path: str) -> str:
+    """
+    Fallback for image-only / scanned PDFs.
+    Renders each page via PyMuPDF and sends it to the Groq vision model.
+    Returns concatenated page descriptions usable as document text.
+    """
+    try:
+        import fitz  # PyMuPDF
+        import tempfile
+        from backend.tools.image_tools import analyze_image
+
+        doc = fitz.open(file_path)
+        page_texts: list[str] = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for i, page in enumerate(doc):
+                img_path = Path(tmpdir) / f"page_{i + 1}.png"
+                pix = page.get_pixmap(dpi=150)
+                pix.save(str(img_path))
+
+                result = analyze_image.invoke({
+                    "image_path": str(img_path),
+                    "query": (
+                        "Extract and describe all text, data, tables, and content "
+                        "visible on this page in full detail."
+                    ),
+                })
+
+                if "error" not in result:
+                    page_texts.append(f"[Page {i + 1}]\n{result['answer']}")
+                else:
+                    logger.warning(
+                        f"Vision extraction failed on page {i + 1} of {file_path}: "
+                        f"{result.get('error')}"
+                    )
+                    page_texts.append(f"[Page {i + 1}] (vision extraction failed)")
+
+        return "\n\n".join(page_texts)
+
+    except Exception as e:
+        logger.error(f"Vision fallback failed for {file_path}: {e}")
+        return ""
+
+
 def extract_document_content(file_path: str) -> Tuple[str, str]:
     """
     Extract text content from various document formats.
@@ -42,7 +86,11 @@ def extract_document_content(file_path: str) -> Tuple[str, str]:
                     text = page.extract_text()
                     if text:
                         content.append(text)
-            return '\n'.join(content), 'pdf'
+            text_content = '\n'.join(content)
+            # Zero-text PDF (e.g. scanned / image-only): fall back to vision
+            if not text_content.strip():
+                text_content = _extract_image_pdf_with_vision(file_path)
+            return text_content, 'pdf'
 
         else:
             raise ValueError(f"Unsupported file format: {file_ext}")

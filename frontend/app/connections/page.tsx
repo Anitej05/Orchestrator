@@ -351,10 +351,10 @@ function ConnectionsContent() {
   return (
     <SidebarInset>
       <div className="min-h-screen bg-bg-page dark:bg-background text-text-primary">
-        <main className="p-6 space-y-6">
-          <div>
-            <h1 className="text-2xl font-semibold text-brand-teal">Connections</h1>
-            <p className="text-text-secondary text-sm">Connect to MCP servers to extend your agent capabilities</p>
+        <main className="p-6 max-w-6xl mx-auto space-y-6">
+          <div className="pb-4 border-b border-border-color">
+            <h1 className="text-2xl font-semibold text-text-primary">Connections</h1>
+            <p className="text-sm text-text-tertiary mt-1">Connect to MCP servers to extend your agent capabilities</p>
           </div>
           <Card className="ui-card">
             <CardHeader>
@@ -387,7 +387,7 @@ function ConnectionsContent() {
                                 Paused
                               </Badge>
                             ) : (integrationStatus["zohobooks"] ?? "disconnected") === "pending" ? (
-                              <Badge className="bg-status-warning/15 text-status-warning border border-status-warning/30">
+                              <Badge className="bg-status-pending-light text-status-pending-dark border border-status-pending/30">
                                 <Loader2 className="h-3 w-3 mr-1 animate-spin" />
                                 Connecting
                               </Badge>
@@ -505,7 +505,7 @@ function ConnectionsContent() {
                                 Paused
                               </Badge>
                             ) : (integrationStatus["gmail"] ?? "disconnected") === "pending" ? (
-                              <Badge className="bg-status-warning/15 text-status-warning border border-status-warning/30">
+                              <Badge className="bg-status-pending-light text-status-pending-dark border border-status-pending/30">
                                 <Loader2 className="h-3 w-3 mr-1 animate-spin" />
                                 Connecting
                               </Badge>

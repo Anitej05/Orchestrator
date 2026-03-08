@@ -199,6 +199,15 @@ class OpenCodeClient:
         if self.password:
             env["OPENCODE_SERVER_PASSWORD"] = self.password
 
+        # OpenCode expects CEREBRAS_API_KEY (singular).
+        # Our .env stores CEREBRAS_API_KEYS (plural, comma-separated list).
+        # Extract the first key so OpenCode can authenticate with Cerebras.
+        if not env.get("CEREBRAS_API_KEY") and env.get("CEREBRAS_API_KEYS"):
+            first_key = env["CEREBRAS_API_KEYS"].split(",")[0].strip()
+            if first_key:
+                env["CEREBRAS_API_KEY"] = first_key
+                logger.info("Extracted CEREBRAS_API_KEY from CEREBRAS_API_KEYS for OpenCode subprocess")
+
         logger.info(f"Starting OpenCode server: {' '.join(cmd)}")
 
         try:
@@ -349,7 +358,7 @@ class OpenCodeClient:
     async def _send_prompt_rest(
         self, prompt: str, provider_id: str, model_id: str
     ) -> CodeTaskResult:
-        """Send prompt via REST API (POST /session/{id}/prompt)."""
+        """Send prompt via REST API (POST /session/{id}/message)."""
         # Create a session
         session = await self.create_session(title=f"Task: {prompt[:40]}")
 
@@ -362,7 +371,7 @@ class OpenCodeClient:
 
         resp = await self._request(
             "POST",
-            f"/session/{session.id}/prompt",
+            f"/session/{session.id}/message",
             json=body,
             timeout=OPENCODE_REQUEST_TIMEOUT,
         )
@@ -394,13 +403,17 @@ class OpenCodeClient:
         )
 
     async def _send_prompt_cli(self, prompt: str, model: str) -> CodeTaskResult:
-        """Send prompt via CLI (opencode run --attach)."""
+        """Send prompt via CLI (opencode run -m <model> <prompt>).
+
+        Note: --attach was removed in opencode-ai v1.2.x.
+        This fallback runs opencode directly without attaching to a server.
+        """
         if not self._opencode_bin:
             self._opencode_bin = self._find_opencode()
             if not self._opencode_bin:
                 return CodeTaskResult(success=False, error="OpenCode CLI not found")
 
-        cmd = [self._opencode_bin, "run", "--attach", self.base_url, "-m", model, prompt]
+        cmd = [self._opencode_bin, "run", "-m", model, prompt]
         logger.info(f"CLI prompt: {prompt[:80]}...")
 
         try:

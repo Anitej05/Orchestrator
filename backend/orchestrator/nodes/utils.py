@@ -101,7 +101,7 @@ def serialize_complex_object(obj):
                         data_content = d.pop('data')
                         d.update(data_content)
                     return d
-            except:
+            except Exception:
                 pass
 
         # For collections, recurse
@@ -229,9 +229,16 @@ def save_conversation_history(state: dict, config=None, *args, **kwargs):
         # Serialize messages if they are objects
         try:
             serialized_messages = messages_to_dict(messages)
-        except:
-            # Fallback for already serialized or mixed content
+        except (ValueError, TypeError, AttributeError) as deser_err:
+            # Fallback for already-serialized dicts or mixed content
+            logger.warning(
+                f"messages_to_dict failed ({deser_err}), "
+                "falling back to serialize_complex_object"
+            )
             serialized_messages = [serialize_complex_object(m) for m in messages]
+        except Exception as deser_err:
+            logger.error(f"Unexpected message serialization error: {deser_err}")
+            serialized_messages = []
         
         # Determine overall status
         status = "completed"

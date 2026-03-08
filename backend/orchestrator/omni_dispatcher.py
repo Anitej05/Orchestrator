@@ -132,20 +132,25 @@ def omni_route_condition(state: Dict[str, Any]) -> str:
     """
     Conditional routing for the OMNI-DISPATCHER graph.
     Routes: "hands" | "approval" | "finish" | "brain"
-    
+
     Routing is based on the Brain's decision.
     The Brain sees full action results (not CMS-compressed) so it can self-regulate.
     """
     # Check for pending approval first
     if state.get("pending_approval"):
         return "approval"
-    
+
+    # If final_response is already set the graph is done regardless of decision field.
+    # This guards against code paths that set final_response without updating decision.
+    if state.get("final_response"):
+        return "finish"
+
     decision = state.get("decision") or {}
     action_type = decision.get("action_type", "")
 
     if action_type == "finish":
         return "finish"
-    
+
     # Skip action should loop back to Brain for another thinking cycle
     if action_type == "skip":
         return "brain"

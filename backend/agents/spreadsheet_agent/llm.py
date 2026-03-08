@@ -166,7 +166,7 @@ OUTPUT FORMAT (JSON):
         system_prompt = f"""You are a data query analyzer. Analyze the user's query and the dataset schema to determine how to find relevant data.
 
 DATASET SCHEMA:
-{json.dumps(schema_info, indent=2)}
+{json.dumps(schema_info, indent=2, default=str)}
 
 Your task: Analyze the query and extract:
 1. Search terms: Specific values/keywords the user is looking for in the data

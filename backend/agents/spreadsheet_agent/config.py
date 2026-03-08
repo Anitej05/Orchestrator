@@ -8,7 +8,9 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).parent.parent.parent / ".env")
+# .env lives in backend/ — resolve the path so it works regardless of cwd
+_backend_dir = Path(__file__).resolve().parent.parent.parent
+load_dotenv(_backend_dir / ".env")
 
 # ============================================================================
 # PATHS

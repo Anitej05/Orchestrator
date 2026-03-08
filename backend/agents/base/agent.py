@@ -3,6 +3,7 @@ Base Agent
 Abstract base class for all intelligent agents.
 """
 
+import asyncio
 import logging
 import time
 from abc import ABC, abstractmethod
@@ -107,7 +108,18 @@ class BaseAgent(ABC):
         # Execution tracking
         self.execution_history: List[Dict] = []
 
+        # Per-request progress queue (set by /execute/stream endpoint)
+        self._progress_queue: Optional[asyncio.Queue] = None
+
         logger.info(f"BaseAgent initialized: {agent_name} ({agent_id})")
+
+    async def emit_progress(self, message: str) -> None:
+        """Push a progress message to the streaming queue (no-op if not streaming)."""
+        if self._progress_queue is not None:
+            try:
+                self._progress_queue.put_nowait(message)
+            except asyncio.QueueFull:
+                pass  # Drop silently if queue is full
 
     def register_capabilities(self):
         """Override in subclass to register agent capabilities."""
@@ -191,6 +203,12 @@ class BaseAgent(ABC):
                         params={**{"prompt": request.prompt}, **(request.payload or {})},
                         context=context,
                     )
+                    # Reset status to READY *before* inspecting cap_result.
+                    # This must happen regardless of success/failure so the agent
+                    # isn't stuck in BUSY if the capability raises or returns an error.
+                    # The caller (agent_manager) reads .status after this returns, so
+                    # it must reflect the idle state by the time we branch on success.
+                    self.status = AgentStatus.READY
                     if cap_result.success:
                         # Surface metadata (message, canvas_display, etc.) in AgentResponse
                         meta = cap_result.metadata or {}
@@ -429,6 +447,7 @@ class BaseAgent(ABC):
         skip_count = len(completed_results)
 
         # Step 1: LLM understands the task
+        await self.emit_progress("Analyzing task...")
         understanding = await self._llm_understand_task(request)
 
         context = ExecutionContext(
@@ -452,6 +471,7 @@ class BaseAgent(ABC):
             step_context = await self._get_step_context(request, context, results)
 
             # 2. Decide next action
+            await self.emit_progress(f"Deciding next action (step {step_num})...")
             plan_step = await self._llm_decide_next_react_step(request, understanding, step_context, results, step_num)
 
             # 3. Check for completion or escalation
@@ -473,9 +493,16 @@ class BaseAgent(ABC):
             )
 
             # Execution
+            cap_label = plan_step.capability_name.replace("_", " ")
+            await self.emit_progress(f"Running: {cap_label}...")
             result = await self._execute_step(step, context)
             results.append(result)
             context.set(f"step_{step_num}_result", result)
+
+            if result.success:
+                await self.emit_progress(f"Completed: {cap_label}")
+            else:
+                await self.emit_progress(f"Step failed: {cap_label} — retrying...")
 
             # 4. Update post step
             await self._update_state_post_step(step, result, context)
@@ -491,6 +518,7 @@ class BaseAgent(ABC):
                 )
 
         # Step 5: Synthesize
+        await self.emit_progress("Synthesizing answer...")
         final_response = await self._llm_synthesize_response(
             results=results, understanding=understanding, request=request
         )
@@ -797,11 +825,11 @@ Respond with structured JSON."""
 
         logger.debug(f"Executing step {step.step_number}: {step.capability_name}")
 
-        # Ensure thread_id is always present in params (LLM plans often omit it)
+        # Always enforce correct thread_id from request context.
+        # LLM plans often omit it OR pass wrong values ("", null, "default"),
+        # which would create a new empty session instead of using the loaded data.
         params = dict(step.parameters)
-        # Use context.thread_id if available, otherwise default to "default"
-        if "thread_id" not in params:
-            params["thread_id"] = context.thread_id if context.thread_id else "default"
+        params["thread_id"] = context.thread_id if context.thread_id else "default"
 
         # Execute capability
         result = await capability.execute(

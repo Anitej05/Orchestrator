@@ -65,6 +65,15 @@ class ConversationManager:
         self._system_tokens: int = 0
         self._last_summarize_turn: int = 0  # Cooldown tracker
         
+    def reset(self):
+        """Reset the conversation for a new task (keeps system prompt)."""
+        self.turns = []
+        self.summary_block = None
+        self.total_tokens = 0
+        self.data_inventory = {}
+        self._last_summarize_turn = 0
+        logger.info("🔄 ConversationManager reset for new task")
+
     def set_system_prompt(self, prompt: str):
         """Set the system prompt (called once at start)."""
         self.system_message = SystemMessage(content=prompt)

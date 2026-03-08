@@ -106,11 +106,11 @@ function AgentsContent() {
     <SidebarInset>
       <div className="min-h-screen bg-bg-page dark:bg-background text-text-primary">
         {/* Main Content */}
-        <main className="p-6">
+        <main className="p-6 max-w-6xl mx-auto">
           {/* Title Section */}
-          <div className="mb-6">
-            <h1 className="text-3xl font-bold text-brand-teal">Agent Directory</h1>
-            <p className="text-text-secondary mt-2">
+          <div className="mb-6 pb-4 border-b border-border-color">
+            <h1 className="text-2xl font-semibold text-text-primary">Agent Directory</h1>
+            <p className="text-sm text-text-tertiary mt-1">
               Browse and discover AI agents for your orchestration workflows.
             </p>
           </div>

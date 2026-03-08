@@ -95,6 +95,13 @@ class BrowserAgent(BaseAgent):
         return self.browser.get_active_page()
 
     async def _get_step_context(self, request: AgentRequest, context: ExecutionContext, previous_results: List[CapabilityResult]) -> Any:
+        # Reset LLM conversation and agent memory at the start of each new task
+        # so stale turns from previous tasks don't confuse the planner.
+        if not previous_results and self.llm:
+            self.llm.reset_for_new_task()
+            self.memory = AgentMemory(task=request.prompt[:120])
+            logger.info("🔄 Browser agent state reset for new task")
+
         page = self._get_page()
         if not page:
             # Auto-launch browser if not yet started
@@ -267,6 +274,13 @@ class BrowserAgent(BaseAgent):
 
             success = await self.browser.navigate(url, timeout=timeout * 1000)
 
+            if not success:
+                # Attempt page recovery and retry once before giving up
+                logger.info(f"🔄 Navigation to {url} failed — recovering page and retrying...")
+                recovered = await self.browser.recover_page()
+                if recovered:
+                    success = await self.browser.navigate(url, timeout=timeout * 1000)
+
             if success:
                 page_url = await self.browser.get_url()
                 title = await self.browser.get_title()
@@ -276,7 +290,7 @@ class BrowserAgent(BaseAgent):
                     "message": f"Navigated to {page_url}",
                 }
             else:
-                return {"success": False, "error": "Navigation failed"}
+                return {"success": False, "error": "Navigation failed after recovery attempt"}
         except Exception as e:
             logger.error(f"Navigation failed: {e}")
             return {"success": False, "error": f"Navigation failed: {str(e)}"}
@@ -438,7 +452,20 @@ class BrowserAgent(BaseAgent):
         script = params.get("script", "")
 
         if not script:
-            return {"success": False, "error": "Script is required"}
+            # Graceful fallback: LLM called execute_javascript without a script.
+            # Extract visible page text so the LLM can see the content it was looking for.
+            try:
+                page = self._get_page()
+                if page:
+                    page_text = await self.dom.extract_text(page)
+                    return {
+                        "success": True,
+                        "data": {"result": page_text[:3000]},
+                        "message": "No script provided — returned visible page text instead",
+                    }
+            except Exception:
+                pass
+            return {"success": False, "error": "Script is required — provide JavaScript code in the 'script' parameter"}
 
         # Sanitize LLM-generated scripts
         script = script.strip()

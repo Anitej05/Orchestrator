@@ -9,7 +9,7 @@
 "use client"
 
 import React from 'react';
-import { CheckCircle, XCircle, Loader2, AlertCircle } from "lucide-react";
+import { CheckCircle, XCircle, Clock } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 // Reuse the same icon mapping from PlanGraph for consistency!
@@ -51,10 +51,12 @@ interface ActionHistoryTimelineProps {
 export default function ActionHistoryTimeline({ history }: ActionHistoryTimelineProps) {
     if (!history || history.length === 0) {
         return (
-            <div className="p-8 text-center text-gray-500 dark:text-gray-400">
-                <div className="text-4xl mb-3">📝</div>
-                <div className="text-sm">No actions executed yet</div>
-                <div className="text-xs mt-1">Actions will appear here as they execute</div>
+            <div className="flex flex-col items-center justify-center h-full py-12 px-4 text-center">
+                <div className="w-16 h-16 rounded-2xl bg-brand-primary-light border-2 border-dashed border-brand-primary/30 flex items-center justify-center mb-4">
+                    <Clock className="w-7 h-7 text-brand-primary/60" />
+                </div>
+                <p className="text-sm font-semibold text-text-secondary">No actions yet</p>
+                <p className="text-xs text-text-tertiary mt-1 max-w-[160px] leading-relaxed">Agent actions will appear here as they execute</p>
             </div>
         );
     }
@@ -88,93 +90,80 @@ export default function ActionHistoryTimeline({ history }: ActionHistoryTimeline
                 const stableId = `${action.iteration}-${action.resource_id}-${action.action_type}-${action.execution_time_ms}`;
                 
                 return (
-                    <div 
+                    <div
                         key={stableId}
                         className={cn(
                             "relative pl-8 pb-4 border-l-2",
-                            action.success 
-                                ? "border-green-500 dark:border-green-600" 
-                                : "border-red-500 dark:border-red-600"
+                            action.success ? "border-status-success" : "border-status-error"
                         )}
                     >
                         {/* Timeline Dot with Agent Icon */}
-                        <div className="absolute left-0 top-0 -translate-x-1/2 w-10 h-10 rounded-full bg-white dark:bg-gray-900 border-2 flex items-center justify-center text-lg border-gray-200 dark:border-gray-700">
+                        <div className="absolute left-0 top-0 -translate-x-1/2 w-9 h-9 rounded-full bg-bg-card border-2 border-border-color flex items-center justify-center text-base shadow-sm">
                             {agentIcon}
                         </div>
-                        
+
                         {/* Action Card */}
                         <div className={cn(
-                            "ml-4 p-4 rounded-lg border shadow-sm",
-                            action.success 
-                                ? "bg-green-50 dark:bg-green-950/30 border-green-200 dark:border-green-900" 
-                                : "bg-red-50 dark:bg-red-950/30 border-red-200 dark:border-red-900"
+                            "ml-4 p-3 rounded-lg border shadow-sm",
+                            action.success
+                                ? "bg-status-success/[0.06] border-status-success/25"
+                                : "bg-status-error/[0.06] border-status-error/25"
                         )}>
                             {/* Header: Agent Name + Action Type + Status */}
                             <div className="flex items-start justify-between gap-2 mb-2">
                                 <div className="flex-1">
                                     <div className="flex items-center gap-2">
-                                        <span className="font-semibold text-sm text-gray-900 dark:text-gray-100">
+                                        <span className="font-semibold text-sm text-text-primary">
                                             {agentName}
                                         </span>
-                                        <span className="text-xs px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400">
+                                        <span className="text-xs px-2 py-0.5 rounded-md bg-bg-subtle text-text-tertiary border border-border-color-light">
                                             {action.action_type}
                                         </span>
                                     </div>
-                                    <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                                    <div className="text-xs text-text-tertiary mt-0.5">
                                         Iteration {action.iteration}
                                     </div>
                                 </div>
-                                
+
                                 {/* Status Icon */}
                                 <div className="flex-shrink-0">
                                     {action.success ? (
-                                        <CheckCircle className="w-5 h-5 text-green-600 dark:text-green-400" />
+                                        <CheckCircle className="w-4 h-4 text-status-success" />
                                     ) : (
-                                        <XCircle className="w-5 h-5 text-red-600 dark:text-red-400" />
+                                        <XCircle className="w-4 h-4 text-status-error" />
                                     )}
                                 </div>
                             </div>
-                            
+
                             {/* Instruction */}
                             <div className="mb-2">
-                                <div className="text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
-                                    Instruction:
-                                </div>
-                                <div className="text-sm text-gray-900 dark:text-gray-100 bg-white dark:bg-gray-900 p-2 rounded border border-gray-200 dark:border-gray-800">
+                                <div className="text-xs font-medium text-text-secondary mb-1">Instruction</div>
+                                <div className="text-sm text-text-primary bg-bg-subtle p-2 rounded-md border border-border-color">
                                     {parseInstruction(action.instruction)}
                                 </div>
                             </div>
-                            
+
                             {/* Result */}
                             <div className="mb-2">
-                                <div className="text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
-                                    Result:
-                                </div>
-                                <div className={cn(
-                                    "text-sm p-2 rounded border",
-                                    action.success 
-                                        ? "bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800 text-gray-900 dark:text-gray-100"
-                                        : "bg-red-100 dark:bg-red-950/50 border-red-300 dark:border-red-900 text-red-900 dark:text-red-100"
-                                )}>
+                                <div className="text-xs font-medium text-text-secondary mb-1">Result</div>
+                                <div className="text-sm text-text-primary bg-bg-subtle p-2 rounded-md border border-border-color">
                                     {parseResultSummary(action.result_summary, action.success)}
                                 </div>
                             </div>
-                            
+
                             {/* Error Details (if failed) */}
                             {!action.success && action.error && (
                                 <div className="mb-2">
-                                    <div className="text-xs font-medium text-red-700 dark:text-red-300 mb-1">
-                                        Error Details:
-                                    </div>
-                                    <div className="text-xs p-2 rounded bg-red-100 dark:bg-red-950/70 border border-red-300 dark:border-red-900 text-red-900 dark:text-red-100">
+                                    <div className="text-xs font-medium text-status-error mb-1">Error</div>
+                                    <div className="text-xs p-2 rounded-md bg-status-error/[0.06] border border-status-error/25 text-status-error">
                                         {action.error}
                                     </div>
                                 </div>
                             )}
-                            
+
                             {/* Execution Time */}
-                            <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-                                <span>⏱️</span>
+                            <div className="flex items-center gap-1.5 text-xs text-text-tertiary mt-1">
+                                <Clock className="w-3 h-3" />
                                 <span>{(action.execution_time_ms / 1000).toFixed(2)}s</span>
                             </div>
                         </div>

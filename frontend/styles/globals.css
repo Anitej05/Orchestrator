@@ -401,7 +401,10 @@
      MESSAGE BUBBLES - Conversation Panel
      ================================================================ */
   .ui-user-bubble {
-    @apply bg-brand-primary-light text-text-primary font-orbimesh-semibold text-orbimesh-user rounded-orbimesh-xl p-orbimesh-md max-w-orbimesh-message ml-auto;
+    @apply bg-brand-primary-light text-text-primary font-normal text-orbimesh-user p-orbimesh-md;
+    border-radius: 12px;
+    border: none;
+    outline: none;
   }
   
   .ui-agent-bubble {
@@ -493,7 +496,14 @@
      BUTTONS
      ================================================================ */
   .ui-button-primary {
-    @apply bg-brand-primary text-white hover:bg-brand-primary-hover font-orbimesh-medium px-ui-button-padding-x py-ui-button-padding-y rounded-orbimesh-sm transition-colors shadow-sm hover:shadow-md;
+    @apply bg-gradient-to-r from-brand-primary to-status-active text-white font-orbimesh-medium px-ui-button-padding-x py-ui-button-padding-y transition-all shadow-sm active:scale-[0.97] active:translate-y-0;
+    border-radius: 24px;
+  }
+
+  .ui-button-primary:hover {
+    background-image: linear-gradient(to right, var(--color-brand-primary-hover), var(--color-status-active));
+    transform: translateY(-1px);
+    box-shadow: 0 4px 16px rgba(44, 75, 168, 0.35);
   }
   
   .ui-button-secondary {
@@ -545,7 +555,21 @@
   }
   
   .ui-textarea {
-    @apply border border-border-color bg-bg-card text-text-secondary rounded-orbimesh-sm px-orbimesh-md py-orbimesh-sm focus:border-brand-primary focus:ring-2 focus:ring-brand-primary/20 transition-all min-h-[80px] resize-y;
+    @apply border border-border-color bg-bg-card text-text-secondary px-orbimesh-md py-orbimesh-sm transition-all min-h-[80px] resize-none;
+    border-radius: 14px;
+    outline: none;
+  }
+
+  .ui-textarea:focus {
+    border-color: rgba(44, 75, 168, 0.5);
+    box-shadow: none;
+    outline: none;
+  }
+
+  .dark .ui-textarea:focus {
+    border-color: rgba(99, 130, 220, 0.5);
+    box-shadow: none;
+    outline: none;
   }
 
   /* ================================================================
@@ -639,7 +663,7 @@
 
   /* Code - Inline and Blocks */
   .ui-markdown-code-inline {
-    @apply font-mono text-orbimesh-code bg-bg-page text-text-primary rounded-orbimesh-sm px-[6px] py-[2px] border border-border-color-light;
+    @apply font-mono text-orbimesh-code bg-bg-subtle text-text-primary rounded-orbimesh-sm px-[6px] py-[2px] border border-border-color;
   }
 
   .ui-markdown-code-block-wrapper {
@@ -647,15 +671,15 @@
   }
 
   .ui-markdown-code-language-label {
-    @apply bg-bg-card text-text-tertiary text-[11px] px-3 py-1.5 rounded-t-orbimesh-md border-b border-border-color font-mono;
+    @apply bg-bg-subtle text-text-tertiary text-[11px] px-3 py-1.5 rounded-t-orbimesh-md border border-b-0 border-border-color font-mono;
   }
 
   .ui-markdown-code-block {
-    @apply font-mono text-orbimesh-code bg-bg-page text-text-primary p-[12px] rounded-orbimesh-md border border-border-color overflow-x-auto leading-orbimesh-small;
+    @apply font-mono text-orbimesh-code bg-bg-subtle text-text-primary p-[12px] rounded-orbimesh-md border border-border-color overflow-x-auto leading-orbimesh-small;
   }
 
   .ui-markdown-code-block-with-label {
-    @apply rounded-t-none;
+    @apply rounded-t-none border-t-0;
   }
 
   /* Links */
@@ -715,6 +739,19 @@
   /* Images */
   .ui-markdown-img {
     @apply rounded-orbimesh-lg my-[16px] max-w-full h-auto shadow-md;
+  }
+
+  /* ================================================================
+     CHAT BACKGROUND - Subtle dot grid pattern
+     ================================================================ */
+  .chat-dot-bg {
+    background-image: radial-gradient(circle, rgba(0, 0, 0, 0.07) 1.5px, transparent 1.5px);
+    background-size: 22px 22px;
+  }
+
+  .dark .chat-dot-bg {
+    background-image: radial-gradient(circle, rgba(255, 255, 255, 0.04) 1.5px, transparent 1.5px);
+    background-size: 22px 22px;
   }
 }
 
