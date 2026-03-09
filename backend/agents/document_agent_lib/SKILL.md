@@ -1,8 +1,9 @@
 ---
-id: document_agent
-name: Document Agent
+id: document_agent_lib
+name: document_agent_lib
 port: 8050
-version: 2.0.0
+version: 1.0.0
+description: LLM-powered document processing for PDF, Word, and text files.
 ---
 
 # Document Agent

@@ -141,7 +141,7 @@ async def save_workflow(request: Request, thread_id: str, name: str, description
         "user_expectations": history.get("user_expectations"),
         "completed_tasks": history.get("completed_tasks", []),
         "final_response": history.get("final_response"),
-        "created_at": datetime.utcnow().isoformat()
+        "created_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
     }
     
     # Generate plan_graph from todo_list (new system) or task_plan (old system)
@@ -210,7 +210,7 @@ async def list_workflows(request: Request, db: Session = Depends(get_db)):
         
         next_scheduled_run = None
         if active_schedules:
-            next_schedule = min(active_schedules, key=lambda s: s.next_run_at or datetime.utcnow())
+            next_schedule = min(active_schedules, key=lambda s: s.next_run_at or datetime.now(timezone.utc).replace(tzinfo=None))
             if next_schedule.next_run_at:
                 next_scheduled_run = next_schedule.next_run_at.isoformat()
         
@@ -681,7 +681,7 @@ async def trigger_webhook(webhook_id: str, payload: Dict[str, Any], webhook_toke
         user_id=webhook.user_id,
         inputs=payload,
         status='queued',
-        started_at=datetime.utcnow()
+        started_at=datetime.now(timezone.utc).replace(tzinfo=None)
     )
     db.add(execution)
     db.commit()

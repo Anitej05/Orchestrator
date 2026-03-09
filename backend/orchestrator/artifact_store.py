@@ -31,7 +31,7 @@ import hashlib
 import threading
 import numpy as np
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -278,7 +278,7 @@ class ArtifactStore:
                 existing.source_objective = entry.source_objective or ""
                 existing.source_agent = entry.source_agent or ""
                 existing.file_path = entry.file_path
-                existing.last_used_at = datetime.utcnow()
+                existing.last_used_at = datetime.now(timezone.utc).replace(tzinfo=None)
             else:
                 db.add(ArtifactEmbedding(
                     user_id=self.user_id,
@@ -781,7 +781,7 @@ steps: {len(steps)}
                 tokens_used += len(content) // 4
 
                 # Update usage stats in DB
-                row.last_used_at = datetime.utcnow()
+                row.last_used_at = datetime.now(timezone.utc).replace(tzinfo=None)
                 row.use_count = (row.use_count or 0) + 1
 
                 if tokens_used >= max_tokens:

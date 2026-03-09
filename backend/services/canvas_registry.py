@@ -12,7 +12,7 @@ Replaces the single-slot canvas system with a full registry supporting:
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 from backend.schemas import CanvasEntry, CanvasRegistryState
 
@@ -64,7 +64,7 @@ class CanvasRegistry:
         Returns the created/updated CanvasEntry.
         """
         async with self._lock:
-            now = datetime.utcnow().isoformat()
+            now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
 
             # Auto-assign priority if not provided
             if priority is None:
@@ -129,7 +129,7 @@ class CanvasRegistry:
         Synchronous version of register() for use in non-async contexts
         (e.g., Hands._update_state_with_result which is sync).
         """
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
 
         if priority is None:
             if requires_confirmation:
@@ -182,7 +182,7 @@ class CanvasRegistry:
             entry_dict = entry.model_dump()
             entry_dict.update(updates)
             entry_dict["version"] = entry.version + 1
-            entry_dict["updated_at"] = datetime.utcnow().isoformat()
+            entry_dict["updated_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
 
             updated_entry = CanvasEntry(**entry_dict)
             self._canvases[canvas_id] = updated_entry
@@ -209,7 +209,7 @@ class CanvasRegistry:
             
             entry_dict = entry.model_dump()
             entry_dict["status"] = "dismissed"
-            entry_dict["updated_at"] = datetime.utcnow().isoformat()
+            entry_dict["updated_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
             self._canvases[canvas_id] = CanvasEntry(**entry_dict)
 
             # If dismissed canvas was active, auto-focus next
@@ -229,7 +229,7 @@ class CanvasRegistry:
 
             entry_dict = entry.model_dump()
             entry_dict["status"] = "archived"
-            entry_dict["updated_at"] = datetime.utcnow().isoformat()
+            entry_dict["updated_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
             self._canvases[canvas_id] = CanvasEntry(**entry_dict)
 
             if self._active_canvas_id == canvas_id:

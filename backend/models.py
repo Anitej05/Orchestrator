@@ -49,7 +49,7 @@ class Agent(Base):
     price_per_call_usd = Column(Float, nullable=False, default=0.0)
     status = Column(SAEnum(StatusEnum), nullable=False, default=StatusEnum.active, index=True)
     public_key_pem = Column(Text, nullable=True)  # Optional for MCP agents
-    created_at = Column(DateTime, default=datetime.utcnow)  # Track when the agent was created
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))  # Track when the agent was created
     
     # MCP Support
     agent_type = Column(String, default=AgentType.HTTP_REST.value)
@@ -64,8 +64,6 @@ class Agent(Base):
     # Format: [{"name": "api_key", "label": "API Key", "type": "password", "required": true, "description": "..."}]
 
     capability_vectors = relationship("AgentCapability", back_populates="agent", cascade="all, delete-orphan")
-    endpoints = relationship("AgentEndpoint", back_populates="agent", cascade="all, delete-orphan", lazy="joined")
-    credentials = relationship("AgentCredential", back_populates="agent", cascade="all, delete-orphan")
 
 class AgentCapability(Base):
     __tablename__ = "agent_capabilities"
@@ -77,32 +75,6 @@ class AgentCapability(Base):
 
     agent = relationship("Agent", back_populates="capability_vectors")
 
-class AgentEndpoint(Base):
-    __tablename__ = "agent_endpoints"
-
-    id = Column(Integer, primary_key=True, index=True)
-    agent_id = Column(String, ForeignKey("agents.id"), nullable=False)
-    endpoint = Column(String, nullable=False)
-    http_method = Column(String, nullable=False, default="POST")
-    description = Column(Text)
-    request_format = Column(String, nullable=True)  # 'json' or 'form', overrides agent default
-
-    agent = relationship("Agent", back_populates="endpoints")
-    parameters = relationship("EndpointParameter", back_populates="endpoint", cascade="all, delete-orphan")
-
-class EndpointParameter(Base):
-    __tablename__ = "endpoint_parameters"
-
-    id = Column(Integer, primary_key=True, index=True)
-    endpoint_id = Column(Integer, ForeignKey("agent_endpoints.id"), nullable=False)
-    name = Column(String, nullable=False)
-    description = Column(Text)
-    param_type = Column(String, nullable=False)
-    required = Column(Boolean, default=True)
-    default_value = Column(String)
-
-    endpoint = relationship("AgentEndpoint", back_populates="parameters")
-
 class UserThread(Base):
     __tablename__ = "user_threads"
 
@@ -110,8 +82,8 @@ class UserThread(Base):
     user_id = Column(String, nullable=False, index=True)
     thread_id = Column(String, nullable=False, unique=True, index=True)
     title = Column(String, nullable=True)  # Title for the conversation
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), onupdate=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
 
 class Workflow(Base):
     __tablename__ = "workflows"
@@ -125,8 +97,8 @@ class Workflow(Base):
     plan_graph = Column(JSON, nullable=True)  # Execution graph/visualization
     version = Column(Integer, default=1)
     status = Column(String, default='active')  # active, archived
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), onupdate=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
 
 class WorkflowExecution(Base):
     __tablename__ = "workflow_executions"
@@ -139,7 +111,7 @@ class WorkflowExecution(Base):
     inputs = Column(JSON)
     outputs = Column(JSON)
     error = Column(Text)
-    started_at = Column(DateTime, default=datetime.utcnow)
+    started_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
     completed_at = Column(DateTime)
 
 class WorkflowSchedule(Base):
@@ -155,7 +127,7 @@ class WorkflowSchedule(Base):
     conversation_thread_id = Column(String, nullable=True)  # Thread ID for scheduled execution results
     last_run_at = Column(DateTime, nullable=True)
     next_run_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
 
 class WorkflowWebhook(Base):
     __tablename__ = "workflow_webhooks"
@@ -166,38 +138,7 @@ class WorkflowWebhook(Base):
     user_id = Column(String, nullable=False, index=True)
     webhook_token = Column(String, nullable=False)
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-class AgentCredential(Base):
-    """
-    Stores user-specific authentication for an agent.
-    Links a User + Agent + Encrypted Keys.
-    Supports multiple credential fields per agent.
-    """
-    __tablename__ = "agent_credentials"
-
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False, index=True)  # Clerk User ID
-    agent_id = Column(String, ForeignKey("agents.id"), nullable=False)
-    
-    # New: Store all credentials as encrypted JSON
-    # Format: {"api_key": "encrypted_value", "connection_id": "encrypted_value", ...}
-    encrypted_credentials = Column(JSON, nullable=True, default=dict)
-    
-    # Legacy fields (kept for backward compatibility)
-    auth_type = Column(String, default=AuthType.NONE.value)
-    encrypted_access_token = Column(Text, nullable=True)
-    encrypted_refresh_token = Column(Text, nullable=True)
-    auth_header_name = Column(String, default="Authorization")
-    token_expires_at = Column(DateTime, nullable=True)
-    
-    # Metadata
-    is_active = Column(Boolean, default=True)  # Can be disabled without deleting
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
-    agent = relationship("Agent", back_populates="credentials")
-
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
 
 # ============================================================================
 # INTEGRATIONS / COMPOSIO OAUTH TABLES
@@ -207,40 +148,63 @@ class UserConnection(Base):
     """
     Stores OAuth connection metadata for external services (Composio).
     Links users to external app connections (Gmail, Zoho Books, etc.)
+    
+    Canonical schema aligned with MASTER_IMPLEMENTATION_PLAN_v2:
+    - internal_user_id  → local system user ID
+    - composio_entity_id → Composio's per-user entity ID
+    - app_name          → normalised app name (e.g. GMAIL)
+    - connection_id     → AES-256-GCM ciphertext; NEVER store plaintext
+    - status            → ACTIVE | PENDING | EXPIRED | REVOKED
     """
     __tablename__ = "user_connections"
     
     id = Column(String, primary_key=True)
-    user_id = Column(String(255), nullable=False, index=True)
-    app_slug = Column(String(100), nullable=False, index=True)  # 'gmail', 'zohobooks', etc.
-    connection_id = Column(Text, nullable=True)  # Encrypted Composio connection ID
-    status = Column(String(50), default='initiated')  # 'initiated', 'active', 'expired', 'error'
+    user_id = Column(String(255), nullable=False, index=True)           # legacy alias kept
+    internal_user_id = Column(String(255), nullable=True, index=True)   # canonical field
+    composio_entity_id = Column(String(255), nullable=True, index=True) # Composio entity
+    app_slug = Column(String(100), nullable=False, index=True)          # e.g. 'gmail'
+    app_name = Column(String(100), nullable=True)                       # normalised e.g. 'GMAIL'
+    connection_id = Column(Text, nullable=True)  # Encrypted ciphertext — decrypt only at execution boundary
+    status = Column(String(50), default='PENDING')  # ACTIVE | PENDING | EXPIRED | REVOKED
     
     # Connection metadata
-    app_metadata = Column(JSON, nullable=True)  # Store app-specific data
+    app_metadata = Column(JSON, nullable=True)  # App-specific data
     auth_timestamp = Column(DateTime, nullable=True)
     last_verified = Column(DateTime, nullable=True)
     
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), onupdate=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
 
 
-class ConnectionLog(Base):
+class IntegrationsSession(Base):
     """
-    Audit log for OAuth connection events.
-    Tracks auth attempts, refreshes, errors, etc.
+    Per-user, per-app session state for the Integrations Agent.
+    Persists context (e.g. folder_id, sheet_id) across conversations so the
+    agent can offer continuity: "Want to pick up where you left off?"
     """
-    __tablename__ = "connection_logs"
-    
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    __tablename__ = "integrations_sessions"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String(255), nullable=False, index=True)
-    app_slug = Column(String(100), nullable=False)
-    connection_id = Column(String(255), nullable=True)
-    event_type = Column(String(50), nullable=False)  # 'auth_started', 'auth_completed', 'refresh', etc.
-    status = Column(String(50), nullable=False)  # 'success', 'error'
-    error_message = Column(Text, nullable=True)
-    
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    app_slug = Column(String(100), nullable=False)          # e.g. 'gmail', 'googlesheets'
+    session_id = Column(String(255), nullable=False)        # Composio session ID
+    last_context = Column(JSON, nullable=True)              # Preserved context dict
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    last_used = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), onupdate=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+
+
+class ComposioEntity(Base):
+    """
+    Bidirectional mapping between local user IDs and Composio entity IDs.
+    Recommended by architecture: maintain the mapping in our own DB so we
+    can resolve it without a Composio round-trip.
+    """
+    __tablename__ = "composio_entities"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    internal_user_id = Column(String(255), unique=True, nullable=False, index=True)
+    composio_entity_id = Column(String(255), unique=True, nullable=False, index=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
 
 
 # ============================================================================
@@ -271,25 +235,8 @@ class ConversationPlan(Base):
     execution_time_ms = Column(Integer, nullable=True)
     error_message = Column(Text, nullable=True)
     
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-
-class ConversationSearch(Base):
-    """
-    Stores searchable content from conversations.
-    Enables full-text search across user's conversations.
-    """
-    __tablename__ = "conversation_search"
-    
-    id = Column(Integer, primary_key=True)
-    thread_id = Column(String(255), ForeignKey("user_threads.thread_id"), nullable=False, index=True)
-    user_id = Column(String(255), nullable=False, index=True)
-    message_index = Column(Integer, nullable=False)
-    message_content = Column(Text, nullable=False)
-    message_role = Column(String(50), nullable=True)  # 'user', 'assistant', 'agent'
-    message_timestamp = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), onupdate=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
 
 
 class ConversationTag(Base):
@@ -305,7 +252,7 @@ class ConversationTag(Base):
     tag_color = Column(String(7), default='#808080')  # Hex color
     tag_description = Column(Text, nullable=True)
     is_system = Column(Boolean, default=False)  # System vs user-created
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
 
 
 class ConversationTagAssignment(Base):
@@ -317,32 +264,7 @@ class ConversationTagAssignment(Base):
     id = Column(Integer, primary_key=True)
     thread_id = Column(String(255), ForeignKey("user_threads.thread_id"), nullable=False, index=True)
     tag_id = Column(String(255), ForeignKey("conversation_tags.tag_id"), nullable=False, index=True)
-    assigned_at = Column(DateTime, default=datetime.utcnow)
-
-
-class ConversationAnalytics(Base):
-    """
-    Analytics metrics for each conversation.
-    Tracks performance, success rates, and usage patterns.
-    """
-    __tablename__ = "conversation_analytics"
-    
-    id = Column(Integer, primary_key=True)
-    thread_id = Column(String(255), ForeignKey("user_threads.thread_id"), nullable=False, unique=True, index=True)
-    user_id = Column(String(255), nullable=False, index=True)
-    
-    # Metrics
-    total_messages = Column(Integer, default=0)
-    total_agents_used = Column(Integer, default=0)
-    plan_attempts = Column(Integer, default=0)
-    successful_plans = Column(Integer, default=0)
-    total_execution_time_ms = Column(Integer, default=0)
-    failed_executions = Column(Integer, default=0)
-    avg_response_time_ms = Column(Float, default=0)
-    conversation_duration_seconds = Column(Integer, default=0)
-    
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    assigned_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
 
 
 class AgentUsageAnalytics(Base):
@@ -363,8 +285,8 @@ class AgentUsageAnalytics(Base):
     avg_execution_time_ms = Column(Float, default=0)
     last_used_at = Column(DateTime, nullable=True)
     
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), onupdate=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
 
 
 class UserActivitySummary(Base):
@@ -388,8 +310,8 @@ class UserActivitySummary(Base):
     agents_used = Column(Integer, default=0)
     api_calls_made = Column(Integer, default=0)
     
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), onupdate=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
 
 
 class WorkflowExecutionAnalytics(Base):
@@ -412,8 +334,8 @@ class WorkflowExecutionAnalytics(Base):
     error_type = Column(String(100), nullable=True)
     success_rate = Column(Float, default=0)  # Percentage (0-100)
     
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), onupdate=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
 
 class LLMTelemetryRecord(Base):
     """
@@ -422,7 +344,7 @@ class LLMTelemetryRecord(Base):
     __tablename__ = "llm_telemetry_records"
     
     id = Column(Integer, primary_key=True, index=True)
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), index=True)
     user_id = Column(String(255), nullable=True, index=True)
     thread_id = Column(String(255), nullable=True, index=True)
     agent_name = Column(String(100), nullable=True, index=True)
@@ -444,7 +366,7 @@ class AgentExecutionRecord(Base):
     __tablename__ = "agent_execution_records"
     
     id = Column(Integer, primary_key=True, index=True)
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), index=True)
     user_id = Column(String(255), nullable=True, index=True)
     thread_id = Column(String(255), nullable=True, index=True)
     agent_name = Column(String(100), nullable=False, index=True)
@@ -459,7 +381,7 @@ class ToolExecutionRecord(Base):
     __tablename__ = "tool_execution_records"
     
     id = Column(Integer, primary_key=True, index=True)
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), index=True)
     user_id = Column(String(255), nullable=True, index=True)
     thread_id = Column(String(255), nullable=True, index=True)
     tool_name = Column(String(100), nullable=False, index=True)
@@ -487,8 +409,8 @@ class ArtifactEmbedding(Base):
     source_agent = Column(String(255), nullable=True)
     file_path = Column(Text, nullable=True)
     use_count = Column(Integer, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    last_used_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    last_used_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
 
 
 # ============================================================================

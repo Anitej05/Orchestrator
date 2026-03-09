@@ -6,7 +6,7 @@ Handles email search, send, reply, draft management, etc.
 """
 
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
 
 from backend.agents.base import BaseAgent, AgentServices, AgentConfig
@@ -84,8 +84,13 @@ class GmailAgent(BaseAgent):
         self._services.clear()
         logger.info("Gmail Agent resources cleaned up")
     
-    def _get_service(self, user_id: str = "default") -> GmailService:
-        """Get or create Gmail service for user."""
+    def _get_service(self, user_id: str) -> GmailService:
+        """
+        Get or create Gmail service for user.
+        
+        Args:
+            user_id: User ID from ExecutionContext (required)
+        """
         if user_id not in self._services:
             self._services[user_id] = GmailService(user_id)
         return self._services[user_id]
@@ -115,23 +120,15 @@ class GmailAgent(BaseAgent):
                 required=False,
                 default=10,
             ),
-            ParameterSchema(
-                name="user_id",
-                type="string",
-                description="User ID",
-                required=False,
-                default="default",
-            ),
         ]
     )
-    async def search_emails(self, context: ExecutionContext) -> AgentResponse:
+    async def search_emails(self, params: Dict[str, Any], context: ExecutionContext) -> AgentResponse:
         """Search emails capability."""
         try:
-            params = context.metadata or {}
-            user_id = params.get("user_id", "default")
+            # Get user_id from ExecutionContext (set by BaseAgent)
+            user_id = context.user_id
             
-            # Extract query from context or params
-            # The orchestrator passes it in context.metadata
+            # Extract query from params
             query = params.get("query") or params.get("prompt", "")
             
             if not query:
@@ -192,20 +189,13 @@ class GmailAgent(BaseAgent):
                 description="BCC recipients",
                 required=False,
             ),
-            ParameterSchema(
-                name="user_id",
-                type="string",
-                description="User ID",
-                required=False,
-                default="default",
-            ),
         ]
     )
-    async def send_email(self, context: ExecutionContext) -> AgentResponse:
+    async def send_email(self, params: Dict[str, Any], context: ExecutionContext) -> AgentResponse:
         """Send email capability."""
         try:
-            params = context.metadata or {}
-            user_id = params.get("user_id", "default")
+            # Get user_id from ExecutionContext (set by BaseAgent)
+            user_id = context.user_id
             
             to = params.get("to")
             subject = params.get("subject")
@@ -243,31 +233,36 @@ class GmailAgent(BaseAgent):
             ParameterSchema(
                 name="message_id",
                 type="string",
-                description="Message ID to reply to",
+                description="Message ID of the email to reply to",
                 required=True,
             ),
             ParameterSchema(
                 name="body",
                 type="string",
-                description="Reply body",
+                description="Reply body text",
                 required=True,
             ),
             ParameterSchema(
-                name="user_id",
+                name="to",
                 type="string",
-                description="User ID",
+                description=(
+                    "Recipient email address for the reply. "
+                    "If omitted, defaults to empty string — caller should populate "
+                    "from the original sender to avoid a Composio error."
+                ),
                 required=False,
-                default="default",
+                default="",
             ),
         ]
     )
-    async def reply_email(self, context: ExecutionContext) -> AgentResponse:
+    async def reply_email(self, params: Dict[str, Any], context: ExecutionContext) -> AgentResponse:
         """Reply to email capability."""
         try:
-            params = context.metadata or {}
+            # Get user_id from ExecutionContext (set by BaseAgent)
+            user_id = context.user_id
+            
             message_id = params.get("message_id")
             body = params.get("body")
-            user_id = params.get("user_id", "default")
             
             if not message_id or not body:
                 return AgentResponse.error(
@@ -275,11 +270,24 @@ class GmailAgent(BaseAgent):
                 )
             
             service = self._get_service(user_id)
+
+            # Auto-fetch sender when `to` is not provided
+            to = (params.get("to") or "").strip()
+            if not to:
+                import re as _re
+                email_result = await service.get_email(message_id=message_id)
+                if email_result.get("success"):
+                    msg = email_result.get("message", {})
+                    raw_sender = msg.get("sender") or msg.get("from", "")
+                    m = _re.search(r"<([^>]+)>", str(raw_sender))
+                    to = m.group(1) if m else str(raw_sender).strip()
+                    logger.info(f"[reply_email] Auto-resolved sender: {to}")
+
             result = await service.reply_to_email(
                 thread_id=message_id,
                 message_id=message_id,
                 body=body,
-                to=params.get("to", "")
+                to=to
             )
             
             if result.get("success"):
@@ -303,21 +311,15 @@ class GmailAgent(BaseAgent):
                 description="Message ID",
                 required=True,
             ),
-            ParameterSchema(
-                name="user_id",
-                type="string",
-                description="User ID",
-                required=False,
-                default="default",
-            ),
         ]
     )
-    async def get_email(self, context: ExecutionContext) -> AgentResponse:
+    async def get_email(self, params: Dict[str, Any], context: ExecutionContext) -> AgentResponse:
         """Get email capability."""
         try:
-            params = context.metadata or {}
+            # Get user_id from ExecutionContext (set by BaseAgent)
+            user_id = context.user_id
+            
             message_id = params.get("message_id")
-            user_id = params.get("user_id", "default")
             
             if not message_id:
                 return AgentResponse.error("Missing message_id parameter")
@@ -335,4 +337,119 @@ class GmailAgent(BaseAgent):
         except Exception as e:
             logger.error(f"[get_email] Error: {e}")
             return AgentResponse.error(f"Failed to retrieve email: {str(e)}")
+
+    @capability(
+        name="summarize_emails",
+        description="Summarize one or more emails using AI. Pass a list of message IDs to get a concise summary of each.",
+        parameters=[
+            ParameterSchema(
+                name="message_ids",
+                type="array",
+                description="List of message IDs to summarize",
+                required=True,
+            ),
+        ]
+    )
+    async def summarize_emails(self, params: Dict[str, Any], context: ExecutionContext) -> AgentResponse:
+        """Summarize emails using AI."""
+        try:
+            user_id = context.user_id
+            message_ids: List[str] = params.get("message_ids", [])
+            if not message_ids:
+                return AgentResponse.error("message_ids parameter is required")
+
+            service = self._get_service(user_id)
+            result = await service.summarize_emails(message_ids)
+
+            if result.get("success"):
+                return AgentResponse.success(
+                    result={
+                        "summary": result.get("summary", ""),
+                        "emails_summarized": result.get("emails_summarized", 0),
+                    },
+                    summary=f"Summarized {result.get('emails_summarized', 0)} emails"
+                )
+            return AgentResponse.error(result.get("error", "Summarization failed"))
+        except Exception as e:
+            logger.error(f"[summarize_emails] Error: {e}")
+            return AgentResponse.error(f"Summarization failed: {str(e)}")
+
+    @capability(
+        name="draft_smart_reply",
+        description="Use AI to draft a reply to an email and save it as a Gmail draft.",
+        parameters=[
+            ParameterSchema(
+                name="message_id",
+                type="string",
+                description="Message ID of the email to reply to",
+                required=True,
+            ),
+            ParameterSchema(
+                name="instructions",
+                type="string",
+                description="Instructions for tone/content of the AI-drafted reply (optional)",
+                required=False,
+            ),
+        ]
+    )
+    async def draft_smart_reply(self, params: Dict[str, Any], context: ExecutionContext) -> AgentResponse:
+        """Draft a smart AI reply and save as Gmail draft."""
+        try:
+            user_id = context.user_id
+            message_id = params.get("message_id")
+            if not message_id:
+                return AgentResponse.error("message_id parameter is required")
+
+            service = self._get_service(user_id)
+            result = await service.draft_smart_reply(
+                message_id=message_id,
+                user_instructions=params.get("instructions"),
+            )
+
+            if result.get("success"):
+                return AgentResponse.success(
+                    result=result.get("draft", {}),
+                    summary="AI draft reply created and saved to Gmail Drafts"
+                )
+            return AgentResponse.error(result.get("error", "Draft creation failed"))
+        except Exception as e:
+            logger.error(f"[draft_smart_reply] Error: {e}")
+            return AgentResponse.error(f"Draft creation failed: {str(e)}")
+
+    @capability(
+        name="extract_action_items",
+        description="Extract to-dos and action items from emails using AI.",
+        parameters=[
+            ParameterSchema(
+                name="message_ids",
+                type="array",
+                description="List of message IDs to analyze for action items",
+                required=True,
+            ),
+        ]
+    )
+    async def extract_action_items(self, params: Dict[str, Any], context: ExecutionContext) -> AgentResponse:
+        """Extract action items from emails using AI."""
+        try:
+            user_id = context.user_id
+            message_ids: List[str] = params.get("message_ids", [])
+            if not message_ids:
+                return AgentResponse.error("message_ids parameter is required")
+
+            service = self._get_service(user_id)
+            result = await service.extract_action_items(message_ids)
+
+            if result.get("success"):
+                return AgentResponse.success(
+                    result={
+                        "action_items": result.get("action_items", []),
+                        "by_email": result.get("by_email", {}),
+                        "total": result.get("total_actions", 0),
+                    },
+                    summary=f"Found {result.get('total_actions', 0)} action items"
+                )
+            return AgentResponse.error(result.get("error", "Extraction failed"))
+        except Exception as e:
+            logger.error(f"[extract_action_items] Error: {e}")
+            return AgentResponse.error(f"Extraction failed: {str(e)}")
 

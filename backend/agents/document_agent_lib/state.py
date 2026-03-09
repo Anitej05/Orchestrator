@@ -7,7 +7,7 @@ Optimized for cloud deployment with minimal persistent storage.
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, asdict
@@ -86,7 +86,7 @@ class DialogueStateManager:
         record = self.get(task_id)
         if record:
             return record
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
         record = DialogueRecord(
             task_id=task_id,
             agent_id=agent_id,
@@ -127,7 +127,7 @@ class DialogueStateManager:
         if not record:
             return
         record.status = status
-        record.updated_at = datetime.utcnow().isoformat()
+        record.updated_at = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
         self.save(record)
 
     def set_question(self, task_id: str, question: Dict[str, Any]) -> None:
@@ -136,7 +136,7 @@ class DialogueStateManager:
             return
         record.status = "paused"
         record.current_question = question
-        record.updated_at = datetime.utcnow().isoformat()
+        record.updated_at = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
         self.save(record)
 
     def update_context(self, task_id: str, patch: Dict[str, Any]) -> None:
@@ -144,7 +144,7 @@ class DialogueStateManager:
         if not record:
             return
         record.context = {**(record.context or {}), **(patch or {})}
-        record.updated_at = datetime.utcnow().isoformat()
+        record.updated_at = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
         self.save(record)
 
     def clear(self, task_id: str) -> None:
@@ -253,7 +253,7 @@ class DocumentSessionManager:
                     return session
 
             # Create new session
-            now = datetime.utcnow().isoformat()
+            now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
             session = DocumentSession(
                 document_path=document_path,
                 document_name=document_name,
@@ -280,7 +280,7 @@ class DocumentSessionManager:
             if session_id in self._active_sessions:
                 session = self._active_sessions[session_id]
                 session.edit_history.append(action)
-                session.last_accessed = datetime.utcnow().isoformat()
+                session.last_accessed = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
                 self._save_session(session)
                 logger.info(f"Added edit action: {action.action_type}")
 
@@ -306,14 +306,14 @@ class DocumentSessionManager:
                 session.conversation_context.append({
                     'role': 'user',
                     'content': user_message,
-                    'timestamp': datetime.utcnow().isoformat()
+                    'timestamp': datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
                 })
                 session.conversation_context.append({
                     'role': 'assistant',
                     'content': agent_response,
-                    'timestamp': datetime.utcnow().isoformat()
+                    'timestamp': datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
                 })
-                session.last_accessed = datetime.utcnow().isoformat()
+                session.last_accessed = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
                 self._save_session(session)
                 logger.info(f"Added conversation turn to session {session_id[:8]}")
 

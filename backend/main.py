@@ -51,6 +51,7 @@ from routers import connect_router
 from utils.mega_logger import setup_mega_logger, mega_log_block
 from routers import credentials_router
 from routers import integrations_router
+from routers import webhooks_router
 
 # --- Lifespan Event Handler (replaces deprecated @app.on_event) ---
 # Global task reference for health checker
@@ -90,15 +91,6 @@ async def lifespan(app: FastAPI):
         logger.info("✅ Database tables ready")
     except Exception as e:
         logger.error(f"❌ Failed to create tables: {str(e)}", exc_info=True)
-        
-    # Download missing models
-    try:
-        logger.info("⬇️ Checking and downloading required AI models...")
-        from utils.model_downloader import download_models_if_missing
-        download_models_if_missing()
-        logger.info("✅ AI models check completed")
-    except Exception as e:
-        logger.error(f"❌ Failed to download models: {str(e)}", exc_info=True)
     
     # Sync agent definitions from SKILL.md files (UAP) to database
     try:
@@ -246,6 +238,7 @@ app.add_middleware(
 app.include_router(connect_router.router)
 app.include_router(credentials_router.router)
 app.include_router(integrations_router.router)
+app.include_router(webhooks_router.router)  # Composio OAuth webhook events
 
 # Import and include content management router
 from routers import content_router
@@ -1087,7 +1080,7 @@ async def execute_orchestration(
     stream_callback=None,
     task_event_callback=None,
     planning_mode: bool = False,
-    owner: Optional[Dict[str, str]] = None
+    owner: Optional[Any] = None
 ):
     """
     Unified orchestration logic that correctly persists and merges file context
@@ -1097,6 +1090,13 @@ async def execute_orchestration(
         owner: Dict with user ownership info, e.g. {"user_id": "...", "email": "..."}.
                Only provided on initial conversation start or when explicitly passed.
     """
+    normalized_owner = owner
+    if isinstance(owner, str):
+        normalized_owner = {"user_id": owner}
+    elif owner and not isinstance(owner, dict):
+        normalized_owner = None
+
+    owner = normalized_owner
     logger.info(f"Starting orchestration for thread_id: {thread_id}, planning_mode: {planning_mode}, owner={owner}")
     
     # PHASE 5: Debug uploaded files state at entry
@@ -1196,6 +1196,11 @@ async def execute_orchestration(
         # initial_state["pending_user_input"] = False # REMOVED: Must preserve this flag from history for resume logic to work
         initial_state["question_for_user"] = None
         initial_state["parse_retry_count"] = 0
+        
+        # Extract user_id from owner if available
+        if owner and isinstance(owner, dict) and owner.get("user_id"):
+            initial_state["user_id"] = owner["user_id"]
+            initial_state["owner_id"] = owner["user_id"]  # Add both for compatibility
         
         # Handle plan approval responses
         needs_approval = initial_state.get("needs_approval", False)
@@ -1353,6 +1358,11 @@ async def execute_orchestration(
             "pending_approval": current_conversation.get("pending_approval", False),
             "pending_decision": current_conversation.get("pending_decision"),
         }
+        
+        # Extract user_id from owner if available
+        if owner and isinstance(owner, dict) and owner.get("user_id"):
+            initial_state["user_id"] = owner["user_id"]
+            initial_state["owner_id"] = owner["user_id"]  # Add both for compatibility
     
     elif current_conversation:
         # Resuming without a new prompt or user response (e.g., status check)
@@ -1411,6 +1421,11 @@ async def execute_orchestration(
             "pending_approval": False,
             "pending_decision": None,
         }
+        
+        # Extract user_id from owner if available
+        if owner and isinstance(owner, dict) and owner.get("user_id"):
+            initial_state["user_id"] = owner["user_id"]
+            initial_state["owner_id"] = owner["user_id"]  # Add both for compatibility
         
         # --- NEW THREAD DB PERSISTENCE ---
         if owner and owner.get("user_id"):
@@ -1572,7 +1587,7 @@ async def execute_orchestration(
                         existing_thread = _db.query(UserThread).filter_by(thread_id=thread_id).first()
                         if existing_thread:
                             # Update updated_at so conversation moves to top of list
-                            existing_thread.updated_at = datetime.utcnow()
+                            existing_thread.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
                             logger.info(f"Updated UserThread timestamp for {thread_id} in execute_orchestration")
                         else:
                             # Generate a title from the original prompt
@@ -1602,12 +1617,7 @@ async def execute_orchestration(
         except Exception as e:
             logger.error(f"Failed to save conversation history for {thread_id}: {e}")
 
-        # Ensure a plan file is saved for every conversation
-        try:
-            from backend.orchestrator.graph import save_plan_to_file
-            save_plan_to_file({**final_state, "thread_id": thread_id})
-        except Exception as e:
-            logger.error(f"Failed to save plan file for thread {thread_id}: {e}")
+        # Plan file saving is handled by orchestrator checkpointer
 
         logger.info(f"Orchestration completed for thread_id: {thread_id}")
 
@@ -2345,7 +2355,7 @@ async def save_workflow(request: Request, thread_id: str, name: str, description
         "user_expectations": history.get("user_expectations"),
         "completed_tasks": history.get("completed_tasks", []),
         "final_response": history.get("final_response"),
-        "created_at": datetime.utcnow().isoformat()
+        "created_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
     }
     
     # Generate plan_graph structure from task_plan for visualization
@@ -2413,7 +2423,7 @@ async def list_workflows(request: Request, db: Session = Depends(get_db)):
         # Get next scheduled run time
         next_scheduled_run = None
         if active_schedules:
-            next_schedule = min(active_schedules, key=lambda s: s.next_run_at or datetime.utcnow())
+            next_schedule = min(active_schedules, key=lambda s: s.next_run_at or datetime.now(timezone.utc).replace(tzinfo=None))
             if next_schedule.next_run_at:
                 next_scheduled_run = next_schedule.next_run_at.isoformat()
         
@@ -2984,7 +2994,7 @@ async def trigger_webhook(webhook_id: str, payload: Dict[str, Any], webhook_toke
         user_id=webhook.user_id,
         inputs=payload,
         status='queued',
-        started_at=datetime.utcnow()
+        started_at=datetime.now(timezone.utc).replace(tzinfo=None)
     )
     db.add(execution)
     db.commit()
@@ -3161,7 +3171,11 @@ async def websocket_chat(websocket: WebSocket):
             user_response = data.get("user_response")  # For continuing conversations
             files_data = data.get("files", [])  # Get files from WebSocket message
             # Pass through owner info if frontend sends Clerk-verified identity
-            owner = data.get("owner")  # Expected shape: { user_id, email }
+            owner = data.get("owner")  # Expected shape: { user_id, email } or legacy string user_id
+            if isinstance(owner, str):
+                owner = {"user_id": owner}
+            elif owner and not isinstance(owner, dict):
+                owner = None
             planning_mode = data.get("planning_mode", False)  # Get planning mode flag
 
             logger.info(f"WebSocket received message with thread_id: {thread_id}, planning_mode: {planning_mode}")
@@ -3192,7 +3206,7 @@ async def websocket_chat(websocket: WebSocket):
                     try:
                         user_thread = db.query(UserThread).filter_by(thread_id=thread_id).first()
                         if user_thread:
-                            owner = user_thread.user_id
+                            owner = {"user_id": user_thread.user_id}
                             logger.info(f"Retrieved owner from database for existing thread {thread_id}: {owner}")
                         else:
                             logger.warning(f"No user-thread relationship found for thread {thread_id}")
@@ -3746,7 +3760,7 @@ async def get_dashboard_metrics(request: Request, db: Session = Depends(get_db))
         agent_count = db.query(Agent).filter(Agent.status == StatusEnum.active).count()
         
         # Time periods
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         week_start = now - timedelta(days=7)
         month_start = now - timedelta(days=30)
@@ -3993,12 +4007,28 @@ def cleanup_agents():
     global agent_processes
     for process in agent_processes:
         try:
-            process.terminate()
-            process.wait(timeout=5)
-        except:
+            if process.poll() is not None:
+                continue
+
+            if platform.system() == "Windows":
+                try:
+                    subprocess.run(
+                        ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        check=False,
+                    )
+                except Exception:
+                    process.terminate()
+                    process.wait(timeout=5)
+            else:
+                process.terminate()
+                process.wait(timeout=5)
+        except Exception:
             try:
                 process.kill()
-            except:
+            except Exception:
                 pass
     agent_processes = []
     agent_status.clear()
@@ -4166,13 +4196,24 @@ if __name__ == "__main__":
     import uvicorn
     # Use 0.0.0.0 to bind to all interfaces (fixes IPv4/IPv6 issues)
     # Add ws_ping_interval and ws_ping_timeout for better WebSocket stability
-    uvicorn.run(
-        "main:app", 
-        host="0.0.0.0",  # Changed from 127.0.0.1 to support both IPv4 and IPv6
-        port=8000, 
-        reload=True,
-        reload_includes=["*.py", "orchestrator/*.py", "agents/*.py", "services/*.py", "routers/*.py"],  # Watch all Python files
-        ws_ping_interval=20,  # Send ping every 20 seconds
-        ws_ping_timeout=20,   # Wait 20 seconds for pong
-        log_level="info"
-    )
+    reload_enabled = os.getenv("UVICORN_RELOAD", "0").strip().lower() in {"1", "true", "yes", "on"}
+    if reload_enabled:
+        logger.info("Starting backend with auto-reload enabled (UVICORN_RELOAD=1)")
+    else:
+        logger.info("Starting backend with auto-reload disabled (set UVICORN_RELOAD=1 to enable)")
+
+    try:
+        uvicorn.run(
+            "main:app",
+            host="0.0.0.0",  # Changed from 127.0.0.1 to support both IPv4 and IPv6
+            port=8000,
+            reload=reload_enabled,
+            reload_includes=["*.py", "orchestrator/*.py", "agents/*.py", "services/*.py", "routers/*.py"],  # Watch all Python files
+            ws_ping_interval=20,  # Send ping every 20 seconds
+            ws_ping_timeout=20,   # Wait 20 seconds for pong
+            log_level="info"
+        )
+    except KeyboardInterrupt:
+        logger.info("Keyboard interrupt received. Shutting down backend...")
+    finally:
+        cleanup_agents()

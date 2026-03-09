@@ -7,7 +7,7 @@ Extracted from main.py to improve code organization and maintainability.
 import os
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, Depends, Request
 from sqlalchemy.orm import Session
 
@@ -35,7 +35,7 @@ async def get_dashboard_metrics(request: Request, db: Session = Depends(get_db))
         agent_count = db.query(Agent).filter(Agent.status == StatusEnum.active).count()
         
         # Time periods
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         week_start = now - timedelta(days=7)
         month_start = now - timedelta(days=30)

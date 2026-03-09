@@ -15,6 +15,7 @@ import { API_BASE_URL } from '@/lib/config';
 import { useTTS } from '@/hooks/useTTS';
 import { useSpeechToText } from '@/hooks/useSpeechToText';
 import { AudioWaveSVG } from '@/components/ui/audio-wave-animation';
+import { EmailResultCard } from '@/components/email-result-card';
 
 interface InteractiveChatInterfaceProps {
   onWorkflowComplete?: (result: ProcessResponse) => void;
@@ -478,8 +479,17 @@ export function InteractiveChatInterface({
                         ))}
                       </div>
                     )}
-                    {/* View in Canvas button for messages with canvas content or data */}
-                    {message.has_canvas && (message.canvas_content || (message as any).canvas_data) && message.canvas_type && (
+                    {/* Inline email results for email canvas type */}
+                    {message.has_canvas && (message as any).canvas_type === 'email' && (message as any).canvas_data && (
+                      <EmailResultCard
+                        messages={((message as any).canvas_data as any)?.messages || []}
+                        totalCount={((message as any).canvas_data as any)?.total_count}
+                        query={((message as any).canvas_data as any)?.query}
+                        className="mt-3"
+                      />
+                    )}
+                    {/* View in Canvas button for messages with canvas content or data (non-email) */}
+                    {message.has_canvas && (message.canvas_content || (message as any).canvas_data) && message.canvas_type && message.canvas_type !== 'email' && (
                       <Button
                         variant="ui-secondary"
                         size="sm"

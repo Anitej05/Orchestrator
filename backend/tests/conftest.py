@@ -27,19 +27,23 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 # ── Agent default ports (mirrors agent_manager.py PortPool) ───────────────────
 AGENT_PORTS = {
-    "spreadsheet_agent": 9000,
-    "mail_agent":        8040,
-    "document_agent":    8050,
-    "universal_agent":   8070,
-    "zoho_books":        8060,
+    "spreadsheet_agent":  9000,
+    "mail_agent":         8040,
+    "document_agent":     8050,
+    "universal_agent":    8070,
+    "zoho_books":         8060,
+    "gmail_agent":        8003,
+    "integrations_agent": 8075,
 }
 
 AGENT_MODULE_MAP = {
-    "spreadsheet_agent": "agents.spreadsheet_agent",
-    "mail_agent":        "agents.mail_agent",
-    "document_agent":    "agents.document_agent_lib",
-    "universal_agent":   "agents.universal_agent",
-    "zoho_books":        "agents.zoho_books",
+    "spreadsheet_agent":  "agents.spreadsheet_agent",
+    "mail_agent":         "agents.mail_agent",
+    "document_agent":     "agents.document_agent_lib",
+    "universal_agent":    "agents.universal_agent",
+    "zoho_books":         "agents.zoho_books",
+    "gmail_agent":        "agents.gmail_agent",
+    "integrations_agent": "agents.integrations_agent",
 }
 
 

@@ -884,7 +884,7 @@ class DocumentAgent:
 
             # Update session with action
             edit_action = StateEditAction(
-                timestamp=__import__('datetime').datetime.utcnow().isoformat(),
+                timestamp=__import__('datetime').datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
                 action_type='edit_document',
                 instruction=request.instruction,
                 parameters={'actions': len(results)},

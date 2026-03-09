@@ -91,9 +91,13 @@ class LLMClient:
             logger.warning("[LLM] Empty or invalid query detected")
             return "label:inbox"
 
-        prompt = f"""You are a Gmail search query generator. Convert the user's request into a valid Gmail search query.
+        system_prompt = """You are an expert Gmail search assistant with deep knowledge of Gmail operators and search patterns.
+You understand user intent and can interpret nuanced, complex requests into effective search queries.
+You balance precision with flexibility - creating queries that capture the user's actual need."""
 
-USER REQUEST: "{vague_query}"
+        user_prompt = f"""Convert this request into an optimal Gmail search query:
+
+"{vague_query}"
 
 === GMAIL SEARCH OPERATORS ===
 - from:email@example.com, to:email@example.com, cc:name, bcc:name
@@ -104,17 +108,17 @@ USER REQUEST: "{vague_query}"
 - in:inbox, in:spam, in:trash, label:work
 - size:5000000, larger:10M, smaller:1M
 
-=== RULES ===
+=== GUIDELINES ===
 1. NO "body:" operator - use plain keywords for body search
 2. OR must be UPPERCASE
-3. Use quotes for exact phrases
-4. Prefer simple queries
-5. Return ONLY the query string, NO explanation
+3. Use quotes for exact phrases when needed
+4. Combine operators intelligently for complex queries
+5. Return the optimized query
 
 EXAMPLES:
 - "Demo Request" → subject:"Demo Request"
-- "emails from John" → from:John
-- "unread emails" → is:unread
+- "emails from John about project" → from:John project
+- "unread emails with PDFs" → is:unread has:attachment filename:pdf
 
 Query:"""
 
@@ -122,8 +126,11 @@ Query:"""
             try:
                 response = await provider['client'].chat.completions.create(
                     model=provider['model'],
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.2
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=0.5
                 )
                 
                 content = response.choices[0].message.content
@@ -180,8 +187,12 @@ Query:"""
 
     async def _base_summarize(self, text: str, is_leaf: bool = True) -> str:
         """Internal summarization logic"""
-        prompt = f"""Summarize this text. Focus on facts, actions, and key identifiers.
-{'Use 3-5 high-density bullet points.' if is_leaf else 'Synthesize the following partial summaries into a final coherent report.'}
+        system_prompt = """You are an expert email summarizer. You understand context, tone, and business communication.
+You extract key information while preserving important nuances, relationships, and implicit meanings.
+You recognize urgency, sentiment, and actionable insights."""
+
+        user_prompt = f"""Summarize this email content with intelligence and context awareness.
+{'Create 3-7 insightful bullet points highlighting key information, actions, and context.' if is_leaf else 'Synthesize these partial summaries into a coherent, comprehensive report.'}
 
 Text:
 \"\"\"
@@ -195,8 +206,11 @@ Summary:"""
                 model = provider.get('summary_model', provider['model'])
                 response = await provider['client'].chat.completions.create(
                     model=model,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.3
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=0.5
                 )
                 
                 content = response.choices[0].message.content
@@ -225,7 +239,12 @@ Summary:"""
         else:
             thread_context = thread_content
             
-        prompt = f"""You are a professional Email Agent. Draft a reply to this email.
+        system_prompt = """You are an expert email communication assistant.
+You understand business etiquette, tone matching, and context-appropriate responses.
+You craft clear, professional emails that address the user's intent while maintaining appropriate style.
+You recognize urgency, formality levels, and relationship dynamics in email threads."""
+
+        user_prompt = f"""Draft a thoughtful reply to this email thread.
 
 Intent: "{intent}"
 Sender: {sender_name}
@@ -238,8 +257,9 @@ Thread Context:
 INSTRUCTIONS:
 1. Write the email body in CLEAN HTML format (use <p>, <br>, <ul>, <li>, <strong>).
 2. Do NOT use Markdown.
-3. Be professional but natural.
-4. Return JSON with fields: "subject", "body" (HTML string), "is_html" (boolean true).
+3. Match the tone and formality of the thread.
+4. Address the intent completely and thoughtfully.
+5. Return JSON with fields: "subject", "body" (HTML string), "is_html" (boolean true).
 
 JSON:"""
 
@@ -247,7 +267,10 @@ JSON:"""
             try:
                 response = await provider['client'].chat.completions.create(
                     model=provider['model'],
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
                     temperature=0.7,
                     response_format={"type": "json_object"}
                 )
@@ -291,15 +314,31 @@ JSON:"""
 
     async def _base_extract_actions(self, text: str) -> List[Dict[str, Any]]:
         """Internal extraction logic"""
-        prompt = f"""Extract action items from these emails.
-Focus on: deadlines, requests, meetings, and delegated tasks.
+        system_prompt = """You are an expert at analyzing emails and identifying actionable items.
+You understand implicit requests, deadlines, and commitments in business communication.
+You recognize urgency levels and can infer priorities from context and language.
+You distinguish between FYI information and actual action requirements."""
+
+        user_prompt = f"""Analyze these emails and extract all action items with context and nuance.
+
+Focus on:
+- Explicit and implicit deadlines
+- Direct and indirect requests
+- Meeting invitations and scheduling
+- Delegated or self-assigned tasks
+- Follow-ups and commitments
 
 Emails:
 \"\"\"
 {text}
 \"\"\"
 
-Return JSON with "actions" list. Each: description, type (todo/meeting/deadline), priority (high/medium/low), source (subject).
+Return JSON with "actions" list. Each action should include:
+- description: Clear action description
+- type: todo/meeting/deadline/followup
+- priority: high/medium/low (inferred from context)
+- source: Email subject or sender
+- context: Brief note on why this is important (optional)
 
 JSON:"""
 
@@ -307,8 +346,11 @@ JSON:"""
             try:
                 response = await provider['client'].chat.completions.create(
                     model=provider.get('summary_model', provider['model']),
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.1,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=0.4,
                     response_format={"type": "json_object"}
                 )
                 content = response.choices[0].message.content

@@ -37,7 +37,7 @@ import logging
 import mimetypes
 import threading
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, List, Callable
 from dataclasses import dataclass, field, asdict
 from enum import Enum
@@ -115,9 +115,9 @@ class AgentFileMetadata:
     status: FileStatus = FileStatus.ACTIVE
     
     # Timestamps
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
-    updated_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
-    accessed_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None).isoformat())
+    updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None).isoformat())
+    accessed_at: str = field(default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None).isoformat())
     expires_at: Optional[str] = None
     
     # Usage tracking
@@ -456,7 +456,7 @@ class AgentFileManager:
             ttl = ttl_hours if ttl_hours is not None else self.default_ttl_hours
             expires_at = None
             if ttl:
-                expires_at = (datetime.utcnow() + timedelta(hours=ttl)).isoformat()
+                expires_at = (datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=ttl)).isoformat()
             
             # Create metadata
             metadata = AgentFileMetadata(
@@ -527,13 +527,13 @@ class AgentFileManager:
             if metadata and metadata.status == FileStatus.ACTIVE:
                 # Check expiration
                 if metadata.expires_at:
-                    if datetime.utcnow() > datetime.fromisoformat(metadata.expires_at):
+                    if datetime.now(timezone.utc).replace(tzinfo=None) > datetime.fromisoformat(metadata.expires_at):
                         metadata.status = FileStatus.EXPIRED
                         self._save_registry()
                         return None
                 
                 # Update access stats
-                metadata.accessed_at = datetime.utcnow().isoformat()
+                metadata.accessed_at = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
                 metadata.access_count += 1
                 self._save_registry()
                 
@@ -582,7 +582,7 @@ class AgentFileManager:
         
         # Check expiration
         if metadata.expires_at:
-            if datetime.utcnow() > datetime.fromisoformat(metadata.expires_at):
+            if datetime.now(timezone.utc).replace(tzinfo=None) > datetime.fromisoformat(metadata.expires_at):
                 metadata.status = FileStatus.EXPIRED
                 self._save_registry()
                 return False
@@ -676,7 +676,7 @@ class AgentFileManager:
             
             metadata.is_processed = True
             metadata.processing_result = processing_result
-            metadata.updated_at = datetime.utcnow().isoformat()
+            metadata.updated_at = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
             self._save_registry()
             
             return True
@@ -694,7 +694,7 @@ class AgentFileManager:
     
     def cleanup_expired(self) -> int:
         """Remove expired files"""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         expired = []
         
         for file_id, metadata in self._registry.items():
@@ -715,7 +715,7 @@ class AgentFileManager:
     
     def cleanup_old(self, max_age_hours: int = 24) -> int:
         """Remove files older than specified hours"""
-        cutoff = datetime.utcnow() - timedelta(hours=max_age_hours)
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=max_age_hours)
         old_files = []
         
         for file_id, metadata in self._registry.items():

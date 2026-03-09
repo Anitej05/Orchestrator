@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc
 
 from database import get_db
-from models import UserThread, ConversationSearch
+from models import UserThread
 
 router = APIRouter(tags=["Conversations"])
 logger = logging.getLogger("uvicorn.error")
@@ -289,32 +289,6 @@ async def get_conversation_history_auth(thread_id: str, request: Request, db: Se
         # If neither JSON nor in-memory, try to recover from database
         logger.warning(f"⚠️  Conversation {thread_id} not found in JSON or memory")
         logger.warning(f"   → JSON file missing: {history_path}")
-        
-        # Try to recover messages from ConversationSearch table
-        search_records = db.query(ConversationSearch).filter_by(
-            thread_id=thread_id,
-            user_id=user_id
-        ).order_by(ConversationSearch.message_index).all()
-        
-        if search_records:
-            logger.info(f"✅ Found {len(search_records)} messages in ConversationSearch table for {thread_id}")
-            # Reconstruct messages from database
-            recovered_messages = []
-            for record in search_records:
-                recovered_messages.append({
-                    "role": record.message_role or "assistant",
-                    "content": record.message_content,
-                    "timestamp": record.message_timestamp.isoformat() if record.message_timestamp else None
-                })
-            return {
-                "thread_id": thread_id,
-                "title": user_thread.title or "Untitled Conversation",
-                "status": "recovered_from_database",
-                "messages": recovered_messages,
-                "created_at": user_thread.created_at.isoformat() if user_thread.created_at else None,
-                "updated_at": user_thread.updated_at.isoformat() if user_thread.updated_at else None,
-                "note": "Conversation history recovered from database. It may be incomplete."
-            }
         
         # No recovery possible - return minimal state
         logger.warning(f"   → No messages found in database either")

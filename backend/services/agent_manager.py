@@ -31,6 +31,8 @@ AGENT_EXECUTE_TIMEOUTS = {
     "mail": 120.0,
     "mail_agent": 120.0,
     "zoho_books": 180.0,
+    "integrations": 120.0,
+    "integrations_agent": 120.0,
     "coding": 600.0,
     "coding_agent": 600.0,
 }
@@ -78,6 +80,8 @@ class PortPool:
         "document": 8050,
         "document_agent": 8050,
         "zoho_books": 8060,
+        "integrations": 8075,
+        "integrations_agent": 8075,
         "universal": 8070,
         "universal_agent": 8070,
         "coding": 8080,
@@ -154,6 +158,8 @@ class ProcessManager:
         "document": "agents.document_agent_lib",
         "document_agent": "agents.document_agent_lib",
         "zoho_books": "agents.zoho_books",
+        "integrations": "agents.integrations_agent",
+        "integrations_agent": "agents.integrations_agent",
         "universal": "agents.universal_agent",
         "universal_agent": "agents.universal_agent",
         "coding": "agents.coding_agent",
@@ -570,6 +576,7 @@ class AgentManager:
             "payload": task.get("payload", {}),
             "task_id": task.get("task_id"),
             "thread_id": task.get("thread_id"),
+            "user_id": task.get("user_id"),
         }
 
         timeout = _get_agent_timeout(agent_id)
