@@ -32,7 +32,10 @@ class ComposioToolManager:
             raise ValueError(f"User {user_id} not connected to Gmail")
         
         self.user_id = user_id
-        self.connection_id = connection.connection_id
+        # connection is a plain dict returned by get_connection_for_agent, not an object.
+        # Use dict key access. connection_id isn't used in execute_action (which uses
+        # entity_id instead) but we store it for logging/debugging purposes.
+        self.connection_id = connection["connection_id"]
         self.composio = Composio(api_key=os.getenv("COMPOSIO_API_KEY"))
         
         logger.info(f"[ComposioToolManager] Initialized for user {user_id}")
@@ -56,11 +59,17 @@ class ComposioToolManager:
             logger.info(f"[ComposioToolManager] Executing {tool_slug} for user {self.user_id}")
             logger.debug(f"[ComposioToolManager] Parameters: {json.dumps(parameters, indent=2)}")
             
-            # Execute tool with user connection
-            result = self.composio.execute_action(
-                action=Action[tool_slug],
+            # Execute tool with user connection.
+            # Composio SDK ≥0.7 API changes:
+            #   - execute_action() removed → use composio.actions.execute()
+            #   - Action subscript (Action["slug"]) removed → use getattr(Action, "slug")
+            #   - connected_account must be passed explicitly (entity_id alone not enough)
+            action_enum = getattr(Action, tool_slug)
+            result = self.composio.actions.execute(
+                action=action_enum,
                 params=parameters,
-                entity_id=self.user_id  # Use user_id instead of connection_id for multi-account support
+                entity_id=self.user_id,           # entity_id = Clerk user_id
+                connected_account=self.connection_id  # Composio connection UUID
             )
             
             logger.info(f"[ComposioToolManager] {tool_slug} completed successfully")

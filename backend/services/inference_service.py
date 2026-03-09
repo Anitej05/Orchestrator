@@ -268,7 +268,14 @@ class InferenceService:
                     # Update Metrics
                     actual_model_name = getattr(llm, 'model', getattr(llm, 'model_name', model_name or 'unknown'))
                     self._update_metrics(current_provider, actual_model_name, in_tokens, out_tokens, duration_ms, is_error=False, telemetry_metadata=telemetry_metadata)
-                    logger.info(f"✅ Inference Success: {current_provider} ({duration_ms/1000:.2f}s) - {in_tokens}in/{out_tokens}out")
+                    _tid = (telemetry_metadata or {}).get("thread_id", "")
+                    _op  = (telemetry_metadata or {}).get("operation_type", "inference")
+                    logger.info(
+                        f"✅ Inference Success: {current_provider} ({duration_ms/1000:.2f}s) "
+                        f"- {in_tokens}in/{out_tokens}out tokens"
+                        + (f" | thread={_tid[:8]}" if _tid else "")
+                        + (f" | op={_op}" if _op else "")
+                    )
                     
                     # Post-processing
                     if strip_think_tags:
@@ -377,7 +384,15 @@ class InferenceService:
                             actual_model_name = getattr(llm, 'model', getattr(llm, 'model_name', model_name or 'unknown'))
                             out_tokens = len(str(result)) // 4
                             in_tokens = input_char_len // 4
-                            self._update_metrics(current_provider, actual_model_name, in_tokens, out_tokens, duration_ms, is_error=False, telemetry_metadata=telemetry_metadata) 
+                            self._update_metrics(current_provider, actual_model_name, in_tokens, out_tokens, duration_ms, is_error=False, telemetry_metadata=telemetry_metadata)
+                            _tid = (telemetry_metadata or {}).get("thread_id", "")
+                            _op  = (telemetry_metadata or {}).get("operation_type", "structured")
+                            logger.info(
+                                f"✅ Structured Success: {current_provider} ({duration_ms/1000:.2f}s) "
+                                f"- {in_tokens}in/{out_tokens}out tokens"
+                                + (f" | thread={_tid[:8]}" if _tid else "")
+                                + (f" | op={_op}" if _op else "")
+                            )
                             return result
                         else:
                             logger.warning(f"⚠️ {current_provider} returned None for structured output, trying fallback...")
@@ -421,7 +436,15 @@ class InferenceService:
                     
                     actual_model_name = getattr(llm, 'model', getattr(llm, 'model_name', model_name or 'unknown'))
                     self._update_metrics(current_provider, actual_model_name, in_tokens, out_tokens, duration_ms, is_error=False, telemetry_metadata=telemetry_metadata)
-                    
+                    _tid = (telemetry_metadata or {}).get("thread_id", "")
+                    _op  = (telemetry_metadata or {}).get("operation_type", "structured_fallback")
+                    logger.info(
+                        f"✅ Structured Fallback Success: {current_provider} ({duration_ms/1000:.2f}s) "
+                        f"- {in_tokens}in/{out_tokens}out tokens"
+                        + (f" | thread={_tid[:8]}" if _tid else "")
+                        + (f" | op={_op}" if _op else "")
+                    )
+
                     # Parse JSON
                     import json
                     try:

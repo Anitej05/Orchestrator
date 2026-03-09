@@ -120,9 +120,10 @@ function ConnectionsContent() {
         let pollCount = 0
         const maxPolls = 20
         
+        let alreadyConnected = false  // guard: fire toast only once
         pollIntervalRef.current = setInterval(async () => {
           pollCount++
-          
+
           try {
             await authFetch(`${API_BASE}/api/integrations/sync/${user.id}`, {
               method: "POST"
@@ -130,23 +131,24 @@ function ConnectionsContent() {
           } catch (syncError) {
             console.error("Sync failed:", syncError)
           }
-          
+
           const statusResponse = await authFetch(`${API_BASE}/api/integrations/status/${user.id}/${appSlug}`)
           if (statusResponse.ok) {
             const statusData = await statusResponse.json()
-            
-            if (statusData.connected_apps && statusData.connected_apps.includes(appSlug)) {
+
+            if (!alreadyConnected && statusData.connected_apps && statusData.connected_apps.includes(appSlug)) {
+              alreadyConnected = true
               if (pollIntervalRef.current) clearInterval(pollIntervalRef.current)
               if (popup && !popup.closed) popup.close()
-              
+
               setIntegrationStatus(prev => ({...prev, [appSlug]: "connected"}))
               setIntegrationLoading(prev => ({...prev, [appSlug]: false}))
-              
+
               toast({
                 title: "Connected!",
                 description: `Successfully connected to ${appSlug}`
               })
-              
+
               loadIntegrationStatus()
               return
             }
@@ -411,9 +413,7 @@ function ConnectionsContent() {
                           {troubleshootingHint["zohobooks"] && (
                             <p className="text-xs text-blue-600 dark:text-blue-400">💡 {troubleshootingHint["zohobooks"]}</p>
                           )}
-                          {integrationConnectionId["zohobooks"] && (
-                            <p className="text-xs text-text-secondary">ID: {integrationConnectionId["zohobooks"]}</p>
-                          )}
+                          {/* Connection ID intentionally hidden from UI */}
                         </div>
                       </div>
                       <div className="flex gap-2">
@@ -529,9 +529,7 @@ function ConnectionsContent() {
                           {troubleshootingHint["gmail"] && (
                             <p className="text-xs text-blue-600 dark:text-blue-400">💡 {troubleshootingHint["gmail"]}</p>
                           )}
-                          {integrationConnectionId["gmail"] && (
-                            <p className="text-xs text-text-secondary">ID: {integrationConnectionId["gmail"]}</p>
-                          )}
+                          {/* Connection ID intentionally hidden from UI */}
                         </div>
                       </div>
                       <div className="flex gap-2">

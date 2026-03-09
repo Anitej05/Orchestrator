@@ -1354,6 +1354,12 @@ async def execute_orchestration(
             "current_phase_id": None,
             "pending_approval": current_conversation.get("pending_approval", False),
             "pending_decision": current_conversation.get("pending_decision"),
+            # If the user approved an action via the REST endpoint, carry the approved
+            # decision + flag forward so the brain skips re-planning and hands executes
+            # it directly. Without this, brain re-plans from scratch and picks a
+            # different agent, causing an infinite approval loop.
+            "pending_action_approval": current_conversation.get("pending_action_approval", False),
+            "decision": current_conversation.get("decision") if current_conversation.get("pending_action_approval") else None,
         }
     
     elif current_conversation:
@@ -1412,8 +1418,9 @@ async def execute_orchestration(
             "current_phase_id": None,
             "pending_approval": False,
             "pending_decision": None,
+            "pending_action_approval": False,
         }
-        
+
         # --- NEW THREAD DB PERSISTENCE ---
         if owner and owner.get("user_id"):
             try:

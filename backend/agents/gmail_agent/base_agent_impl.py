@@ -124,10 +124,12 @@ class GmailAgent(BaseAgent):
             ),
         ]
     )
-    async def search_emails(self, context: ExecutionContext) -> AgentResponse:
+    async def search_emails(self, params: Dict[str, Any], context: ExecutionContext) -> AgentResponse:
         """Search emails capability."""
         try:
-            params = context.metadata or {}
+            # params is passed directly by Capability.execute(); fall back to context.metadata
+            if not params:
+                params = context.metadata or {}
             user_id = params.get("user_id", "default")
             
             # Extract query from context or params
@@ -201,10 +203,11 @@ class GmailAgent(BaseAgent):
             ),
         ]
     )
-    async def send_email(self, context: ExecutionContext) -> AgentResponse:
+    async def send_email(self, params: Dict[str, Any], context: ExecutionContext) -> AgentResponse:
         """Send email capability."""
         try:
-            params = context.metadata or {}
+            if not params:
+                params = context.metadata or {}
             user_id = params.get("user_id", "default")
             
             to = params.get("to")
@@ -261,10 +264,11 @@ class GmailAgent(BaseAgent):
             ),
         ]
     )
-    async def reply_email(self, context: ExecutionContext) -> AgentResponse:
+    async def reply_email(self, params: Dict[str, Any], context: ExecutionContext) -> AgentResponse:
         """Reply to email capability."""
         try:
-            params = context.metadata or {}
+            if not params:
+                params = context.metadata or {}
             message_id = params.get("message_id")
             body = params.get("body")
             user_id = params.get("user_id", "default")
@@ -312,10 +316,11 @@ class GmailAgent(BaseAgent):
             ),
         ]
     )
-    async def get_email(self, context: ExecutionContext) -> AgentResponse:
+    async def get_email(self, params: Dict[str, Any], context: ExecutionContext) -> AgentResponse:
         """Get email capability."""
         try:
-            params = context.metadata or {}
+            if not params:
+                params = context.metadata or {}
             message_id = params.get("message_id")
             user_id = params.get("user_id", "default")
             

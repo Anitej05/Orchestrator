@@ -170,10 +170,13 @@ def approve_pending_action(state: Dict[str, Any]) -> Dict[str, Any]:
     
     pending_decision = state.get("pending_decision", {})
     logger.info(f"✅ User APPROVED action: {pending_decision.get('approval_reason', 'Unknown')}")
-    
+
     return {
         "pending_approval": False,
         "pending_decision": None,
+        # Signal to the brain that approval was just given — it must skip re-planning
+        # and let hands execute this decision directly on the next cycle.
+        "pending_action_approval": True,
         # Re-apply decision but without requires_approval so it executes
         "decision": {
             **pending_decision,

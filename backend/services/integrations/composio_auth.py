@@ -153,26 +153,21 @@ class ComposioAuthManager:
             logger.warning("Connection ID appears to be unencrypted (or wrong key). Using as-is.")
             return encrypted_id
     
-    def _get_auth_config_id(self, app_slug: str) -> str:
+    def _get_auth_config_id(self, app_slug: str) -> Optional[str]:
         """
         Map app slug to auth config ID from environment.
-        
-        Auth configs must be created in Composio dashboard first:
-        https://app.composio.dev → Integrations → Apps → Configure
-        
-        Args:
-            app_slug: App identifier (e.g., 'gmail', 'zohobooks')
-                Note: Use 'zohobooks' (normalized). 'zoho_books' is deprecated.
-        
-        Returns:
-            Auth config ID (e.g., 'ac_gmail_123')
-        
-        Raises:
-            ValueError: If auth config not found for app
+
+        Returns the auth config ID if the env var is set, or None if it isn't.
+        None is acceptable — _get_integration_id will fall back to Composio's
+        integrations API to resolve the integration UUID, so you don't need to
+        create a custom auth config just to connect a standard app like Gmail.
+
+        If you DO have a custom auth config (e.g. your own OAuth client), set:
+            COMPOSIO_AUTH_CONFIG_GMAIL=ac_gmail_xxx  in backend/.env
         """
         # Normalize app slug
         normalized_slug = app_slug.lower()
-        
+
         # Handle deprecated 'zoho_books' slug
         if normalized_slug == "zoho_books":
             logger.warning(
@@ -181,7 +176,7 @@ class ComposioAuthManager:
                 "Support for 'zoho_books' will be removed in a future version."
             )
             normalized_slug = "zohobooks"
-        
+
         # Map common app slugs to environment variables
         auth_config_map = {
             "gmail": os.getenv("COMPOSIO_AUTH_CONFIG_GMAIL"),
@@ -190,17 +185,18 @@ class ComposioAuthManager:
             "slack": os.getenv("COMPOSIO_AUTH_CONFIG_SLACK"),
             "notion": os.getenv("COMPOSIO_AUTH_CONFIG_NOTION"),
         }
-        
+
         auth_config_id = auth_config_map.get(normalized_slug)
-        
+
         if not auth_config_id:
-            raise ValueError(
-                f"No auth config found for '{app_slug}'. "
-                f"Please create auth config in Composio dashboard and add "
-                f"COMPOSIO_AUTH_CONFIG_{normalized_slug.upper()} to .env file. "
-                f"Supported apps: {', '.join(auth_config_map.keys())}"
+            # No custom auth config — that's fine. _get_integration_id will
+            # look up the integration directly via Composio's API.
+            logger.info(
+                f"COMPOSIO_AUTH_CONFIG_{normalized_slug.upper()} not set; "
+                f"will resolve integration via Composio API instead."
             )
-        
+            return None
+
         return auth_config_id
 
     def _get_integration_id(self, app_slug: str, auth_config_id: Optional[str] = None) -> str:
@@ -271,7 +267,8 @@ class ComposioAuthManager:
             5. Backend polls check_connection_status() to verify
         """
         try:
-            # Get auth config ID for this app (may be used as fallback)
+            # auth_config_id is optional — None means "use Composio's default integration".
+            # _get_integration_id will find the integration via Composio's API either way.
             auth_config_id = self._get_auth_config_id(app_slug)
             integration_id = self._get_integration_id(app_slug, auth_config_id)
             
@@ -324,24 +321,20 @@ class ComposioAuthManager:
                 "poll_status_url": f"/api/integrations/status/{user_id}/{app_slug}",
             }
         
-        except ValueError as e:
-            # Auth config not found
-            logger.error(f"Auth config error: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-                "app_slug": app_slug,
-            }
         except Exception as e:
             error_msg = self._format_composio_error(e)
             logger.error(f"Auth flow failed for {app_slug}: {error_msg}", exc_info=True)
             self._log_connection_event(user_id, app_slug, "initiated", "failed", error_msg)
-            
+
             return {
                 "success": False,
                 "error": error_msg,
                 "app_slug": app_slug,
-                "troubleshooting": "Check that auth config is created in Composio dashboard and COMPOSIO_AUTH_CONFIG_{APP} is set in .env"
+                "troubleshooting": (
+                    f"Composio could not find an integration for '{app_slug}'. "
+                    f"Optionally set COMPOSIO_AUTH_CONFIG_{app_slug.upper()} in .env "
+                    f"if you have a custom OAuth app configured in the Composio dashboard."
+                ),
             }
     
     def check_connection_status(
@@ -940,7 +933,7 @@ class ComposioAuthManager:
                     try:
                         # Quick status check
                         decrypted_id = self._decrypt_connection_id(connection.connection_id)
-                        conn_check = self._composio.connected_accounts.get(connected_account_id=decrypted_id)
+                        conn_check = self._composio.connected_accounts.get(connection_id=decrypted_id)
                         
                         # Update last_verified timestamp
                         connection.last_verified = datetime.utcnow()
@@ -960,7 +953,7 @@ class ComposioAuthManager:
                     "connection_id": decrypted_id,
                     "app_slug": connection.app_slug,
                     "status": connection.status,
-                    "connected_at": connection.connected_at,
+                    "connected_at": connection.created_at,
                     "metadata": connection.app_metadata
                 }
                 

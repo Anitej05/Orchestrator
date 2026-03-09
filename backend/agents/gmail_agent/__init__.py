@@ -48,14 +48,17 @@ except Exception as e:
     logger.error(f"Failed to initialize BaseAgent Gmail implementation: {e}")
     import traceback
     traceback.print_exc()
-    
+
+    # Capture error before `e` goes out of scope (Python 3 clears it after except block)
+    _init_error = str(e)
+
     # Create minimal health-check app as fallback
     from fastapi import FastAPI
     app = FastAPI(title="Gmail Agent (error)")
-    
+
     @app.get("/health")
     async def health():
-        return {"status": "unhealthy", "error": "Failed to load Gmail Agent", "details": str(e)}
+        return {"status": "unhealthy", "error": "Failed to load Gmail Agent", "details": _init_error}
 
 
 # ============================================================================

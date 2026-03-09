@@ -155,6 +155,15 @@ class Brain:
         """
         Main reasoning entry point with full context awareness.
         """
+        # Short-circuit: user just approved a pending action via the REST endpoint.
+        # The approved decision is already in state["decision"] with requires_approval=False.
+        # Skip all re-planning and return immediately so omni_dispatcher routes to hands.
+        # Without this, brain re-runs think() from scratch, picks a different agent, and
+        # creates a new approval request → infinite approval loop.
+        if state.get("pending_action_approval"):
+            logger.info("🧠 Brain: pending_action_approval=True — skipping re-plan, executing approved decision directly")
+            return {"pending_action_approval": False}
+
         todo_list = state.get("todo_list", [])
         memory = state.get("memory", {})
         insights = state.get("insights", {})
@@ -184,6 +193,28 @@ class Brain:
         # Check iteration limit — the ONLY hard safety net
         if iteration_count >= self.max_iterations:
             return self._force_finish_with_error(state, "Maximum iterations reached")
+
+        # Code-level consecutive-failure escape: if the same agent has failed 4+ times
+        # in a row, stop re-planning and force finish with a descriptive error.
+        # This prevents an infinite replan cascade when an agent has a deterministic bug
+        # (e.g., wrong method signature) that no amount of reprompting will fix.
+        if failure_count >= 4:
+            recent_agent_failures = [
+                e for e in action_history[-failure_count:]
+                if not e.get("success") and e.get("action_type") == "agent"
+            ]
+            if len(recent_agent_failures) >= 4:
+                agents = {e.get("resource_id", "unknown") for e in recent_agent_failures}
+                last_error = recent_agent_failures[-1].get("result_summary", "unknown error")
+                logger.warning(
+                    f"🧠 Brain: consecutive-failure escape — agent(s) {agents} failed "
+                    f"{failure_count}x in a row. Forcing finish."
+                )
+                return self._force_finish_with_error(
+                    state,
+                    f"Agent(s) {agents} failed {failure_count} consecutive times "
+                    f"(last error: {last_error[:200]}). Cannot complete request.",
+                )
 
         # Extract insights from last execution if significant
         updated_insights = self._extract_insights_from_last_action(state, insights)
