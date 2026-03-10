@@ -6,6 +6,13 @@
 
 Gmail Agent is a next-generation email management agent built exclusively with Composio's official Gmail tools. It replaces the legacy mail_agent's custom MCP implementation with direct SDK integration for better performance, reliability, and maintainability.
 
+### 📚 Documentation
+
+- **[ARCHITECTURE.md](./ARCHITECTURE.md)** - Complete architecture, data flows, LLM system, security, and performance
+- **[CREDENTIALS_AND_COMMUNICATION.md](./CREDENTIALS_AND_COMMUNICATION.md)** - Detailed credential retrieval, database schema, encryption, and Composio communication
+- **[SKILL.md](./SKILL.md)** - API reference and capability specifications
+- **[QUICK_START.md](./QUICK_START.md)** - Setup and testing guide
+
 ## Architecture
 
 ```
