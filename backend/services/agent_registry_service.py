@@ -341,14 +341,16 @@ class AgentRegistryService:
         """
         Retrieve details for a specific agent.
         """
+        agent_dict = None
         should_close_db = False
-        if db is None:
-            db = SessionLocal()
-            should_close_db = True
-
+        _db = db
         try:
+            if _db is None:
+                _db = SessionLocal()
+                should_close_db = True
+
             agent = (
-                db.query(Agent)
+                _db.query(Agent)
                 .options(
                     joinedload(Agent.endpoints).joinedload(AgentEndpoint.parameters)
                 )
@@ -357,31 +359,36 @@ class AgentRegistryService:
             )
 
             if agent:
-                return self._serialize_agent(agent)
-
-            # Fallback: check SKILL.md
-            skill = self.get_agent_skill(agent_id)
-            if skill:
-                return {
-                    "id": agent_id,
-                    "name": skill["name"],
-                    "description": skill["description"],
-                    "capabilities": [],
-                    "price_per_call_usd": None,
-                    "endpoints": [],
-                    "type": "http_rest",
-                    "connection_config": {
-                        "base_url": f"http://{skill['host']}:{skill['port']}"
-                    },
-                }
-
-            return None
+                agent_dict = self._serialize_agent(agent)
         except Exception as e:
-            logger.error(f"Failed to get agent {agent_id}: {e}")
-            return None
+            logger.warning(f"DB unavailable or failed to get agent {agent_id}: {e}")
         finally:
-            if should_close_db:
-                db.close()
+            if should_close_db and _db is not None:
+                try:
+                    _db.close()
+                except Exception:
+                    pass
+
+        if agent_dict:
+            return agent_dict
+
+        # Fallback: check SKILL.md
+        skill = self.get_agent_skill(agent_id)
+        if skill:
+            return {
+                "id": agent_id,
+                "name": skill["name"],
+                "description": skill["description"],
+                "capabilities": [],
+                "price_per_call_usd": None,
+                "endpoints": [],
+                "type": "http_rest",
+                "connection_config": {
+                    "base_url": f"http://{skill['host']}:{skill['port']}"
+                },
+            }
+
+        return None
 
     def validate_capability(self, agent_id: str, task_description: str) -> bool:
         """
