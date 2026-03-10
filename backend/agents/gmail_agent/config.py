@@ -6,10 +6,14 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent.parent.parent / ".env")
 
-# API Keys
-COMPOSIO_API_KEY = os.getenv("COMPOSIO_API_KEY")
+# API Keys — service credentials via CredentialManager (DB → .env fallback)
+try:
+    from backend.services.credential_service import credential_manager
+    COMPOSIO_API_KEY = credential_manager.get("agent", "gmail_agent", "COMPOSIO_API_KEY")
+except Exception:
+    COMPOSIO_API_KEY = os.getenv("COMPOSIO_API_KEY")
 
-# LLM Configuration
+# LLM Configuration (stays in .env per design)
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "groq")
 LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.1-70b-versatile")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")

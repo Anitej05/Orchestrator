@@ -113,6 +113,36 @@ class BaseAgent(ABC):
 
         logger.info(f"BaseAgent initialized: {agent_name} ({agent_id})")
 
+    # ------------------------------------------------------------------
+    # Credential helpers — delegate to CredentialManager singleton
+    # ------------------------------------------------------------------
+
+    def get_credential(self, key: str, user_id: str = "system") -> Optional[str]:
+        """
+        Get a single credential for this agent from the DB (with .env fallback).
+
+        Usage from any agent subclass::
+
+            api_key = self.get_credential("COMPOSIO_API_KEY")
+        """
+        return self.services.credentials.get(
+            scope="agent",
+            scope_id=self.agent_id,
+            key=key,
+            user_id=user_id,
+        )
+
+    def get_all_credentials(self, user_id: str = "system") -> Dict[str, str]:
+        """
+        Get all credentials for this agent.
+        Returns a dict of ``{credential_name: plaintext_value}``.
+        """
+        return self.services.credentials.get_all(
+            scope="agent",
+            scope_id=self.agent_id,
+            user_id=user_id,
+        )
+
     async def emit_progress(self, message: str) -> None:
         """Push a progress message to the streaming queue (no-op if not streaming)."""
         if self._progress_queue is not None:

@@ -35,7 +35,8 @@ class ComposioToolManager:
         self.user_id = user_id
 
         self.connection_id = connection["connection_id"]
-        self.composio = Composio(api_key=os.getenv("COMPOSIO_API_KEY"))
+        from agents.gmail_agent.config import COMPOSIO_API_KEY
+        self.composio = Composio(api_key=COMPOSIO_API_KEY)
         
         logger.info(f"[ComposioToolManager] Initialized for user {user_id}")
     

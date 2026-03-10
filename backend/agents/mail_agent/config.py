@@ -23,10 +23,16 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
 logging.getLogger("composio").setLevel(logging.WARNING)
 
-# Configuration
-COMPOSIO_API_KEY = os.getenv("COMPOSIO_API_KEY")
-MCP_URL = os.getenv("GMAIL_MCP_URL")  # e.g., https://mcp.composio.dev/gmail/sse?user_id=...
-CONNECTION_ID = os.getenv("GMAIL_CONNECTION_ID")  # Gmail connection ID
+# Service Credentials — via CredentialManager (DB → .env fallback)
+try:
+    from backend.services.credential_service import credential_manager
+    COMPOSIO_API_KEY = credential_manager.get("agent", "mail_agent", "COMPOSIO_API_KEY")
+    MCP_URL = credential_manager.get("agent", "mail_agent", "GMAIL_MCP_URL")
+    CONNECTION_ID = credential_manager.get("agent", "mail_agent", "GMAIL_CONNECTION_ID")
+except Exception:
+    COMPOSIO_API_KEY = os.getenv("COMPOSIO_API_KEY")
+    MCP_URL = os.getenv("GMAIL_MCP_URL")
+    CONNECTION_ID = os.getenv("GMAIL_CONNECTION_ID")
 
 if not COMPOSIO_API_KEY:
     logger.warning("COMPOSIO_API_KEY not set. Gmail agent will not function.")

@@ -140,6 +140,33 @@ class WorkflowWebhook(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
 
+class Credential(Base):
+    """
+    Generic, scope-based credential storage.
+
+    Unlike AgentCredential (which is FK'd to agents.id), this table supports
+    any scope: agents, tools, system-level keys, third-party integrations, etc.
+
+    Scope examples:
+      scope="agent",  scope_id="gmail_agent"      → Gmail agent's Composio key
+      scope="tool",   scope_id="web_search"        → SerpAPI key for web search tool
+      scope="system", scope_id="global"            → System-wide shared credentials
+    """
+    __tablename__ = "credentials"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(255), nullable=False, index=True)  # "system" for shared creds
+    scope = Column(String(50), nullable=False, index=True)     # "agent", "tool", "system"
+    scope_id = Column(String(255), nullable=False, index=True) # agent_id, tool_name, "global"
+
+    # All credentials stored as encrypted JSON: {"api_key": "enc...", "secret": "enc..."}
+    encrypted_credentials = Column(JSON, nullable=True, default=dict)
+
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 # ============================================================================
 # INTEGRATIONS / COMPOSIO OAUTH TABLES
 # ============================================================================

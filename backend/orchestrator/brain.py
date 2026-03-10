@@ -110,44 +110,22 @@ class Brain:
     Analyzes the current state and decides the next action.
     """
 
-    # Iteration budgets indexed by rough task complexity
-    _ITER_BUDGETS = {
-        "simple": 12,   # single-agent factual queries
-        "medium": 18,   # multi-step analysis, reports
-        "complex": 25,  # multi-agent, fetch+merge+generate
-    }
+    # Generous iteration ceiling — a pure safety net, not a constraint.
+    # A capable model should finish well before this; it only exists to
+    # prevent runaway API costs in pathological edge cases.
+    _MAX_ITERATIONS = 50
 
     def __init__(self):
-        self.max_iterations = self._ITER_BUDGETS["medium"]  # default
+        self.max_iterations = self._MAX_ITERATIONS
 
     def _compute_max_iterations(self, original_prompt: str) -> int:
+        """Return a generous flat iteration budget.
+
+        We intentionally do NOT scale this by task complexity — the model
+        is trusted to finish dynamically when the task is done.  The ceiling
+        is just a last-resort safeguard against infinite loops.
         """
-        Heuristically scale the iteration budget with task complexity so
-        simple queries finish faster and complex multi-step tasks don't get
-        cut short.
-        """
-        text = (original_prompt or "").lower()
-
-        # Signals of high complexity
-        complex_signals = [
-            "create", "generate", "build", "write", "report",
-            "compare", "combine", "merge", "multiple", "all agents",
-            "chart", "graph", "visuali", "dashboard",
-        ]
-        # Signals of low complexity (direct lookup / single-question)
-        simple_signals = [
-            "how many", "what is", "list", "show me", "count",
-            "average", "total", "sum", "max", "min",
-        ]
-
-        complex_score = sum(1 for s in complex_signals if s in text)
-        simple_score = sum(1 for s in simple_signals if s in text)
-
-        if complex_score >= 2:
-            return self._ITER_BUDGETS["complex"]
-        if simple_score >= 2 and complex_score == 0:
-            return self._ITER_BUDGETS["simple"]
-        return self._ITER_BUDGETS["medium"]
+        return self._MAX_ITERATIONS
 
     async def think(
         self, state: Dict[str, Any], config: Optional[RunnableConfig] = None
@@ -194,16 +172,16 @@ class Brain:
         if iteration_count >= self.max_iterations:
             return self._force_finish_with_error(state, "Maximum iterations reached")
 
-        # Code-level consecutive-failure escape: if the same agent has failed 4+ times
+        # Code-level consecutive-failure escape: if agents have failed 6+ times
         # in a row, stop re-planning and force finish with a descriptive error.
-        # This prevents an infinite replan cascade when an agent has a deterministic bug
+        # This is a genuine safety net against infrastructure / code bugs
         # (e.g., wrong method signature) that no amount of reprompting will fix.
-        if failure_count >= 4:
+        if failure_count >= 6:
             recent_agent_failures = [
                 e for e in action_history[-failure_count:]
                 if not e.get("success") and e.get("action_type") == "agent"
             ]
-            if len(recent_agent_failures) >= 4:
+            if len(recent_agent_failures) >= 6:
                 agents = {e.get("resource_id", "unknown") for e in recent_agent_failures}
                 last_error = recent_agent_failures[-1].get("result_summary", "unknown error")
                 logger.warning(
@@ -256,43 +234,10 @@ class Brain:
         
         decision = self._apply_stagnation_guard(state, decision)
 
-        # Python-level MANDATORY FINISH — code-level enforcement of the prompt rule.
-        #
-        # WHY THIS EXISTS:
-        # When the planner auto-decomposes a request it creates tasks with IDs like
-        # "phase_1", "phase_2". These are planning artifacts, NOT user-specified steps.
-        # Once the agent returns success the full question has already been answered
-        # (the agent received the complete question verbatim as its goal).
-        #
-        # Without this check the LLM sometimes ignores the MANDATORY FINISH prompt and
-        # picks a python/terminal/tool action to "verify" or "compile" results — causing
-        # an extra wasted iteration before it finally finishes.
-        #
-        # THREE CONDITIONS must all be true to trigger the force-finish:
-        #   1. last_agent_result.success=True  — the agent actually succeeded
-        #   2. action_type not in (finish, agent) — LLM chose something unnecessary
-        #      ('agent' is allowed through so genuine multi-agent workflows still work)
-        #   3. all task IDs start with "phase_" — confirms these are auto-decomposed
-        #      tasks, not user-written "Step 1 / Step 2" instructions
-        last_agent_result = state.get("last_agent_result")
-        if (
-            last_agent_result
-            and last_agent_result.get("success")
-            and isinstance(decision, BrainDecision)
-            and decision.action_type not in ("finish", "agent")
-        ):
-            all_auto_phases = all(
-                t.get("task_id", "").startswith("phase_")
-                for t in todo_list
-            )
-            if all_auto_phases and todo_list:
-                logger.info(
-                    f"🧠 Brain: Python-level force FINISH — agent succeeded, "
-                    f"LLM chose '{decision.action_type}' on auto-decomposed plan (blocked)"
-                )
-                decision.action_type = "finish"
-                if not decision.user_response:
-                    decision.user_response = last_agent_result.get("result", "")
+        # NOTE: The Python-level MANDATORY FINISH override that used to live here
+        # has been intentionally removed.  It forcibly overrode the LLM's decision
+        # after a single agent success, which was a workaround for weaker models.
+        # A capable model should decide on its own when to finish vs. continue.
 
 
         updates = self._apply_decision_to_state(state, decision)
@@ -481,7 +426,7 @@ You are a helpful, intelligent, and expressive AI assistant.
 5. **Handle errors gracefully.** If a tool or agent fails, try a different approach or work with what you have. Don't repeat the same failing action.
 6. **Be efficient.** The user values results, not exhaustive retries. One good search is better than five similar ones.
 7. **NEVER repeat the same action.** If you already called python to read a file, DO NOT call python again to read the same file. The result is in your action history above.
-8. **Iteration awareness.** You are on iteration {iteration_count}/{self.max_iterations}. If you're past iteration 8, you MUST prioritize finishing over gathering more data.
+8. **Iteration awareness.** You are on iteration {iteration_count}/{self.max_iterations}. Use your judgement on when to finish — you have ample room.
 9. **MANDATORY PLANNING STEP — do this before anything else.**
    If the TO-DO LIST above contains exactly ONE task with `task_id = '__initial__'`, you MUST respond with `action_type='plan'`. This is NOT optional and has NO exceptions.
    - Break the user's objective into **2 to 6 concrete, specific steps** — each one a real, named action (e.g. "Fetch Q4 supplier data from spreadsheet", "Calculate total spend per supplier", "Identify top 5 by volume", "Write summary report").
