@@ -1,8 +1,9 @@
 ---
 id: mail_agent
-name: Mail Agent
+name: mail_agent
 port: 8040
-version: 2.0.0
+version: 1.0.0
+description: Deprecated mail agent retained for compatibility with legacy Gmail-style workflows.
 ---
 
 # Mail Agent

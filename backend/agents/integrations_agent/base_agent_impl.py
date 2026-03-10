@@ -1,12 +1,7 @@
 """
-General Agent - BaseAgent Implementation
+Integrations Agent - BaseAgent Implementation
 Universal fallback agent for any Composio-powered integration.
-
-Capabilities:
-- Dynamic app detection (Slack, Notion, GitHub, etc.)
-- Automatic connection verification
-- Tool discovery and execution
-- Multi-app support
+Features in-chat OAuth, app detection, and session persistence.
 """
 
 import logging
@@ -18,18 +13,18 @@ from backend.agents.base import BaseAgent, AgentServices, AgentConfig
 from backend.agents.base.types import ExecutionContext
 from backend.agents.base.capability import capability, ParameterSchema
 
-from .service import GeneralAgentService
+from .service import IntegrationsAgentService
 from .tool_cache import ToolCache
 
-logger = logging.getLogger("agents.general_agent")
+logger = logging.getLogger("agents.integrations_agent")
 
 
 @dataclass
-class GeneralAgentConfig(AgentConfig):
-    """Configuration for General Agent."""
+class IntegrationsAgentConfig(AgentConfig):
+    """Configuration for Integrations Agent."""
     tool_cache_ttl: int = 300  # 5 minutes
     supported_apps: List[str] = None
-    
+
     def __post_init__(self):
         if self.supported_apps is None:
             self.supported_apps = [
@@ -38,30 +33,24 @@ class GeneralAgentConfig(AgentConfig):
             ]
 
 
-class GeneralAgent(BaseAgent):
+class IntegrationsAgent(BaseAgent):
     """
-    Universal fallback agent for Composio integrations.
-    
-    Handles requests for any app not covered by specialized agents.
-    Features:
-    - Automatic app detection from user prompt
-    - Connection verification with user prompting
-    - Dynamic tool discovery
-    - LLM-powered tool selection
+    Universal fallback agent with in-chat OAuth and session persistence.
+    Handles requests for any Composio app not covered by dedicated agents.
     """
     
     def __init__(
         self,
-        agent_id: str = "general_agent",
-        agent_name: str = "General Agent",
+        agent_id: str = "integrations_agent",
+        agent_name: str = "Integrations Agent",
         services: Optional[AgentServices] = None,
-        config: Optional[GeneralAgentConfig] = None,
+        config: Optional[IntegrationsAgentConfig] = None,
     ):
         super().__init__(
             agent_id=agent_id,
             agent_name=agent_name,
             services=services or AgentServices.create_default(),
-            config=config or GeneralAgentConfig(),
+            config=config or IntegrationsAgentConfig(),
         )
         
         self.description = "Universal agent for any Composio-powered integration"
@@ -70,9 +59,9 @@ class GeneralAgent(BaseAgent):
         self.tool_cache = ToolCache(ttl_seconds=self.config.tool_cache_ttl)
         
         # Service instances (per-user)
-        self._service_cache: Dict[str, GeneralAgentService] = {}
-        
-        logger.info(f"GeneralAgent initialized with {len(self.config.supported_apps)} supported apps")
+        self._service_cache: Dict[str, IntegrationsAgentService] = {}
+
+        logger.info(f"IntegrationsAgent initialized with {len(self.config.supported_apps)} supported apps")
     
     async def _initialize_resources(self):
         """Initialize agent-specific resources."""
@@ -83,12 +72,12 @@ class GeneralAgent(BaseAgent):
         self.tool_manager = get_tool_manager()
         self.auth_manager = get_auth_manager()
         
-        logger.info("General Agent resources initialized")
+        logger.info("Integrations Agent resources initialized")
     
-    def _get_service(self, user_id: str) -> GeneralAgentService:
-        """Get or create service instance for user."""
+    def _get_service(self, user_id: str) -> IntegrationsAgentService:
+        """Get or create IntegrationsAgentService instance for user."""
         if user_id not in self._service_cache:
-            self._service_cache[user_id] = GeneralAgentService(
+            self._service_cache[user_id] = IntegrationsAgentService(
                 user_id=user_id,
                 tool_cache=self.tool_cache,
                 tool_manager=self.tool_manager,
@@ -299,9 +288,9 @@ class GeneralAgent(BaseAgent):
 _agent_instance = None
 
 
-def get_agent() -> GeneralAgent:
-    """Get or create singleton agent instance."""
+def get_agent() -> IntegrationsAgent:
+    """Get or create singleton IntegrationsAgent instance."""
     global _agent_instance
     if _agent_instance is None:
-        _agent_instance = GeneralAgent()
+        _agent_instance = IntegrationsAgent()
     return _agent_instance

@@ -1,13 +1,14 @@
-# agents/general_agent/agent.py
+# agents/integrations_agent/agent.py
 """
-General Fallback Agent
+Integrations Agent
 
-A universal agent that can execute tools from any Composio-supported app.
-Falls back for requests where no specialized agent exists.
+Universal fallback agent with in-chat OAuth and session persistence.
+Handles requests where no dedicated agent exists, and manages Composio connections.
 
 Key Features:
-- Dynamic tool discovery via Composio SDK
-- Connection checking with user prompting
+- In-chat OAuth: returns auth URL when connection is missing
+- App detection: identifies which Composio app a task requires
+- Session persistence: preserves context across conversations
 - Tool execution caching (TTL: 5 minutes)
 - Full UAP compliance
 - Graceful error handling
@@ -25,15 +26,15 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 from orchestrator.uap_schemas import UAPExecuteRequest, UAPResponse
-from .service import GeneralAgentService
+from .service import IntegrationsAgentService
 from .tool_cache import ToolCache
 
-logger = logging.getLogger("general_agent")
+logger = logging.getLogger("integrations_agent")
 
 # Create FastAPI app
 app = FastAPI(
-    title="General Fallback Agent",
-    description="Universal agent for Composio-powered integrations (Slack, Notion, etc.)",
+    title="Integrations Agent",
+    description="Universal fallback agent with in-chat OAuth and 100+ Composio integrations.",
     version="1.0.0"
 )
 
@@ -50,12 +51,12 @@ app.add_middleware(
 tool_cache = ToolCache(ttl_seconds=300)  # 5 minute TTL
 
 # Service instances (per-user)
-_service_cache: Dict[str, GeneralAgentService] = {}
+_service_cache: Dict[str, IntegrationsAgentService] = {}
 
-def get_service(user_id: str) -> GeneralAgentService:
+def get_service(user_id: str) -> IntegrationsAgentService:
     """Get or create service instance for user"""
     if user_id not in _service_cache:
-        _service_cache[user_id] = GeneralAgentService(user_id, tool_cache)
+        _service_cache[user_id] = IntegrationsAgentService(user_id, tool_cache)
     return _service_cache[user_id]
 
 # === Health & Info Endpoints ===
@@ -64,7 +65,7 @@ def get_service(user_id: str) -> GeneralAgentService:
 async def root():
     """Root endpoint - agent info"""
     return {
-        "agent": "General Fallback Agent",
+        "agent": "Integrations Agent",
         "version": "1.0.0",
         "description": "Universal agent for Composio integrations (Slack, Notion, GitHub, etc.)",
         "status": "operational",
@@ -84,7 +85,7 @@ async def root():
 @app.get("/health")
 async def health():
     """Health check endpoint"""
-    return {"status": "healthy", "agent": "general_agent"}
+    return {"status": "healthy", "agent": "integrations_agent"}
 
 # === UAP Execute Endpoint ===
 

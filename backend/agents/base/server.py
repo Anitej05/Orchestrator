@@ -7,7 +7,7 @@ import asyncio
 import json
 import logging
 from typing import Type, Optional
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.encoders import jsonable_encoder
@@ -82,8 +82,9 @@ class AgentServer:
             
             return await self.agent.health_check()
         
-        @self.app.post("/execute")
-        async def execute(request: AgentRequest):
+        @self.app.post("/execute", response_model=AgentResponse)
+        async def execute(request: AgentRequest, raw_request: Request):
+
             """Execute a task."""
             # Lazy initialization
             if self.agent is None:
@@ -94,6 +95,12 @@ class AgentServer:
                     services=self.services
                 )
                 await self.agent.initialize()
+
+            if not request.user_id:
+                header_user_id = raw_request.headers.get("X-User-ID")
+                if header_user_id:
+                    request.user_id = header_user_id
+            
 
             try:
                 result = await self.agent.execute(request)

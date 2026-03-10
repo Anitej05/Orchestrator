@@ -34,18 +34,9 @@ def test_start_auth_flow_returns_redirect_url(composio_client, test_user_id):
     # Initiate connection for Gmail
     app_slug = "gmail"
     
-    # Get integration ID for Gmail
-    integrations = composio_client.integrations.get(app_name="GMAIL")
-    if isinstance(integrations, list) and integrations:
-        integration_id = integrations[0].id
-    else:
-        integration_id = integrations.id
-    
-    # Initiate connection
-    connection_request = composio_client.connected_accounts.initiate(
-        integration_id=integration_id,
-        entity_id=test_user_id
-    )
+    # SDK v0.7.x: entity.initiate_connection(app_name=...) is the simplest approach
+    entity = composio_client.get_entity(id=test_user_id)
+    connection_request = entity.initiate_connection(app_name=app_slug.upper())
     
     # Verify response structure
     assert connection_request is not None, "Connection request should not be None"
@@ -145,7 +136,9 @@ def test_check_connection_status_for_active_connections(
     Task: 2.2.2 Test check_connection_status for active connections
     """
     # Get all connections for test user
-    connections = composio_client.connected_accounts.get(entity_ids=[test_user_id])
+    connections = composio_client.connected_accounts.get(entity_ids=[test_user_id]) or []
+    if not isinstance(connections, list):
+        connections = [connections]
     
     # Verify we got connections
     assert connections is not None, "Connections should not be None"
@@ -269,13 +262,15 @@ def test_disconnect_app_removes_connection(composio_client, test_user_id):
     
     Task: 2.2.3 Test disconnect_app removes connection
     """
-    from models import UserConnection, ConnectionLog
+    from models import UserConnection
     from database import SessionLocal
     
     app_slug = "slack"
     
     # Step 1: Check if Slack connection already exists
-    connections_before = composio_client.connected_accounts.get(entity_ids=[test_user_id])
+    connections_before = composio_client.connected_accounts.get(entity_ids=[test_user_id]) or []
+    if not isinstance(connections_before, list):
+        connections_before = [connections_before]
     slack_conn_before = next(
         (c for c in connections_before if c.appName.lower() == "slack"), 
         None
@@ -322,7 +317,9 @@ def test_disconnect_app_removes_connection(composio_client, test_user_id):
     # Wait a moment for the deletion to propagate
     time.sleep(2)
     
-    connections_after = composio_client.connected_accounts.get(entity_ids=[test_user_id])
+    connections_after = composio_client.connected_accounts.get(entity_ids=[test_user_id]) or []
+    if not isinstance(connections_after, list):
+        connections_after = [connections_after]
     slack_conn_after = next(
         (c for c in connections_after if c.appName.lower() == "slack"), 
         None
@@ -345,19 +342,7 @@ def test_disconnect_app_removes_connection(composio_client, test_user_id):
             "Connection should be removed from database after disconnect"
         
         print("✓ Connection removed from database")
-        
-        # Step 6: Verify disconnect event was logged
-        disconnect_log = db.query(ConnectionLog).filter(
-            ConnectionLog.user_id == test_user_id,
-            ConnectionLog.app_slug == app_slug,
-            ConnectionLog.event_type == "disconnected",
-            ConnectionLog.status == "success"
-        ).order_by(ConnectionLog.created_at.desc()).first()
-        
-        assert disconnect_log is not None, \
-            "Disconnect event should be logged in connection_logs"
-        
-        print("✓ Disconnect event logged successfully")
+        # Note: connection_logs table has been dropped; disconnect event logging removed.
         
     finally:
         db.close()
@@ -375,7 +360,6 @@ def test_disconnect_app_error_handling_nonexistent_connection(test_user_id):
     
     Task: 2.2.3 Test disconnect_app removes connection (Error Handling)
     """
-    from models import ConnectionLog
     from database import SessionLocal
     
     # Use an app that definitely doesn't exist for this test user
@@ -403,23 +387,7 @@ def test_disconnect_app_error_handling_nonexistent_connection(test_user_id):
         f"Error message should mention the app or connection status: {error_message}"
     
     print(f"✓ Error handled gracefully: {error_message}")
-    
-    # Verify error was logged (optional - depends on implementation)
-    db = SessionLocal()
-    try:
-        error_log = db.query(ConnectionLog).filter(
-            ConnectionLog.user_id == test_user_id,
-            ConnectionLog.app_slug == nonexistent_app,
-            ConnectionLog.event_type == "disconnected",
-            ConnectionLog.status == "failed"
-        ).order_by(ConnectionLog.created_at.desc()).first()
-        
-        # Note: Logging might not happen for "not found" cases
-        # This is just a verification if it does happen
-        if error_log:
-            print("✓ Error logged to connection_logs")
-        else:
-            print("ℹ No error log created (acceptable for 'not found' case)")
+    # Note: connection_logs table has been dropped; error event logging removed.
             
     finally:
         db.close()
@@ -438,21 +406,10 @@ def test_oauth_flow_error_handling_invalid_app(composio_client, test_user_id):
     """
     invalid_app_slug = "nonexistent_app_12345"
     
-    # Attempt to get integration for invalid app
+    # SDK v0.7.x: entity.initiate_connection raises an exception for unknown apps
     with pytest.raises(Exception) as exc_info:
-        integrations = composio_client.integrations.get(app_name=invalid_app_slug)
-        
-        # If we somehow get a result, try to initiate connection
-        if integrations:
-            if isinstance(integrations, list) and integrations:
-                integration_id = integrations[0].id
-            else:
-                integration_id = integrations.id
-            
-            composio_client.connected_accounts.initiate(
-                integration_id=integration_id,
-                entity_id=test_user_id
-            )
+        entity = composio_client.get_entity(id=test_user_id)
+        entity.initiate_connection(app_name=invalid_app_slug.upper())
     
     # Verify an exception was raised
     assert exc_info.value is not None, "Should raise an exception for invalid app"
@@ -471,7 +428,9 @@ def test_multiple_connections_same_user(composio_client, test_user_id):
     Additional test for multi-app support
     """
     # Get all connections for test user
-    connections = composio_client.connected_accounts.get(entity_ids=[test_user_id])
+    connections = composio_client.connected_accounts.get(entity_ids=[test_user_id]) or []
+    if not isinstance(connections, list):
+        connections = [connections]
     
     assert connections is not None, "Connections should not be None"
     

@@ -9,28 +9,6 @@ from cryptography.hazmat.primitives import serialization
 
 # --- Core Data Structures ---
 
-class EndpointParameterDetail(BaseModel):
-    """Defines the structure for a single parameter of an agent's API endpoint."""
-    name: str
-    description: Optional[str] = None
-    param_type: str
-    required: bool = True
-    default_value: Optional[str] = None
-
-    class Config:
-        from_attributes = True
-
-class EndpointDetail(BaseModel):
-    """Defines the structure for an agent's API endpoint."""
-    endpoint: str  # Changed from HttpUrl to support MCP tool names
-    http_method: str
-    description: Optional[str] = None
-    parameters: List[EndpointParameterDetail] = []
-    request_format: Optional[str] = None  # 'json' or 'form', defaults to agent's connection_config
-
-    class Config:
-        from_attributes = True
-
 class AgentCard(BaseModel):
     """The main schema for an agent's registration and data."""
     id: str
@@ -40,7 +18,7 @@ class AgentCard(BaseModel):
     capabilities: List[str] | Dict[str, Any] | None = []  # Optional; accepts old list format, structured, or None
     price_per_call_usd: float
     status: Literal['active', 'inactive', 'deprecated'] = 'active'
-    endpoints: List[EndpointDetail]
+    endpoints: List[Any] = []
     public_key_pem: Optional[str] = None
     agent_type: Literal['http_rest', 'mcp_http', 'tool'] = 'http_rest'  # Added 'tool' type
     connection_config: Optional[Dict[str, Any]] = None

@@ -1,4 +1,4 @@
-# Dockerfile for General Fallback Agent
+# Dockerfile for Integrations Agent
 # Build context: backend/
 FROM python:3.11-slim
 
@@ -30,6 +30,6 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 # Set Python path
 ENV PYTHONPATH=/app
 
-# Run General agent
-WORKDIR /app/agents/general_agent
+# Run Integrations agent
+WORKDIR /app/agents/integrations_agent
 CMD ["uvicorn", "agent:app", "--host", "0.0.0.0", "--port", "8000"]

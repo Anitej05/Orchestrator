@@ -1,8 +1,9 @@
 ---
 id: coding_agent
-name: Coding Agent
+name: coding_agent
 port: 8080
-version: 2.0.0
+version: 1.0.0
+description: Priority agent for coding, software engineering, multi-file editing, and test execution tasks.
 ---
 
 # Coding Agent

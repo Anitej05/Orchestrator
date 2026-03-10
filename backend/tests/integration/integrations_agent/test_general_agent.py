@@ -12,7 +12,7 @@ import os
 # Add parent directory to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..')))
 
-from agents.general_agent.tool_cache import ToolCache
+from agents.integrations_agent.tool_cache import ToolCache
 
 
 class TestGeneralAgentService:
@@ -28,7 +28,7 @@ class TestGeneralAgentService:
              patch('services.integrations.composio_auth.ComposioAuthManager') as mock_auth:
             
             # Import here to avoid import errors
-            from agents.general_agent.service import GeneralAgentService
+            from agents.integrations_agent.service import GeneralAgentService
             
             service = GeneralAgentService(user_id="test_user_123", tool_cache=tool_cache)
             
@@ -236,7 +236,7 @@ class TestIntegration:
     def client(self):
         """Create FastAPI test client"""
         from fastapi.testclient import TestClient
-        from agents.general_agent.agent import app
+        from agents.integrations_agent.agent import app
         return TestClient(app)
     
     def test_health_endpoint(self, client):
@@ -249,7 +249,7 @@ class TestIntegration:
         """Test / endpoint"""
         response = client.get("/")
         assert response.status_code == 200
-        assert "General Fallback Agent" in response.json()["agent"]
+        assert "Integrations Agent" in response.json()["agent"]
     
     def test_execute_missing_user_id(self, client):
         """Test /execute without user_id"""

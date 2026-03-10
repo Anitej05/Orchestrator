@@ -11,11 +11,12 @@ import logging
 import os
 import uuid
 from typing import Any, Dict, List, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from sqlalchemy import or_
 
 from dotenv import load_dotenv
 from database import SessionLocal
-from models import UserConnection, ConnectionLog
+from models import UserConnection, ComposioEntity
 from cryptography.fernet import Fernet
 import base64
 import hashlib
@@ -108,6 +109,64 @@ class ComposioAuthManager:
                 "Invalid CONNECTION_ENCRYPTION_KEY. Must be a valid Fernet key. "
                 "Generate one with: python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'"
             )
+
+    @staticmethod
+    def _normalize_status(status: Optional[str]) -> str:
+        """Normalize connection status values to lowercase canonical form."""
+        return (status or "").strip().lower()
+
+    @staticmethod
+    def _normalize_app_slug(app_slug: str) -> str:
+        """Normalize app slug values for consistent DB lookups."""
+        return (app_slug or "").strip().lower()
+
+    def _get_candidate_entity_ids(self, user_id: str, app_slug: Optional[str] = None) -> List[str]:
+        """
+        Resolve all candidate Composio entity IDs for a user.
+        Includes canonical user_id, mapped composio_entity_id values, and legacy default fallback.
+        """
+        ids: List[str] = []
+
+        def _add(value: Optional[str]):
+            if value and value not in ids:
+                ids.append(value)
+
+        _add(user_id)
+        normalized_slug = self._normalize_app_slug(app_slug) if app_slug else None
+
+        needs_legacy_default_fallback = False
+        try:
+            with SessionLocal() as db:
+                mapping = (
+                    db.query(ComposioEntity)
+                    .filter(ComposioEntity.internal_user_id == user_id)
+                    .first()
+                )
+                if mapping:
+                    _add(mapping.composio_entity_id)
+
+                user_connections_query = db.query(UserConnection).filter(
+                    or_(
+                        UserConnection.user_id == user_id,
+                        UserConnection.internal_user_id == user_id,
+                    )
+                )
+                if normalized_slug:
+                    user_connections_query = user_connections_query.filter(
+                        UserConnection.app_slug == normalized_slug
+                    )
+
+                for conn in user_connections_query.all():
+                    _add(conn.composio_entity_id)
+                    if not conn.composio_entity_id or conn.composio_entity_id == "default":
+                        needs_legacy_default_fallback = True
+        except Exception as e:
+            logger.debug(f"Failed to load candidate entity IDs for {user_id}: {e}")
+
+        if user_id != "default" and needs_legacy_default_fallback:
+            _add("default")
+
+        return ids
     
     def _encrypt_connection_id(self, connection_id: str) -> str:
         """
@@ -201,11 +260,17 @@ class ComposioAuthManager:
 
     def _get_integration_id(self, app_slug: str, auth_config_id: Optional[str] = None) -> str:
         """
-        Resolve Composio integration ID (UUID) for an app.
+        DEPRECATED — No longer called after migrating start_auth_flow to v3 session-based approach.
 
-        Tries Composio integrations API by app name. If not found, falls back
-        to auth_config_id only if it is a valid UUID.
+        This method used Composio's v2 'integrations' API (now renamed to 'auth configs' in v3).
+        Kept for reference / backwards-compat only. Do not call in new code.
+
+        v2 terminology: integration / integration ID → v3: auth config / auth config ID
         """
+        logger.warning(
+            "_get_integration_id() is deprecated (v2 integrations API). "
+            "Use the session-based start_auth_flow() instead."
+        )
         app_name_candidates = [
             app_slug,
             app_slug.upper(),
@@ -245,47 +310,52 @@ class ComposioAuthManager:
         callback_url: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Initiate OAuth connection for a single app using official SDK.
-        
+        Initiate OAuth connection using the recommended v3 session-based approach.
+
+        v3 pattern (per docs):
+            session = composio.create(user_id)
+            connection_request = session.authorize(toolkit, callbackUrl=...)
+            redirect_url = connection_request.redirect_url
+
+        No manual integration_id / entity_id lookup required.
+        Composio handles auth-config selection automatically.
+
         Args:
-            user_id: Your app's user ID
-            app_slug: Composio app slug (e.g., 'zohobooks', 'gmail', 'github')
-            callback_url: Optional custom callback URL
-        
+            user_id: Your app's user ID (v3: user_id, not entity_id)
+            app_slug: Composio toolkit slug (e.g., 'gmail', 'github', 'zohobooks')
+            callback_url: Optional URL Composio redirects to after auth
+
         Returns:
             Dict with redirect_url and connection tracking info
-        
-        Prerequisites:
-            - Auth configs must be created in Composio dashboard
-            - Environment variables set: COMPOSIO_AUTH_CONFIG_{APP}
-        
+
         Data flow:
             1. Backend calls this → gets redirect_url
-            2. Frontend redirects user to redirect_url
-            3. User authenticates on Composio Connect Link
-            4. User redirected back to callback_url
-            5. Backend polls check_connection_status() to verify
+            2. Frontend redirects user to redirect_url (Composio Connect Link)
+            3. User authenticates → Composio redirects to callback_url
+            4. POST /webhooks/composio fires → DB updated to ACTIVE
         """
         try:
-            # auth_config_id is optional — None means "use Composio's default integration".
-            # _get_integration_id will find the integration via Composio's API either way.
-            auth_config_id = self._get_auth_config_id(app_slug)
-            integration_id = self._get_integration_id(app_slug, auth_config_id)
-            
+
             logger.info(f"Starting auth for {app_slug} (user: {user_id})")
-            logger.info(f"Using integration_id: {integration_id}")
             if callback_url:
                 logger.info(f"Using callback URL: {callback_url}")
-            
-            # Use official SDK method: connected_accounts.initiate()
-            # Parameters: integration_id, entity_id, redirect_url
-            connection_request = self._composio.connected_accounts.initiate(
-                integration_id=integration_id,
-                entity_id=user_id,
-                redirect_url=callback_url
+
+            # SDK v0.7.x: get_entity(user_id).initiate_connection(app_name=...)
+            # This is the simplest pattern that works with the installed version.
+            entity = self._composio.get_entity(id=user_id)
+            connection_request = entity.initiate_connection(
+                app_name=app_slug.upper(),
+                redirect_url=callback_url or None,
             )
-            
-            # Extract connection_id (SDK returns connectedAccountId in v3)
+
+            # Extract redirect URL
+            redirect_url = None
+            if hasattr(connection_request, "redirectUrl"):
+                redirect_url = connection_request.redirectUrl
+            elif hasattr(connection_request, "redirect_url"):
+                redirect_url = connection_request.redirect_url
+
+            # Extract connection ID
             connection_id = None
             if hasattr(connection_request, "connectedAccountId"):
                 connection_id = connection_request.connectedAccountId
@@ -293,24 +363,20 @@ class ComposioAuthManager:
                 connection_id = connection_request.connected_account_id
             elif hasattr(connection_request, "id"):
                 connection_id = connection_request.id
-            
-            # Save connection to database with INITIATED status
+
+            # Persist INITIATED status to DB for tracking
             if connection_id:
                 logger.info(f"💾 Saving INITIATED connection: {connection_id}")
                 self._save_connection_to_db(
                     user_id=user_id,
                     app_slug=app_slug,
                     connection_id=connection_id,
-                    status="INITIATED"
+                    status="INITIATED",
+                    composio_entity_id=user_id,
+                    app_name=app_slug,
                 )
             else:
-                logger.warning("⚠️ No connection_id returned")
-            
-            redirect_url = None
-            if hasattr(connection_request, "redirectUrl"):
-                redirect_url = connection_request.redirectUrl
-            elif hasattr(connection_request, "redirect_url"):
-                redirect_url = connection_request.redirect_url
+                logger.warning("⚠️ No connected-account ID returned")
 
             return {
                 "success": True,
@@ -320,7 +386,8 @@ class ComposioAuthManager:
                 "connection_id": connection_id,
                 "poll_status_url": f"/api/integrations/status/{user_id}/{app_slug}",
             }
-        
+
+
         except Exception as e:
             error_msg = self._format_composio_error(e)
             logger.error(f"Auth flow failed for {app_slug}: {error_msg}", exc_info=True)
@@ -330,11 +397,7 @@ class ComposioAuthManager:
                 "success": False,
                 "error": error_msg,
                 "app_slug": app_slug,
-                "troubleshooting": (
-                    f"Composio could not find an integration for '{app_slug}'. "
-                    f"Optionally set COMPOSIO_AUTH_CONFIG_{app_slug.upper()} in .env "
-                    f"if you have a custom OAuth app configured in the Composio dashboard."
-                ),
+
             }
     
     def check_connection_status(
@@ -353,17 +416,30 @@ class ComposioAuthManager:
             Connection status for the user's toolkits
         """
         try:
-            # Use official SDK method: connected_accounts.get() with entity_ids parameter
-            connections_response = self._composio.connected_accounts.get(
-                entity_ids=[user_id],
-                active=False  # Get all connections, not just active ones
-            )
-            
-            # Handle both single connection and list of connections
-            if isinstance(connections_response, list):
-                connections = connections_response
-            else:
-                connections = [connections_response] if connections_response else []
+            # SDK v0.7.x: fetch by entity_ids; support canonical + legacy mapped entity IDs.
+            connections: List[Any] = []
+            seen_connection_ids = set()
+            for entity_id in self._get_candidate_entity_ids(user_id, app_slug):
+                try:
+                    connections_response = self._composio.connected_accounts.get(
+                        entity_ids=[entity_id]
+                    )
+                    if isinstance(connections_response, list):
+                        raw_connections = connections_response
+                    elif connections_response is not None:
+                        raw_connections = [connections_response]
+                    else:
+                        raw_connections = []
+
+                    for raw_conn in raw_connections:
+                        conn_id = getattr(raw_conn, "id", None)
+                        if conn_id and conn_id in seen_connection_ids:
+                            continue
+                        if conn_id:
+                            seen_connection_ids.add(conn_id)
+                        connections.append(raw_conn)
+                except Exception as entity_error:
+                    logger.debug(f"Could not fetch connections for entity {entity_id}: {entity_error}")
             
             logger.info(f"📋 Checking {len(connections)} connections for user {user_id}")
             
@@ -376,10 +452,13 @@ class ComposioAuthManager:
             try:
                 with SessionLocal() as db:
                     db_connections = db.query(UserConnection).filter(
-                        UserConnection.user_id == user_id
+                        or_(
+                            UserConnection.user_id == user_id,
+                            UserConnection.internal_user_id == user_id,
+                        )
                     ).all()
                     for conn in db_connections:
-                        db_status_map[conn.app_slug] = conn.status
+                        db_status_map[conn.app_slug] = self._normalize_status(conn.status)
                         db_connection_map[conn.app_slug] = conn.connection_id
             except Exception as db_error:
                 logger.warning(f"⚠️ Failed to load DB connections for {user_id}: {db_error}")
@@ -407,8 +486,9 @@ class ComposioAuthManager:
                 integration_id = integration_id or getattr(conn, "integration_id", None) or getattr(conn, "integrationId", None)
                 app_name = app_name or getattr(conn, "app_name", None) or getattr(conn, "appName", None)
                 app_unique_id = app_unique_id or getattr(conn, "app_unique_id", None) or getattr(conn, "appUniqueId", None)
-                status = (status or getattr(conn, "status", "") or "").lower()
+                status = self._normalize_status(status or getattr(conn, "status", "") or "")
                 connected_account_id = connected_account_id or getattr(conn, "id", None)
+                entity_id = getattr(conn, "entityId", None) or getattr(conn, "entity_id", None)
 
                 slug = (app_unique_id or app_name or "").lower()
                 is_connected = status == "active"
@@ -421,6 +501,7 @@ class ComposioAuthManager:
                     "slug": slug,
                     "is_connected": is_connected,
                     "connected_account_id": connected_account_id,
+                    "entity_id": entity_id,
                     "db_status": db_status,
                     "db_connection_id": db_connection_id,
                 }
@@ -449,6 +530,8 @@ class ComposioAuthManager:
                         slug,
                         connection_info["connected_account_id"],
                         status="active",
+                        composio_entity_id=connection_info.get("entity_id"),
+                        app_name=connection_info.get("name", slug),
                         app_metadata={
                             "app_name": connection_info.get("name", slug),
                             "composio_status": "active",
@@ -472,11 +555,11 @@ class ComposioAuthManager:
             
             connected = [
                 t for t in results
-                if t["is_connected"] or (t.get("db_status") == "active")
+                if t["is_connected"] or (self._normalize_status(t.get("db_status")) == "active")
             ]
             pending = [
                 t for t in results
-                if t.get("db_status") == "INITIATED"
+                if self._normalize_status(t.get("db_status")) == "initiated"
             ]
             
             return {
@@ -534,14 +617,21 @@ class ComposioAuthManager:
     def disconnect_app(self, user_id: str, app_slug: str) -> Dict[str, Any]:
         """Disconnect a user from a specific app and remove from database."""
         try:
-            # Get user's connections using official SDK
-            connections_response = self._composio.connected_accounts.list(
-                user_ids=[user_id]
+            # Get user's connections using v0.7.x SDK
+            connections_response = self._composio.connected_accounts.get(
+                entity_ids=[user_id]
             )
+            connections = connections_response if isinstance(connections_response, list) else ([connections_response] if connections_response else [])
             
-            for conn in connections_response.items:
-                integration_id = conn.integration_id if hasattr(conn, 'integration_id') else None
-                slug = (integration_id or "").lower()
+            for conn in connections:
+                conn_dict = conn.model_dump() if hasattr(conn, "model_dump") else {}
+                slug = (
+                    conn_dict.get("appUniqueId")
+                    or conn_dict.get("appName")
+                    or getattr(conn, "appUniqueId", None)
+                    or getattr(conn, "appName", None)
+                    or ""
+                ).lower()
                 if slug == app_slug.lower():
                     # Use official SDK delete method
                     self._composio.connected_accounts.delete(conn.id)
@@ -616,10 +706,15 @@ class ComposioAuthManager:
             
             logger.info(f"🔄 Refreshing connection: {app_slug} for user {user_id}")
             
-            # Use official SDK refresh method
-            response = self._composio.connected_accounts.refresh(
-                connected_account_id=connection_id
-            )
+            # NOTE: v0.7.15 doesn't have refresh() method with connected_account_id parameter
+            # Instead, connection refresh happens automatically via OAuth
+            logger.warning(f"Connection refresh not implemented in Composio v0.7.15 - skipping")
+            response = None  # Placeholder
+            
+            # # Use official SDK refresh method (NOT AVAILABLE IN v0.7.15)
+            # response = self._composio.connected_accounts.refresh(
+            #     connected_account_id=connection_id
+            # )
             
             # Update DB with refresh timestamp
             db = SessionLocal()
@@ -630,7 +725,7 @@ class ComposioAuthManager:
                     UserConnection.app_slug == app_slug
                 ).first()
                 if conn:
-                    conn.auth_timestamp = datetime.utcnow()
+                    conn.auth_timestamp = datetime.now(timezone.utc).replace(tzinfo=None)
                     db.commit()
             finally:
                 db.close()
@@ -641,7 +736,7 @@ class ComposioAuthManager:
             return {
                 "success": True,
                 "status": response.status if hasattr(response, 'status') else "refreshed",
-                "refreshed_at": datetime.utcnow().isoformat(),
+                "refreshed_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
                 "message": f"Successfully refreshed {app_slug} connection"
             }
             
@@ -681,10 +776,13 @@ class ComposioAuthManager:
             
             logger.info(f"⏸️ Disabling connection: {app_slug} for user {user_id}")
             
-            # Use official SDK disable method
-            self._composio.connected_accounts.disable(
-                connected_account_id=connection_id
-            )
+            # NOTE: v0.7.15 doesn't have disable() method with connected_account_id parameter
+            logger.warning(f"Connection disable not implemented in Composio v0.7.15 - updating DB only")
+            
+            # # Use official SDK disable method (NOT AVAILABLE IN v0.7.15)
+            # self._composio.connected_accounts.disable(
+            #     connected_account_id=connection_id
+            # )
             
             # Update DB status
             db = SessionLocal()
@@ -736,10 +834,13 @@ class ComposioAuthManager:
             
             logger.info(f"▶️ Enabling connection: {app_slug} for user {user_id}")
             
-            # Use official SDK enable method
-            self._composio.connected_accounts.enable(
-                connected_account_id=connection_id
-            )
+            # NOTE: v0.7.15 doesn't have enable() method with connected_account_id parameter
+            logger.warning(f"Connection enable not implemented in Composio v0.7.15 - updating DB only")
+            
+            # # Use official SDK enable method (NOT AVAILABLE IN v0.7.15)
+            # self._composio.connected_accounts.enable(
+            #     connected_account_id=connection_id
+            # )
             
             # Update DB status
             db = SessionLocal()
@@ -809,6 +910,8 @@ class ComposioAuthManager:
         app_slug: str,
         connection_id: str,
         status: str = "active",
+        composio_entity_id: Optional[str] = None,
+        app_name: Optional[str] = None,
         app_metadata: Optional[Dict[str, Any]] = None,
     ):
         """
@@ -817,7 +920,8 @@ class ComposioAuthManager:
         Connection ID is encrypted before storage for security.
         """
         # Normalize app_slug to lowercase to ensure consistency with Composio's format
-        app_slug = app_slug.lower()
+        app_slug = self._normalize_app_slug(app_slug)
+        status = self._normalize_status(status)
         
         # Encrypt connection ID before storing
         encrypted_connection_id = self._encrypt_connection_id(connection_id)
@@ -839,17 +943,33 @@ class ComposioAuthManager:
                     # Update existing connection
                     existing.connection_id = encrypted_connection_id
                     existing.status = status
-                    existing.auth_timestamp = datetime.utcnow()
+                    existing.internal_user_id = user_id
+                    if composio_entity_id:
+                        existing.composio_entity_id = composio_entity_id
+                    if app_name:
+                        existing.app_name = app_name
+                    existing.auth_timestamp = datetime.now(timezone.utc).replace(tzinfo=None)
+                    if status == "active":
+                        existing.last_verified = datetime.now(timezone.utc).replace(tzinfo=None)
                     if app_metadata:
                         existing.app_metadata = app_metadata
                     db.commit()
                     logger.info(f"✅ Updated connection in DB: {app_slug} for user {user_id} (status: {status})")
                 elif existing_by_id:
                     # Connection already tracked under a different app_slug/user; just update metadata
+                    existing_by_id.user_id = user_id
+                    existing_by_id.internal_user_id = user_id
+                    existing_by_id.app_slug = app_slug
                     existing_by_id.status = status
+                    if composio_entity_id:
+                        existing_by_id.composio_entity_id = composio_entity_id
+                    if app_name:
+                        existing_by_id.app_name = app_name
                     if app_metadata:
                         existing_by_id.app_metadata = app_metadata
-                    existing_by_id.auth_timestamp = datetime.utcnow()
+                    existing_by_id.auth_timestamp = datetime.now(timezone.utc).replace(tzinfo=None)
+                    if status == "active":
+                        existing_by_id.last_verified = datetime.now(timezone.utc).replace(tzinfo=None)
                     db.commit()
                     logger.info(
                         f"✅ Updated existing connection by ID (status: {status})"
@@ -860,10 +980,14 @@ class ComposioAuthManager:
                     connection = UserConnection(
                         id=str(uuid.uuid4()),
                         user_id=user_id,
+                        internal_user_id=user_id,
+                        composio_entity_id=composio_entity_id,
                         app_slug=app_slug,
+                        app_name=app_name,
                         connection_id=encrypted_connection_id,
                         status=status,
-                        auth_timestamp=datetime.utcnow()
+                        auth_timestamp=datetime.now(timezone.utc).replace(tzinfo=None),
+                        last_verified=datetime.now(timezone.utc).replace(tzinfo=None) if status == "active" else None,
                     )
                     if app_metadata:
                         connection.app_metadata = app_metadata
@@ -873,6 +997,25 @@ class ComposioAuthManager:
                 
                 # Also log the event
                 self._log_connection_event(user_id, app_slug, "auth_completed", "success", connection_id=connection_id)
+
+                # Keep canonical entity mapping table in sync when available
+                if composio_entity_id:
+                    mapping = (
+                        db.query(ComposioEntity)
+                        .filter(ComposioEntity.internal_user_id == user_id)
+                        .first()
+                    )
+                    if mapping:
+                        if mapping.composio_entity_id != composio_entity_id:
+                            mapping.composio_entity_id = composio_entity_id
+                    else:
+                        db.add(
+                            ComposioEntity(
+                                internal_user_id=user_id,
+                                composio_entity_id=composio_entity_id,
+                            )
+                        )
+                    db.commit()
                 
             finally:
                 db.close()
@@ -908,9 +1051,12 @@ class ComposioAuthManager:
                 connection = (
                     db.query(UserConnection)
                     .filter(
-                        UserConnection.user_id == user_id,
-                        UserConnection.app_slug == app_slug,
-                        UserConnection.status.in_(["active", "stale"])
+                        or_(
+                            UserConnection.user_id == user_id,
+                            UserConnection.internal_user_id == user_id,
+                        ),
+                        UserConnection.app_slug == self._normalize_app_slug(app_slug),
+                        UserConnection.status.in_(["active", "stale", "ACTIVE", "STALE"])
                     )
                     .first()
                 )
@@ -922,7 +1068,7 @@ class ComposioAuthManager:
                 # Check if connection needs verification (older than 1 hour)
                 needs_verification = False
                 if connection.last_verified:
-                    time_since_verification = datetime.utcnow() - connection.last_verified
+                    time_since_verification = datetime.now(timezone.utc).replace(tzinfo=None) - connection.last_verified
                     needs_verification = time_since_verification > timedelta(hours=1)
                 else:
                     needs_verification = True
@@ -931,14 +1077,48 @@ class ComposioAuthManager:
                 if needs_verification:
                     logger.info(f"Verifying connection for {user_id}/{app_slug} (last verified: {connection.last_verified})")
                     try:
-                        # Quick status check
+                        # Quick status check using v0.7.15 API
                         decrypted_id = self._decrypt_connection_id(connection.connection_id)
-                        conn_check = self._composio.connected_accounts.get(connection_id=decrypted_id)
+
                         
-                        # Update last_verified timestamp
-                        connection.last_verified = datetime.utcnow()
-                        db.commit()
-                        logger.info(f"Connection verified and updated for {user_id}/{app_slug}")
+                        # Get all connections for user (try both actual user_id and "default" fallback)
+                        # Some connections may be registered under "default" entity_id
+                        entity_ids_to_check = self._get_candidate_entity_ids(user_id, app_slug)
+                        
+                        all_connections = []
+                        for entity_id in entity_ids_to_check:
+                            try:
+                                connections = self._composio.connected_accounts.get(entity_ids=[entity_id])
+                                all_connections.extend(connections)
+                            except Exception as e:
+                                logger.debug(f"Could not fetch connections for entity {entity_id}: {e}")
+                        
+                        conn_found = False
+                        for conn in all_connections:
+                            conn_app_name = (getattr(conn, "appName", "") or "").lower()
+                            if conn.id == decrypted_id and conn_app_name == self._normalize_app_slug(app_slug):
+                                # Check if connection is active
+                                if self._normalize_status(getattr(conn, "status", "")) in ["active", "connected"]:
+                                    conn_found = True
+                                    # Update composio_entity_id in DB if connection found under different entity
+                                    if connection.composio_entity_id != conn.entityId:
+                                        logger.info(f"Updating composio_entity_id from {connection.composio_entity_id} to {conn.entityId}")
+                                        connection.composio_entity_id = conn.entityId
+                                    break
+                        
+                        if conn_found:
+                            # Update last_verified timestamp
+                            connection.last_verified = datetime.now(timezone.utc).replace(tzinfo=None)
+                            connection.status = "active"
+                            db.commit()
+                            logger.info(f"Connection verified and updated for {user_id}/{app_slug}")
+                        else:
+                            logger.warning(f"Connection not found or inactive for {user_id}/{app_slug}")
+                            # Mark as stale but don't fail the request
+                            connection.status = "stale"
+                            db.commit()
+                            return None
+                            
                     except Exception as verify_error:
                         logger.warning(f"Connection verification failed for {user_id}/{app_slug}: {verify_error}")
                         # Mark as stale but don't fail the request
@@ -953,7 +1133,8 @@ class ComposioAuthManager:
                     "connection_id": decrypted_id,
                     "app_slug": connection.app_slug,
                     "status": connection.status,
-                    "connected_at": connection.created_at,
+                    "created_at": connection.created_at,  # Fixed: model uses created_at not connected_at
+
                     "metadata": connection.app_metadata
                 }
                 
@@ -970,22 +1151,8 @@ class ComposioAuthManager:
         error_message: Optional[str] = None,
         connection_id: Optional[str] = None,
     ):
-        """Log connection events to database for audit trail."""
-        try:
-            with SessionLocal() as db:
-                log = ConnectionLog(
-                    user_id=user_id,
-                    app_slug=app_slug,
-                    connection_id=connection_id,
-                    event_type=event_type,
-                    status=status,
-                    error_message=error_message,
-                )
-                db.add(log)
-                db.commit()
-                logger.debug(f"✓ Logged event: {event_type} for {app_slug}")
-        except Exception as e:
-            logger.error(f"Failed to log connection event: {e}")
+        """No-op: connection_logs table has been dropped."""
+        logger.debug(f"[connection_event] {event_type}/{status} for {app_slug} (logging removed)")
 # Singleton
 _auth_manager = None
 

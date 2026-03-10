@@ -40,13 +40,13 @@ try {
 }
 Write-Host ""
 
-# Test 3: Build General Agent
-Write-Host "📦 Building General Agent image..." -ForegroundColor Yellow
+# Test 3: Build Integrations Agent
+Write-Host "📦 Building Integrations Agent image..." -ForegroundColor Yellow
 try {
-    docker build -t orbimesh-general-agent:test -f backend/agents/general_agent/Dockerfile backend
-    Write-Host "✅ General Agent build successful" -ForegroundColor Green
+    docker build -t orbimesh-integrations-agent:test -f backend/agents/integrations_agent/Dockerfile backend
+    Write-Host "✅ Integrations Agent build successful" -ForegroundColor Green
 } catch {
-    Write-Host "❌ General Agent build failed" -ForegroundColor Red
+    Write-Host "❌ Integrations Agent build failed" -ForegroundColor Red
     exit 1
 }
 Write-Host ""
@@ -68,4 +68,4 @@ Write-Host "2. Run: docker-compose up --build"
 Write-Host "3. Access services at:"
 Write-Host "   - Orchestrator: http://localhost:8000"
 Write-Host "   - Gmail Agent: http://localhost:8001"
-Write-Host "   - General Agent: http://localhost:8003"
+Write-Host "   - Integrations Agent: http://localhost:8003"

@@ -1,8 +1,9 @@
 ---
-id: browser_automation_agent
-name: Browser Automation Agent
+id: browser_agent
+name: browser_agent
 port: 8090
 version: 1.0.0
+description: LLM-driven web browser automation for navigation, interaction, and data extraction.
 ---
 
 # Browser Automation Agent

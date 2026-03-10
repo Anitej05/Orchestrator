@@ -1,69 +1,9 @@
 ---
 id: universal_agent
-name: Universal Agent
-description: A general-purpose agent capable of handling any arbitrary task through LLM reasoning, code execution, and tool use. Spawns on-demand for tasks not covered by specialized agents.
+name: universal_agent
+port: 8100
 version: 1.0.0
-port: 8070
-type: agent
-category: general
-
-capabilities:
-  - name: general_task_execution
-    description: Execute any arbitrary task using LLM reasoning, planning, and step-by-step execution
-    
-  - name: code_generation
-    description: Write and execute Python code to solve problems
-    
-  - name: analysis
-    description: Analyze data, text, or situations and provide insights
-    
-  - name: research
-    description: Research topics and compile comprehensive information
-    
-  - name: creative_writing
-    description: Write creative content like stories, poems, scripts
-    
-  - name: problem_solving
-    description: Break down complex problems and solve them systematically
-
-parameters:
-  - name: prompt
-    type: string
-    required: true
-    description: The task to be executed by the universal agent
-    
-  - name: context
-    type: object
-    required: false
-    description: Additional context or files for the task
-
-examples:
-  - prompt: "Write a Python script to analyze this CSV file and find trends"
-  - prompt: "Research the history of quantum computing and summarize key milestones"
-  - prompt: "Create a marketing strategy for a new eco-friendly water bottle"
-  - prompt: "Debug this code and explain what's wrong with it"
-  - prompt: "Draft an email to my team about the project deadline extension"
-
-use_when: |
-  - Task doesn't fit specialized agents (browser, spreadsheet, mail, document, zoho_books)
-  - Creative or analytical tasks requiring reasoning
-  - Tasks requiring code generation or problem-solving
-  - Research and information synthesis
-  - Writing and content creation
-  - Debugging or explaining code
-  - General questions or tasks that need step-by-step execution
-
-not_for: |
-  - Web browsing or scraping (use Browser Agent)
-  - Excel/CSV data processing (use Spreadsheet Agent)
-  - Email sending (use Mail Agent)
-  - Document processing (use Document Agent)
-  - Accounting/invoicing (use Zoho Books Agent)
-  - Simple tool calls (use direct tools instead)
-
-lifecycle: on_demand
-auto_terminate: 300
-
+description: A general-purpose agent for arbitrary tasks using LLM reasoning, code execution, and tool use.
 ---
 
 # Universal Agent

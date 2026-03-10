@@ -17,7 +17,7 @@ import threading
 import asyncio
 import time
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, List, Union, Tuple
 from dataclasses import dataclass, field, asdict
 from enum import Enum
@@ -137,7 +137,7 @@ class AgentContentMapping:
     agent_id: str
     agent_content_id: str
     agent_endpoint: str
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None).isoformat())
     verified_at: Optional[str] = None
     is_valid: bool = True
 
@@ -158,9 +158,9 @@ class UnifiedContentMetadata:
     agent_mappings: Dict[str, AgentContentMapping] = field(default_factory=dict)
     priority: ContentPriority = ContentPriority.MEDIUM
     retention_policy: RetentionPolicy = RetentionPolicy.TTL
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
-    updated_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
-    accessed_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None).isoformat())
+    updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None).isoformat())
+    accessed_at: str = field(default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None).isoformat())
     expires_at: Optional[str] = None
     access_count: int = 0
     summary: Optional[str] = None
@@ -343,7 +343,7 @@ class ContentManagementService:
     def _calculate_expiration(self, priority: ContentPriority, ttl_hours: Optional[int] = None) -> Optional[str]:
         """Calculate expiration time based on priority"""
         if ttl_hours:
-            return (datetime.utcnow() + timedelta(hours=ttl_hours)).isoformat()
+            return (datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=ttl_hours)).isoformat()
         
         ttl_map = {
             ContentPriority.CRITICAL: None,
@@ -354,7 +354,7 @@ class ContentManagementService:
         }
         hours = ttl_map.get(priority)
         if hours:
-            return (datetime.utcnow() + timedelta(hours=hours)).isoformat()
+            return (datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=hours)).isoformat()
         return None
     
     def _generate_summary(self, content: Any, content_type: ContentType) -> str:
@@ -960,7 +960,7 @@ Task: Answer the user's query using ONLY the retrieved history. If the answer is
                          logger.info(f"♻️ Content deduplicated: {name} -> Existing ID {meta.id}")
                          if tags:
                             meta.tags = list(set(meta.tags) | set(tags))
-                         meta.accessed_at = datetime.utcnow().isoformat()
+                         meta.accessed_at = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
                          self._save_registry()
                          return meta
             
@@ -1135,7 +1135,7 @@ Task: Answer the user's query using ONLY the retrieved history. If the answer is
         with self._lock:
             if content_id not in self._registry: return None
             metadata = self._registry[content_id]
-            if metadata.expires_at and datetime.utcnow() > datetime.fromisoformat(metadata.expires_at):
+            if metadata.expires_at and datetime.now(timezone.utc).replace(tzinfo=None) > datetime.fromisoformat(metadata.expires_at):
                 self.delete_content(content_id)
                 return None
             
@@ -1153,7 +1153,7 @@ Task: Answer the user's query using ONLY the retrieved history. If the answer is
                     except: content = content_bytes
                 
                 if update_access:
-                    metadata.accessed_at = datetime.utcnow().isoformat()
+                    metadata.accessed_at = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
                     metadata.access_count += 1
                     self._save_registry()
                 return metadata, content
@@ -1190,7 +1190,7 @@ Task: Answer the user's query using ONLY the retrieved history. If the answer is
             return True
 
     def cleanup_expired(self) -> int:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         expired_ids = [cid for cid, m in self._registry.items() if m.expires_at and now > datetime.fromisoformat(m.expires_at)]
         for cid in expired_ids: self.delete_content(cid)
         return len(expired_ids)

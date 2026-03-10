@@ -20,7 +20,7 @@ import logging
 import hashlib
 import mimetypes
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, asdict
 from fastapi import FastAPI, UploadFile, File, HTTPException
@@ -161,7 +161,7 @@ class StandardFileHandler:
             mime_type=mime_type,
             checksum=checksum,
             storage_path=str(storage_path),
-            created_at=datetime.utcnow().isoformat()
+            created_at=datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
         )
         
         # Register
@@ -224,7 +224,7 @@ class StandardFileHandler:
         """Remove files older than max_age_hours"""
         from datetime import timedelta
         
-        cutoff = datetime.utcnow() - timedelta(hours=max_age_hours)
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=max_age_hours)
         old_files = []
         
         for file_id, metadata in self._files.items():

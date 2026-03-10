@@ -450,7 +450,7 @@ class Hands:
         task = {
             "prompt": instruction,
             "action": payload.get("action"),
-            "payload": payload.get("payload", {}),
+            "payload": payload,
             "task_id": payload.get("task_id"),
             "thread_id": payload.get("thread_id"),
             "user_id": user_id,
@@ -967,6 +967,28 @@ os.chdir(r'{workspace_path}')
                 canvas = nested_result["canvas_display"]
                 if canvas:
                     logger.info("🎨 Hands: Found canvas_display in nested result")
+
+        # Path 4: Gmail / email results — auto-build email canvas
+        # Detect when any agent returns a list of email messages and wrap as an email canvas
+        if not canvas and isinstance(output, dict):
+            nested_result = output.get("result")
+            if isinstance(nested_result, dict):
+                email_messages = nested_result.get("messages")
+                if isinstance(email_messages, list) and len(email_messages) > 0:
+                    first_msg = email_messages[0] if email_messages else {}
+                    if isinstance(first_msg, dict) and any(
+                        k in first_msg for k in ("subject", "sender", "from", "snippet", "body")
+                    ):
+                        canvas = {
+                            "canvas_type": "email",
+                            "canvas_data": {
+                                "messages": email_messages,
+                                "total_count": nested_result.get("total_count", len(email_messages)),
+                                "query": nested_result.get("query", ""),
+                            },
+                            "heading": f"Email Results ({len(email_messages)} emails)",
+                        }
+                        logger.info(f"📧 Hands: Auto-generated email canvas ({len(email_messages)} messages)")
 
         if canvas:
             logger.info("🎨 Hands: Registering canvas in Canvas Registry")

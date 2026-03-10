@@ -1,11 +1,11 @@
-# agents/general_agent/service.py
+# agents/integrations_agent/service.py
 """
-General Agent Service
+Integrations Agent Service
 
-Core business logic for the General Fallback Agent.
-Handles tool discovery, connection checking, and execution.
+Core business logic for the Integrations Agent (universal fallback + in-chat OAuth).
+Handles app detection, connection checking, session management, and execution.
 
-Updated for BaseAgent compatibility.
+Architecture: Tier 3 – Dedicated Agent (as per MASTER_IMPLEMENTATION_PLAN_v2)
 """
 
 import logging
@@ -15,17 +15,18 @@ import os
 
 from backend.agents.base.types import ExecutionContext
 
-logger = logging.getLogger("general_agent")
+logger = logging.getLogger("integrations_agent")
 
-class GeneralAgentService:
+class IntegrationsAgentService:
     """
-    Service layer for General Fallback Agent.
-    
+    Service layer for the Integrations Agent (universal fallback + in-chat OAuth).
+
     Responsibilities:
-    - Determine which app the user wants to interact with
-    - Check if user has required connection
-    - Discover available tools from Composio
-    - Execute tools with user parameters
+    - Detect which Composio app the task requires (via AppDetector)
+    - Check per-user connection status
+    - Return inline OAuth URL when connection is missing (in-chat OAuth flow)
+    - Manage per-user, per-app session context (via ComposioSessionManager)
+    - Discover available Composio tools and execute them
     - Handle errors gracefully
     """
     
@@ -61,7 +62,7 @@ class GeneralAgentService:
             from services.integrations.composio_auth import get_auth_manager
             self.auth_manager = get_auth_manager()
         
-        logger.info(f"[GeneralAgentService] Initialized for user {user_id}")
+        logger.info(f"[IntegrationsAgentService] Initialized for user {user_id}")
     
     async def execute(
         self,
@@ -69,149 +70,180 @@ class GeneralAgentService:
         app_name: Optional[str] = None,
         action_params: Optional[Dict[str, Any]] = None,
         context: Optional[ExecutionContext] = None,
+        # UAP-style kwargs (forwarded from agent.py /execute endpoint)
+        payload: Optional[Dict[str, Any]] = None,
+        task_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Execute a user prompt.
-        
+        Execute a task with in-chat OAuth support.
+
         Workflow:
-        1. Parse prompt to determine app (or use provided app_name)
-        2. Check if user has connection for that app
-        3. If not, return error with connect URL
-        4. If yes, discover tools and execute
-        5. Return result
-        
-        Args:
-            prompt: Natural language instruction
-            app_name: Optional app name (auto-detected if not provided)
-            action_params: Optional structured parameters
-            context: Execution context with user_id, thread_id, etc.
-        
-        Returns:
-            Dict with success, data, error, etc.
+          1. Detect which Composio app the task needs (AppDetector)
+          2. Check whether the user has an active connection for that app
+          3a. Connection missing  → return pending_auth with auth URL (in-chat OAuth)
+          3b. Connection present  → load/create session, fetch tools, execute, save context
+
+        Returns (connection missing):
+          {
+            "status": "pending_auth",
+            "needs_approval": True,
+            "auth_url": "https://connect.composio.dev/link/...",
+            "app_slug": "slack",
+            "app_name": "Slack",
+            "message": "Please authorise Slack to continue"
+          }
+
+        Returns (success):
+          {
+            "success": True,
+            "status": "completed",
+            "result": { ... },
+            "session_id": "...",
+            "app_slug": "slack"
+          }
         """
         try:
-            # Step 1: Determine which app the user wants to use
-            if not app_name:
-                app_name = self._extract_app_from_prompt(prompt)
-            
-            if not app_name:
+            # Merge payload kwargs so the method works when called from agent.py
+            if payload:
+                if not action_params:
+                    action_params = payload
+                if not app_name and "app_name" in payload:
+                    app_name = payload["app_name"]
+
+            # ----------------------------------------------------------------
+            # Step 1: Detect which app the task requires
+            # ----------------------------------------------------------------
+            from .app_detector import get_app_detector
+
+            detector = get_app_detector()
+            if app_name:
+                # Caller already knows the app; wrap in detection result format
+                detection = {
+                    "app_slug": app_name.lower(),
+                    "app_name": app_name,
+                    "confidence": 1.0,
+                    "method": "INTEGRATIONS_AGENT",
+                    "agent_id": "integrations_agent",
+                }
+            else:
+                detection = detector.detect_app_from_task(prompt)
+
+            if not detection.get("app_slug"):
                 return {
                     "success": False,
-                    "error": "Could not determine which app to use. Please mention the app name explicitly (e.g., 'Send a Slack message', 'Create a Notion page')."
+                    "status": "error",
+                    "error": (
+                        "Could not determine which app to use. "
+                        "Please mention the app name explicitly "
+                        "(e.g. 'Send a Slack message', 'Create a Notion page')."
+                    ),
                 }
-            
-            logger.info(f"[Execute] Using app: {app_name} for prompt: {prompt[:100]}")
-            
-            # Step 2: Check if user has connection for this app
-            connection_check = await self._check_connection(app_name)
-            
-            if not connection_check["connected"]:
-                # User needs to connect the app
-                frontend_url = os.getenv('FRONTEND_URL', 'https://app.orbimesh.com')
-                connect_url = f"{frontend_url}/connections/{app_name.lower()}"
-                
+
+            app_slug = detection["app_slug"]
+            app_display_name = detection["app_name"]
+
+            logger.info(
+                f"[IntegrationsAgentService] Detected app: {app_slug} "
+                f"(confidence={detection.get('confidence', 0):.2f}) "
+                f"for user {self.user_id}"
+            )
+
+            # ----------------------------------------------------------------
+            # Step 2: Check connection status for this user + app
+            # ----------------------------------------------------------------
+            connection = self.auth_manager.get_connection_for_agent(self.user_id, app_slug)
+
+            if not connection:
+                # ----------------------------------------------------------------
+                # Step 3a: Connection missing → return inline auth link
+                # ----------------------------------------------------------------
+                logger.info(
+                    f"[IntegrationsAgentService] No {app_slug} connection for "
+                    f"user {self.user_id} — initiating in-chat OAuth"
+                )
+                try:
+                    auth_result = self.auth_manager.start_auth_flow(self.user_id, app_slug)
+                    auth_url = auth_result.get("redirect_url") if auth_result.get("success") else None
+                except Exception as auth_err:
+                    logger.warning(f"[IntegrationsAgentService] start_auth_flow error: {auth_err}")
+                    auth_url = None
+
                 return {
                     "success": False,
-                    "error": f"No {app_name.title()} connection found",
-                    "message": f"Please connect your {app_name.title()} account to continue",
-                    "connect_url": connect_url,
-                    "needs_connection": True
+                    "status": "pending_auth",
+                    "needs_approval": True,
+                    "auth_url": auth_url,
+                    "app_slug": app_slug,
+                    "app_name": app_display_name,
+                    "message": (
+                        f"Please authorise {app_display_name} to continue. "
+                        + (f"Click here: {auth_url}" if auth_url else "Go to your Connections page.")
+                    ),
+                    # Structured for Brain to handle via requires_approval flow
+                    "result": None,
+                    "error": f"No active {app_display_name} connection",
                 }
-            
-            # Step 3: Get tools for this app (cached)
-            tools = await self._get_tools_for_app(app_name)
-            
+
+            # ----------------------------------------------------------------
+            # Step 3b: Connected — load/create session & execute
+            # ----------------------------------------------------------------
+            from .session_manager import get_session_manager
+
+            session_mgr = get_session_manager()
+            session = session_mgr.get_or_create_session(self.user_id, app_slug)
+
+            logger.info(
+                f"[IntegrationsAgentService] Using session {session['session_id']} "
+                f"(new={session['is_new']})"
+            )
+
+            # Fetch tools
+            tools = await self._get_tools_for_app(app_slug)
             if not tools:
                 return {
                     "success": False,
-                    "error": f"No tools available for {app_name.title()}. This may be a temporary issue."
+                    "status": "error",
+                    "error": (
+                        f"No tools available for {app_display_name}. "
+                        "This may be a temporary issue — please try again."
+                    ),
                 }
-            
-            logger.info(f"[Execute] Found {len(tools)} tools for {app_name}")
-            
-            # Step 4: Execute using LLM tool selection
-            # For now, using simple heuristic - replace with LLM in production
-            result = await self._execute_with_tools(
+
+            logger.info(
+                f"[IntegrationsAgentService] Found {len(tools)} tools for {app_slug}"
+            )
+
+            # Execute
+            exec_result = await self._execute_with_tools(
                 prompt=prompt,
                 tools=tools,
-                app_name=app_name,
-                action_params=action_params
+                app_name=app_slug,
+                action_params=action_params,
             )
-            
-            return result
-            
+
+            # Persist any context the execution surfaced
+            if exec_result.get("success") and exec_result.get("context"):
+                session_mgr.save_context(self.user_id, app_slug, exec_result["context"])
+
+            return {
+                "success": exec_result.get("success", False),
+                "status": "completed" if exec_result.get("success") else "error",
+                "result": exec_result.get("data"),
+                "session_id": session["session_id"],
+                "app_slug": app_slug,
+                "tool_used": exec_result.get("tool_used"),
+                "message": exec_result.get("message", ""),
+                "error": exec_result.get("error"),
+            }
+
         except Exception as e:
-            logger.error(f"[Execute] Error: {e}", exc_info=True)
+            logger.error(f"[IntegrationsAgentService.execute] Unexpected error: {e}", exc_info=True)
             return {
                 "success": False,
-                "error": f"Execution failed: {str(e)}"
+                "status": "error",
+                "error": f"Execution failed: {str(e)}",
             }
-    
-    def _extract_app_from_prompt(self, prompt: str) -> Optional[str]:
-        """
-        Extract app name from user prompt using simple pattern matching.
-        
-        Examples:
-        - "Send a Slack message" → "Slack"
-        - "Create Notion page" → "Notion"
-        - "Open GitHub PR" → "GitHub"
-        
-        Args:
-            prompt: User's natural language instruction
-        
-        Returns:
-            App name or None if not found
-        """
-        prompt_lower = prompt.lower()
-        
-        # Common app patterns
-        app_patterns = {
-            "slack": ["slack"],
-            "notion": ["notion"],
-            "github": ["github", "git hub"],
-            "linear": ["linear"],
-            "jira": ["jira"],
-            "asana": ["asana"],
-            "trello": ["trello"],
-            "figma": ["figma"],
-            "discord": ["discord"],
-            "hubspot": ["hubspot"],
-            "salesforce": ["salesforce"],
-            "zendesk": ["zendesk"],
-            "intercom": ["intercom"],
-        }
-        
-        for app_name, patterns in app_patterns.items():
-            for pattern in patterns:
-                if pattern in prompt_lower:
-                    return app_name.capitalize()
-        
-        return None
-    
-    async def _check_connection(self, app_name: str) -> Dict[str, bool]:
-        """
-        Check if user has active connection for app.
-        
-        Args:
-            app_name: App name (e.g., "Slack", "Notion")
-        
-        Returns:
-            {"connected": True/False}
-        """
-        try:
-            status = self.auth_manager.check_connection_status(
-                user_id=self.user_id,
-                app_slug=app_name.lower()
-            )
-            
-            # Check if app is in connected_apps list
-            connected_apps = status.get("connected_apps", [])
-            is_connected = app_name.lower() in [app.lower() for app in connected_apps]
-            
-            return {"connected": is_connected}
-        except Exception as e:
-            logger.error(f"[CheckConnection] Error: {e}")
-            return {"connected": False}
     
     async def _get_tools_for_app(self, app_name: str) -> List[Any]:
         """

@@ -294,6 +294,7 @@ class Brain:
                 if not decision.user_response:
                     decision.user_response = last_agent_result.get("result", "")
 
+
         updates = self._apply_decision_to_state(state, decision)
 
         # Include updated insights if any new ones were extracted
@@ -562,7 +563,9 @@ Available tools:
 ❌ Creating Word/PDF documents → Document Agent
 ❌ Analyzing user-uploaded spreadsheets → Spreadsheet Agent
 ❌ Writing/editing actual project code → Coding Agent
-❌ Sending/reading emails → Mail Agent
+❌ Sending/reading emails → Gmail Agent
+
+⚠️ CONNECTION VERIFICATION RULE: If an agent action already SUCCEEDED in the current session, the OAuth connection is PROVEN WORKING. Do NOT call integrations_agent afterwards to "check if [app] is connected" — that call is redundant and wastes iterations. Rule: if gmail_agent returned emails or confirmed sending → Gmail IS connected → proceed directly to finish. This rule applies to every agent: a successful response = connection confirmed.
 
 **Sandbox details:**
 - Modules: pandas, numpy, json, datetime, re, math, statistics, csv, os, requests
@@ -647,7 +650,7 @@ When `requires_approval=True`:
 ```json
 {{
   "action_type": "agent",
-  "resource_id": "MailAgent",
+  "resource_id": "Gmail Agent",
   "payload": {{"instruction": "Send Q4 report to finance@company.com"}},
   "requires_approval": true,
   "approval_reason": "Will send Q4 sales report email to finance@company.com with 3 attachments (report.pdf, data.xlsx, summary.docx)"
@@ -1424,6 +1427,116 @@ Example for "summarise a PDF and email it":
             ).model_dump(),
         }
 
+
+    # -----------------------------------------------------------------------
+    # Connection-gate: check Composio connections before agent delegation
+    # -----------------------------------------------------------------------
+
+    # Maps agent resource_id patterns → (app_slug, display_name)
+    _AGENT_APP_MAP: Dict[str, tuple] = {
+        "gmail": ("gmail", "Gmail"),
+        "gmail_agent": ("gmail", "Gmail"),
+        "mail": ("gmail", "Gmail"),
+        "mail_agent": ("gmail", "Gmail"),
+        "zoho": ("zohobooks", "Zoho Books"),
+        "zoho_books": ("zohobooks", "Zoho Books"),
+        "zoho_books_agent": ("zohobooks", "Zoho Books"),
+    }
+
+    async def _check_connection_for_decision(
+        self, state: Dict[str, Any], decision: BrainDecision
+    ) -> BrainDecision:
+        """
+        Connection-gate: if the Brain has decided to route to an agent that needs
+        a Composio connection, verify that the user has an active connection first.
+
+        If the connection is MISSING:
+          - Rewrite the decision to use `integrations_agent` with
+            `requires_approval=True` so the frontend shows an OAuth link.
+
+        If the connection is PRESENT (or not required):
+          - Return the decision unchanged.
+        """
+        if decision.action_type != "agent":
+            return decision
+        
+        # Skip connection check if we're already executing integrations_agent
+        # This happens after user approves the OAuth dialog - don't redirect infinitely
+        if decision.resource_id and "integrations" in (decision.resource_id or "").lower():
+            logger.info(f"Skipping connection-gate for integrations_agent to avoid infinite redirect")
+            return decision
+
+        resource_id = (decision.resource_id or "").lower().strip()
+        # Resolve via alias map
+        app_key = resource_id
+        for key in self._AGENT_APP_MAP:
+            if key in resource_id:
+                app_key = key
+                break
+
+        app_info = self._AGENT_APP_MAP.get(app_key)
+        if not app_info:
+            # This agent doesn't need a specific Composio connection
+            return decision
+
+        app_slug, app_display_name = app_info
+        user_id = state.get("user_id") or state.get("owner_id") or "default"
+
+        try:
+            from services.integrations.composio_auth import get_auth_manager
+
+            auth_mgr = get_auth_manager()
+            connection = auth_mgr.get_connection_for_agent(user_id, app_slug)
+
+            if connection:
+                # Connection found – proceed normally, inject user_id into payload
+                payload = decision.payload or {}
+                payload.setdefault("user_id", user_id)
+                return BrainDecision(
+                    **{
+                        **decision.model_dump(),
+                        "payload": payload,
+                    }
+                )
+
+            # Connection missing – redirect to integrations_agent with OAuth prompt
+            logger.info(
+                f"🔌 Brain connection-gate: {app_slug} not connected for "
+                f"user={user_id} — redirecting to integrations_agent"
+            )
+
+            original_task = (
+                (decision.payload or {}).get("prompt")
+                or (decision.payload or {}).get("instruction")
+                or state.get("original_prompt", "")
+            )
+
+            return BrainDecision(
+                action_type="agent",
+                resource_id="Integrations Agent",
+                requires_approval=True,
+                approval_reason=(
+                    f"Need to connect {app_display_name} to complete this task. "
+                    f"Click 'Approve' to authorise and continue."
+                ),
+                payload={
+                    "user_id": user_id,
+                    "prompt": original_task,
+                    "app_name": app_slug,
+                    "requesting_service": app_slug,
+                    "post_auth_task": original_task,
+                },
+                reasoning=(
+                    f"User {user_id} has no active {app_display_name} connection. "
+                    "Routing to Integrations Agent to initiate in-chat OAuth."
+                ),
+            )
+
+        except Exception as e:
+            logger.warning(
+                f"Brain connection-gate error (non-fatal, proceeding): {e}"
+            )
+            return decision
 
     def _apply_decision_to_state(
         self, state: Dict[str, Any], decision: BrainDecision

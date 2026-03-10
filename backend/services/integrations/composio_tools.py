@@ -1,240 +1,214 @@
 """
 Composio ToolSet Manager (Multi-App)
 
-Provides LangChain-compatible tools for authenticated users across all apps.
-Uses official Composio SDK patterns.
+Provides tool execution and discovery for authenticated users.
+Uses composio_core v0.7.x SDK (composio.actions API).
 """
 
 import logging
 import os
 from typing import Dict, List, Optional, Any
 
-from langchain_core.tools import BaseTool
-
-# Initialize logger first
 logger = logging.getLogger("composio_tools")
 
-# Import official Composio exceptions for better error handling
+# Import Composio exceptions for better error messages
 try:
     from composio import exceptions as composio_exceptions
     COMPOSIO_EXCEPTIONS_AVAILABLE = True
 except ImportError:
-    logger.warning("Composio exceptions module not available. Using generic exception handling.")
     COMPOSIO_EXCEPTIONS_AVAILABLE = False
-    composio_exceptions = None
+    composio_exceptions = None  # type: ignore
+
+
+class ComposioActionAdapter:
+    """
+    Thin wrapper around a Composio action name (v0.7.x SDK).
+
+    Exposes `.name` and `.ainvoke()` so it can be used wherever
+    LangChain BaseTool objects are expected (e.g. IntegrationsAgentService).
+    """
+
+    def __init__(self, action_name: str, composio_client, entity_id: str, connected_account: Optional[str] = None):
+        self.name = action_name
+        self._client = composio_client
+        self._entity_id = entity_id
+        self._connected_account = connected_account
+
+    async def ainvoke(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute the action via the v0.7.x SDK."""
+        from composio import Action
+        result = self._client.actions.execute(
+            action=Action[self.name],
+            params=params or {},
+            entity_id=self._entity_id,
+            connected_account=self._connected_account,
+        )
+        return result
+
+    def __repr__(self) -> str:
+        return f"ComposioActionAdapter(name={self.name!r})"
 
 
 class ComposioToolManager:
     """
-    Manages LangChain tools for authenticated Composio sessions.
-    
-    Only returns tools for apps where the user has active connections.
-    Uses official SDK: composio.tools.get(user_id=...)
+    Manages Composio action discovery and execution for authenticated users.
+
+    Uses composio_core v0.7.x:
+        composio.actions.get(apps=[...])   → discover available actions
+        composio.actions.execute(...)      → run an action for a user
     """
-    
+
     def __init__(self):
         self.api_key = os.getenv("COMPOSIO_API_KEY")
         if not self.api_key:
-            logger.error("COMPOSIO_API_KEY not set in environment")
             raise ValueError("COMPOSIO_API_KEY required")
-        
-        # Initialize Composio client (official SDK pattern)
         from composio import Composio
         self._composio = Composio(api_key=self.api_key)
         logger.info("Initialized Composio client for tools")
-    
+
     def _format_composio_error(self, error: Exception) -> str:
-        """
-        Format Composio SDK errors into user-friendly messages.
-        
-        Handles official Composio exception types when available.
-        """
+        """Convert SDK exceptions to readable messages."""
         if not COMPOSIO_EXCEPTIONS_AVAILABLE or not composio_exceptions:
             return str(error)
-        
-        # Handle specific Composio exception types
-        if isinstance(error, getattr(composio_exceptions, 'ApiKeyNotProvidedError', type(None))):
-            return "Composio API key not configured. Please set COMPOSIO_API_KEY in environment."
-        elif isinstance(error, getattr(composio_exceptions, 'ComposioSDKTimeoutError', type(None))):
+        if isinstance(error, getattr(composio_exceptions, "ApiKeyNotProvidedError", type(None))):
+            return "Composio API key not configured."
+        elif isinstance(error, getattr(composio_exceptions, "ComposioSDKTimeoutError", type(None))):
             return "Request timeout. Please try again."
-        elif isinstance(error, getattr(composio_exceptions, 'NoItemsFound', type(None))):
+        elif isinstance(error, getattr(composio_exceptions, "NoItemsFound", type(None))):
             return "No connected accounts found for user. Please connect the app first."
-        else:
-            error_str = str(error)
-            if "401" in error_str or "unauthorized" in error_str.lower():
-                return "Authentication failed. User may need to reconnect the app."
-            elif "connection" in error_str.lower() and "not found" in error_str.lower():
-                return "User not connected to this app. Please connect first."
-            else:
-                return error_str
-    
+        err = str(error)
+        if "401" in err or "unauthorized" in err.lower():
+            return "Authentication failed. User may need to reconnect the app."
+        if "not found" in err.lower():
+            return "User not connected to this app. Please connect first."
+        return err
+
+    def _resolve_connected_account_id(self, user_id: str, action_or_toolkit: str) -> Optional[str]:
+        """Resolve connected account id from our DB connection store."""
+        try:
+            from services.integrations.composio_auth import get_auth_manager
+
+            token = (action_or_toolkit or "").strip().upper()
+            app_slug = token.split("_", 1)[0].lower() if "_" in token else token.lower()
+            if app_slug == "zoho":
+                app_slug = "zohobooks"
+
+            connection = get_auth_manager().get_connection_for_agent(user_id, app_slug)
+            if not connection:
+                return None
+            return connection.get("connection_id")
+        except Exception as e:
+            logger.debug(f"Could not resolve connected_account_id for {user_id}/{action_or_toolkit}: {e}")
+            return None
+
     def get_tools_for_user(
         self,
         user_id: str,
         toolkits: Optional[List[str]] = None,
         tools: Optional[List[str]] = None,
-    ) -> List[BaseTool]:
+    ) -> List[ComposioActionAdapter]:
         """
-        Get LangChain tools for authenticated user using official SDK.
-        
+        Get Composio actions for a user as ComposioActionAdapter objects.
+
+        Uses composio.actions.get(apps=[toolkit]) from the v0.7.x SDK.
+        Returns objects with .name and .ainvoke() compatible with
+        IntegrationsAgentService._execute_with_tools().
+
         Args:
-            user_id: Your app's user ID (REQUIRED - SDK needs this)
-            toolkits: Toolkit slugs like ["gmail", "github", "slack"]
-            tools: Specific tool slugs like ["GMAIL_SEND_EMAIL"]
-        
-        Returns:
-            List of LangChain BaseTool objects ready for agent use
-        
-        Note:
-            SDK automatically filters tools based on user's active connections.
-            If user doesn't have gmail connected, gmail tools won't be returned.
-        
-        Example:
-            tools = manager.get_tools_for_user(
-                user_id="user_123",
-                toolkits=["gmail"]
-            )
-            # Only returns gmail tools if user has gmail connected
+            user_id: User ID (used as entity_id for execution)
+            toolkits: App slugs like ["gmail", "github"]
+            tools: Specific action slugs like ["GMAIL_SEND_EMAIL"]
         """
-        if not self.api_key:
-            logger.error("Cannot get tools: COMPOSIO_API_KEY not configured")
-            return []
-        
         try:
-            # Use official SDK pattern: composio.tools.get(user_id=...)
             if tools:
-                # Get specific tools by slug
-                tools_list = self._composio.tools.get(
-                    user_id=user_id,  # ✅ REQUIRED
-                    tools=tools
-                )
-                logger.info(f"Retrieved {len(tools_list)} specific tools for user {user_id}")
-            elif toolkits:
-                # Get tools by toolkit (recommended)
-                tools_list = self._composio.tools.get(
-                    user_id=user_id,  # ✅ REQUIRED
-                    toolkits=toolkits  # Use strings, not App enum
-                )
-                logger.info(f"Retrieved {len(tools_list)} toolkit tools for user {user_id}")
-            else:
-                # Get all tools for user's connected apps
-                logger.warning("No toolkits specified, getting all connected tools")
-                tools_list = self._composio.tools.get(user_id=user_id)
-                logger.info(f"Retrieved {len(tools_list)} tools for user {user_id}")
-            
-            return tools_list
-            
+                adapters = [
+                    ComposioActionAdapter(
+                        slug.upper(),
+                        self._composio,
+                        user_id,
+                        connected_account=self._resolve_connected_account_id(user_id, slug),
+                    )
+                    for slug in tools
+                ]
+                logger.info(f"Wrapped {len(adapters)} specific actions for user {user_id}")
+                return adapters
+
+            if toolkits:
+                adapters = []
+                for toolkit in toolkits:
+                    action_models = self._composio.actions.get(
+                        apps=[toolkit.upper()],
+                        limit=20,
+                    )
+                    if not isinstance(action_models, list):
+                        action_models = [action_models] if action_models else []
+                    for am in action_models:
+                        name = getattr(am, "name", None)
+                        if name:
+                            adapters.append(
+                                ComposioActionAdapter(
+                                    name,
+                                    self._composio,
+                                    user_id,
+                                    connected_account=self._resolve_connected_account_id(user_id, toolkit),
+                                )
+                            )
+                logger.info(f"Fetched {len(adapters)} actions for {toolkits} (user {user_id})")
+                return adapters
+
+            logger.warning("No toolkits or tools specified — returning empty list")
+            return []
+
         except Exception as e:
             error_msg = self._format_composio_error(e)
             logger.error(f"Failed to get tools for {user_id}: {error_msg}", exc_info=True)
-            
-            # Return empty list but log helpful troubleshooting info
-            if "not connected" in error_msg.lower() or "no connected accounts" in error_msg.lower():
-                logger.info(f"💡 Troubleshooting: User {user_id} needs to connect apps via /connections page")
-            elif "api key" in error_msg.lower():
-                logger.error("💡 Troubleshooting: Set COMPOSIO_API_KEY in environment variables")
-            
             return []
-    
+
     def execute_tool(
         self,
         user_id: str,
         tool_slug: str,
-        arguments: Dict[str, Any]
+        arguments: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        Execute a tool for a specific user using official SDK.
-        
-        Args:
-            user_id: Your app's user ID (REQUIRED - SDK uses this to find connection)
-            tool_slug: Tool identifier (e.g., "GMAIL_SEND_EMAIL")
-            arguments: Tool parameters
-        
-        Returns:
-            Execution result with success status, data, and error
-        
-        Example:
-            result = manager.execute_tool(
-                user_id="user_123",
-                tool_slug="GMAIL_SEND_EMAIL",
-                arguments={
-                    "to": "user@example.com",
-                    "subject": "Hello",
-                    "body": "Test email"
-                }
-            )
+        Execute a Composio action for a user.
+
+        Uses composio.actions.execute(action=Action[slug], params=..., entity_id=...)
+        from the v0.7.x SDK.
         """
         try:
-            # Use official SDK: composio.tools.execute(user_id=...)
-            result = self._composio.tools.execute(
-                user_id=user_id,  # ✅ SDK uses this to find connection
-                slug=tool_slug,
-                arguments=arguments
+            from composio import Action
+            result = self._composio.actions.execute(
+                action=Action[tool_slug.upper()],
+                params=arguments or {},
+                entity_id=user_id,
+                connected_account_id=self._resolve_connected_account_id(user_id, tool_slug),
             )
-            
-            success = result.get("successful", False)
-            
-            if not success:
-                logger.warning(f"Tool execution unsuccessful for {tool_slug}: {result.get('error')}")
-            
+            success = "error" not in result if isinstance(result, dict) else True
             return {
                 "success": success,
-                "data": result.get("data", {}),
-                "error": result.get("error")
+                "data": result if isinstance(result, dict) else {"result": result},
+                "error": result.get("error") if isinstance(result, dict) else None,
             }
-            
         except Exception as e:
             error_msg = self._format_composio_error(e)
             logger.error(f"Tool execution failed for {user_id}/{tool_slug}: {error_msg}", exc_info=True)
-            
-            # Provide troubleshooting hints
-            troubleshooting_hint = None
-            if "not connected" in error_msg.lower():
-                troubleshooting_hint = "User needs to connect the app at /connections page"
-            elif "401" in error_msg or "unauthorized" in error_msg.lower():
-                troubleshooting_hint = "User may need to refresh or reconnect the app"
-            
-            return {
-                "success": False,
-                "data": {},
-                "error": error_msg,
-                "troubleshooting": troubleshooting_hint
-            }
-    
-    def get_invoice_tools_for_user(self, user_id: str) -> List[BaseTool]:
-        """
-        Get invoice-specific tools for a user (Zoho Books).
-        
-        This is a convenience method that gets Zoho Books tools.
-        Requires user to be connected to Zoho Books.
-        
-        Args:
-            user_id: Your app's user ID
-        
-        Returns:
-            List of Zoho Books tools (empty if not connected)
-        """
-        try:
-            # Get only Zoho Books tools
-            tools = self._composio.tools.get(
-                user_id=user_id,
-                toolkits=["zohobooks"]  # or "zoho_books"
-            )
-            
-            logger.info(f"Retrieved {len(tools)} Zoho Books tools for user {user_id}")
-            return tools
-        
-        except Exception as e:
-            error_msg = self._format_composio_error(e)
-            logger.error(f"Failed to get invoice tools: {error_msg}", exc_info=True)
-            return []
+            return {"success": False, "data": {}, "error": error_msg}
+
+    def get_invoice_tools_for_user(self, user_id: str) -> List[ComposioActionAdapter]:
+        """Convenience: get Zoho Books (invoice) actions for a user."""
+        return self.get_tools_for_user(user_id, toolkits=["zohobooks"])
 
 
-_tool_manager = None
+# ---------------------------------------------------------------------------
+# Singleton + convenience helpers
+# ---------------------------------------------------------------------------
+
+_tool_manager: Optional[ComposioToolManager] = None
 
 
 def get_tool_manager() -> ComposioToolManager:
-    """Get or create singleton tool manager."""
+    """Get or create singleton ComposioToolManager."""
     global _tool_manager
     if _tool_manager is None:
         _tool_manager = ComposioToolManager()
@@ -242,32 +216,9 @@ def get_tool_manager() -> ComposioToolManager:
 
 
 def get_tools_for_user(
-    user_id: str, 
+    user_id: str,
     toolkits: Optional[List[str]] = None,
-    tools: Optional[List[str]] = None
-) -> List[BaseTool]:
-    """
-    Convenience function to get tools for a user.
-    
-    Args:
-        user_id: Your app's user ID (REQUIRED)
-        toolkits: Toolkit slugs like ["gmail", "github"]
-        tools: Specific tool slugs like ["GMAIL_SEND_EMAIL"]
-    
-    Returns:
-        List of LangChain BaseTool objects
-    
-    Example:
-        from services.integrations.composio_tools import get_tools_for_user
-        
-        # Get all gmail tools for user
-        tools = get_tools_for_user("user_123", toolkits=["gmail"])
-        
-        # Get specific tools
-        tools = get_tools_for_user(
-            "user_123", 
-            tools=["GMAIL_SEND_EMAIL", "GMAIL_SEARCH_EMAILS"]
-        )
-    """
-    manager = get_tool_manager()
-    return manager.get_tools_for_user(user_id, toolkits=toolkits, tools=tools)
+    tools: Optional[List[str]] = None,
+) -> List[ComposioActionAdapter]:
+    """Convenience wrapper around ComposioToolManager.get_tools_for_user()."""
+    return get_tool_manager().get_tools_for_user(user_id, toolkits=toolkits, tools=tools)

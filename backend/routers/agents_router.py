@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_, select
 
 from database import get_db
-from models import Agent, AgentCapability, AgentEndpoint, EndpointParameter
+from models import Agent, AgentCapability
 from backend.schemas import AgentCard
 
 router = APIRouter(prefix="/api/agents", tags=["Agents"])
@@ -36,8 +36,7 @@ def get_sentence_transformer_model():
 @router.post("/register", response_model=AgentCard)
 def register_or_update_agent(agent_data: AgentCard, response: Response, db: Session = Depends(get_db)):
     db_agent = db.query(Agent).options(
-        joinedload(Agent.capability_vectors),
-        joinedload(Agent.endpoints).joinedload(AgentEndpoint.parameters)
+        joinedload(Agent.capability_vectors)
     ).get(agent_data.id)
 
     agent_dict = agent_data.model_dump(
@@ -51,7 +50,6 @@ def register_or_update_agent(agent_data: AgentCard, response: Response, db: Sess
         for key, value in agent_dict.items():
             setattr(db_agent, key, value)
         db_agent.capability_vectors.clear()
-        db_agent.endpoints.clear()
         response.status_code = status.HTTP_200_OK
     else:
         db_agent = Agent(**agent_dict)
@@ -68,28 +66,6 @@ def register_or_update_agent(agent_data: AgentCard, response: Response, db: Sess
                 embedding=embedding_vector
             )
             db.add(new_capability)
-
-    if agent_data.endpoints:
-        for endpoint_data in agent_data.endpoints:
-            new_endpoint = AgentEndpoint(
-                agent=db_agent,
-                endpoint=str(endpoint_data.endpoint),
-                http_method=endpoint_data.http_method,
-                description=endpoint_data.description
-            )
-            db.add(new_endpoint)
-
-            if endpoint_data.parameters:
-                for param_data in endpoint_data.parameters:
-                    new_param = EndpointParameter(
-                        endpoint=new_endpoint,
-                        name=param_data.name,
-                        description=param_data.description,
-                        param_type=param_data.param_type,
-                        required=param_data.required,
-                        default_value=param_data.default_value
-                    )
-                    db.add(new_param)
 
     db.commit()
     db.refresh(db_agent)
@@ -121,7 +97,7 @@ def search_agents(
             conditions.append(Agent.id.in_(subquery))
 
         query = db.query(Agent).options(
-            joinedload(Agent.endpoints).joinedload(AgentEndpoint.parameters)
+            joinedload(Agent.capability_vectors)
         ).filter(Agent.status == 'active').filter(or_(*conditions))
 
         if max_price is not None:
@@ -132,7 +108,7 @@ def search_agents(
     except Exception as e:
         logger.warning(f"Vector search failed, falling back to text search: {e}")
         query = db.query(Agent).options(
-            joinedload(Agent.endpoints).joinedload(AgentEndpoint.parameters)
+            joinedload(Agent.capability_vectors)
         ).filter(Agent.status == 'active')
         
         if max_price is not None:
@@ -145,14 +121,14 @@ def search_agents(
 def get_all_agents(db: Session = Depends(get_db)):
     """Returns all agents in the agents table as a JSON list."""
     return db.query(Agent).options(
-        joinedload(Agent.endpoints).joinedload(AgentEndpoint.parameters)
+        joinedload(Agent.capability_vectors)
     ).all()
 
 
 @router.get("/{agent_id}", response_model=AgentCard)
 def get_agent(agent_id: str, db: Session = Depends(get_db)):
     db_agent = db.query(Agent).options(
-        joinedload(Agent.endpoints).joinedload(AgentEndpoint.parameters)
+        joinedload(Agent.capability_vectors)
     ).get(agent_id)
     if not db_agent:
         raise HTTPException(status_code=404, detail="Agent not found!")

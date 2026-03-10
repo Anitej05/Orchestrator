@@ -1,8 +1,9 @@
 ---
 id: spreadsheet_agent
-name: Spreadsheet Agent
+name: spreadsheet_agent
 port: 9000
-version: 3.0.0
+version: 1.0.0
+description: Priority agent for CSV and Excel analysis, transformations, and natural-language data operations.
 ---
 
 # Spreadsheet Agent

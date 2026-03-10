@@ -4,7 +4,7 @@ Manages automated execution of workflows using APScheduler
 """
 import logging
 from typing import Dict, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.jobstores.base import JobLookupError
@@ -99,7 +99,7 @@ class WorkflowScheduler:
                     user_id=user_id,
                     status='queued',
                     inputs=input_template,
-                    started_at=datetime.utcnow()
+                    started_at=datetime.now(timezone.utc).replace(tzinfo=None)
                 )
                 db.add(execution)
                 
@@ -108,7 +108,7 @@ class WorkflowScheduler:
                     WorkflowSchedule.schedule_id == schedule_id
                 ).first()
                 if schedule:
-                    schedule.last_run_at = datetime.utcnow()
+                    schedule.last_run_at = datetime.now(timezone.utc).replace(tzinfo=None)
                 
                 db.commit()
                 
@@ -155,7 +155,7 @@ class WorkflowScheduler:
                 ).first()
                 if execution:
                     execution.status = 'running'
-                    execution.started_at = datetime.utcnow()
+                    execution.started_at = datetime.now(timezone.utc).replace(tzinfo=None)
                     db.commit()
                 
                 # Get the saved plan from blueprint (try new system first, fall back to old)
@@ -230,8 +230,8 @@ class WorkflowScheduler:
                 
                 # Add execution start message as LangChain SystemMessage
                 execution_start_message = SystemMessage(
-                    content=f"Scheduled execution started at {datetime.utcnow().isoformat()}",
-                    additional_kwargs={"timestamp": datetime.utcnow().isoformat()}
+                    content=f"Scheduled execution started at {datetime.now(timezone.utc).replace(tzinfo=None).isoformat()}",
+                    additional_kwargs={"timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()}
                 )
                 # Append the message object - now all messages are proper LangChain objects
                 existing_messages.append(execution_start_message)
@@ -259,7 +259,7 @@ class WorkflowScheduler:
                         "from_workflow": workflow_id,
                         "execution_id": execution_id,
                         "scheduled": True,
-                        "last_execution": datetime.utcnow().isoformat()
+                        "last_execution": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
                     },
                     "uploaded_files": []
                 }
@@ -353,7 +353,7 @@ class WorkflowScheduler:
                 conversation_json["completed_tasks"] = serialized.get("metadata", {}).get("completed_tasks", completed_tasks)
                 conversation_json["final_response"] = final_response or "Workflow completed"
                 conversation_json["status"] = "completed"
-                conversation_json["metadata"]["completed_at"] = datetime.utcnow().isoformat()
+                conversation_json["metadata"]["completed_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
                 
                 with open(history_path, "w", encoding="utf-8") as f:
                     json.dump(conversation_json, f, ensure_ascii=False, indent=2)
@@ -366,7 +366,7 @@ class WorkflowScheduler:
                         "completed_tasks": completed_tasks,
                         "thread_id": thread_id
                     }
-                    execution.completed_at = datetime.utcnow()
+                    execution.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
                     db.commit()
                 
                 logger.info(f"Scheduled workflow execution {execution_id} completed successfully. Results saved to thread {thread_id}")
@@ -379,7 +379,7 @@ class WorkflowScheduler:
                 if execution:
                     execution.status = 'failed'
                     execution.error = str(e)
-                    execution.completed_at = datetime.utcnow()
+                    execution.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
                     db.commit()
                 
                 logger.error(f"Scheduled workflow execution {execution_id} failed: {str(e)}", exc_info=True)

@@ -14,6 +14,7 @@ import { API_BASE_URL } from '@/lib/config';
 import { useTTS } from '@/hooks/useTTS';
 import { useSpeechToText } from '@/hooks/useSpeechToText';
 import { AudioWaveSVG } from '@/components/ui/audio-wave-animation';
+import { EmailResultCard } from '@/components/email-result-card';
 
 interface InteractiveChatInterfaceProps {
   onWorkflowComplete?: (result: ProcessResponse) => void;
@@ -428,6 +429,51 @@ export function InteractiveChatInterface({
                           </div>
                         )}
                       </div>
+                    )}
+
+                    {message.attachments && message.attachments.length > 0 && (
+                      <div className="flex flex-wrap gap-2 mt-2">
+                        {message.attachments.map((att: Attachment, attIndex: number) => (
+                          <div key={`${messageId}-attachment-${attIndex}`}>
+                            {att.type.startsWith('image/') && att.content ? (
+                              <img src={att.content} alt={att.name} className="max-w-xs max-h-48 rounded-orbimesh-lg" />
+                            ) : (
+                              <div className="flex items-center gap-2 px-3 py-2 rounded-orbimesh-md bg-bg-card border border-border-color">
+                                <FileIcon className="w-4 h-4 text-text-tertiary" />
+                                <span className="text-sm text-text-primary">{att.name}</span>
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {/* Inline email results for email canvas type */}
+                    {message.has_canvas && (message as any).canvas_type === 'email' && (message as any).canvas_data && (
+                      <EmailResultCard
+                        messages={((message as any).canvas_data as any)?.messages || []}
+                        totalCount={((message as any).canvas_data as any)?.total_count}
+                        query={((message as any).canvas_data as any)?.query}
+                        className="mt-3"
+                      />
+                    )}
+                    {/* View in Canvas button for messages with canvas content or data (non-email) */}
+                    {message.has_canvas && (message.canvas_content || (message as any).canvas_data) && message.canvas_type && message.canvas_type !== 'email' && (
+                      <Button
+                        variant="ui-secondary"
+                        size="sm"
+                        className="mt-2 text-xs"
+                        onClick={() => onViewCanvas?.(message.canvas_content || JSON.stringify((message as any).canvas_data || {}), message.canvas_type!)}
+                      >
+                        <FileText className="w-3 h-3 mr-1" />
+                        View in Canvas
+                      </Button>
+                    )}
+                  </div>
+                  {/* Footer with timestamp and copy button */}
+                  <div className={`flex items-center justify-between mt-1.5 ${message.type === 'user' ? 'text-text-tertiary' : 'text-text-tertiary'}`}>
+                    <div className="ui-file-meta opacity-60">
+                      {message.timestamp.toLocaleTimeString()}
+
                     </div>
                     {/* Timestamp below bubble, outside */}
                     <span className="text-[10px] text-text-disabled px-1">{message.timestamp.toLocaleTimeString()}</span>

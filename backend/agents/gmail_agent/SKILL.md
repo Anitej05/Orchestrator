@@ -1,8 +1,9 @@
 ---
 id: gmail_agent
-name: Gmail Agent
+name: gmail_agent
 port: 8003
 version: 1.0.0
+description: Advanced Gmail automation agent with native Composio SDK integration and per-user authentication.
 ---
 
 # Gmail Agent

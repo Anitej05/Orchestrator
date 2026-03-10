@@ -2,7 +2,8 @@
 import os
 import logging
 from typing import Dict, Any, Optional, List
-from composio import Composio, Action
+from composio import Composio
+from composio.client.enums.action import Action
 import json
 
 logger = logging.getLogger("gmail_agent")
@@ -32,9 +33,7 @@ class ComposioToolManager:
             raise ValueError(f"User {user_id} not connected to Gmail")
         
         self.user_id = user_id
-        # connection is a plain dict returned by get_connection_for_agent, not an object.
-        # Use dict key access. connection_id isn't used in execute_action (which uses
-        # entity_id instead) but we store it for logging/debugging purposes.
+
         self.connection_id = connection["connection_id"]
         self.composio = Composio(api_key=os.getenv("COMPOSIO_API_KEY"))
         
@@ -59,25 +58,27 @@ class ComposioToolManager:
             logger.info(f"[ComposioToolManager] Executing {tool_slug} for user {self.user_id}")
             logger.debug(f"[ComposioToolManager] Parameters: {json.dumps(parameters, indent=2)}")
             
-            # Execute tool with user connection.
-            # Composio SDK ≥0.7 API changes:
-            #   - execute_action() removed → use composio.actions.execute()
-            #   - Action subscript (Action["slug"]) removed → use getattr(Action, "slug")
-            #   - connected_account must be passed explicitly (entity_id alone not enough)
-            action_enum = getattr(Action, tool_slug)
+            # Execute action via Composio SDK — action must be an Action enum,
+            # not a plain string (passing a string causes AttributeError: 'str'
+            # object has no attribute 'no_auth' inside the SDK).
             result = self.composio.actions.execute(
-                action=action_enum,
-                params=parameters,
-                entity_id=self.user_id,           # entity_id = Clerk user_id
-                connected_account=self.connection_id  # Composio connection UUID
+                action=Action(tool_slug),
+                params=parameters or {},
+                entity_id=self.user_id,
+                connected_account=self.connection_id,
+
             )
-            
-            logger.info(f"[ComposioToolManager] {tool_slug} completed successfully")
-            
+
+            # v0.7.x always returns a dict that CONTAINS an "error" key (set to
+            # null on success). Checking `"error" not in result` would always be
+            # False, so check whether the value is non-null instead.
+            success = (result.get("error") is None) if isinstance(result, dict) else True
+            logger.info(f"[ComposioToolManager] {tool_slug} completed (successful={success})")
+
             return {
-                "success": True,
+                "success": success,
                 "data": result.get("data", result),
-                "error": None
+                "error": result.get("error") if not success else None
             }
             
         except Exception as e:
@@ -148,10 +149,11 @@ class ComposioToolManager:
         cc: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """Reply to email thread"""
+        # Composio GMAIL_REPLY_TO_THREAD requires 'recipient_email', not 'to'
         params = {
             "thread_id": thread_id,
             "body": body,
-            "to": to
+            "recipient_email": to
         }
         if cc:
             params["cc"] = cc

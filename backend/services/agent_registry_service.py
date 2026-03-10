@@ -12,17 +12,20 @@ import re
 import yaml
 from typing import List, Dict, Optional, Any
 from sqlalchemy.orm import Session, joinedload
-from models import Agent, AgentEndpoint, StatusEnum, AgentType
+from models import Agent, StatusEnum, AgentType
 from database import SessionLocal, Base, engine
 from pathlib import Path
 
 logger = logging.getLogger("AgentRegistryService")
 
-# Agent directories to scan for SKILL.md files
+# Agent directories to scan for SKILL.md files.
+# mail_agent is DEPRECATED – excluded from scan so the orchestrator LLM never routes to it.
+# All email routing goes through gmail_agent.
 AGENT_DIRS = [
     "spreadsheet_agent",
-    "mail_agent",
+    # "mail_agent",  # DEPRECATED – use gmail_agent
     "gmail_agent",
+    "integrations_agent",
     "browser_agent",
     "document_agent_lib",
     "zoho_books",
@@ -46,9 +49,12 @@ AGENT_ALIASES = {
     "data_agent": "Spreadsheet Agent",
     # Mail agent aliases
     "mail": "Gmail Agent",
-    "mail_agent": "Gmail Agent",
+    # Mail agent aliases — all redirect to Gmail Agent (mail_agent is DEPRECATED)
+    "mail": "Gmail Agent",
+    "mail_agent": "Gmail Agent",  # DEPRECATED: mail_agent → gmail_agent
     "email": "Gmail Agent",
     "gmail": "Gmail Agent",
+    "gmail_agent": "Gmail Agent",
     # Document agent aliases
     "document": "Document Agent",
     "document_agent": "Document Agent",
@@ -61,11 +67,14 @@ AGENT_ALIASES = {
     "zoho_books": "Zoho Books Agent",
     "accounting": "Zoho Books Agent",
     "invoice": "Zoho Books Agent",
-    # Universal agent aliases
+    # Integrations agent aliases (canonical universal fallback + in-chat OAuth)
+    "integrations": "Integrations Agent",
+    "integrations_agent": "Integrations Agent",
+    "general_agent": "Integrations Agent",  # legacy alias
+    # Universal agent aliases (DEPRECATED: use integrations_agent)
     "universal": "Universal Agent",
     "universal_agent": "Universal Agent",
-    "general": "Universal Agent",
-    "general_agent": "Universal Agent",
+    "general": "Integrations Agent",
     # Coding agent aliases
     "coding": "Coding Agent",
     "coding_agent": "Coding Agent",
@@ -291,7 +300,7 @@ class AgentRegistryService:
             query = (
                 _db.query(Agent)
                 .options(
-                    joinedload(Agent.endpoints).joinedload(AgentEndpoint.parameters)
+                    joinedload(Agent.capability_vectors)
                 )
                 .filter(Agent.status == StatusEnum.active)
             )
@@ -352,7 +361,7 @@ class AgentRegistryService:
             agent = (
                 _db.query(Agent)
                 .options(
-                    joinedload(Agent.endpoints).joinedload(AgentEndpoint.parameters)
+                    joinedload(Agent.capability_vectors)
                 )
                 .filter(Agent.id == agent_id)
                 .first()

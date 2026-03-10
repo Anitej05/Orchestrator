@@ -40,13 +40,13 @@ else
 fi
 echo ""
 
-# Test 3: Build General Agent
-echo "📦 Building General Agent image..."
-docker build -t orbimesh-general-agent:test -f backend/agents/general_agent/Dockerfile backend
+# Test 3: Build Integrations Agent
+echo "📦 Building Integrations Agent image..."
+docker build -t orbimesh-integrations-agent:test -f backend/agents/integrations_agent/Dockerfile backend
 if [ $? -eq 0 ]; then
-    echo "✅ General Agent build successful"
+    echo "✅ Integrations Agent build successful"
 else
-    echo "❌ General Agent build failed"
+    echo "❌ Integrations Agent build failed"
     exit 1
 fi
 echo ""
@@ -68,4 +68,4 @@ echo "2. Run: docker-compose up --build"
 echo "3. Access services at:"
 echo "   - Orchestrator: http://localhost:8000"
 echo "   - Gmail Agent: http://localhost:8001"
-echo "   - General Agent: http://localhost:8003"
+echo "   - Integrations Agent: http://localhost:8003"

@@ -47,7 +47,7 @@ services:
       
       # Agent URLs (internal Docker network)
       GMAIL_AGENT_URL: http://gmail_agent:8000
-      GENERAL_AGENT_URL: http://general_agent:8000
+      INTEGRATIONS_AGENT_URL: http://integrations_agent:8000
       
       # Environment
       ENVIRONMENT: development
@@ -103,12 +103,12 @@ services:
       retries: 3
       start_period: 10s
 
-  # General Fallback Agent Service
-  general_agent:
+  # Integrations Agent Service
+  integrations_agent:
     build:
       context: ./backend
-      dockerfile: agents/general_agent/Dockerfile
-    container_name: orbimesh-general-agent
+      dockerfile: agents/integrations_agent/Dockerfile
+    container_name: orbimesh-integrations-agent
     ports:
       - "8003:8000"
     environment:
