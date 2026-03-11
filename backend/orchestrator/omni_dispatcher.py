@@ -140,6 +140,10 @@ def omni_route_condition(state: Dict[str, Any]) -> str:
     if state.get("pending_approval"):
         return "approval"
 
+    # Check for pending user input (e.g. from needs_input)
+    if state.get("pending_user_input"):
+        return "needs_input"
+
     # If final_response is already set the graph is done regardless of decision field.
     # This guards against code paths that set final_response without updating decision.
     if state.get("final_response"):

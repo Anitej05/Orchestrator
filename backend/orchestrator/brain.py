@@ -153,6 +153,22 @@ class Brain:
             logger.info("🧠 Brain: pending_action_approval=True -- skipping re-plan, executing approved decision directly")
             return {"pending_action_approval": False}
 
+        # --- USER INPUT HANDLING ---
+        # If the last step requested user input and we haven't received a response yet,
+        # we must pause the graph. We return a skip decision so omni_route_condition can pause it.
+        if state.get("pending_user_input"):
+            if state.get("user_response"):
+                # The user has replied! Clear the flag so we can process their response.
+                logger.info(f"🧠 Brain: Received user_response: '{state.get('user_response')[:50]}...'. Clearing pending_user_input to resume.")
+                # We do not return here; we let the Brain continue thinking with the new context
+            else:
+                logger.info("🧠 Brain: pending_user_input=True with no response yet -- pausing to wait for user text input")
+                decision = BrainDecision(
+                    action_type="skip", 
+                    reasoning="Waiting for user input"
+                )
+                return {"decision": decision.model_dump()}
+
         todo_list = state.get("todo_list", [])
         memory = state.get("memory", {})
         insights = state.get("insights", {})
@@ -1566,6 +1582,8 @@ Example for "summarise a PDF and email it":
         updates = {
             "decision": decision_dump,
             "iteration_count": state.get("iteration_count", 0) + 1,
+            "pending_user_input": False,
+            "user_response": None
         }
 
         # === HUMAN-IN-THE-LOOP: Check if approval is required ===

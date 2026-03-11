@@ -1007,6 +1007,17 @@ os.chdir(r'{workspace_path}')
             "shared_workspace": str(shared_manager.get_workspace_path()),
         }
 
+        # === INTERCEPT NEEDS_INPUT FROM AGENTS ===
+        # If an agent explicitly requires user input (like credentials), 
+        # pause execution and ask the user directly.
+        if action_type == "agent" and isinstance(result.output, dict):
+            status = result.output.get("status")
+            if status == "needs_input":
+                question = result.output.get("question", "The agent needs more information to proceed.")
+                updates["pending_user_input"] = True
+                updates["question_for_user"] = question
+                logger.info(f"⏸️ Agent {decision_dict.get('resource_id')} needs input: {question}")
+
         # === LAST AGENT RESULT: Expose raw output so Brain can finish immediately ===
         # When an agent or tool call succeeds, store the full uncompressed result in a
         # dedicated state field. Brain reads this directly instead of trying to reload
