@@ -28,9 +28,9 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-# Base storage directory (absolute path for security) - uses root storage/ folder
-STORAGE_BASE = Path(__file__).parent.parent.parent / "storage"
-STORAGE_BASE = STORAGE_BASE.resolve()  # Resolve to absolute path
+# Centralized storage directory (absolute path for security)
+from backend.storage_config import STORAGE_ROOT
+STORAGE_BASE = STORAGE_ROOT.resolve()
 
 # Priority order for filename search (most common first)
 SEARCH_FOLDERS = [
@@ -38,10 +38,11 @@ SEARCH_FOLDERS = [
     "content",
     "images",
     "spreadsheets",
-    "document_versions",
-    "browser_downloads",
-    "gmail_attachments",
+    "screenshots",
+    "downloads",
+    "attachments",
     "artifacts",
+    "temp",
 ]
 
 

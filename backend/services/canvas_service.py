@@ -121,6 +121,22 @@ class CanvasService:
             canvas_data={"file_path": file_path}
         )
 
+    @staticmethod
+    def build_pptx_view(
+        file_path: str,
+        title: str = "Presentation Viewer",
+        slide_count: Optional[int] = None,
+    ) -> CanvasDisplay:
+        """Build a PPTX presentation viewer canvas."""
+        data = {"file_path": file_path}
+        if slide_count is not None:
+            data["slide_count"] = slide_count
+        return CanvasDisplay(
+            canvas_type="pptx",
+            canvas_title=title,
+            canvas_data=data,
+        )
+
     # --- TEMPLATE-BASED BUILDERS ---
 
     @staticmethod

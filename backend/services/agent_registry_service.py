@@ -28,6 +28,8 @@ AGENT_DIRS = [
     "integrations_agent",
     "browser_agent",
     "document_agent_lib",
+    "pdf_agent",
+    "ppt_agent",
     "zoho_books",
     "universal_agent",
     "coding_agent",
@@ -58,9 +60,21 @@ AGENT_ALIASES = {
     # Document agent aliases
     "document": "Document Agent",
     "document_agent": "Document Agent",
-    "pdf": "Document Agent",
     "word": "Document Agent",
     "docx": "Document Agent",
+    # PDF agent aliases
+    "pdf": "PDF Agent",
+    "pdf_agent": "PDF Agent",
+    "merge_pdf": "PDF Agent",
+    "scan_pdf": "PDF Agent",
+    "ocr": "PDF Agent",
+    # PPT agent aliases
+    "ppt": "PPT Agent",
+    "ppt_agent": "PPT Agent",
+    "pptx": "PPT Agent",
+    "powerpoint": "PPT Agent",
+    "presentation": "PPT Agent",
+    "slides": "PPT Agent",
     # Zoho agent aliases
     "zoho": "Zoho Books Agent",
     "zoho_agent": "Zoho Books Agent",

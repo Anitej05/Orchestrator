@@ -28,6 +28,16 @@ export interface TaskAgentPair {
   fallbacks: (Agent & { score?: number })[]
 }
 
+export interface ExposedFile {
+  id: string;
+  name: string;
+  path: string;
+  type: 'image' | 'document' | 'spreadsheet' | 'code' | 'archive' | 'other';
+  size_bytes?: number;
+  mime_type?: string;
+  description?: string;
+}
+
 export interface ProcessResponse {
   message: string;
   thread_id: string;
@@ -35,6 +45,7 @@ export interface ProcessResponse {
   final_response: string | null;
   pending_user_input: boolean;
   question_for_user: string | null;
+  exposed_files?: ExposedFile[];
 }
 
 export interface ConversationStatus {
@@ -196,6 +207,7 @@ export interface Message {
   browsing_trace?: BrowsingTraceStep[];
   screenshot_files?: FileObject[];
   show_trace?: boolean;  // UI state for collapsible trace
+  exposed_files?: ExposedFile[];
 }
 
 export type FileObject = {

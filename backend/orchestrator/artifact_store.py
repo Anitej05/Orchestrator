@@ -39,9 +39,8 @@ from utils.mega_logger import setup_mega_logger
 
 logger = setup_mega_logger("ArtifactStore")
 
-# Base storage path
-STORAGE_BASE = Path(__file__).parent.parent / "storage"
-ARTIFACTS_BASE = STORAGE_BASE / "artifacts"
+# Centralized storage paths
+from backend.storage_config import STORAGE_ROOT as STORAGE_BASE, ARTIFACTS_DIR as ARTIFACTS_BASE
 
 # ── Lazy-loaded embedding model (shared across all stores) ───────────────────
 _embed_lock = threading.Lock()

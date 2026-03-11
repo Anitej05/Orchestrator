@@ -44,7 +44,7 @@ import httpx
 CONVERSATION_HISTORY_DIR = "conversation_history"
 from database import SessionLocal, get_db
 from models import Agent, StatusEnum, Workflow, WorkflowExecution, UserThread, WorkflowSchedule, WorkflowWebhook
-from backend.schemas import ProcessRequest, ProcessResponse, PlanResponse, FileObject, ActionApprovalRequest, ActionRejectRequest
+from backend.schemas import ProcessRequest, ProcessResponse, PlanResponse, FileObject, ActionApprovalRequest, ActionRejectRequest, ExposedFile
 from backend.orchestrator.graph import create_graph_with_checkpointer, create_execution_subgraph, serialize_complex_object
 from langgraph.checkpoint.memory import MemorySaver
 from routers import connect_router
@@ -2008,6 +2008,41 @@ async def find_agents(request: ProcessRequest, api_request: Request):
         state_registry = final_state.get('canvas_registry')
         state_active = final_state.get('active_canvas_id')
 
+        # Map created files to ExposedFile objects
+        exposed_files = []
+        created_files = final_state.get("created_files", [])
+        for f in created_files:
+            # Safely handle both dict and object formats from state
+            f_dict = f if isinstance(f, dict) else (f.dict() if hasattr(f, 'dict') else {})
+            if not f_dict: continue
+            
+            # Extract basic data
+            file_name = f_dict.get('file_name', 'Unnamed File')
+            file_id = f_dict.get('file_id') or f_dict.get('content_id') or str(uuid.uuid4())
+            file_path = f_dict.get('file_path', '')
+            file_type = f_dict.get('file_type', 'other')
+            
+            # Map paths to download URLs - use the relative paths for standard storage locations
+            from pathlib import Path
+            abs_path = Path(file_path)
+            # Find the path relative to the storage dir, or just use filename
+            try:
+                storage_idx = abs_path.parts.index('storage')
+                rel_parts = abs_path.parts[storage_idx+1:]
+                virtual_path = '/'.join(rel_parts)
+            except ValueError:
+                virtual_path = abs_path.name
+                
+            exposed_files.append(ExposedFile(
+                id=str(file_id),
+                name=file_name,
+                path=virtual_path,
+                type=file_type if file_type in ['image', 'document', 'spreadsheet', 'code', 'archive', 'other'] else 'other',
+                size_bytes=f_dict.get('size'),
+                mime_type=f_dict.get('mime_type'),
+                description=f_dict.get('content_summary', f"Generated {file_type} file")
+            ))
+
         return ProcessResponse(
             message="Successfully processed the request.",
             thread_id=thread_id,
@@ -2015,6 +2050,7 @@ async def find_agents(request: ProcessRequest, api_request: Request):
             final_response=final_response_str,
             pending_user_input=False,
             question_for_user=None,
+            exposed_files=exposed_files,
             # Canvas Registry (NEW)
             canvas_registry=registry_state if registry_state.canvases else None,
             active_canvas_id=canvas_registry.get_active_id() or state_active,
@@ -2123,6 +2159,37 @@ async def continue_conversation(user_response: UserResponse, api_request: Reques
         registry_state = canvas_registry.get_registry_state()
         compat = canvas_registry.get_backward_compat_fields()
 
+        # Map created files to ExposedFile objects
+        exposed_files = []
+        created_files = final_state.get("created_files", [])
+        for f in created_files:
+            f_dict = f if isinstance(f, dict) else (f.dict() if hasattr(f, 'dict') else {})
+            if not f_dict: continue
+            
+            file_name = f_dict.get('file_name', 'Unnamed File')
+            file_id = f_dict.get('file_id') or f_dict.get('content_id') or str(uuid.uuid4())
+            file_path = f_dict.get('file_path', '')
+            file_type = f_dict.get('file_type', 'other')
+            
+            from pathlib import Path
+            abs_path = Path(file_path)
+            try:
+                storage_idx = abs_path.parts.index('storage')
+                rel_parts = abs_path.parts[storage_idx+1:]
+                virtual_path = '/'.join(rel_parts)
+            except ValueError:
+                virtual_path = abs_path.name
+                
+            exposed_files.append(ExposedFile(
+                id=str(file_id),
+                name=file_name,
+                path=virtual_path,
+                type=file_type if file_type in ['image', 'document', 'spreadsheet', 'code', 'archive', 'other'] else 'other',
+                size_bytes=f_dict.get('size'),
+                mime_type=f_dict.get('mime_type'),
+                description=f_dict.get('content_summary', f"Generated {file_type} file")
+            ))
+
         return ProcessResponse(
             message="Successfully processed the continued conversation.",
             thread_id=user_response.thread_id,
@@ -2130,6 +2197,7 @@ async def continue_conversation(user_response: UserResponse, api_request: Reques
             final_response=final_response_str,
             pending_user_input=False,
             question_for_user=None,
+            exposed_files=exposed_files,
             canvas_registry=registry_state if registry_state.canvases else None,
             active_canvas_id=canvas_registry.get_active_id(),
             has_canvas=compat.get('has_canvas', False),
@@ -3810,6 +3878,37 @@ async def websocket_chat(websocket: WebSocket):
                     "warning": f"Some data could not be processed: {str(serialize_err)[:100]}"
                 }
 
+            # Map created files to ExposedFile dicts for the frontend
+            exposed_files = []
+            created_files = final_state.get("created_files", [])
+            for f in created_files:
+                f_dict = f if isinstance(f, dict) else (f.dict() if hasattr(f, 'dict') else {})
+                if not f_dict: continue
+                
+                file_name = f_dict.get('file_name', 'Unnamed File')
+                file_id = f_dict.get('file_id') or f_dict.get('content_id') or str(uuid.uuid4())
+                file_path = f_dict.get('file_path', '')
+                file_type = f_dict.get('file_type', 'other')
+                
+                from pathlib import Path
+                abs_path = Path(file_path)
+                try:
+                    storage_idx = abs_path.parts.index('storage')
+                    rel_parts = abs_path.parts[storage_idx+1:]
+                    virtual_path = '/'.join(rel_parts)
+                except ValueError:
+                    virtual_path = abs_path.name
+                    
+                exposed_files.append({
+                    "id": str(file_id),
+                    "name": file_name,
+                    "path": virtual_path,
+                    "type": file_type if file_type in ['image', 'document', 'spreadsheet', 'code', 'archive', 'other'] else 'other',
+                    "size_bytes": f_dict.get('size'),
+                    "mime_type": f_dict.get('mime_type'),
+                    "description": f_dict.get('content_summary', f"Generated {file_type} file")
+                })
+
             # Try to send the __end__ event, but handle if connection is already closed
             try:
                 # Explicitly surface the most important fields so the frontend
@@ -3826,6 +3925,7 @@ async def websocket_chat(websocket: WebSocket):
                     "canvas_type": final_state.get("canvas_type"),
                     "canvas_title": final_state.get("canvas_title"),
                     "has_canvas": final_state.get("has_canvas", False),
+                    "exposed_files": exposed_files,
                     # --- Full serialized state for components that need it ---
                     "data": serializable_state,
                     "message": "Agent orchestration completed successfully.",

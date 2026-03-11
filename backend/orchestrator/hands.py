@@ -445,6 +445,88 @@ class Hands:
         agent = agent_registry.find_agent(agent_id)
         agent_name = agent.get("name", agent_id) if agent else agent_id
 
+        # ──────────────────────────────────────────────────────────────
+        # IN-CHAT AUTH PRE-CHECK
+        # If this agent requires Composio OAuth, verify the user has an
+        # active connection BEFORE spawning the agent.  When missing,
+        # initiate the auth flow and return the Connect Link URL so the
+        # Brain can surface it to the user.
+        # ──────────────────────────────────────────────────────────────
+        try:
+            from backend.services.skill_registry import skill_registry
+            skill_config = skill_registry.get_skill_config(agent_id)
+
+            if skill_config and skill_config.requires_auth and skill_config.composio_app_slug:
+                app_slug = skill_config.composio_app_slug
+                logger.info(
+                    f"🔐 Auth pre-check: {agent_name} requires "
+                    f"Composio connection for '{app_slug}'"
+                )
+
+                from services.integrations.composio_auth import get_auth_manager
+                auth_mgr = get_auth_manager()
+
+                # Quick DB/API check for active connection
+                status = auth_mgr.check_connection_status(user_id, app_slug)
+                connected_apps = status.get("connected_apps", []) if status.get("success") else []
+
+                if app_slug.lower() not in [a.lower() for a in connected_apps]:
+                    # No active connection → initiate auth flow
+                    logger.info(
+                        f"🔑 No active {app_slug} connection for user {user_id} "
+                        f"— initiating in-chat OAuth"
+                    )
+                    try:
+                        auth_result = auth_mgr.start_auth_flow(user_id, app_slug)
+                        auth_url = (
+                            auth_result.get("redirect_url")
+                            if auth_result.get("success")
+                            else None
+                        )
+                    except Exception as auth_err:
+                        logger.warning(f"start_auth_flow error: {auth_err}")
+                        auth_url = None
+
+                    app_display = skill_config.name or app_slug.title()
+                    message = (
+                        f"To use **{app_display}**, please connect your "
+                        f"**{app_slug.title()}** account first."
+                    )
+                    if auth_url:
+                        message += (
+                            f"\n\n🔗 **[Click here to connect {app_slug.title()}]({auth_url})**"
+                            f"\n\nAfter you complete authentication in the new tab, "
+                            f"come back here and ask me again."
+                        )
+                    else:
+                        message += (
+                            "\n\nPlease go to your **Connections** page "
+                            "to set up this integration."
+                        )
+
+                    return ActionResult(
+                        action_id=f"auth_required_{agent_id}",
+                        success=False,
+                        output={
+                            "status": "pending_auth",
+                            "auth_required": True,
+                            "auth_url": auth_url,
+                            "app_slug": app_slug,
+                            "app_name": app_display,
+                            "message": message,
+                        },
+                        error_message=message,
+                        execution_time_ms=(time.time() - start_time) * 1000,
+                    )
+
+                logger.info(f"✅ Auth pre-check passed: {app_slug} is connected")
+        except ImportError as imp_err:
+            # Composio not installed — skip pre-check, let agent handle it
+            logger.debug(f"Auth pre-check skipped (import error): {imp_err}")
+        except Exception as auth_check_err:
+            # Non-fatal — let agent attempt execution even if pre-check fails
+            logger.warning(f"Auth pre-check failed (non-fatal): {auth_check_err}")
+
         # Prepare task
         instruction = payload.get("instruction", payload.get("prompt", ""))
         task = {
@@ -879,6 +961,27 @@ os.chdir(r'{workspace_path}')
             ))
         except Exception as e:
             logger.debug(f"Artifact capture skipped: {e}")
+
+        # === MEMORY SERVICE: Capture routing decisions ===
+        # Records which agent/tool worked for which type of task,
+        # building persistent routing knowledge over time.
+        try:
+            from backend.services.memory_service import get_memory_service
+            memory_svc = get_memory_service(user_id)
+            if action_type == "agent":
+                memory_svc.capture_routing_decision(
+                    prompt=state.get("original_prompt", ""),
+                    agent_id=decision_dict.get("resource_id", "unknown"),
+                    success=result.success,
+                )
+                if not result.success and result.error_message:
+                    memory_svc.capture_error_pattern(
+                        task=state.get("original_prompt", ""),
+                        agent_id=decision_dict.get("resource_id", "unknown"),
+                        error_message=result.error_message,
+                    )
+        except Exception as e:
+            logger.debug(f"Memory capture skipped: {e}")
 
         existing_action_history = list(state.get("action_history", []))
         

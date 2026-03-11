@@ -15,6 +15,7 @@ import { useTTS } from '@/hooks/useTTS';
 import { useSpeechToText } from '@/hooks/useSpeechToText';
 import { AudioWaveSVG } from '@/components/ui/audio-wave-animation';
 import { EmailResultCard } from '@/components/email-result-card';
+import { ExposedFilesPanel } from '@/components/exposed-files-panel';
 
 interface InteractiveChatInterfaceProps {
   onWorkflowComplete?: (result: ProcessResponse) => void;
@@ -379,7 +380,7 @@ export function InteractiveChatInterface({
             const hasAttachments = message.attachments && message.attachments.length > 0;
             const hasCanvas = message.has_canvas && (message.canvas_content || (message as any).canvas_data);
             const hasBrowsingTrace = message.browsing_trace && message.browsing_trace.length > 0;
-            
+
             return hasContent || hasAttachments || hasCanvas || hasBrowsingTrace;
           })
           .map((message: Message, index: number) => {
@@ -399,7 +400,7 @@ export function InteractiveChatInterface({
                 {isAssistant && (
                   <div className="flex-shrink-0 mt-[3px]">
                     <svg width="26" height="26" viewBox="0 0 26 26" fill="none" xmlns="http://www.w3.org/2000/svg">
-                      <circle cx="13" cy="13" r="7.5" stroke="#2C4BA8" strokeWidth="6" fill="none"/>
+                      <circle cx="13" cy="13" r="7.5" stroke="#2C4BA8" strokeWidth="6" fill="none" />
                     </svg>
                   </div>
                 )}
@@ -428,55 +429,42 @@ export function InteractiveChatInterface({
                             ))}
                           </div>
                         )}
-                      </div>
-                    )}
+                        {/* Inline email results for email canvas type */}
+                        {message.has_canvas && (message as any).canvas_type === 'email' && (message as any).canvas_data && (
+                          <EmailResultCard
+                            messages={((message as any).canvas_data as any)?.messages || []}
+                            totalCount={((message as any).canvas_data as any)?.total_count}
+                            query={((message as any).canvas_data as any)?.query}
+                            className="mt-3"
+                          />
+                        )}
+                        {/* View in Canvas button for messages with canvas content or data (non-email) */}
+                        {message.has_canvas && (message.canvas_content || (message as any).canvas_data) && message.canvas_type && message.canvas_type !== 'email' && (
+                          <Button
+                            variant="ui-secondary"
+                            size="sm"
+                            className="mt-2 text-xs"
+                            onClick={() => onViewCanvas?.(message.canvas_content || JSON.stringify((message as any).canvas_data || {}), message.canvas_type!)}
+                          >
+                            <FileText className="w-3 h-3 mr-1" />
+                            View in Canvas
+                          </Button>
+                        )}
 
-                    {message.attachments && message.attachments.length > 0 && (
-                      <div className="flex flex-wrap gap-2 mt-2">
-                        {message.attachments.map((att: Attachment, attIndex: number) => (
-                          <div key={`${messageId}-attachment-${attIndex}`}>
-                            {att.type.startsWith('image/') && att.content ? (
-                              <img src={att.content} alt={att.name} className="max-w-xs max-h-48 rounded-orbimesh-lg" />
-                            ) : (
-                              <div className="flex items-center gap-2 px-3 py-2 rounded-orbimesh-md bg-bg-card border border-border-color">
-                                <FileIcon className="w-4 h-4 text-text-tertiary" />
-                                <span className="text-sm text-text-primary">{att.name}</span>
-                              </div>
-                            )}
-                          </div>
-                        ))}
+                        {/* Render exposed files for user message if any */}
+                        {message.exposed_files && message.exposed_files.length > 0 && (
+                          <ExposedFilesPanel files={message.exposed_files} />
+                        )}
                       </div>
-                    )}
-                    {/* Inline email results for email canvas type */}
-                    {message.has_canvas && (message as any).canvas_type === 'email' && (message as any).canvas_data && (
-                      <EmailResultCard
-                        messages={((message as any).canvas_data as any)?.messages || []}
-                        totalCount={((message as any).canvas_data as any)?.total_count}
-                        query={((message as any).canvas_data as any)?.query}
-                        className="mt-3"
-                      />
-                    )}
-                    {/* View in Canvas button for messages with canvas content or data (non-email) */}
-                    {message.has_canvas && (message.canvas_content || (message as any).canvas_data) && message.canvas_type && message.canvas_type !== 'email' && (
-                      <Button
-                        variant="ui-secondary"
-                        size="sm"
-                        className="mt-2 text-xs"
-                        onClick={() => onViewCanvas?.(message.canvas_content || JSON.stringify((message as any).canvas_data || {}), message.canvas_type!)}
-                      >
-                        <FileText className="w-3 h-3 mr-1" />
-                        View in Canvas
-                      </Button>
-                    )}
-                  </div>
-                  {/* Footer with timestamp and copy button */}
-                  <div className={`flex items-center justify-between mt-1.5 ${message.type === 'user' ? 'text-text-tertiary' : 'text-text-tertiary'}`}>
-                    <div className="ui-file-meta opacity-60">
-                      {message.timestamp.toLocaleTimeString()}
-
                     </div>
-                    {/* Timestamp below bubble, outside */}
-                    <span className="text-[10px] text-text-disabled px-1">{message.timestamp.toLocaleTimeString()}</span>
+                    {/* Footer with timestamp and copy button */}
+                    <div className={`flex items-center justify-between mt-1.5 ${message.type === 'user' ? 'text-text-tertiary' : 'text-text-tertiary'}`}>
+                      <div className="ui-file-meta opacity-60">
+                        {message.timestamp.toLocaleTimeString()}
+                      </div>
+                      {/* Timestamp below bubble, outside */}
+                      <span className="text-[10px] text-text-disabled px-1">{message.timestamp.toLocaleTimeString()}</span>
+                    </div>
                   </div>
                 ) : (
                   <div className={message.type === 'system' ? 'ui-system-bubble' : 'ui-agent-bubble'}>
@@ -563,6 +551,11 @@ export function InteractiveChatInterface({
                           View in Canvas
                         </Button>
                       )}
+
+                      {/* Render exposed files for assistant message */}
+                      {message.exposed_files && message.exposed_files.length > 0 && (
+                        <ExposedFilesPanel files={message.exposed_files} />
+                      )}
                     </div>
                     {/* Footer: timestamp + action buttons */}
                     <div className="flex items-center justify-between mt-1.5 text-text-tertiary">
@@ -630,7 +623,7 @@ export function InteractiveChatInterface({
           <div className="w-full flex justify-start px-6 py-3 gap-3">
             <div className="flex-shrink-0 mt-1">
               <svg width="26" height="26" viewBox="0 0 26 26" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <circle cx="13" cy="13" r="7.5" stroke="#2C4BA8" strokeWidth="6" fill="none"/>
+                <circle cx="13" cy="13" r="7.5" stroke="#2C4BA8" strokeWidth="6" fill="none" />
               </svg>
             </div>
             <div className="flex items-center gap-1.5 pt-1">

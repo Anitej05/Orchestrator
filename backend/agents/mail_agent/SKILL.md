@@ -1,14 +1,36 @@
 ---
 id: mail_agent
-name: mail_agent
+name: Mail Agent
 port: 8040
 version: 1.0.0
-description: Deprecated mail agent retained for compatibility with legacy Gmail-style workflows.
+description: >
+  Deprecated mail agent retained for compatibility with legacy Gmail-style workflows.
+  Prefer gmail_agent for new email tasks.
+model: cerebras/llama-3.3-70b
+context_strategy: minimal
+requires_auth: true
+composio_app_slug: gmail
+deprecated: true
+prefer: gmail_agent
+triggers: []
+capabilities:
+  - search_emails
+  - summarize_threads
+  - draft_reply
+  - send_email
+  - manage_emails
+  - extract_action_items
+not_for:
+  - spreadsheets
+  - PDF documents
+  - web browsing
+  - calendar events
 ---
 
-# Mail Agent
+# Mail Agent (Legacy)
 
 Smart, stateful Gmail assistant with LLM-powered email understanding.
+**Note:** Prefer `gmail_agent` for new tasks — this agent is retained for backward compatibility.
 
 ## Capabilities
 
@@ -19,31 +41,6 @@ Smart, stateful Gmail assistant with LLM-powered email understanding.
 - Manage emails: archive, delete, star, label
 - Extract action items, tasks, and deadlines from emails
 - Download and analyze email attachments
-
-## When to Use
-
-Use this agent when the user:
-- Mentions email, Gmail, inbox, or messages
-- Wants to search, read, or send emails
-- Asks to reply to or forward emails
-- Needs to summarize email threads
-- Wants to find action items in emails
-- Mentions drafting or composing emails
-
-## NOT For
-
-- Spreadsheet files → use Spreadsheet Agent
-- PDF/Word documents → use Document Agent
-- Web browsing → use Browser Agent
-- Calendar events → (future Calendar Agent)
-
-## Example Prompts
-
-- "Find emails from John about the budget proposal"
-- "Summarize my unread emails from today"
-- "Draft a reply thanking them for the meeting"
-- "Mark all emails from newsletter@ as read"
-- "What action items do I have from recent emails?"
 
 ## Notes
 

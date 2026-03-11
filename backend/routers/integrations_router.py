@@ -422,3 +422,110 @@ async def enable_connection(user_id: str, app_slug: str):
     except Exception as e:
         logger.error(f"❌ Exception in enable_connection: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Dynamic tool discovery & toolkit catalog (v2)
+# ---------------------------------------------------------------------------
+
+class SearchToolsRequest(BaseModel):
+    query: str
+    limit: int = 15
+
+
+@router.get("/toolkits")
+async def list_toolkits(search: Optional[str] = None):
+    """
+    Browse the Composio toolkit catalog.
+
+    Returns a list of all available toolkits (apps) with optional search filter.
+    This powers the frontend "Browse Integrations" catalog.
+
+    Example:
+    ```
+    GET /api/integrations/toolkits?search=slack
+
+    Response:
+    [
+        {"name": "Slack", "slug": "slack", "description": "Send messages..."},
+        ...
+    ]
+    ```
+    """
+    try:
+        from services.integrations.composio_tools import get_tool_manager
+        manager = get_tool_manager()
+        toolkits = manager.list_toolkits(search=search)
+        return {
+            "success": True,
+            "toolkits": toolkits[:50],
+            "total_count": len(toolkits),
+        }
+    except Exception as e:
+        logger.error(f"Failed to list toolkits: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/toolkits/{user_id}/status")
+async def get_toolkit_status(user_id: str):
+    """
+    Get connection status for all toolkits for a specific user.
+
+    Returns each toolkit with its connection state, useful for the
+    frontend connections page to show connected/not-connected badges.
+    """
+    try:
+        from services.integrations.composio_tools import get_tool_manager
+        manager = get_tool_manager()
+        status = manager.get_toolkit_connection_status(user_id)
+        return {
+            "success": True,
+            "user_id": user_id,
+            "toolkits": status,
+        }
+    except Exception as e:
+        logger.error(f"Failed to get toolkit status: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/search-tools")
+async def search_tools(request: SearchToolsRequest):
+    """
+    Search for available Composio tools by natural language query.
+
+    Example:
+    ```
+    POST /api/integrations/search-tools
+    {"query": "send slack message", "limit": 10}
+
+    Response:
+    {
+        "success": true,
+        "tools": [
+            {"name": "SLACK_SEND_MESSAGE", "description": "Send a message to a Slack channel"},
+            ...
+        ],
+        "total_found": 5
+    }
+    ```
+    """
+    try:
+        from services.integrations.composio_tools import get_tool_manager
+        manager = get_tool_manager()
+        results = manager.search_tools(query=request.query)
+        limited = results[:request.limit]
+        return {
+            "success": True,
+            "query": request.query,
+            "tools": [
+                {
+                    "name": r.get("name") or r.get("slug", ""),
+                    "description": r.get("description", "")[:200],
+                }
+                for r in limited
+            ],
+            "total_found": len(results),
+        }
+    except Exception as e:
+        logger.error(f"Tool search failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))

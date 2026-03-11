@@ -505,6 +505,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
               browsing_trace: msg?.browsing_trace,
               screenshot_files: msg?.screenshot_files,
               show_trace: msg?.show_trace,
+              exposed_files: msg?.exposed_files || msg?.data?.exposed_files || msg?.additional_kwargs?.exposed_files,
             } as Message;
           })
           .filter((msg: Message) => msg.content.trim() !== '' || (msg.attachments && msg.attachments.length > 0));

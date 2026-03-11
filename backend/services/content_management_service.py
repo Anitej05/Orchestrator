@@ -42,20 +42,19 @@ from langchain_core.messages import HumanMessage
 
 logger = logging.getLogger("ContentManagementService")
 
-# Storage directories
-PROJECT_ROOT = Path(__file__).parent.parent.parent.resolve()
-STORAGE_BASE = PROJECT_ROOT / "storage"
-SYSTEM_DIR = STORAGE_BASE / "system"
-CONTENT_DIR = SYSTEM_DIR / "content"
+# Storage directories (centralized)
+from backend.storage_config import (
+    STORAGE_ROOT as STORAGE_BASE, SYSTEM_DIR, CONTENT_DIR,
+    TEMP_DIR as _TEMP_DIR, PROJECT_ROOT,
+)
 
 USER_UPLOADS_DIR = CONTENT_DIR / "uploads"
 AGENT_FILES_DIR = CONTENT_DIR / "agent_files"
 ARTIFACTS_DIR = CONTENT_DIR / "artifacts"
-TEMP_DIR = CONTENT_DIR / "temp"
+TEMP_DIR = _TEMP_DIR
 
-# Ensure directories exist
-SYSTEM_DIR.mkdir(parents=True, exist_ok=True)
-for dir_path in [USER_UPLOADS_DIR, AGENT_FILES_DIR, ARTIFACTS_DIR, TEMP_DIR]:
+# Ensure CMS-specific subdirectories exist
+for dir_path in [USER_UPLOADS_DIR, AGENT_FILES_DIR, ARTIFACTS_DIR]:
     dir_path.mkdir(parents=True, exist_ok=True)
 
 
@@ -277,10 +276,9 @@ class ContentManagementService:
     
     def __init__(self, storage_dir: str = None):
         self._registry: Dict[str, UnifiedContentMetadata] = {}
-        # Use absolute path based on BACKEND dir to avoid CWD issues
+        # Use centralized storage config to avoid CWD issues
         if storage_dir is None:
-            backend_dir = Path(__file__).parent.parent.resolve()  # services -> backend
-            storage_dir = str(backend_dir / "storage" / "content")
+            storage_dir = str(CONTENT_DIR)
         self._registry_path = Path(storage_dir) / "content_registry.json"
         self._registry_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()

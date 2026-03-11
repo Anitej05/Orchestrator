@@ -20,10 +20,9 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY")
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
 
-# Storage
-PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
-ATTACHMENT_DIR = PROJECT_ROOT / "storage" / "gmail_agent" / "attachments"
-ATTACHMENT_TTL_HOURS = 72
+# Centralized storage
+from backend.storage_config import ATTACHMENTS_DIR
+ATTACHMENT_DIR = ATTACHMENTS_DIR
 
 # Gmail Agent Settings
 MAX_SEARCH_RESULTS = 50

@@ -227,7 +227,7 @@ class CanvasDisplay(BaseModel):
     1. Structured data (preferred): Send canvas_data, frontend templates it
     2. Custom HTML (when needed): Send canvas_content with raw HTML
     """
-    canvas_type: Literal['email_preview', 'spreadsheet', 'spreadsheet_plan', 'document', 'pdf', 'image', 'json', 'html', 'markdown', 'chart', 'code'] = Field(
+    canvas_type: Literal['email_preview', 'spreadsheet', 'spreadsheet_plan', 'document', 'pdf', 'pptx', 'image', 'json', 'html', 'markdown', 'chart', 'code'] = Field(
         ...,
         description="Type of content being displayed in canvas"
     )
@@ -392,6 +392,20 @@ class DialogueContext(BaseModel):
 
 # --- API Request/Response Models ---
 
+class ExposedFile(BaseModel):
+    """
+    Represents a file explicitly exposed to the user by the LLM.
+    Used for rendering file attachments, downloads, and previews in the chat UI.
+    """
+    id: str = Field(..., description="Unique ID for the exposed file")
+    name: str = Field(..., description="Display name of the file")
+    path: str = Field(..., description="Relative or absolute path for downloading/previewing")
+    type: Literal['image', 'document', 'spreadsheet', 'code', 'archive', 'other'] = Field(default='other', description="File type category")
+    size_bytes: Optional[int] = Field(None, description="Size of the file in bytes")
+    mime_type: Optional[str] = Field(None, description="MIME type for previewing")
+    description: Optional[str] = Field(None, description="LLM-generated description of what this file is")
+
+
 class ProcessResponse(BaseModel):
     """The schema for the main `/api/chat` endpoint response."""
     message: str
@@ -400,6 +414,8 @@ class ProcessResponse(BaseModel):
     final_response: Optional[str] = None
     pending_user_input: bool = False
     question_for_user: Optional[str] = None
+    # Exposed Files System
+    exposed_files: List[ExposedFile] = Field(default_factory=list, description="Files explicitly chosen by the LLM to expose to the user")
     # Canvas Registry (NEW)
     canvas_registry: Optional[CanvasRegistryState] = None
     active_canvas_id: Optional[str] = None

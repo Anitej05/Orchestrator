@@ -10,9 +10,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-STORAGE_BASE_DIR = "storage"
-DOCUMENTS_DIR = os.path.join(STORAGE_BASE_DIR, "documents")
-IMAGES_DIR = os.path.join(STORAGE_BASE_DIR, "images")
+from backend.storage_config import STORAGE_ROOT, DOCUMENTS_DIR, IMAGES_DIR
+
+STORAGE_BASE_DIR = str(STORAGE_ROOT)
 
 
 def ensure_storage_dirs():

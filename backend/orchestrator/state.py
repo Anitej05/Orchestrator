@@ -110,9 +110,9 @@ class State(TypedDict):
     # Metadata
     thread_id: str
     user_id: str
-    # Fallback identity field — brain.py reads `state.get("owner_id") or state.get("user_id")`
     owner_id: Annotated[Optional[str], overwrite_reducer]
     uploaded_files: Annotated[List[Dict], overwrite_reducer]
+    exposed_files: Annotated[List[Dict], overwrite_reducer]
     
     # --- FILE TRACKING ---
     # Files created by orchestrator during this conversation (persisted per thread)

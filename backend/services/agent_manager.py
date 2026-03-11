@@ -37,6 +37,8 @@ AGENT_EXECUTE_TIMEOUTS = {
     "integrations_agent": 120.0,
     "coding": 600.0,
     "coding_agent": 600.0,
+    "pdf_agent": 240.0,
+    "ppt_agent": 240.0,
 }
 
 
@@ -117,6 +119,8 @@ class PortPool:
         "universal_agent": 8070,
         "coding": 8080,
         "coding_agent": 8080,
+        "pdf_agent": 8055,
+        "ppt_agent": 8056,
     }
 
     DYNAMIC_RANGE = (9001, 9100)  # Ports 9001-9100 for dynamic allocation
@@ -195,6 +199,8 @@ class ProcessManager:
         "universal_agent": "agents.universal_agent",
         "coding": "agents.coding_agent",
         "coding_agent": "agents.coding_agent",
+        "pdf_agent": "agents.pdf_agent",
+        "ppt_agent": "agents.ppt_agent",
     }
 
     # Special cases: agents that don't use __init__.py pattern
@@ -370,6 +376,8 @@ class HealthChecker:
         "document_agent_lib": 90,
         "coding_agent": 120,
         "universal_agent": 60,
+        "pdf_agent": 90,
+        "ppt_agent": 60,
     }
     DEFAULT_TIMEOUT: int = 60  # raised from 30 → 60 for general safety
 

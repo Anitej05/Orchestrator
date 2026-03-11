@@ -57,9 +57,14 @@ class ComposioAuthManager:
     """
     
     def __init__(self):
-        self.api_key = os.getenv("COMPOSIO_API_KEY")
+        # Get COMPOSIO_API_KEY via credential_manager (DB → .env fallback)
+        try:
+            from backend.services.credential_service import credential_manager
+            self.api_key = credential_manager.get("agent", "integrations", "COMPOSIO_API_KEY")
+        except Exception:
+            self.api_key = os.getenv("COMPOSIO_API_KEY")
         if not self.api_key:
-            logger.error("COMPOSIO_API_KEY not set in environment")
+            logger.error("COMPOSIO_API_KEY not set in credentials or environment")
             raise ValueError("COMPOSIO_API_KEY required")
         
         # Initialize Composio client directly (official SDK pattern)

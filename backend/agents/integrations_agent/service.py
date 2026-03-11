@@ -3,33 +3,41 @@
 Integrations Agent Service
 
 Core business logic for the Integrations Agent (universal fallback + in-chat OAuth).
-Handles app detection, connection checking, session management, and execution.
+Handles dynamic tool discovery, LLM-driven tool selection, connection checking,
+session management, and execution.
 
 Architecture: Tier 3 – Dedicated Agent (as per MASTER_IMPLEMENTATION_PLAN_v2)
 """
 
+import json
 import logging
+import os
 import re
 from typing import Dict, Any, Optional, List
-import os
 
 from backend.agents.base.types import ExecutionContext
 
 logger = logging.getLogger("integrations_agent")
 
+# LLM model to use for tool selection / parameter extraction
+_TOOL_SELECTION_MODEL = os.getenv("INTEGRATIONS_TOOL_LLM", "llama-3.3-70b-versatile")
+
+
 class IntegrationsAgentService:
     """
     Service layer for the Integrations Agent (universal fallback + in-chat OAuth).
 
-    Responsibilities:
-    - Detect which Composio app the task requires (via AppDetector)
-    - Check per-user connection status
-    - Return inline OAuth URL when connection is missing (in-chat OAuth flow)
-    - Manage per-user, per-app session context (via ComposioSessionManager)
-    - Discover available Composio tools and execute them
-    - Handle errors gracefully
+    Dynamic execution flow (v3):
+      1. Detect which app the task needs (AppDetector fast-path OR Composio search)
+      2. Check per-user connection status
+      3a. Missing connection → return inline OAuth URL (in-chat OAuth)
+      3b. Connected → dynamically discover tools, LLM selects best tool,
+          LLM extracts parameters, execute, save context
+
+    Key difference from v1: No hardcoded tool/app maps. Uses Composio's
+    search API for tool discovery and an LLM for tool selection + param extraction.
     """
-    
+
     def __init__(
         self,
         user_id: str,
@@ -39,7 +47,7 @@ class IntegrationsAgentService:
     ):
         """
         Initialize service for a specific user.
-        
+
         Args:
             user_id: User ID for connection checking
             tool_cache: Shared ToolCache instance
@@ -48,22 +56,22 @@ class IntegrationsAgentService:
         """
         self.user_id = user_id
         self.tool_cache = tool_cache
-        
+
         # Use injected managers or initialize
         if tool_manager:
             self.tool_manager = tool_manager
         else:
             from services.integrations.composio_tools import get_tool_manager
             self.tool_manager = get_tool_manager()
-        
+
         if auth_manager:
             self.auth_manager = auth_manager
         else:
             from services.integrations.composio_auth import get_auth_manager
             self.auth_manager = get_auth_manager()
-        
+
         logger.info(f"[IntegrationsAgentService] Initialized for user {user_id}")
-    
+
     async def execute(
         self,
         prompt: str,
@@ -76,13 +84,14 @@ class IntegrationsAgentService:
         thread_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Execute a task with in-chat OAuth support.
+        Execute a task with dynamic tool discovery and in-chat OAuth.
 
         Workflow:
           1. Detect which Composio app the task needs (AppDetector)
           2. Check whether the user has an active connection for that app
           3a. Connection missing  → return pending_auth with auth URL (in-chat OAuth)
-          3b. Connection present  → load/create session, fetch tools, execute, save context
+          3b. Connection present  → dynamically discover tools, LLM selects + extracts
+              params, execute, save context
 
         Returns (connection missing):
           {
@@ -130,15 +139,15 @@ class IntegrationsAgentService:
                 detection = detector.detect_app_from_task(prompt)
 
             if not detection.get("app_slug"):
-                return {
-                    "success": False,
-                    "status": "error",
-                    "error": (
-                        "Could not determine which app to use. "
-                        "Please mention the app name explicitly "
-                        "(e.g. 'Send a Slack message', 'Create a Notion page')."
-                    ),
-                }
+                # Fast-path detection failed — try dynamic search via Composio
+                logger.info(
+                    "[IntegrationsAgentService] AppDetector returned no app, "
+                    "trying dynamic tool search"
+                )
+                return await self._execute_dynamic_search(
+                    prompt=prompt,
+                    action_params=action_params,
+                )
 
             app_slug = detection["app_slug"]
             app_display_name = detection["app_name"]
@@ -198,7 +207,7 @@ class IntegrationsAgentService:
                 f"(new={session['is_new']})"
             )
 
-            # Fetch tools
+            # Fetch tools dynamically
             tools = await self._get_tools_for_app(app_slug)
             if not tools:
                 return {
@@ -214,7 +223,7 @@ class IntegrationsAgentService:
                 f"[IntegrationsAgentService] Found {len(tools)} tools for {app_slug}"
             )
 
-            # Execute
+            # Execute with LLM-driven tool selection
             exec_result = await self._execute_with_tools(
                 prompt=prompt,
                 tools=tools,
@@ -244,42 +253,170 @@ class IntegrationsAgentService:
                 "status": "error",
                 "error": f"Execution failed: {str(e)}",
             }
-    
+
+    # ------------------------------------------------------------------
+    # Dynamic search fallback (when AppDetector can't identify the app)
+    # ------------------------------------------------------------------
+
+    async def _execute_dynamic_search(
+        self,
+        prompt: str,
+        action_params: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Fallback when AppDetector can't identify the app.
+
+        Uses Composio's search API to find relevant tools directly from
+        the user's prompt, then executes the best match.
+        """
+        try:
+            # Search for tools matching the prompt
+            search_results = self.tool_manager.search_tools(query=prompt)
+
+            if not search_results:
+                return {
+                    "success": False,
+                    "status": "error",
+                    "error": (
+                        "Could not find any matching integrations for your request. "
+                        "Please mention the app name explicitly "
+                        "(e.g., 'Send a Slack message', 'Create a Notion page')."
+                    ),
+                }
+
+            # Extract the app/toolkit from the first result
+            top_result = search_results[0]
+            tool_name = top_result.get("name", top_result.get("slug", ""))
+
+            # Derive app slug from tool name (e.g., SLACK_SEND_MESSAGE → slack)
+            app_slug = tool_name.split("_", 1)[0].lower() if "_" in tool_name else ""
+
+            if not app_slug:
+                return {
+                    "success": False,
+                    "status": "error",
+                    "error": "Could not determine which app to use from search results.",
+                }
+
+            logger.info(
+                f"[DynamicSearch] Found tool {tool_name} (app: {app_slug}) "
+                f"from {len(search_results)} search results"
+            )
+
+            # Check connection
+            connection = self.auth_manager.get_connection_for_agent(self.user_id, app_slug)
+            if not connection:
+                try:
+                    auth_result = self.auth_manager.start_auth_flow(self.user_id, app_slug)
+                    auth_url = auth_result.get("redirect_url") if auth_result.get("success") else None
+                except Exception:
+                    auth_url = None
+
+                return {
+                    "success": False,
+                    "status": "pending_auth",
+                    "needs_approval": True,
+                    "auth_url": auth_url,
+                    "app_slug": app_slug,
+                    "app_name": app_slug.title(),
+                    "message": (
+                        f"I found the right tool ({tool_name}), but you need to "
+                        f"connect {app_slug.title()} first. "
+                        + (f"Click here: {auth_url}" if auth_url else "Go to your Connections page.")
+                    ),
+                    "result": None,
+                    "error": f"No active {app_slug.title()} connection",
+                }
+
+            # Build adapters from search results (only matching app)
+            matching_tools = [
+                r for r in search_results
+                if (r.get("name", "") or r.get("slug", "")).upper().startswith(app_slug.upper())
+            ]
+
+            adapters = []
+            for r in matching_tools[:10]:  # Limit to top 10
+                from services.integrations.composio_tools import ComposioActionAdapter
+                name = r.get("name") or r.get("slug", "")
+                adapters.append(
+                    ComposioActionAdapter(
+                        action_name=name,
+                        composio_client=self.tool_manager._composio,
+                        user_id=self.user_id,
+                        connected_account=self.tool_manager._resolve_connected_account_id(
+                            self.user_id, name
+                        ),
+                        description=r.get("description", ""),
+                        parameters=r.get("parameters", {}),
+                    )
+                )
+
+            if not adapters:
+                return {
+                    "success": False,
+                    "status": "error",
+                    "error": f"Found tools but none matched app {app_slug}.",
+                }
+
+            # Execute with LLM
+            return await self._execute_with_tools(
+                prompt=prompt,
+                tools=adapters,
+                app_name=app_slug,
+                action_params=action_params,
+            )
+
+        except Exception as e:
+            logger.error(f"[DynamicSearch] Error: {e}", exc_info=True)
+            return {
+                "success": False,
+                "status": "error",
+                "error": f"Dynamic tool search failed: {str(e)}",
+            }
+
+    # ------------------------------------------------------------------
+    # Tool retrieval
+    # ------------------------------------------------------------------
+
     async def _get_tools_for_app(self, app_name: str) -> List[Any]:
         """
         Get tools for app from cache or Composio API.
-        
+
         Args:
             app_name: App name (e.g., "Slack")
-        
+
         Returns:
-            List of LangChain tools
+            List of ComposioActionAdapter tools
         """
         # Check cache first
         cached_tools = self.tool_cache.get(self.user_id, app_name)
         if cached_tools is not None:
             logger.info(f"[GetTools] Cache hit for {app_name} (user {self.user_id})")
             return cached_tools
-        
+
         # Cache miss - fetch from Composio
         logger.info(f"[GetTools] Cache miss for {app_name}, fetching from Composio")
-        
+
         try:
-            # Get tools using tool manager
+            # Get tools using tool manager (v3 API)
             tools = self.tool_manager.get_tools_for_user(
                 user_id=self.user_id,
                 toolkits=[app_name.lower()]
             )
-            
+
             # Cache the result
             if tools:
                 self.tool_cache.set(self.user_id, app_name, tools)
-            
+
             return tools or []
         except Exception as e:
             logger.error(f"[GetTools] Error fetching tools: {e}", exc_info=True)
             return []
-    
+
+    # ------------------------------------------------------------------
+    # LLM-driven tool selection & execution
+    # ------------------------------------------------------------------
+
     async def _execute_with_tools(
         self,
         prompt: str,
@@ -288,124 +425,190 @@ class IntegrationsAgentService:
         action_params: Optional[Dict[str, Any]]
     ) -> Dict[str, Any]:
         """
-        Execute the user's prompt using available tools.
-        
-        Uses simple heuristic for tool selection.
-        TODO: Replace with LLM-based tool selection for production.
-        
-        Args:
-            prompt: User instruction
-            tools: Available tools from Composio
-            app_name: App being used
-            action_params: Optional structured parameters
-        
-        Returns:
-            Result dict with success, data, error
+        Execute the user's prompt using LLM-driven tool selection.
+
+        1. Build a tool catalog from available tools
+        2. Ask LLM to select the best tool and extract parameters
+        3. Execute the selected tool
         """
         try:
-            # Select tool based on heuristic
-            tool_name = self._select_tool_heuristic(prompt, tools, app_name)
-            
-            if not tool_name:
+            # Build tool descriptions for LLM
+            tool_info = []
+            tool_map = {}
+            for t in tools:
+                name = getattr(t, "name", str(t))
+                desc = getattr(t, "description", "")
+                params = getattr(t, "parameters", {})
+                tool_info.append({
+                    "name": name,
+                    "description": desc,
+                    "parameters": params,
+                })
+                tool_map[name] = t
+
+            if not tool_info:
                 return {
                     "success": False,
-                    "error": f"Could not determine which {app_name.title()} action to take. Please be more specific."
+                    "error": f"No tools available for {app_name}",
                 }
-            
-            logger.info(f"[ExecuteWithTools] Selected tool: {tool_name}")
-            
-            # Extract parameters from prompt
-            params = self._extract_parameters(prompt, action_params)
-            
-            logger.info(f"[ExecuteWithTools] Executing {tool_name} with params: {params}")
-            
-            # Execute the tool
-            # Note: This is a simplified execution - in production, use LangChain Agent
-            selected_tool = next((t for t in tools if hasattr(t, 'name') and t.name == tool_name), None)
-            
+
+            # Use LLM to select tool and extract parameters
+            selection = await self._llm_select_tool(
+                prompt=prompt,
+                tool_catalog=tool_info,
+                app_name=app_name,
+                provided_params=action_params,
+            )
+
+            if not selection or not selection.get("tool_name"):
+                # Fallback: use first tool with basic params
+                logger.warning("[ExecuteWithTools] LLM selection failed, using fallback")
+                selection = {
+                    "tool_name": tool_info[0]["name"],
+                    "parameters": action_params or {},
+                }
+
+            tool_name = selection["tool_name"]
+            params = selection.get("parameters", {})
+
+            # Merge with explicit action_params (user-provided take priority)
+            if action_params:
+                params.update(action_params)
+
+            logger.info(f"[ExecuteWithTools] LLM selected: {tool_name} with {len(params)} params")
+
+            # Find and execute the tool
+            selected_tool = tool_map.get(tool_name)
+            if not selected_tool:
+                # Try case-insensitive match
+                for name, tool in tool_map.items():
+                    if name.upper() == tool_name.upper():
+                        selected_tool = tool
+                        tool_name = name
+                        break
+
             if not selected_tool:
                 return {
                     "success": False,
-                    "error": f"Tool {tool_name} not found in available tools"
+                    "error": f"Tool {tool_name} not found in available tools. Available: {list(tool_map.keys())[:5]}",
                 }
-            
+
             # Execute tool directly
             result = await selected_tool.ainvoke(params)
-            
+
             return {
                 "success": True,
                 "data": result,
                 "tool_used": tool_name,
-                "message": f"Successfully executed {tool_name}"
+                "message": f"Successfully executed {tool_name}",
             }
-            
+
         except Exception as e:
             logger.error(f"[ExecuteWithTools] Error: {e}", exc_info=True)
             return {
                 "success": False,
-                "error": f"Tool execution failed: {str(e)}"
+                "error": f"Tool execution failed: {str(e)}",
             }
-    
-    def _select_tool_heuristic(self, prompt: str, tools: List[Any], app_name: str) -> Optional[str]:
+
+    async def _llm_select_tool(
+        self,
+        prompt: str,
+        tool_catalog: List[Dict[str, Any]],
+        app_name: str,
+        provided_params: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
         """
-        Simple heuristic for tool selection.
-        
-        TODO: Replace with LLM-based selection for production.
+        Use LLM to select the best tool and extract parameters from the prompt.
+
+        Args:
+            prompt: User's original request
+            tool_catalog: List of available tool descriptions
+            app_name: The app being used (for context)
+            provided_params: Any parameters already provided by the caller
+
+        Returns:
+            Dict with "tool_name" and "parameters", or None on failure
         """
-        prompt_lower = prompt.lower()
-        
-        # Slack-specific heuristics
-        if app_name.lower() == "slack":
-            if "send" in prompt_lower and "message" in prompt_lower:
-                return "SLACK_SEND_MESSAGE"
-            elif "list" in prompt_lower and "channel" in prompt_lower:
-                return "SLACK_LIST_CHANNELS"
-        
-        # Notion-specific heuristics
-        elif app_name.lower() == "notion":
-            if "create" in prompt_lower and "page" in prompt_lower:
-                return "NOTION_CREATE_PAGE"
-            elif "search" in prompt_lower:
-                return "NOTION_SEARCH"
-        
-        # GitHub-specific heuristics
-        elif app_name.lower() == "github":
-            if "create" in prompt_lower and ("issue" in prompt_lower or "pr" in prompt_lower):
-                return "GITHUB_CREATE_ISSUE"
-            elif "list" in prompt_lower and "repo" in prompt_lower:
-                return "GITHUB_LIST_REPOS"
-        
-        # Fallback: Use first tool if available
-        if tools:
-            first_tool = tools[0]
-            if hasattr(first_tool, 'name'):
-                return first_tool.name
-        
-        return None
-    
-    def _extract_parameters(self, prompt: str, payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        Extract parameters from prompt and payload.
-        
-        TODO: Use LLM to extract structured parameters.
-        """
-        params = payload.copy() if payload else {}
-        
-        # Simple extraction examples
-        # In production, use LLM for this
-        
-        # Extract channel from "send to #general"
-        channel_match = re.search(r'#(\w+)', prompt)
-        if channel_match:
-            params["channel"] = channel_match.group(1)
-        
-        # Extract quoted text as message
-        message_match = re.search(r'"([^"]+)"', prompt)
-        if message_match:
-            params["text"] = message_match.group(1)
-        elif "'" in prompt:
-            message_match = re.search(r"'([^']+)'", prompt)
-            if message_match:
-                params["text"] = message_match.group(1)
-        
-        return params
+        try:
+            from groq import Groq
+
+            client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+
+            # Build a concise tool list for the LLM
+            tool_list_str = "\n".join(
+                f"- {t['name']}: {t.get('description', 'No description')[:120]}"
+                for t in tool_catalog[:20]  # Limit to 20 tools
+            )
+
+            system_prompt = (
+                "You are a tool-selection assistant. Given a user request and a list of "
+                "available API tools, select the BEST matching tool and extract the "
+                "required parameters from the user's message.\n\n"
+                "Respond with ONLY a JSON object (no markdown, no explanation):\n"
+                '{\n'
+                '  "tool_name": "EXACT_TOOL_NAME_FROM_LIST",\n'
+                '  "parameters": { "param1": "value1", ... },\n'
+                '  "reasoning": "one line explaining why"\n'
+                '}\n\n'
+                "Rules:\n"
+                "- tool_name MUST exactly match one of the tool names below\n"
+                "- Extract parameters from the user message (names, dates, text, etc.)\n"
+                "- If a parameter isn't in the message, omit it\n"
+                "- For channel/workspace references like #general, use the name without #\n"
+            )
+
+            user_message = (
+                f"App: {app_name}\n"
+                f"User request: {prompt}\n\n"
+                f"Available tools:\n{tool_list_str}"
+            )
+
+            if provided_params:
+                user_message += f"\n\nAlready provided parameters: {json.dumps(provided_params)}"
+
+            response = client.chat.completions.create(
+                model=_TOOL_SELECTION_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message},
+                ],
+                temperature=0.0,
+                max_tokens=500,
+            )
+
+            raw = response.choices[0].message.content.strip()
+
+            # Parse JSON from response (handle markdown code fences)
+            if raw.startswith("```"):
+                raw = re.sub(r"^```(?:json)?\s*", "", raw)
+                raw = re.sub(r"\s*```$", "", raw)
+
+            result = json.loads(raw)
+
+            # Validate tool_name exists
+            valid_names = {t["name"] for t in tool_catalog}
+            if result.get("tool_name") not in valid_names:
+                # Try case-insensitive
+                for name in valid_names:
+                    if name.upper() == result.get("tool_name", "").upper():
+                        result["tool_name"] = name
+                        break
+                else:
+                    logger.warning(
+                        f"[LLM] Selected tool '{result.get('tool_name')}' "
+                        f"not in catalog. Falling back to first tool."
+                    )
+                    result["tool_name"] = tool_catalog[0]["name"]
+
+            logger.info(
+                f"[LLM] Selected: {result['tool_name']} "
+                f"(reason: {result.get('reasoning', 'N/A')})"
+            )
+            return result
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"[LLM] Failed to parse response as JSON: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"[LLM] Tool selection failed: {e}")
+            return None

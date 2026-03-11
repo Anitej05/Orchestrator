@@ -14,19 +14,25 @@ _AGENTS_DIR = _BROWSER_AGENT_DIR.parent
 _BACKEND_DIR = _AGENTS_DIR.parent
 _PROJECT_ROOT = _BACKEND_DIR.parent
 
-# Storage configuration - Use project root storage folder
-STORAGE_ROOT = _PROJECT_ROOT / "storage" / "browser_agent"
+# Centralized storage configuration (replaces per-agent storage)
+from backend.storage_config import (
+    SCREENSHOTS_DIR, DOWNLOADS_DIR, STORAGE_ROOT,
+    PROJECT_ROOT as _PROJECT_ROOT,
+)
+# Keep backward-compatible STORAGE_ROOT reference pointing to screenshots for this agent
+_BROWSER_STORAGE = STORAGE_ROOT / "browser_agent"
+_BROWSER_STORAGE.mkdir(parents=True, exist_ok=True)
 
 class BrowserAgentConfig:
     """Centralized configuration for browser agent"""
     
-    # Storage root
-    STORAGE_ROOT: Path = STORAGE_ROOT
+    # Storage root (for backward compatibility)
+    STORAGE_ROOT: Path = _BROWSER_STORAGE
     
-    # Storage paths - all relative to browser_agent storage root
-    DOWNLOADS_DIR: Path = STORAGE_ROOT / "downloads"
-    UPLOADS_DIR: Path = STORAGE_ROOT / "uploads"
-    SCREENSHOTS_DIR: Path = STORAGE_ROOT / "screenshots"
+    # Storage paths - use centralized content-type dirs
+    DOWNLOADS_DIR: Path = DOWNLOADS_DIR
+    UPLOADS_DIR: Path = _BROWSER_STORAGE / "uploads"
+    SCREENSHOTS_DIR: Path = SCREENSHOTS_DIR
     
     # Timeouts (in milliseconds)
     NAVIGATION_TIMEOUT: int = 60000  # 60 seconds
