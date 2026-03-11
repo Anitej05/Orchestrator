@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field, model_validator
 from typing import Dict, Any, Optional, Literal
 import enum
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 class StatusEnum(str, enum.Enum):
     active = "active"

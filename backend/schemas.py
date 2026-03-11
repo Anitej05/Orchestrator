@@ -279,19 +279,15 @@ class CanvasDisplay(BaseModel):
                         ],
                         "filename": "data.csv"
                     }
+                },
+                {
+                    "canvas_type": "email_preview",
+                    "canvas_content": "<html><body><h1>Email Preview</h1>...</body></html>",
+                    "canvas_title": "Email to be sent",
+                    "requires_confirmation": True,
+                    "confirmation_message": "Please review the email before sending"
                 }
             ]
-        }
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "canvas_type": "email_preview",
-                "canvas_content": "<html><body><h1>Email Preview</h1>...</body></html>",
-                "canvas_title": "Email to be sent",
-                "requires_confirmation": True,
-                "confirmation_message": "Please review the email before sending"
-            }
         }
 
 

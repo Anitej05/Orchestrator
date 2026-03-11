@@ -5,19 +5,18 @@ import json
 import asyncio
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from fastapi import UploadFile, File
 from aiofiles import open as aio_open
-
+from pathlib import Path
 
 import os
 import subprocess
 import sys
 import platform
-import socket
 import re
 
 # Ensure both import styles resolve without requiring external PYTHONPATH.
@@ -789,181 +788,8 @@ class UpdateScheduleRequest(BaseModel):
     error_message: Optional[str] = None
 
 # --- Agent Server Startup ---
-def is_port_in_use(port: int) -> bool:
-    """Checks if a local port is already in use."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        return s.connect_ex(('127.0.0.1', port)) == 0
-
-def wait_for_port(port: int, agent_file: str, timeout: int = 15):
-    """Waits for a network port to become active."""
-    start_time = time.time()
-    logger.info(f"Waiting for agent '{agent_file}' to start on port {port}...")
-    while time.time() - start_time < timeout:
-        if is_port_in_use(port):
-            logger.info(f"Agent '{agent_file}' is now running on port {port}.")
-            return True
-        time.sleep(0.5)
-    logger.error(f"Agent '{agent_file}' did not start on port {port} within {timeout} seconds.")
-    return False
-
-def start_agent_servers():
-    """
-    Finds and starts agent servers, with enhanced logging and better error handling
-    to track which agents start successfully and which fail.
-    """
-    global agent_processes
-    
-    # Use absolute path based on the project root directory
-    project_root = os.path.dirname(os.path.abspath(__file__))  # This gets the backend directory
-    agents_dir = os.path.join(project_root, "agents")
-    
-    if not os.path.isdir(agents_dir):
-        logger.warning(f"'{agents_dir}' directory not found. Skipping agent server startup.")
-        return
-
-    logs_dir = "logs"
-    os.makedirs(logs_dir, exist_ok=True)
-    logger.info(f"Agent logs will be stored in the '{logs_dir}' directory.")
-
-    started_agents = []
-    failed_agents = []
-
-    # UAP: Read from SKILL.md definitions (Source of Truth)
-    agent_configs = {}
-    
-    # SKILL.md directories to scan (each contains SKILL.md with port)
-    skill_dirs = [
-        ("spreadsheet_agent", "spreadsheet_agent/__init__.py"),
-        ("mail_agent", "mail_agent/agent.py"),
-        ("gmail_agent", "gmail_agent/__init__.py"),
-        ("browser_agent", "browser_agent/__init__.py"),
-        ("document_agent_lib", "document_agent_lib/__init__.py"),
-        ("zoho_books", "zoho_books/zoho_books_agent.py"),
-    ]
-    
-    import yaml
-    for skill_dir, script_path in skill_dirs:
-        skill_file = os.path.join(agents_dir, skill_dir, "SKILL.md")
-        full_script_path = os.path.join(agents_dir, script_path)
-        
-        if not os.path.exists(skill_file):
-            continue
-            
-        if not os.path.exists(full_script_path):
-            logger.warning(f"Script not found for {skill_dir}: {script_path}")
-            continue
-            
-        try:
-            with open(skill_file, 'r', encoding='utf-8') as f:
-                content = f.read()
-                # Extract YAML frontmatter
-                if content.startswith('---'):
-                    parts = content.split('---', 2)
-                    if len(parts) >= 3:
-                        yaml_content = parts[1]
-                        config = yaml.safe_load(yaml_content)
-                        port = config.get('port')
-                        if port:
-                            agent_configs[script_path] = int(port)  # Store relative path, not full path
-                            logger.info(f"UAP: Found {skill_dir} on port {port}")
-        except Exception as e:
-            logger.warning(f"Failed to parse SKILL.md for {skill_dir}: {e}")
-
-    logger.info(f"Target Agent Configurations: {len(agent_configs)} agents")
-
-    for agent_file, port in agent_configs.items():
-        agent_path = os.path.join(agents_dir, agent_file)
-        # Extract agent name from path (e.g., "spreadsheet_agent/__init__.py" -> "spreadsheet_agent")
-        agent_name = agent_file.split('/')[0].split('\\')[0]
-        
-        if is_port_in_use(port):
-            logger.info(f"Agent '{agent_name}' is already running on port {port}.")
-            started_agents.append({
-                'agent': agent_name,
-                'port': port,
-                'status': 'already_running'
-            })
-            continue
-
-        logger.info(f"Attempting to start '{agent_name}' on port {port}...")
-        log_path = os.path.join(logs_dir, f"{agent_name}.log")
-
-        # Create the subprocess
-        process = None
-        try:
-            with open(log_path, 'w') as log_file:
-                if platform.system() == "Windows":
-                    process = subprocess.Popen(
-                        [sys.executable, agent_path],
-                        stdout=log_file,
-                        stderr=log_file,
-                        creationflags=subprocess.CREATE_NO_WINDOW
-                    )
-                else:
-                    process = subprocess.Popen(
-                        [sys.executable, agent_path],
-                        stdout=log_file,
-                        stderr=log_file
-                    )
-                agent_processes.append(process)
-        except Exception as e:
-            logger.error(f"Failed to start {agent_name}: {e}")
-            failed_agents.append({
-                'agent': agent_name,
-                'reason': f'Failed to spawn process: {e}',
-                'port': port
-            })
-            continue
-
-        # Wait for the port to be in use with a timeout
-        # With lazy imports and reload=False, agents should start quickly
-        agent_timeout = 15  # Reasonable timeout for fast startup
-        
-        if wait_for_port(port, agent_name, timeout=agent_timeout):
-            logger.info(f"Successfully started agent '{agent_name}' on port {port}")
-            started_agents.append({
-                'agent': agent_name,
-                'port': port,
-                'status': 'started',
-                'process': process
-            })
-        else:
-            logger.error(f"Timed out waiting for agent '{agent_name}' to start on port {port}")
-            failed_agents.append({
-                'agent': agent_name,
-                'reason': f'Timed out waiting for port {port} to become available',
-                'port': port
-            })
-            if process:
-                try:
-                    process.terminate()
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-
-
-
-    # Log summary of agent startup results
-    logger.info(f"Agent startup completed. Started: {len(started_agents)}, Failed: {len(failed_agents)}")
-    
-    if started_agents:
-        logger.info("Successfully started agents:")
-        for agent_info in started_agents:
-            logger.info(f"  - {agent_info['agent']} on port {agent_info['port']} ({agent_info['status']})")
-    
-    if failed_agents:
-        logger.error("Failed to start agents:")
-        for agent_info in failed_agents:
-            logger.error(f"  - {agent_info['agent']}: {agent_info['reason']}")
-        
-        # Provide detailed instructions for manual startup
-        logger.info("To start agents manually, run these commands in separate terminals:")
-        for agent_info in failed_agents:
-            agent_file = agent_info['agent']
-            agent_path = os.path.join(agents_dir, agent_file)
-            logger.info(f"  - python {agent_path}")
-    
-    logger.info("Agent startup check completed.")
+# NOTE: start_agent_servers() has been removed - it was dead code (never called).
+# The active agent startup logic is in start_agents_async() below.
 
 os.makedirs("storage/images", exist_ok=True)
 os.makedirs("storage/documents", exist_ok=True)
@@ -1046,30 +872,8 @@ async def upload_files(files: List[UploadFile] = File(...)):
     logger.info(f"Upload complete: {len(file_objects)} file(s) uploaded successfully")
     return file_objects
 
-@app.get("/api/files/{file_path:path}")
-async def serve_file(file_path: str):
-    """
-    Serves uploaded files (images, documents) from the storage directory.
-    """
-    # Decode the file path
-    from urllib.parse import unquote
-    file_path = unquote(file_path)
-    
-    # Security: ensure the path doesn't escape the storage directory
-    if ".." in file_path or file_path.startswith("/"):
-        raise HTTPException(status_code=400, detail="Invalid file path")
-    
-    # Check if file exists
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File not found")
-    
-    # Determine media type based on file extension
-    from mimetypes import guess_type
-    media_type, _ = guess_type(file_path)
-    
-    # Return the file
-    from fastapi.responses import FileResponse
-    return FileResponse(file_path, media_type=media_type)
+# NOTE: File serving is handled by the secure /files/{file_path:path} endpoint above
+# which includes proper authentication, path traversal protection, and MIME type detection.
 
 # --- Unified Orchestration Service ---
 async def execute_orchestration(
@@ -4298,45 +4102,6 @@ def cleanup_agents():
                 pass
     agent_processes = []
     agent_status.clear()
-
-async def wait_for_agent_ready(agent_name: str, port: int, timeout: float = 30.0) -> bool:
-    """
-    Wait for a specific agent to be ready by checking its health endpoint.
-    Returns True if agent is ready, False if timeout or failed.
-    """
-    import time
-    
-    start_time = time.time()
-    # Try /health first (standard), then fall back to / for legacy agents
-    health_endpoints = [f"http://localhost:{port}/health", f"http://localhost:{port}/"]
-    
-    while time.time() - start_time < timeout:
-        async with agent_status_lock:
-            status = agent_status.get(agent_name, {}).get('status')
-            if status == 'ready':
-                return True
-            elif status == 'failed':
-                return False
-        
-        # Try to connect to the agent using multiple endpoints
-        for health_url in health_endpoints:
-            try:
-                async with httpx.AsyncClient(timeout=2.0) as client:
-                    response = await client.get(health_url)
-                    if response.status_code == 200:
-                        async with agent_status_lock:
-                            if agent_name in agent_status:
-                                agent_status[agent_name]['status'] = 'ready'
-                        return True
-            except:
-                pass
-        
-        await asyncio.sleep(0.5)
-    
-    async with agent_status_lock:
-        if agent_name in agent_status:
-            agent_status[agent_name]['status'] = 'failed'
-    return False
 
 async def check_agent_health_background():
     """Background task to check agent health and update status"""
