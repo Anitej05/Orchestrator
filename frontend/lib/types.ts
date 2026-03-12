@@ -28,6 +28,16 @@ export interface TaskAgentPair {
   fallbacks: (Agent & { score?: number })[]
 }
 
+export interface ExposedFile {
+  id: string;
+  name: string;
+  path: string;
+  type: 'image' | 'document' | 'spreadsheet' | 'code' | 'archive' | 'other';
+  size_bytes?: number;
+  mime_type?: string;
+  description?: string;
+}
+
 export interface ProcessResponse {
   message: string;
   thread_id: string;
@@ -35,6 +45,7 @@ export interface ProcessResponse {
   final_response: string | null;
   pending_user_input: boolean;
   question_for_user: string | null;
+  exposed_files?: ExposedFile[];
 }
 
 export interface ConversationStatus {
@@ -76,6 +87,21 @@ export interface TodoItem {
   updated_at?: number | string;
 }
 
+// Chronological execution flow event — one entry per Brain or Hands step
+export interface FlowEvent {
+  id: string
+  /** 'brain' = Brain.think() decision | 'agent_call' = Hands calling an agent/tool */
+  type: 'brain' | 'agent_call'
+  label: string           // Primary text shown on the timeline row
+  sublabel?: string       // Secondary/live text (reasoning snippet, agent progress)
+  status: 'running' | 'completed' | 'failed'
+  taskId?: string         // Links agent_call events to todo_list task ids
+  agentName?: string
+  action_type?: string    // Brain decision: 'agent' | 'finish' | 'plan' | etc.
+  executionTime?: number  // ms, populated on completion
+  timestamp: number
+}
+
 // NEW: Action History Entry - Shows actual agent/tool execution
 export interface ActionHistoryEntry {
   iteration: number;
@@ -87,6 +113,9 @@ export interface ActionHistoryEntry {
   execution_time_ms: number;
   error?: string;
 }
+
+export const CANVAS_TYPES = ['html', 'markdown', 'pdf', 'spreadsheet', 'email_preview', 'document', 'image', 'json'] as const;
+export type CanvasType = typeof CANVAS_TYPES[number];
 
 export interface ConversationState {
   thread_id?: string;
@@ -107,12 +136,14 @@ export interface ConversationState {
   todo_list?: TodoItem[];
   // NEW: Brain thinking state for real-time AI reasoning display
   brain_reasoning?: string;
+  // Chronological Brain→Hands flow for the execution timeline
+  flow_events?: FlowEvent[];
   // NEW: Orchestration state from OMNI-DISPATCHER
   action_history?: ActionHistoryEntry[];  // Complete execution log with agent/tool info
   // Canvas feature fields
   canvas_content?: string;  // Legacy: HTML/markdown string
   canvas_data?: Record<string, any>;  // Preferred: Structured data
-  canvas_type?: 'html' | 'markdown' | 'pdf' | 'spreadsheet' | 'email_preview' | 'document' | 'image' | 'json';
+  canvas_type?: CanvasType;
   has_canvas?: boolean;
   canvas_title?: string;
   canvas_metadata?: Record<string, any>;
@@ -168,7 +199,7 @@ export interface Message {
   };
   // Canvas information for this specific message
   canvas_content?: string;
-  canvas_type?: 'html' | 'markdown' | 'pdf' | 'spreadsheet' | 'email_preview' | 'document' | 'image' | 'json';
+  canvas_type?: CanvasType;
   has_canvas?: boolean;
   // Browser automation fields
   is_browser_task?: boolean;
@@ -176,6 +207,7 @@ export interface Message {
   browsing_trace?: BrowsingTraceStep[];
   screenshot_files?: FileObject[];
   show_trace?: boolean;  // UI state for collapsible trace
+  exposed_files?: ExposedFile[];
 }
 
 export type FileObject = {

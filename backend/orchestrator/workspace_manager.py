@@ -15,12 +15,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Base storage path
-STORAGE_BASE = Path(__file__).parent.parent / "storage"
-ORCHESTRATOR_WORKSPACE = STORAGE_BASE / "orchestrator"
-
-# Ensure orchestrator workspace exists
-ORCHESTRATOR_WORKSPACE.mkdir(parents=True, exist_ok=True)
+# Centralized storage paths
+from backend.storage_config import STORAGE_ROOT as STORAGE_BASE, ORCHESTRATOR_DIR as ORCHESTRATOR_WORKSPACE
 
 
 class FileMetadata:

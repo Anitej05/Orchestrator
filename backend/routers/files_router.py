@@ -16,14 +16,8 @@ from backend.schemas import FileObject
 
 router = APIRouter(prefix="/api", tags=["Files"])
 
-# Ensure storage directories exist
-from pathlib import Path
-# Backend directory (where this router's parent is)
-BACKEND_DIR = Path(__file__).parent.parent
-STORAGE_ROOT = BACKEND_DIR / "storage"
-(STORAGE_ROOT / "images").mkdir(parents=True, exist_ok=True)
-(STORAGE_ROOT / "documents").mkdir(parents=True, exist_ok=True)
-(STORAGE_ROOT / "spreadsheets").mkdir(parents=True, exist_ok=True)
+# Centralized storage paths
+from backend.storage_config import STORAGE_ROOT, BACKEND_DIR
 
 
 @router.post("/upload", response_model=List[FileObject])

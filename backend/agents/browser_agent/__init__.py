@@ -1,235 +1,72 @@
 """
-Browser Agent - FastAPI Entry Point
+Browser Agent - AgentServer Entry Point
 
-UAP-compliant browser automation agent with /execute and /continue endpoints.
+UAP-compliant browser automation agent using BaseAgent architecture.
+Delegates to base_agent_impl.BrowserAgent via AgentServer.
 """
 
 # CRITICAL: Load .env BEFORE any imports that trigger InferenceService/KeyManager singletons.
 from pathlib import Path as _Path
 from dotenv import load_dotenv as _load_dotenv
 _load_dotenv(_Path(__file__).parent.parent.parent / ".env")
-import logging
-import uuid
-from typing import Optional, Dict, Any
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
-from pydantic import BaseModel, Field
 
-from .agent import BrowserAgent
-
+import os
 import sys
 from pathlib import Path
-backend_root = Path(__file__).resolve().parents[3]
-if str(backend_root) not in sys.path:
-    sys.path.insert(0, str(backend_root))
+
+# ==================== ROBUST PATH HANDLING ====================
+PACKAGE_DIR = Path(__file__).parent.absolute()
+AGENTS_DIR = PACKAGE_DIR.parent
+BACKEND_DIR = AGENTS_DIR.parent
+PROJECT_ROOT = BACKEND_DIR.parent
+
+for path in [str(PROJECT_ROOT), str(BACKEND_DIR)]:
+    if path not in sys.path:
+        sys.path.insert(0, path)
 
 from backend.utils.mega_logger import setup_mega_logger
 logger = setup_mega_logger("BrowserAgent")
 
-from backend.schemas import AgentResponse, StandardAgentResponse, AgentResponseStatus
+# ============================================================================
+# BASEAGENT SERVER (primary)
+# ============================================================================
 
-
-# =============================================================================
-# UAP SCHEMAS
-# =============================================================================
-
-class UAPExecuteRequest(BaseModel):
-    """UAP standard request format for /execute endpoint."""
-    prompt: str = Field(..., description="Natural language task description")
-    payload: Optional[Dict[str, Any]] = Field(
-        default=None,
-        description="Optional: headless, max_steps, thread_id"
-    )
-    task_id: Optional[str] = Field(default=None)
-    thread_id: Optional[str] = Field(default=None)
-
-
-class UAPContinueRequest(BaseModel):
-    """UAP standard request format for /continue endpoint."""
-    task_id: str = Field(..., description="Task ID from previous /execute call")
-    answer: str = Field(..., description="User's answer to the agent's question")
-    thread_id: Optional[str] = Field(default=None)
-
-
-class UAPResponse(BaseModel):
-    """UAP standard response format."""
-    success: bool
-    result: Any
-    status: str  # "completed", "needs_input", "in_progress", "error"
-    task_id: Optional[str] = None
-    question: Optional[str] = None
-    error: Optional[str] = None
-
-
-# =============================================================================
-# LIFESPAN
-# =============================================================================
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Lifespan manager"""
-    logger.info("🚀 Browser Agent starting...")
-    yield
-    logger.info("👋 Browser Agent shutting down...")
-
-
-app = FastAPI(
-    title="Browser Automation Agent",
-    description="UAP-compliant browser automation",
-    version="3.0.0",
-    lifespan=lifespan
-)
-
-# CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-# =============================================================================
-# UAP ENDPOINTS
-# =============================================================================
-
-@app.get("/")
-async def root():
-    """Root endpoint for protocol compliance."""
-    return {
-        "status": "active",
-        "agent": "browser-automation-agent",
-        "version": "3.0.0",
-        "endpoints": ["/execute", "/health"]
-    }
-
-
-@app.get("/health")
-async def health():
-    """UAP health check endpoint."""
-    return {
-        "status": "healthy",
-        "agent_id": "browser_automation_agent",
-        "agent_name": "Browser Automation Agent",
-        "version": "3.0.0",
-        "capabilities": ["browse", "click", "type", "extract", "screenshot"]
-    }
-
-
-@app.post("/execute", response_model=AgentResponse)
-async def execute(request: UAPExecuteRequest):
-    """
-    UAP unified execution endpoint.
-    
-    Accepts natural language prompts and executes browser automation tasks.
-    """
-    try:
-        request.task_id or str(uuid.uuid4())
-        payload = request.payload or {}
-        thread_id = request.thread_id or payload.get("thread_id")
-        
-        logger.info(f"📥 Execute: {request.prompt[:100]}...")
-        
-        agent = BrowserAgent(
-            task=request.prompt,
-            headless=payload.get("headless", True),
-            thread_id=thread_id
-        )
-        
-        result = await agent.run()
-        
-        logger.info(f"✅ Task complete: {result.task_summary}")
-        
-        return AgentResponse(
-            status=AgentResponseStatus.COMPLETE if result.success else AgentResponseStatus.ERROR,
-            result={
-                "task_summary": result.task_summary,
-                "extracted_data": result.extracted_data,
-                "actions_taken": result.actions_taken,
-                "metrics": result.metrics
-            },
-            standard_response=StandardAgentResponse(
-                status="success" if result.success else "error",
-                summary=result.task_summary,
-                data={
-                     "extracted_data": result.extracted_data,
-                     "metrics": result.metrics
-                },
-                error_message=result.error if not result.success else None
-            ),
-            error=result.error if not result.success else None
-        )
-        
-    except Exception as e:
-        logger.error(f"❌ Task failed: {e}")
-        return AgentResponse(
-            status=AgentResponseStatus.ERROR,
-            error=str(e),
-            standard_response=StandardAgentResponse(
-                status="error",
-                summary="Browser task failed exception",
-                error_message=str(e)
-            )
-        )
-
-
-@app.post("/continue", response_model=UAPResponse)
-async def continue_task(request: UAPContinueRequest):
-    """
-    UAP continue endpoint for multi-turn conversations.
-    
-    Browser agent runs tasks to completion; this endpoint exists for protocol compliance.
-    """
-    logger.info(f"📥 Continue: task_id={request.task_id}")
-    
-    return UAPResponse(
-        success=False,
-        result=None,
-        status="error",
-        task_id=request.task_id,
-        error="Browser agent runs tasks to completion. Use /execute for new tasks."
-    )
-
-
-
-# =============================================================================
-# BASEAGENT INTEGRATION
-# =============================================================================
-
-# Legacy app for backwards compatibility
-legacy_app = app
-
-# New BaseAgent implementation
 try:
     from .base_agent_impl import BrowserAgent as BaseBrowserAgent
     from backend.agents.base.server import create_agent_server
-    
+
     _server = create_agent_server(
         agent_class=BaseBrowserAgent,
         agent_id="browser_agent",
         agent_name="Browser Automation Agent"
     )
-    app = _server.app  # Export BaseAgent app as primary
-    
+    app = _server.app
+    logger.info("BaseAgent Browser implementation loaded successfully")
+
 except Exception as e:
-    print(f"WARNING: BaseAgent BrowserAgent failed to initialize: {e}", file=sys.stderr)
+    logger.error(f"Failed to initialize BaseAgent Browser implementation: {e}")
     import traceback
     traceback.print_exc()
-    app = legacy_app  # Fallback to legacy
+
+    _init_error = str(e)
+
+    from fastapi import FastAPI
+    app = FastAPI(title="Browser Agent (error)")
+
+    @app.get("/health")
+    async def health():
+        return {"status": "unhealthy", "error": "Failed to load Browser Agent", "details": _init_error}
 
 
-# =============================================================================
-# MAIN
-# =============================================================================
+# ============================================================================
+# STANDALONE RUNNER
+# ============================================================================
 
 def run_agent() -> None:
+    """Run Browser Agent as standalone service on port 8090"""
     import uvicorn
-    uvicorn.run(legacy_app, host="0.0.0.0", port=8090)
+    uvicorn.run(app, host="0.0.0.0", port=8090)
 
 
 if __name__ == "__main__":
     run_agent()
-
-

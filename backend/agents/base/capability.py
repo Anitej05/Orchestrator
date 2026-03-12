@@ -7,7 +7,13 @@ import logging
 from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass, field
 
-from .types import CapabilityType, ParameterSchema, ExecutionContext, CapabilityResult
+from .types import (
+    CapabilityType,
+    ParameterSchema,
+    ExecutionContext,
+    CapabilityResult,
+    AgentResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +71,37 @@ class Capability:
             # Normalize result
             if isinstance(result, CapabilityResult):
                 return result
+            elif isinstance(result, AgentResponse):
+                meta: Dict[str, Any] = {
+                    "agent_response_status": result.status,
+                    "summary": result.summary,
+                    "message": result.summary,
+                    "canvas_display": result.canvas_display,
+                    "question": result.question,
+                    "question_type": result.question_type,
+                    "options": result.options,
+                    "execution_time_ms": result.execution_time_ms,
+                    "capabilities_used": result.capabilities_used,
+                }
+                if result.metadata:
+                    meta.update(result.metadata)
+                payload = result.result if result.result is not None else result.data
+                if result.data is not None and payload is not result.data:
+                    meta.setdefault("data", result.data)
+
+                if result.status == "needs_input":
+                    return CapabilityResult.fail(
+                        error=result.question or "Additional user input is required",
+                        metadata=meta,
+                    )
+
+                if result.status == "error":
+                    return CapabilityResult.fail(
+                        error=result.error_message or "Capability failed",
+                        metadata=meta,
+                    )
+
+                return CapabilityResult.ok(data=payload, metadata=meta)
             elif isinstance(result, dict) and "success" in result:
                 # Map dict keys to CapabilityResult fields.
                 # Extra keys (message, canvas_display, file_id, etc.) are

@@ -28,6 +28,8 @@ AGENT_DIRS = [
     "integrations_agent",
     "browser_agent",
     "document_agent_lib",
+    "pdf_agent",
+    "ppt_agent",
     "zoho_books",
     "universal_agent",
     "coding_agent",
@@ -58,9 +60,21 @@ AGENT_ALIASES = {
     # Document agent aliases
     "document": "Document Agent",
     "document_agent": "Document Agent",
-    "pdf": "Document Agent",
     "word": "Document Agent",
     "docx": "Document Agent",
+    # PDF agent aliases
+    "pdf": "PDF Agent",
+    "pdf_agent": "PDF Agent",
+    "merge_pdf": "PDF Agent",
+    "scan_pdf": "PDF Agent",
+    "ocr": "PDF Agent",
+    # PPT agent aliases
+    "ppt": "PPT Agent",
+    "ppt_agent": "PPT Agent",
+    "pptx": "PPT Agent",
+    "powerpoint": "PPT Agent",
+    "presentation": "PPT Agent",
+    "slides": "PPT Agent",
     # Zoho agent aliases
     "zoho": "Zoho Books Agent",
     "zoho_agent": "Zoho Books Agent",
@@ -283,71 +297,83 @@ class AgentRegistryService:
         """
         List all active agents with their metadata.
 
-        UAP Edition: Also includes agents from SKILL.md files.
+        UAP Edition: Always returns SKILL.md agents even if DB is unreachable.
+        DB agents take priority; SKILL.md fills in any gaps.
         """
-        should_close_db = False
-        if db is None:
-            db = SessionLocal()
-            should_close_db = True
+        catalog = []
+        seen_ids = set()
 
+        # ── 1. Try DB (best-effort — never crash if DB is down) ──────────────
+        should_close_db = False
+        _db = db
         try:
-            # Get DB agents
+            if _db is None:
+                _db = SessionLocal()
+                should_close_db = True
+
             query = (
-                db.query(Agent)
+                _db.query(Agent)
                 .options(
                     joinedload(Agent.capability_vectors)
                 )
                 .filter(Agent.status == StatusEnum.active)
             )
-
-            agents = query.all()
-
-            catalog = []
-            seen_ids = set()
-
-            # Add DB agents
-            for agent in agents:
+            for agent in query.all():
                 serialized = self._serialize_agent(agent)
                 catalog.append(serialized)
                 seen_ids.add(agent.id)
 
-            # Add SKILL.md agents not in DB
+        except Exception as e:
+            logger.warning(
+                f"DB unavailable — agent list will be built from SKILL.md only. "
+                f"Error: {e}"
+            )
+        finally:
+            if should_close_db and _db is not None:
+                try:
+                    _db.close()
+                except Exception:
+                    pass
+
+        # ── 2. Always add SKILL.md agents not already in the catalog ─────────
+        try:
             skills = self._load_skill_configs()
             for agent_id, skill_config in skills.items():
                 if agent_id not in seen_ids:
                     catalog.append({
                         "id": agent_id,
-                        "name": skill_config['name'],
-                        "description": skill_config['description'],
+                        "name": skill_config["name"],
+                        "description": skill_config["description"],
                         "capabilities": [],
                         "price_per_call_usd": None,
-                        "endpoints": [],  # UAP: endpoints are standardized, no need to list
+                        "endpoints": [],  # UAP: endpoints are standardized
                         "type": "http_rest",
                         "connection_config": {
                             "base_url": f"http://{skill_config['host']}:{skill_config['port']}"
-                        }
+                        },
                     })
-
-            return catalog
         except Exception as e:
-            logger.error(f"Failed to list active agents: {e}")
-            return []
-        finally:
-            if should_close_db:
-                db.close()
+            logger.error(f"Failed to load SKILL.md agents: {e}")
+
+        if not catalog:
+            logger.warning("No agents found (DB down and no SKILL.md files loaded)")
+
+        return catalog
 
     def get_agent(self, agent_id: str, db: Session = None) -> Optional[Dict[str, Any]]:
         """
         Retrieve details for a specific agent.
         """
+        agent_dict = None
         should_close_db = False
-        if db is None:
-            db = SessionLocal()
-            should_close_db = True
-
+        _db = db
         try:
+            if _db is None:
+                _db = SessionLocal()
+                should_close_db = True
+
             agent = (
-                db.query(Agent)
+                _db.query(Agent)
                 .options(
                     joinedload(Agent.capability_vectors)
                 )
@@ -356,31 +382,36 @@ class AgentRegistryService:
             )
 
             if agent:
-                return self._serialize_agent(agent)
-
-            # Fallback: check SKILL.md
-            skill = self.get_agent_skill(agent_id)
-            if skill:
-                return {
-                    "id": agent_id,
-                    "name": skill["name"],
-                    "description": skill["description"],
-                    "capabilities": [],
-                    "price_per_call_usd": None,
-                    "endpoints": [],
-                    "type": "http_rest",
-                    "connection_config": {
-                        "base_url": f"http://{skill['host']}:{skill['port']}"
-                    },
-                }
-
-            return None
+                agent_dict = self._serialize_agent(agent)
         except Exception as e:
-            logger.error(f"Failed to get agent {agent_id}: {e}")
-            return None
+            logger.warning(f"DB unavailable or failed to get agent {agent_id}: {e}")
         finally:
-            if should_close_db:
-                db.close()
+            if should_close_db and _db is not None:
+                try:
+                    _db.close()
+                except Exception:
+                    pass
+
+        if agent_dict:
+            return agent_dict
+
+        # Fallback: check SKILL.md
+        skill = self.get_agent_skill(agent_id)
+        if skill:
+            return {
+                "id": agent_id,
+                "name": skill["name"],
+                "description": skill["description"],
+                "capabilities": [],
+                "price_per_call_usd": None,
+                "endpoints": [],
+                "type": "http_rest",
+                "connection_config": {
+                    "base_url": f"http://{skill['host']}:{skill['port']}"
+                },
+            }
+
+        return None
 
     def validate_capability(self, agent_id: str, task_description: str) -> bool:
         """
@@ -448,7 +479,7 @@ class AgentRegistryService:
     def _serialize_agent(self, agent: Agent) -> Dict[str, Any]:
         """Convert Agent ORM object to dictionary"""
         endpoints_info = []
-        for ep in agent.endpoints:
+        for ep in getattr(agent, "endpoints", []) or []:
             endpoints_info.append(
                 {
                     "endpoint": ep.endpoint,

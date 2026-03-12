@@ -55,7 +55,8 @@ def gmail_connection(test_user_id, composio_client):
     Raises:
         pytest.skip: If Gmail is not connected for test user
     """
-    connections = composio_client.connected_accounts.get(entity_ids=[test_user_id]) or []
+    resp = composio_client.connected_accounts.list(user_ids=[test_user_id])
+    connections = getattr(resp, 'items', None) or (resp if isinstance(resp, list) else [])
     if not isinstance(connections, list):
         connections = [connections]
     gmail_conn = next((c for c in connections if c.appName.lower() == "gmail"), None)

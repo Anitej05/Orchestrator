@@ -43,6 +43,35 @@ class Hands:
             "python": 60.0,
         }
 
+    @staticmethod
+    def _extract_needs_input_payload(output: Any) -> Optional[Dict[str, Any]]:
+        """
+        Normalize agent responses that request user input.
+
+        Raw agent output may be a direct ``needs_input`` payload or the same
+        payload nested under ``result`` / ``standard_response`` after other
+        wrappers are applied. Hands must recognize all shapes so the graph
+        pauses instead of retrying the same agent call.
+        """
+        if not isinstance(output, dict):
+            return None
+
+        if output.get("status") == "needs_input":
+            return output
+
+        nested_result = output.get("result")
+        if isinstance(nested_result, dict) and nested_result.get("status") == "needs_input":
+            return nested_result
+
+        standard_response = output.get("standard_response")
+        if (
+            isinstance(standard_response, dict)
+            and standard_response.get("status") == "needs_input"
+        ):
+            return standard_response
+
+        return None
+
     async def execute(
         self, state: Dict[str, Any], config: Optional[RunnableConfig] = None
     ) -> Dict[str, Any]:
@@ -58,9 +87,15 @@ class Hands:
         resource_id = decision_dict.get("resource_id")
         payload = decision_dict.get("payload", {})
 
-        # Get thread_id and user_id for credential lookup
+        # Get thread_id and user_id for credential lookup.
+        # Prefer the persisted state user because some orchestrator entry points
+        # invoke the graph without configurable.owner, and falling back to
+        # "system" breaks per-user OAuth-backed agents like Gmail.
         owner = (config or {}).get("configurable", {}).get("owner", {})
-        if isinstance(owner, str):
+        state_user_id = state.get("user_id") or state.get("owner_id")
+        if state_user_id:
+            user_id = state_user_id
+        elif isinstance(owner, str):
             user_id = owner
         else:
             user_id = owner.get("user_id", "system")
@@ -68,6 +103,35 @@ class Hands:
 
         start_time = time.time()
         logger.info(f"🚀 Hands: Executing {action_type} -> {resource_id}")
+
+        # Read real-time task event callback from LangGraph config
+        task_event_callback = (config or {}).get("configurable", {}).get("task_event_callback")
+        current_task_id = state.get("current_task_id")
+        todo_list = state.get("todo_list", [])
+        task_description = next(
+            (t.get("description", "") for t in todo_list if t.get("task_id") == current_task_id),
+            ""
+        )
+
+        # Fire task_started BEFORE execution so the UI shows real-time activity
+        if task_event_callback and action_type in ("agent", "tool", "terminal", "python") and current_task_id:
+            activity_map = {
+                "agent": f"Calling {resource_id}...",
+                "tool": f"Running tool: {resource_id}...",
+                "terminal": "Executing terminal command...",
+                "python": "Running Python code...",
+            }
+            try:
+                await task_event_callback({
+                    "event_type": "task_started",
+                    "task_name": current_task_id,
+                    "task_description": task_description,
+                    "agent_name": resource_id,
+                    "activity_description": activity_map.get(action_type, f"Executing {action_type}..."),
+                    "timestamp": time.time(),
+                })
+            except Exception as _cb_err:
+                logger.debug(f"task_event_callback (started) failed: {_cb_err}")
 
         result = None
 
@@ -112,25 +176,78 @@ class Hands:
         workspace_manager = get_workspace_manager(thread_id)
         
         # === Direct execution actions ===
-        if action_type == "agent":
-            result = await self._execute_agent(
-                resource_id, payload, user_id, start_time
+        # Wrap dispatch in try-except so unhandled exceptions become a failed
+        # ActionResult that still triggers the task_failed callback below.
+        try:
+            timeout = self.timeout_map.get(action_type)
+            if action_type == "agent":
+                # Use per-agent timeout so long-running agents (browser: 900s) aren't
+                # cut short by the generic 120s agent cap.
+                from backend.services.agent_manager import _get_agent_timeout
+                timeout = _get_agent_timeout(resource_id) + 30  # +30s buffer
+                result = await asyncio.wait_for(
+                    self._execute_agent(
+                        resource_id, payload, user_id, start_time,
+                        task_event_callback=task_event_callback,
+                        current_task_id=current_task_id,
+                    ),
+                    timeout=timeout,
+                )
+            elif action_type == "tool":
+                result = await asyncio.wait_for(
+                    self._execute_tool(resource_id, payload, start_time, state),
+                    timeout=timeout,
+                )
+            elif action_type == "terminal":
+                result = await asyncio.wait_for(
+                    self._execute_terminal(payload, start_time),
+                    timeout=timeout,
+                )
+                # Scan for files created by terminal command
+                new_files = workspace_manager.scan_for_new_files(created_by="terminal")
+                if new_files:
+                    logger.info(f"📝 Terminal created {len(new_files)} new file(s): {[f.file_name for f in new_files]}")
+            elif action_type == "python":
+                result = await asyncio.wait_for(
+                    self._execute_python(payload, start_time, thread_id, state),
+                    timeout=timeout,
+                )
+                # Scan for files created by Python code
+                new_files = workspace_manager.scan_for_new_files(created_by="python")
+                if new_files:
+                    logger.info(f"📝 Python created {len(new_files)} new file(s): {[f.file_name for f in new_files]}")
+            else:
+                result = None  # handled by the elif/else block below
+        except asyncio.TimeoutError:
+            timeout_secs = self.timeout_map.get(action_type, 60)
+            logger.error(f"⏰ Hands: {action_type}/{resource_id} timed out after {timeout_secs}s")
+            result = ActionResult(
+                action_id=f"timeout_{action_type}_{int(time.time())}",
+                success=False,
+                error_message=f"Action timed out after {timeout_secs} seconds",
+                execution_time_ms=timeout_secs * 1000,
             )
-        elif action_type == "tool":
-            result = await self._execute_tool(resource_id, payload, start_time, state)
-        elif action_type == "terminal":
-            result = await self._execute_terminal(payload, start_time)
-            # Scan for files created by terminal command
-            new_files = workspace_manager.scan_for_new_files(created_by="terminal")
-            if new_files:
-                logger.info(f"📝 Terminal created {len(new_files)} new file(s): {[f.file_name for f in new_files]}")
-        elif action_type == "python":
-            result = await self._execute_python(payload, start_time, thread_id, state)
-            # Scan for files created by Python code
-            new_files = workspace_manager.scan_for_new_files(created_by="python")
-            if new_files:
-                logger.info(f"📝 Python created {len(new_files)} new file(s): {[f.file_name for f in new_files]}")
-        elif action_type == "skip" or action_type == "finish":
+        except Exception as dispatch_exc:
+            logger.error(
+                f"🔥 Hands dispatch exception for {action_type}/{resource_id}: {dispatch_exc}",
+                exc_info=True,
+            )
+            result = ActionResult(
+                action_id=f"error_{action_type}_{int(time.time())}",
+                success=False,
+                error_message=f"Execution error: {str(dispatch_exc)[:300]}",
+                execution_time_ms=(time.time() - start_time) * 1000,
+            )
+
+        if result is None and action_type not in ("skip", "finish"):
+            result = ActionResult(
+                action_id=f"unknown_{action_type}",
+                success=False,
+                error_message=f"Unknown action type: {action_type}",
+                execution_time_ms=(time.time() - start_time) * 1000,
+            )
+
+        if action_type == "skip" or action_type == "finish":
             # Return a valid result object even for skip/finish to ensure state consistency
             if action_type == "finish":
                 user_response = decision_dict.get("user_response", "")
@@ -150,13 +267,6 @@ class Hands:
                 execution_time_ms=(time.time() - start_time) * 1000,
             )
             return self._update_state_with_result(state, result, config)
-        else:
-            result = ActionResult(
-                action_id=f"unknown_{action_type}",
-                success=False,
-                error_message=f"Unknown action type: {action_type}",
-                execution_time_ms=(time.time() - start_time) * 1000,
-            )
 
         # Post-process through CMS hooks if success
         # IMPORTANT: Save raw output BEFORE CMS compression replaces it with _content_ref
@@ -171,6 +281,45 @@ class Hands:
         
         # Attach raw output for downstream use (e.g., Python sandbox injection)
         result._raw_output = raw_output
+
+        # Fire task_completed callback so the UI clears the live activity text
+        if task_event_callback and current_task_id:
+            try:
+                result_summary = ""
+                if result.success and isinstance(result.output, dict):
+                    # Each agent type puts its human-readable result in a different field.
+                    # WHY the cascade exists:
+                    #   - Universal/browser agents → "text_response" or "message" at top level
+                    #   - Spreadsheet/document agents → nested under result["result"]["task_summary"]
+                    #     (the outer "result" key is the AgentResponse field; inner dict is the
+                    #      capability's return value which has its own "task_summary" key)
+                    #   - Some agents use a "standard_response" envelope with a "summary" field
+                    # We must try all locations because the Brain uses this string to show the
+                    # task completion description in the UI — a blank here means the task card
+                    # shows no result text even though the agent succeeded.
+                    raw = getattr(result, '_raw_output', result.output) or {}
+                    result_summary = (
+                        raw.get("text_response")
+                        or raw.get("message")
+                        # Spreadsheet / document agents: result.task_summary
+                        or (raw.get("result") or {}).get("task_summary") if isinstance(raw.get("result"), dict) else None
+                        # standard_response path
+                        or (raw.get("standard_response") or {}).get("summary") if isinstance(raw.get("standard_response"), dict) else None
+                        or ""
+                    )
+                    result_summary = str(result_summary)[:200]
+                await task_event_callback({
+                    "event_type": "task_completed" if result.success else "task_failed",
+                    "task_name": current_task_id,
+                    "task_description": task_description,
+                    "agent_name": resource_id,
+                    "result_summary": result_summary,
+                    "error": result.error_message if not result.success else None,
+                    "execution_time": (time.time() - start_time),
+                    "timestamp": time.time(),
+                })
+            except Exception as _cb_err:
+                logger.debug(f"task_event_callback (completed) failed: {_cb_err}")
 
         return self._update_state_with_result(state, result, config)
 
@@ -310,20 +459,109 @@ class Hands:
         )
 
     async def _execute_agent(
-        self, agent_id: str, payload: Dict[str, Any], user_id: str, start_time: float
+        self,
+        agent_id: str,
+        payload: Dict[str, Any],
+        user_id: str,
+        start_time: float,
+        task_event_callback=None,
+        current_task_id: Optional[str] = None,
     ) -> ActionResult:
         """
         Execute an agent task with on-demand spawning.
-        
-        The agent is automatically spawned if not running, executes the task,
-        and can be terminated after completion based on policy.
+
+        When task_event_callback and current_task_id are provided, streams
+        real-time progress messages from the agent to the frontend via the
+        task_event_callback (task_progress events).
         """
         from backend.services.agent_manager import get_agent_manager
-        
+
         # Get agent info for logging/telemetry
         agent = agent_registry.find_agent(agent_id)
         agent_name = agent.get("name", agent_id) if agent else agent_id
-        
+
+        # ──────────────────────────────────────────────────────────────
+        # IN-CHAT AUTH PRE-CHECK
+        # If this agent requires Composio OAuth, verify the user has an
+        # active connection BEFORE spawning the agent.  When missing,
+        # initiate the auth flow and return the Connect Link URL so the
+        # Brain can surface it to the user.
+        # ──────────────────────────────────────────────────────────────
+        try:
+            from backend.services.skill_registry import skill_registry
+            skill_config = skill_registry.get_skill_config(agent_id)
+
+            if skill_config and skill_config.requires_auth and skill_config.composio_app_slug:
+                app_slug = skill_config.composio_app_slug
+                logger.info(
+                    f"🔐 Auth pre-check: {agent_name} requires "
+                    f"Composio connection for '{app_slug}'"
+                )
+
+                from services.integrations.composio_auth import get_auth_manager
+                auth_mgr = get_auth_manager()
+
+                # Quick DB/API check for active connection
+                status = auth_mgr.check_connection_status(user_id, app_slug)
+                connected_apps = status.get("connected_apps", []) if status.get("success") else []
+
+                if app_slug.lower() not in [a.lower() for a in connected_apps]:
+                    # No active connection → initiate auth flow
+                    logger.info(
+                        f"🔑 No active {app_slug} connection for user {user_id} "
+                        f"— initiating in-chat OAuth"
+                    )
+                    try:
+                        auth_result = auth_mgr.start_auth_flow(user_id, app_slug)
+                        auth_url = (
+                            auth_result.get("redirect_url")
+                            if auth_result.get("success")
+                            else None
+                        )
+                    except Exception as auth_err:
+                        logger.warning(f"start_auth_flow error: {auth_err}")
+                        auth_url = None
+
+                    app_display = skill_config.name or app_slug.title()
+                    message = (
+                        f"To use **{app_display}**, please connect your "
+                        f"**{app_slug.title()}** account first."
+                    )
+                    if auth_url:
+                        message += (
+                            f"\n\n🔗 **[Click here to connect {app_slug.title()}]({auth_url})**"
+                            f"\n\nAfter you complete authentication in the new tab, "
+                            f"come back here and ask me again."
+                        )
+                    else:
+                        message += (
+                            "\n\nPlease go to your **Connections** page "
+                            "to set up this integration."
+                        )
+
+                    return ActionResult(
+                        action_id=f"auth_required_{agent_id}",
+                        success=False,
+                        output={
+                            "status": "pending_auth",
+                            "auth_required": True,
+                            "auth_url": auth_url,
+                            "app_slug": app_slug,
+                            "app_name": app_display,
+                            "message": message,
+                        },
+                        error_message=message,
+                        execution_time_ms=(time.time() - start_time) * 1000,
+                    )
+
+                logger.info(f"✅ Auth pre-check passed: {app_slug} is connected")
+        except ImportError as imp_err:
+            # Composio not installed — skip pre-check, let agent handle it
+            logger.debug(f"Auth pre-check skipped (import error): {imp_err}")
+        except Exception as auth_check_err:
+            # Non-fatal — let agent attempt execution even if pre-check fails
+            logger.warning(f"Auth pre-check failed (non-fatal): {auth_check_err}")
+
         # Prepare task
         instruction = payload.get("instruction", payload.get("prompt", ""))
         task = {
@@ -334,16 +572,34 @@ class Hands:
             "thread_id": payload.get("thread_id"),
             "user_id": user_id,
         }
-        
+
+        # Build a progress_callback that forwards agent progress to the WebSocket
+        progress_callback = None
+        if task_event_callback and current_task_id:
+            async def _progress_cb(message: str):
+                try:
+                    await task_event_callback({
+                        "event_type": "task_progress",
+                        "task_name": current_task_id,
+                        "message": message,
+                        "agent_name": agent_id,
+                        "timestamp": time.time(),
+                    })
+                except Exception as _e:
+                    logger.debug(f"progress_callback forwarding failed: {_e}")
+            progress_callback = _progress_cb
+
         try:
             # Get agent manager and ensure it's initialized
             agent_manager = get_agent_manager()
             if not agent_manager._initialized:
                 await agent_manager.initialize()
-            
+
             # Execute task (agent spawned automatically if needed)
             logger.info(f"🚀 Executing task on {agent_name} (on-demand)")
-            agent_result = await agent_manager.execute(agent_id, task)
+            agent_result = await agent_manager.execute(
+                agent_id, task, progress_callback=progress_callback
+            )
             
             # Determine success
             success = agent_result.get("status") != "error"
@@ -490,6 +746,18 @@ class Hands:
                 action_id="python",
                 success=False,
                 error_message="No code provided",
+                execution_time_ms=(time.time() - start_time) * 1000,
+            )
+
+        # Syntax pre-validation — catch SyntaxError before entering the sandbox
+        try:
+            compile(code, "<brain_python>", "exec")
+        except SyntaxError as syntax_err:
+            logger.warning(f"[_execute_python] Syntax error in generated code: {syntax_err}")
+            return ActionResult(
+                action_id="python_syntax_error",
+                success=False,
+                error_message=f"Python syntax error: {syntax_err}",
                 execution_time_ms=(time.time() - start_time) * 1000,
             )
 
@@ -729,6 +997,27 @@ os.chdir(r'{workspace_path}')
         except Exception as e:
             logger.debug(f"Artifact capture skipped: {e}")
 
+        # === MEMORY SERVICE: Capture routing decisions ===
+        # Records which agent/tool worked for which type of task,
+        # building persistent routing knowledge over time.
+        try:
+            from backend.services.memory_service import get_memory_service
+            memory_svc = get_memory_service(user_id)
+            if action_type == "agent":
+                memory_svc.capture_routing_decision(
+                    prompt=state.get("original_prompt", ""),
+                    agent_id=decision_dict.get("resource_id", "unknown"),
+                    success=result.success,
+                )
+                if not result.success and result.error_message:
+                    memory_svc.capture_error_pattern(
+                        task=state.get("original_prompt", ""),
+                        agent_id=decision_dict.get("resource_id", "unknown"),
+                        error_message=result.error_message,
+                    )
+        except Exception as e:
+            logger.debug(f"Memory capture skipped: {e}")
+
         existing_action_history = list(state.get("action_history", []))
         
         # Get workspace managers for file tracking
@@ -752,6 +1041,55 @@ os.chdir(r'{workspace_path}')
             "shared_files": [f.to_dict() for f in shared_files],
             "shared_workspace": str(shared_manager.get_workspace_path()),
         }
+
+        needs_input_payload = None
+        if action_type == "agent":
+            needs_input_payload = self._extract_needs_input_payload(raw_output)
+            if needs_input_payload is None:
+                needs_input_payload = self._extract_needs_input_payload(result.output)
+
+        # === INTERCEPT NEEDS_INPUT FROM AGENTS ===
+        # If an agent explicitly requires user input (like credentials), 
+        # pause execution and ask the user directly.
+        if needs_input_payload:
+            question = needs_input_payload.get(
+                "question",
+                "The agent needs more information to proceed.",
+            )
+            updates["pending_user_input"] = True
+            updates["question_for_user"] = question
+            logger.info(f"⏸️ Agent {decision_dict.get('resource_id')} needs input: {question}")
+
+        # === LAST AGENT RESULT: Expose raw output so Brain can finish immediately ===
+        # When an agent or tool call succeeds, store the full uncompressed result in a
+        # dedicated state field. Brain reads this directly instead of trying to reload
+        # JSON files, eliminating the 8+ wasted iterations after a successful agent call.
+        if action_type in ("agent", "tool") and result.success and not needs_input_payload:
+            try:
+                # Serialize raw_output to a clean string Brain can read
+                if isinstance(raw_output, dict):
+                    last_result_str = json.dumps(raw_output, indent=2, default=str)
+                elif raw_output is not None:
+                    last_result_str = str(raw_output)
+                else:
+                    last_result_str = result_summary
+                updates["last_agent_result"] = {
+                    "agent": resource_id or action_type,
+                    "success": True,
+                    # Cap at 3000 chars: this string is injected verbatim into the Brain's
+                # next LLM prompt under "LATEST AGENT RESULT". Without a cap, a large
+                # agent response (e.g. a full spreadsheet analysis) would balloon the
+                # prompt token count and risk hitting context limits or inflating costs.
+                # 3000 chars ≈ ~750 tokens — enough for the Brain to read the key result
+                # and decide to finish, but small enough to be safe for all model tiers.
+                "result": last_result_str[:3000],
+                    "iteration": iteration,
+                }
+            except Exception:
+                pass  # Non-critical; Brain falls back to action_history
+        elif action_type in ("agent", "tool"):
+            # Clear any stale last_agent_result on failure or needs_input.
+            updates["last_agent_result"] = None
 
         # === CANVAS REGISTRY: Extract and register canvases from agent responses ===
         output = result.output
@@ -863,9 +1201,12 @@ os.chdir(r'{workspace_path}')
                 if task.get("task_id") == current_task_id:
                     task["result"] = result.output
                     task["error"] = result.error_message
-                    task["status"] = (
-                        TaskStatus.COMPLETED if result.success else TaskStatus.FAILED
-                    )
+                    if needs_input_payload:
+                        task["status"] = TaskStatus.IN_PROGRESS
+                    else:
+                        task["status"] = (
+                            TaskStatus.COMPLETED if result.success else TaskStatus.FAILED
+                        )
                     break
 
             updates["todo_list"] = todo_list

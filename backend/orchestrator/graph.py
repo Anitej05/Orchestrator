@@ -43,8 +43,15 @@ def create_graph_with_checkpointer(checkpointer):
             "pending_approval": state.get("pending_approval"),
             "pending_decision": state.get("pending_decision")
         }
+        
+    def user_input_node(state):
+        return {
+            "pending_user_input": True,
+            "question_for_user": state.get("question_for_user")
+        }
     
     workflow.add_node("action_approval_required", action_approval_node)
+    workflow.add_node("user_input_required", user_input_node)
     
     # Define Core Logic Cycle
     workflow.add_edge(START, "omni_brain")
@@ -55,6 +62,7 @@ def create_graph_with_checkpointer(checkpointer):
         {
             "hands": "omni_hands",
             "approval": "action_approval_required",
+            "needs_input": "user_input_required",
             "brain": "omni_brain",  # Skip action loops back for another thinking cycle
             "finish": END
         }
@@ -65,6 +73,7 @@ def create_graph_with_checkpointer(checkpointer):
     
     # After approval, we end (the UI will send a new message to continue)
     workflow.add_edge("action_approval_required", END)
+    workflow.add_edge("user_input_required", END)
     
     return workflow.compile(checkpointer=checkpointer)
 

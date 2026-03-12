@@ -1,9 +1,46 @@
 ---
 id: coding_agent
-name: coding_agent
+name: Coding Agent
 port: 8080
 version: 1.0.0
-description: Priority agent for coding, software engineering, multi-file editing, and test execution tasks.
+description: >
+  Priority agent for coding, software engineering, multi-file editing,
+  test execution, and code review. Powered by OpenCode headless server.
+model: cerebras/llama-3.3-70b
+context_strategy: standard
+requires_auth: false
+triggers:
+  - code
+  - programming
+  - debug
+  - fix bug
+  - refactor
+  - write function
+  - create api
+  - unit test
+  - code review
+  - git
+  - html preview
+  - software
+  - developer
+  - traceback
+  - error
+capabilities:
+  - code_task
+  - review_code
+  - run_tests
+  - debug
+  - explain_code
+  - generate_docs
+  - git_operations
+  - search_codebase
+  - generate_preview
+not_for:
+  - quick calculations
+  - data analysis of CSV/Excel
+  - web browsing
+  - email operations
+  - document reading
 ---
 
 # Coding Agent
@@ -12,7 +49,6 @@ description: Priority agent for coding, software engineering, multi-file editing
 
 Powered by [OpenCode](https://opencode.ai) headless server — a full-featured AI coding agent
 with codebase awareness, LSP integration, multi-file editing, and test execution.
-Auto-installs the OpenCode CLI (`npm i -g opencode-ai@latest`) on first use.
 
 ## Capabilities
 
@@ -33,23 +69,6 @@ Auto-installs the OpenCode CLI (`npm i -g opencode-ai@latest`) on first use.
 - **run_tests** — Execute project test suite, report pass/fail with terminal output.
 - **git_operations** — Git status, diff, log, branch info. Read-only version control inspection.
 
-## Canvas Integration
-
-This agent has full access to the Orbimesh Canvas system. Output is automatically
-routed to the best visual format:
-
-| Output Type | Canvas Rendering |
-|---|---|
-| File diffs | Multi-file diff viewer with syntax highlighting + apply/reject buttons |
-| Markdown analysis | Rich markdown document |
-| HTML/React generated | **Live iframe preview** (self-contained HTML) |
-| JSON data | Collapsible JSON tree viewer |
-| Test results | Terminal output with pass/fail indicators |
-| Git output | Syntax-highlighted code viewer |
-
-The agent can also use `build_dynamic_canvas()` to generate any registered canvas template
-on the fly (charts, spreadsheets, images, etc.).
-
 ## When to Use
 
 Use this agent when the user:
@@ -58,11 +77,10 @@ Use this agent when the user:
 - Requests code refactoring or improvement
 - Needs tests written or executed
 - Asks for code review, explanation, or documentation
-- Wants multi-file changes (e.g., "add authentication to the app")
+- Wants multi-file changes
 - Wants a live HTML/UI preview in the canvas
 - Needs git status, diff, or log information
 - Wants to search the codebase for patterns or functions
-- Mentions programming languages, frameworks, or development tools
 
 ## NOT For
 
@@ -71,31 +89,3 @@ Use this agent when the user:
 - Web browsing or scraping → use Browser Agent
 - Email operations → use Mail Agent
 - Document reading/creation → use Document Agent
-
-## Action Routing
-
-| Action | Aliases | Capability |
-|---|---|---|
-| `code_task` | *(default)* | Write/edit code |
-| `review_code` | `review` | Analyze code |
-| `run_tests` | `test` | Run tests |
-| `debug` | `fix` | Debug errors |
-| `explain_code` | `explain` | Explain code |
-| `generate_docs` | `docs` | Generate docs |
-| `git_operations` | `git` | Git info |
-| `search_codebase` | `search` | Search code |
-| `generate_preview` | `preview` | HTML preview |
-
-## Example Prompts
-
-- "Fix the authentication bug in the login endpoint"
-- "Create a REST API for user management with CRUD operations"
-- "Refactor the database module to use connection pooling"
-- "Write unit tests for the payment service"
-- "Review the security of auth/middleware.py"
-- "Explain how the orchestrator's Brain works"
-- "Generate API documentation for the agents module"
-- "Show me a live preview of a login form with dark theme"
-- "Show git log for the last 10 commits"
-- "Search for all usages of CanvasDisplay in the codebase"
-- "Debug this traceback: ModuleNotFoundError: No module named 'xyz'"

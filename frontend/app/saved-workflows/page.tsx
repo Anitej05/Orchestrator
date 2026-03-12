@@ -181,16 +181,16 @@ function SavedWorkflowsContent() {
   return (
     <SidebarInset>
       <div className="min-h-screen bg-bg-page dark:bg-background text-text-primary">
-        <main className="p-6">
-          <div className="mb-6">
-            <h1 className="text-3xl font-bold text-brand-teal">Saved Workflows</h1>
-            <p className="text-text-secondary mt-2">Your reusable automation workflows. Execute, edit, or delete them anytime.</p>
+        <main className="p-6 max-w-6xl mx-auto">
+          <div className="mb-6 pb-4 border-b border-border-color">
+            <h1 className="text-2xl font-semibold text-text-primary">Saved Workflows</h1>
+            <p className="text-sm text-text-tertiary mt-1">Your reusable automation workflows. Execute, edit, or delete them anytime.</p>
           </div>
 
           {workflows.length === 0 ? (
             <Card className="ui-card">
               <CardContent className="flex flex-col items-center justify-center py-12 text-text-secondary">
-                <Zap className="w-16 h-16 text-brand-teal mb-4" />
+                <Zap className="w-10 h-10 text-brand-primary mb-4" />
                 <h3 className="text-xl font-semibold mb-2 text-text-primary">No workflows yet</h3>
                 <p className="text-center mb-4">Start a conversation and click "Save as Workflow" to create your first reusable workflow.</p>
                 <Button onClick={() => router.push("/")}>Start Conversation</Button>
@@ -201,7 +201,7 @@ function SavedWorkflowsContent() {
               {workflows.map((workflow) => (
                 <Card
                   key={workflow.workflow_id}
-                  className="ui-card flex flex-col hover:border-brand-teal hover:shadow-brand transition-all"
+                  className="ui-card flex flex-col hover:border-brand-primary hover:shadow-orbimesh-card-hover transition-all"
                 >
                   <CardHeader
                     className="cursor-pointer"

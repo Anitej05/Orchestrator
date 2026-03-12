@@ -23,14 +23,6 @@ logger = logging.getLogger("agents.integrations_agent")
 class IntegrationsAgentConfig(AgentConfig):
     """Configuration for Integrations Agent."""
     tool_cache_ttl: int = 300  # 5 minutes
-    supported_apps: List[str] = None
-
-    def __post_init__(self):
-        if self.supported_apps is None:
-            self.supported_apps = [
-                "slack", "notion", "github", "linear", "jira", "asana",
-                "trello", "figma", "discord", "twitter", "instagram"
-            ]
 
 
 class IntegrationsAgent(BaseAgent):
@@ -61,7 +53,7 @@ class IntegrationsAgent(BaseAgent):
         # Service instances (per-user)
         self._service_cache: Dict[str, IntegrationsAgentService] = {}
 
-        logger.info(f"IntegrationsAgent initialized with {len(self.config.supported_apps)} supported apps")
+        logger.info("IntegrationsAgent initialized (dynamic toolkit discovery enabled)")
     
     async def _initialize_resources(self):
         """Initialize agent-specific resources."""
@@ -210,20 +202,153 @@ class IntegrationsAgent(BaseAgent):
             }
     
     @capability(
+        name="discover_tools",
+        description="Search for available tools/integrations by natural language query",
+        parameters=[
+            ParameterSchema(
+                name="query",
+                type="string",
+                description="Natural language search (e.g., 'send slack message', 'create jira ticket')",
+                required=True,
+            ),
+        ],
+    )
+    async def discover_tools(
+        self, params: Dict[str, Any], context: ExecutionContext
+    ) -> Dict[str, Any]:
+        """Search for available Composio tools by natural language query."""
+        query = params.get("query", "")
+        if not query:
+            return {"success": False, "error": "Missing 'query' parameter"}
+
+        try:
+            results = self.tool_manager.search_tools(query=query)
+            return {
+                "success": True,
+                "query": query,
+                "tools": [
+                    {
+                        "name": r.get("name") or r.get("slug", ""),
+                        "description": r.get("description", "")[:200],
+                    }
+                    for r in results[:15]
+                ],
+                "total_found": len(results),
+                "message": f"Found {len(results)} tools matching '{query}'",
+            }
+        except Exception as e:
+            logger.error(f"Tool discovery failed: {e}")
+            return {"success": False, "error": str(e)}
+
+    @capability(
+        name="manage_connections",
+        description="Initiate or check connection to a third-party app (OAuth)",
+        parameters=[
+            ParameterSchema(
+                name="app_name",
+                type="string",
+                description="App slug to connect (e.g., 'slack', 'notion', 'github')",
+                required=True,
+            ),
+            ParameterSchema(
+                name="action",
+                type="string",
+                description="'connect', 'disconnect', or 'check'",
+                required=False,
+            ),
+        ],
+    )
+    async def manage_connections(
+        self, params: Dict[str, Any], context: ExecutionContext
+    ) -> Dict[str, Any]:
+        """Manage user connections to third-party apps."""
+        app_name = params.get("app_name", "").lower()
+        action = params.get("action", "connect").lower()
+
+        if not app_name:
+            return {"success": False, "error": "Missing 'app_name' parameter"}
+
+        try:
+            if action == "check":
+                return await self.check_app_connection({"app_name": app_name}, context)
+
+            elif action == "disconnect":
+                result = self.auth_manager.disconnect_app(context.user_id, app_name)
+                return result
+
+            else:  # connect
+                # Check if already connected
+                connection = self.auth_manager.get_connection_for_agent(
+                    context.user_id, app_name
+                )
+                if connection:
+                    return {
+                        "success": True,
+                        "connected": True,
+                        "message": f"{app_name.title()} is already connected",
+                    }
+
+                # Initiate auth flow
+                auth_result = self.auth_manager.start_auth_flow(
+                    context.user_id, app_name
+                )
+                if auth_result.get("success"):
+                    return {
+                        "success": True,
+                        "needs_approval": True,
+                        "auth_url": auth_result.get("redirect_url"),
+                        "app_name": app_name,
+                        "message": (
+                            f"Please connect {app_name.title()}: "
+                            f"{auth_result.get('redirect_url', 'Go to Connections page')}"
+                        ),
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "error": auth_result.get("error", "Failed to start auth flow"),
+                    }
+
+        except Exception as e:
+            logger.error(f"Connection management failed for {app_name}: {e}")
+            return {"success": False, "error": str(e)}
+
+    @capability(
         name="list_supported_apps",
-        description="List all apps supported by this agent",
-        parameters=[],
+        description="List available integrations and their connection status",
+        parameters=[
+            ParameterSchema(
+                name="search",
+                type="string",
+                description="Optional search query to filter apps",
+                required=False,
+            ),
+        ],
     )
     async def list_supported_apps(
         self, params: Dict[str, Any], context: ExecutionContext
     ) -> Dict[str, Any]:
-        """List all supported apps."""
-        return {
-            "success": True,
-            "apps": self.config.supported_apps,
-            "total_count": len(self.config.supported_apps),
-            "message": f"Supports {len(self.config.supported_apps)} Composio apps"
-        }
+        """List available integrations, optionally with search."""
+        search = params.get("search")
+
+        try:
+            toolkits = self.tool_manager.list_toolkits(search=search)
+            return {
+                "success": True,
+                "apps": [
+                    {
+                        "name": tk.get("name", tk.get("slug", "")),
+                        "slug": tk.get("slug", tk.get("name", "")).lower(),
+                        "description": tk.get("description", "")[:150],
+                    }
+                    for tk in toolkits[:30]
+                ],
+                "total_count": len(toolkits),
+                "message": f"Found {len(toolkits)} available integrations",
+            }
+        except Exception as e:
+            logger.error(f"Failed to list toolkits: {e}")
+            return {"success": False, "error": str(e)}
     
     @capability(
         name="get_available_tools",

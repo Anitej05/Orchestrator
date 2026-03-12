@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useConversationStore } from '@/lib/conversation-store';
-import type { ConversationState, Message, TaskStatus } from '@/lib/types';
+import type { ConversationState, Message, TaskStatus, FlowEvent } from '@/lib/types';
 
 // This interface defines the structure of messages coming from the WebSocket
 interface WebSocketEventData {
@@ -13,14 +13,23 @@ interface WebSocketEventData {
   error_category?: string;
   status?: string;
   timestamp?: number;
+  /** Monotonic sequence number emitted by the backend for ordering guarantees */
+  seq?: number;
   // Task status tracking fields
   task_name?: string;
   task_description?: string;
+  activity_description?: string;
   agent_name?: string;
   execution_time?: number;
   cost?: number;
   result?: any;
-  // ... other potential fields
+  result_summary?: string;
+  // __end__ top-level convenience fields
+  final_response?: string;
+  canvas_display?: any;
+  canvas_type?: string;
+  canvas_title?: string;
+  has_canvas?: boolean;
 }
 
 interface UseWebSocketManagerProps {
@@ -36,6 +45,7 @@ export function useWebSocketManager({
   url = process.env.NEXT_PUBLIC_API_URL ? process.env.NEXT_PUBLIC_API_URL.replace(/^http/, 'ws') + '/ws/chat' : 'ws://localhost:8000/ws/chat',
 }: UseWebSocketManagerProps = {}) {
   const ws = useRef<WebSocket | null>(null);
+  const lastSeenSeq = useRef<number>(-1);  // resets to -1 on each new connection
   const [isConnected, setIsConnected] = useState(false);
   const { _setConversationState } = useConversationStore((state: any) => state.actions);
 
@@ -51,6 +61,7 @@ export function useWebSocketManager({
 
       ws.current.onopen = () => {
         console.log('✅ WebSocket connected successfully to', url);
+        lastSeenSeq.current = -1;  // reset dedup counter on each new connection
         setIsConnected(true);
 
         // Expose WebSocket to window for conversation store to use
@@ -124,6 +135,18 @@ export function useWebSocketManager({
             dataKeys: eventData.data ? Object.keys(eventData.data).slice(0, 10) : []
           });
 
+          // Seq deduplication: backend emits a monotonic seq on every task event.
+          // If a reconnect causes the server to resend an already-processed event,
+          // the seq will be ≤ our last-seen value → skip it silently.
+          const TASK_EVENT_NODES = ['task_started', 'task_progress', 'task_completed', 'task_failed'];
+          if (TASK_EVENT_NODES.includes(eventData.node) && eventData.seq !== undefined) {
+            if (eventData.seq <= lastSeenSeq.current) {
+              console.warn(`⚠️ Skipping duplicate/stale task event (seq ${eventData.seq} ≤ last ${lastSeenSeq.current}):`, eventData.node);
+              return;
+            }
+            lastSeenSeq.current = eventData.seq;
+          }
+
           const mapTodoStatus = (status?: string) => {
             switch ((status || '').toLowerCase()) {
               case 'in_progress':
@@ -154,22 +177,34 @@ export function useWebSocketManager({
               const taskKey = task.id || task.task_id;
               if (!taskKey) return;
 
+              // Spread existing status to preserve agentName/activityDescription set by task_started
+              const existing = updatedTaskStatuses[taskKey] || {};
               updatedTaskStatuses[taskKey] = {
+                ...existing,
                 status: mapTodoStatus(task.status),
-                taskName: task.description || 'Untitled task',
+                taskName: task.description || existing.taskName || 'Untitled task',
                 taskId: taskKey,
-                taskDescription: task.description,
-                agentName: task.payload?.agent_name,
-                executionTime: task.execution_time,
-                error: task.error,
-                result: task.result,
+                taskDescription: task.description || existing.taskDescription,
+                agentName: task.payload?.agent_name || existing.agentName,
+                executionTime: task.execution_time || existing.executionTime,
+                error: task.error || existing.error,
+                result: task.result || existing.result,
               };
             });
+
+            const stageUpdate = todoList.length > 0 ? {
+              metadata: {
+                ...currentState.metadata,
+                currentStage: 'planning',
+                stageMessage: 'Brain is planning tasks...',
+              }
+            } : {};
 
             _setConversationState({
               todo_list: todoList,
               task_statuses: updatedTaskStatuses,
               current_executing_task: currentTaskId || currentState.current_executing_task,
+              ...stageUpdate,
             });
           }
 
@@ -333,49 +368,111 @@ export function useWebSocketManager({
           else if (eventData.node === 'brain_thinking') {
             // Brain reasoning update - show what the AI is thinking
             const reasoning = eventData.data?.reasoning;
-            
+            const action_type = eventData.data?.action_type;
+
             if (reasoning) {
               console.log('🧠 Brain thinking:', reasoning.substring(0, 100) + '...');
-              
+
+              // Append a brain event to the flow timeline
+              const brainEvent: FlowEvent = {
+                id: `brain_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                type: 'brain',
+                label: reasoning.length > 120 ? reasoning.slice(0, 120) + '…' : reasoning,
+                status: 'completed',
+                action_type,
+                timestamp: eventData.timestamp || Date.now(),
+              };
+              const currentFlow = useConversationStore.getState().flow_events || [];
               _setConversationState({
                 brain_reasoning: reasoning,
+                flow_events: [...currentFlow, brainEvent],
               });
             }
           }
           else if (eventData.node === 'task_started') {
             // Real-time task execution tracking - task started
+            // task_name is now the task_id (UUID) so it matches the todo_list entry key
             const taskName = eventData.data?.task_name || eventData.task_name;
             const agentName = eventData.data?.agent_name || eventData.agent_name;
             const activityDescription = eventData.data?.activity_description || eventData.activity_description;
+            const taskDescription = eventData.data?.task_description || eventData.task_description;
 
             console.log('📨 WebSocket task_started event received:', { taskName, agentName, activityDescription, eventData });
 
             if (taskName) {
               const currentState = useConversationStore.getState();
+              const existingStatus = currentState.task_statuses?.[taskName];
               const updatedTaskStatuses = {
                 ...currentState.task_statuses,
                 [taskName]: {
+                  // Spread existing status to preserve taskName/taskDescription set by todo_list_update
+                  ...existingStatus,
                   status: 'running' as const,
-                  taskName,
                   agentName,
-                  taskDescription: eventData.data?.task_description || eventData.task_description,
+                  taskDescription: taskDescription || existingStatus?.taskDescription,
                   activityDescription,
                   startedAt: new Date(),
                 }
               };
 
+              // Add an agent_call flow event for this task
+              const agentCallEvent: FlowEvent = {
+                id: `task_${taskName}`,
+                type: 'agent_call',
+                label: taskDescription || existingStatus?.taskName || taskName,
+                sublabel: activityDescription || (agentName ? `Calling ${agentName}…` : undefined),
+                status: 'running',
+                taskId: taskName,
+                agentName,
+                timestamp: eventData.timestamp || Date.now(),
+              };
+              const currentFlow = currentState.flow_events || [];
               _setConversationState({
                 task_statuses: updatedTaskStatuses,
                 current_executing_task: taskName,
                 brain_reasoning: undefined,  // Clear brain thinking when hands start executing
+                flow_events: [...currentFlow, agentCallEvent],
+                metadata: {
+                  ...currentState.metadata,
+                  currentStage: 'executing',
+                  stageMessage: `Executing: ${agentName || 'agent'}...`,
+                },
               });
 
               console.log('✅ Updated task_statuses in store:', updatedTaskStatuses);
               console.debug('Task started:', { taskName, agentName, activityDescription });
             }
           }
+          else if (eventData.node === 'task_progress') {
+            // Real-time agent progress (from SSE stream inside the agent subprocess)
+            const taskName = eventData.data?.task_name || eventData.task_name;
+            const progressMsg = eventData.data?.activity_description || eventData.activity_description;
+
+            if (taskName && progressMsg) {
+              const currentState = useConversationStore.getState();
+              const existingStatus = currentState.task_statuses?.[taskName];
+
+              // Update sublabel on the running agent_call flow event in-place
+              const updatedFlow = (currentState.flow_events || []).map((e) =>
+                e.taskId === taskName && e.status === 'running'
+                  ? { ...e, sublabel: progressMsg.length > 90 ? progressMsg.slice(0, 90) + '…' : progressMsg }
+                  : e
+              );
+              _setConversationState({
+                task_statuses: {
+                  ...currentState.task_statuses,
+                  [taskName]: {
+                    ...existingStatus,
+                    activityDescription: progressMsg,
+                  },
+                },
+                flow_events: updatedFlow,
+              });
+            }
+          }
           else if (eventData.node === 'task_completed') {
             // Real-time task execution tracking - task completed
+            // task_name is the task_id (UUID) so it matches the todo_list entry key
             const taskName = eventData.data?.task_name || eventData.task_name;
             const executionTime = eventData.data?.execution_time || eventData.execution_time;
             const agentName = eventData.data?.agent_name || eventData.agent_name;
@@ -383,7 +480,7 @@ export function useWebSocketManager({
             const resultSummary = eventData.data?.result_summary || eventData.result_summary;
             const cost = eventData.data?.cost || eventData.cost;
 
-            console.log('📨 WebSocket task_completed event received:', { taskName, executionTime, agentName, resultSummary });
+            console.log('📨 WebSocket task_completed event received:', { taskName, executionTime, agentName, resultSummary, seq: eventData.seq });
 
             if (taskName) {
               const currentState = useConversationStore.getState();
@@ -394,12 +491,12 @@ export function useWebSocketManager({
                 [taskName]: {
                   ...existingStatus,
                   status: 'completed' as const,
-                  taskName,
-                  agentName,
+                  agentName: agentName || existingStatus?.agentName,
                   completedAt: new Date(),
                   executionTime,
                   cost,
                   resultSummary,
+                  activityDescription: undefined,  // Clear live text on completion
                   // MEMORY FIX: Don't store full result, just a summary
                   result: typeof result === 'string'
                     ? result.substring(0, 500)
@@ -407,9 +504,23 @@ export function useWebSocketManager({
                 }
               };
 
+              // Mark the matching agent_call flow event as completed
+              const updatedFlow = (currentState.flow_events || []).map((e) =>
+                e.taskId === taskName
+                  ? {
+                      ...e,
+                      status: 'completed' as const,
+                      sublabel: resultSummary
+                        ? (resultSummary.length > 90 ? resultSummary.slice(0, 90) + '…' : resultSummary)
+                        : undefined,
+                      executionTime,
+                    }
+                  : e
+              );
               _setConversationState({
                 task_statuses: updatedTaskStatuses,
                 current_executing_task: null,
+                flow_events: updatedFlow,
               });
 
               console.log('✅ Updated task_statuses in store:', updatedTaskStatuses);
@@ -440,9 +551,22 @@ export function useWebSocketManager({
                 }
               };
 
+              // Mark the matching agent_call flow event as failed
+              const updatedFlow = (currentState.flow_events || []).map((e) =>
+                e.taskId === taskName
+                  ? {
+                      ...e,
+                      status: 'failed' as const,
+                      sublabel: error
+                        ? (error.length > 90 ? error.slice(0, 90) + '…' : error)
+                        : 'Agent failed',
+                    }
+                  : e
+              );
               _setConversationState({
                 task_statuses: updatedTaskStatuses,
                 current_executing_task: null,
+                flow_events: updatedFlow,
               });
 
               console.warn('Task failed:', { taskName, error, executionTime });
@@ -608,14 +732,22 @@ export function useWebSocketManager({
 
               if (!eventData.data) {
                 console.warn('__end__ event received but no data field!');
-                // Set isLoading to false even if there's no data
                 useConversationStore.setState({ isLoading: false, status: 'completed', brain_reasoning: undefined });
                 return;
               }
 
               console.debug('Received __end__ event, processing final state...');
-              // The backend sends the complete state in the data field
-              const finalState: ConversationState = eventData.data;
+              // The backend sends the complete state in data, plus convenience top-level fields.
+              // Merge top-level fields into finalState so downstream code finds them either way.
+              const finalState: ConversationState = {
+                ...eventData.data,
+                // Top-level fields take priority (they're the explicit, de-buried versions)
+                final_response: eventData.final_response ?? eventData.data?.final_response,
+                canvas_data: eventData.canvas_display ?? eventData.data?.canvas_data,
+                canvas_type: eventData.canvas_type ?? eventData.data?.canvas_type,
+                canvas_title: eventData.canvas_title ?? eventData.data?.canvas_title,
+                has_canvas: eventData.has_canvas ?? eventData.data?.has_canvas,
+              };
               console.debug('Final state:', {
                 hasMessages: !!finalState.messages,
                 messagesCount: finalState.messages?.length || 0,
@@ -936,7 +1068,10 @@ export function useWebSocketManager({
             _setConversationState({
               messages: [...currentMessages, errorSystemMessage],
               status: 'idle', // Keep status as 'idle' so conversation can continue
+              isLoading: false,
               brain_reasoning: undefined,  // Clear brain thinking on error
+              task_statuses: {},           // Clear any stale task progress indicators
+              current_executing_task: null,
               metadata: {
                 ...useConversationStore.getState().metadata,
                 currentStage: 'ready',
@@ -950,8 +1085,6 @@ export function useWebSocketManager({
                 }
               }
             });
-            // Set isLoading to false when there's an error
-            useConversationStore.setState({ isLoading: false });
           }
           else {
             // Catch-all for any remaining unhandled events - still update progress if provided

@@ -9,29 +9,51 @@ import { Loader2, AlertCircle, CheckCircle2, BookOpen, Mail, RefreshCw, Pause, P
 import { useUser } from "@clerk/nextjs"
 import { useToast } from "@/hooks/use-toast"
 import { authFetch } from "@/lib/auth-fetch"
+import { SearchBar } from "@/components/search-bar"
+import { AppLogo } from "@/components/app-logo"
 
 function ConnectionsContent() {
   const { user } = useUser()
   const { toast } = useToast()
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null)
+
+  // Available toolkits from Composio (dynamically loaded)
+  const [availableToolkits, setAvailableToolkits] = useState<any[]>([])
+  const [filteredToolkits, setFilteredToolkits] = useState<any[]>([])
+  const [toolkitsLoading, setToolkitsLoading] = useState(false)
+  const [searchQuery, setSearchQuery] = useState("")
   
   // Integration connections state (multi-app support)
-  const [integrationStatus, setIntegrationStatus] = useState<Record<string, "unknown" | "connected" | "disconnected" | "disabled" | "pending" | "error">>({
-    "zohobooks": "unknown", 
-    "gmail": "unknown"
-  })
-  const [integrationLoading, setIntegrationLoading] = useState<Record<string, boolean>>({"zohobooks": false, "gmail": false})
-  const [integrationConnectionId, setIntegrationConnectionId] = useState<Record<string, string | null>>({"zohobooks": null, "gmail": null})
-  const [integrationError, setIntegrationError] = useState<Record<string, string | null>>({"zohobooks": null, "gmail": null})
-  const [troubleshootingHint, setTroubleshootingHint] = useState<Record<string, string | null>>({"zohobooks": null, "gmail": null})
+  const [integrationStatus, setIntegrationStatus] = useState<Record<string, "unknown" | "connected" | "disconnected" | "disabled" | "pending" | "error">>({})
+  const [integrationLoading, setIntegrationLoading] = useState<Record<string, boolean>>({})
+  const [integrationConnectionId, setIntegrationConnectionId] = useState<Record<string, string | null>>({})
+  const [integrationError, setIntegrationError] = useState<Record<string, string | null>>({})
+  const [troubleshootingHint, setTroubleshootingHint] = useState<Record<string, string | null>>({})
 
   const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 
   useEffect(() => {
     if (user) {
+      loadAvailableToolkits()
       loadIntegrationStatus()
     }
   }, [user])
+
+  // Filter toolkits based on search query
+  useEffect(() => {
+    if (searchQuery.trim() === "") {
+      setFilteredToolkits(availableToolkits)
+    } else {
+      const query = searchQuery.toLowerCase()
+      const filtered = availableToolkits.filter((toolkit) =>
+        toolkit.name?.toLowerCase().includes(query) ||
+        toolkit.slug?.toLowerCase().includes(query) ||
+        toolkit.description?.toLowerCase().includes(query) ||
+        toolkit.category?.toLowerCase().includes(query)
+      )
+      setFilteredToolkits(filtered)
+    }
+  }, [searchQuery, availableToolkits])
 
   useEffect(() => {
     return () => {
@@ -43,17 +65,17 @@ function ConnectionsContent() {
 
   const loadIntegrationStatus = async () => {
     if (!user?.id) return
-    
+
     try {
       const response = await authFetch(`${API_BASE}/api/integrations/status/${user.id}`)
       const data = await response.json()
-      
+
       if (data.success) {
         const statusMap: Record<string, "connected" | "disconnected" | "disabled" | "pending"> = {}
         const connectionIdMap: Record<string, string | null> = {}
         const errorMap: Record<string, string | null> = {}
         const hintMap: Record<string, string | null> = {}
-        
+
         data.all_toolkits?.forEach((toolkit: any) => {
           if (toolkit.db_status === "disabled") {
             statusMap[toolkit.slug] = "disabled"
@@ -71,18 +93,60 @@ function ConnectionsContent() {
           errorMap[toolkit.slug] = toolkit.error || null
           hintMap[toolkit.slug] = toolkit.troubleshooting || null
         })
-        
+
         setIntegrationStatus(statusMap)
         setIntegrationConnectionId(connectionIdMap)
         setIntegrationError(errorMap)
         setTroubleshootingHint(hintMap)
-      } else {
-        setIntegrationError({"zohobooks": data.error || "Failed to check status", "gmail": data.error || "Failed to check status"})
       }
     } catch (error) {
       console.error("Error checking integration status:", error)
-      setIntegrationError({"zohobooks": "Failed to check connection status", "gmail": "Failed to check connection status"})
-      setIntegrationStatus({"zohobooks": "error", "gmail": "error"})
+    }
+  }
+
+  const loadAvailableToolkits = async () => {
+    setToolkitsLoading(true)
+    try {
+      const response = await authFetch(`${API_BASE}/api/integrations/available`)
+      const data = await response.json()
+
+      if (data.success && data.toolkits) {
+        setAvailableToolkits(data.toolkits)
+        setFilteredToolkits(data.toolkits)
+
+        // Initialize state for all toolkits
+        const statusMap: Record<string, "unknown" | "connected" | "disconnected" | "disabled" | "pending" | "error"> = {}
+        const loadingMap: Record<string, boolean> = {}
+        const connectionIdMap: Record<string, string | null> = {}
+        const errorMap: Record<string, string | null> = {}
+        const hintMap: Record<string, string | null> = {}
+
+        data.toolkits.forEach((toolkit: any) => {
+          const slug = toolkit.slug || toolkit.name?.toLowerCase()
+          if (slug) {
+            statusMap[slug] = "unknown"
+            loadingMap[slug] = false
+            connectionIdMap[slug] = null
+            errorMap[slug] = null
+            hintMap[slug] = null
+          }
+        })
+
+        setIntegrationStatus(prev => ({...prev, ...statusMap}))
+        setIntegrationLoading(prev => ({...prev, ...loadingMap}))
+        setIntegrationConnectionId(prev => ({...prev, ...connectionIdMap}))
+        setIntegrationError(prev => ({...prev, ...errorMap}))
+        setTroubleshootingHint(prev => ({...prev, ...hintMap}))
+      }
+    } catch (error) {
+      console.error("Error loading available toolkits:", error)
+      toast({
+        title: "Error",
+        description: "Failed to load available integrations",
+        variant: "destructive"
+      })
+    } finally {
+      setToolkitsLoading(false)
     }
   }
 
@@ -120,9 +184,10 @@ function ConnectionsContent() {
         let pollCount = 0
         const maxPolls = 20
         
+        let alreadyConnected = false  // guard: fire toast only once
         pollIntervalRef.current = setInterval(async () => {
           pollCount++
-          
+
           try {
             await authFetch(`${API_BASE}/api/integrations/sync/${user.id}`, {
               method: "POST"
@@ -130,23 +195,24 @@ function ConnectionsContent() {
           } catch (syncError) {
             console.error("Sync failed:", syncError)
           }
-          
+
           const statusResponse = await authFetch(`${API_BASE}/api/integrations/status/${user.id}/${appSlug}`)
           if (statusResponse.ok) {
             const statusData = await statusResponse.json()
-            
-            if (statusData.connected_apps && statusData.connected_apps.includes(appSlug)) {
+
+            if (!alreadyConnected && statusData.connected_apps && statusData.connected_apps.includes(appSlug)) {
+              alreadyConnected = true
               if (pollIntervalRef.current) clearInterval(pollIntervalRef.current)
               if (popup && !popup.closed) popup.close()
-              
+
               setIntegrationStatus(prev => ({...prev, [appSlug]: "connected"}))
               setIntegrationLoading(prev => ({...prev, [appSlug]: false}))
-              
+
               toast({
                 title: "Connected!",
                 description: `Successfully connected to ${appSlug}`
               })
-              
+
               loadIntegrationStatus()
               return
             }
@@ -346,264 +412,236 @@ function ConnectionsContent() {
     }
   }
 
+  // Helper to get icon for common apps
+  const getAppIcon = (slug: string) => {
+    const iconMap: Record<string, any> = {
+      "gmail": Mail,
+      "zohobooks": BookOpen,
+      "github": BookOpen,
+      "slack": BookOpen,
+      "notion": BookOpen,
+    }
+    return iconMap[slug] || BookOpen
+  }
 
+  // Get Composio app logo URL - GitHub raw CDN (ACTUAL working source)
+  const getAppLogoUrl = (slug: string) => {
+    // Composio hosts logos on GitHub: https://github.com/ComposioHQ/open-logos
+    // Try PNG first, then SVG
+    return {
+      png: `https://raw.githubusercontent.com/ComposioHQ/open-logos/master/icons/${slug}.png`,
+      svg: `https://raw.githubusercontent.com/ComposioHQ/open-logos/master/icons/${slug}.svg`,
+    }
+  }
+
+  // Render toolkit card
+  const renderToolkitCard = (toolkit: any) => {
+    const slug = toolkit.slug || toolkit.name?.toLowerCase().replace(/\s+/g, "")
+    const name = toolkit.name || slug
+    const description = toolkit.description || toolkit.long_description || `Connect and automate workflows with ${name}`
+    const status = integrationStatus[slug] ?? "disconnected"
+    const loading = integrationLoading[slug] ?? false
+    const error = integrationError[slug]
+    const hint = troubleshootingHint[slug]
+
+    return (
+      <Card key={slug} className="ui-card border border-border-color hover:shadow-xl transition-all duration-300 hover:-translate-y-1">
+        <CardContent className="p-6">
+          <div className="flex flex-col gap-4">
+            {/* Logo with automatic fallback */}
+            <AppLogo slug={slug} name={name} />
+            
+            {/* Name and Status */}
+            <div className="text-center space-y-2">
+              <h3 className="font-semibold text-lg text-text-primary line-clamp-1">{name}</h3>
+              <div className="flex justify-center">
+                {loading ? (
+                  <Loader2 className="h-5 w-5 animate-spin text-text-secondary" />
+                ) : status === "connected" ? (
+                  <Badge className="bg-status-success/15 text-status-success border border-status-success/30 text-xs px-3 py-1">
+                    <CheckCircle2 className="h-3 w-3 mr-1" />
+                    Connected
+                  </Badge>
+                ) : status === "disabled" ? (
+                  <Badge className="bg-yellow-500/15 text-yellow-600 border border-yellow-500/30 text-xs px-3 py-1">
+                    <Pause className="h-3 w-3 mr-1" />
+                    Paused
+                  </Badge>
+                ) : status === "pending" ? (
+                  <Badge className="bg-status-pending-light text-status-pending-dark border border-status-pending/30 text-xs px-3 py-1">
+                    <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                    Connecting
+                  </Badge>
+                ) : status === "disconnected" ? (
+                  <Badge variant="outline" className="border-border-color text-text-secondary text-xs px-3 py-1">
+                    Not Connected
+                  </Badge>
+                ) : status === "error" ? (
+                  <Badge className="bg-status-error/15 text-status-error border border-status-error/30 text-xs px-3 py-1">
+                    <AlertCircle className="h-3 w-3 mr-1" />
+                    Error
+                  </Badge>
+                ) : null}
+              </div>
+            </div>
+            
+            {/* Description */}
+            <p className="text-sm text-text-secondary text-center line-clamp-2 min-h-[2.5rem]">{description}</p>
+            
+            {/* Error/Hint */}
+            {error && (
+              <div className="bg-status-error/10 border border-status-error/20 rounded-lg p-2 text-xs text-status-error">
+                <AlertCircle className="h-3 w-3 inline mr-1" />
+                {error}
+              </div>
+            )}
+            {hint && (
+              <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-2 text-xs text-blue-600 dark:text-blue-400">
+                💡 {hint}
+              </div>
+            )}
+            
+            {/* Action Buttons */}
+            <div className="flex flex-col gap-2 pt-4 border-t border-border-color">
+              {status === "connected" ? (
+                <>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => handleIntegrationRefresh(slug)}
+                      disabled={loading}
+                      title="Refresh connection"
+                      className="flex-1"
+                    >
+                      <RefreshCw className="h-4 w-4 mr-1" />
+                      Refresh
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => handleIntegrationDisable(slug)}
+                      disabled={loading}
+                      title="Pause connection"
+                      className="flex-1"
+                    >
+                      <Pause className="h-4 w-4 mr-1" />
+                      Pause
+                    </Button>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handleIntegrationDisconnect(slug)}
+                    disabled={loading}
+                    className="w-full text-status-error hover:bg-status-error/10 hover:text-status-error"
+                  >
+                    {loading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+                    Disconnect
+                  </Button>
+                </>
+              ) : status === "disabled" ? (
+                <>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handleIntegrationEnable(slug)}
+                    disabled={loading}
+                    title="Resume connection"
+                    className="w-full"
+                  >
+                    <Play className="h-4 w-4 mr-2" />
+                    Resume
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handleIntegrationDisconnect(slug)}
+                    disabled={loading}
+                    className="w-full text-status-error hover:bg-status-error/10 hover:text-status-error"
+                  >
+                    {loading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+                    Disconnect
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  size="sm"
+                  onClick={() => handleIntegrationConnect(slug)}
+                  disabled={loading}
+                  className="w-full bg-brand-teal hover:bg-brand-teal/90 text-white font-medium py-2"
+                >
+                  {loading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+                  Connect
+                </Button>
+              )}
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+    )
+  }
+
+
+
+  const handleSearchChange = useCallback((query: string) => {
+    setSearchQuery(query)
+  }, [])
 
   return (
-    <SidebarInset>
-      <div className="min-h-screen bg-bg-page dark:bg-background text-text-primary">
-        <main className="p-6 space-y-6">
-          <div>
-            <h1 className="text-2xl font-semibold text-brand-teal">Connections</h1>
-            <p className="text-text-secondary text-sm">Connect to MCP servers to extend your agent capabilities</p>
+    <SidebarInset className="flex flex-col h-screen overflow-hidden">
+      {/* Header with Search - Fixed height, not scrollable */}
+      <div className="flex-shrink-0 sticky top-0 z-10 bg-bg-page/95 dark:bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-bg-page/60 border-b border-border-color">
+        <div className="p-6">
+          <div className="flex items-center justify-between gap-8">
+            <div className="flex-1">
+              <h1 className="text-3xl font-bold text-text-primary">Connections</h1>
+              <p className="text-sm text-text-tertiary mt-1">
+                Connect to {availableToolkits.length}+ external apps to extend your agent capabilities
+              </p>
+            </div>
+            
+            {/* Search Bar - Client-side component */}
+            <div className="flex-shrink-0">
+              <SearchBar onSearchChange={handleSearchChange} />
+            </div>
           </div>
-          <Card className="ui-card">
-            <CardHeader>
-              <CardTitle className="text-text-primary">Connected Applications</CardTitle>
-              <CardDescription className="text-text-secondary">Manage OAuth connections for external services</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {/* Zoho Books Card */}
-                <Card className="ui-card border-l-4 border-l-brand-teal">
-                  <CardContent className="pt-6">
-                    <div className="flex items-start justify-between gap-4">
-                      <div className="flex items-start gap-3 flex-1">
-                        <div className="p-2 rounded-lg bg-brand-teal/10 text-brand-teal">
-                          <BookOpen className="h-5 w-5" />
-                        </div>
-                        <div className="flex-1 space-y-2">
-                          <div className="flex items-center gap-2">
-                            <h3 className="font-semibold text-text-primary">Zoho Books</h3>
-                            {integrationLoading["zohobooks"] ? (
-                              <Loader2 className="h-4 w-4 animate-spin text-text-secondary" />
-                            ) : (integrationStatus["zohobooks"] ?? "disconnected") === "connected" ? (
-                              <Badge className="bg-status-success/15 text-status-success border border-status-success/30">
-                                <CheckCircle2 className="h-3 w-3 mr-1" />
-                                Connected
-                              </Badge>
-                            ) : (integrationStatus["zohobooks"] ?? "disconnected") === "disabled" ? (
-                              <Badge className="bg-yellow-500/15 text-yellow-600 border border-yellow-500/30">
-                                <Pause className="h-3 w-3 mr-1" />
-                                Paused
-                              </Badge>
-                            ) : (integrationStatus["zohobooks"] ?? "disconnected") === "pending" ? (
-                              <Badge className="bg-status-warning/15 text-status-warning border border-status-warning/30">
-                                <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                                Connecting
-                              </Badge>
-                            ) : (integrationStatus["zohobooks"] ?? "disconnected") === "disconnected" ? (
-                              <Badge variant="outline" className="border-border-color text-text-secondary">
-                                Not Connected
-                              </Badge>
-                            ) : (integrationStatus["zohobooks"] ?? "disconnected") === "error" ? (
-                              <Badge className="bg-status-error/15 text-status-error border border-status-error/30">
-                                <AlertCircle className="h-3 w-3 mr-1" />
-                                Error
-                              </Badge>
-                            ) : null}
-                          </div>
-                          <p className="text-sm text-text-secondary">
-                            Create, list, update, and send invoices
-                          </p>
-                          {integrationError["zohobooks"] && (
-                            <p className="text-xs text-status-error">{integrationError["zohobooks"]}</p>
-                          )}
-                          {troubleshootingHint["zohobooks"] && (
-                            <p className="text-xs text-blue-600 dark:text-blue-400">💡 {troubleshootingHint["zohobooks"]}</p>
-                          )}
-                          {integrationConnectionId["zohobooks"] && (
-                            <p className="text-xs text-text-secondary">ID: {integrationConnectionId["zohobooks"]}</p>
-                          )}
-                        </div>
-                      </div>
-                      <div className="flex gap-2">
-                        {(integrationStatus["zohobooks"] ?? "disconnected") === "connected" ? (
-                          <>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => handleIntegrationRefresh("zohobooks")}
-                              disabled={integrationLoading["zohobooks"]}
-                              title="Refresh connection"
-                            >
-                              <RefreshCw className="h-4 w-4" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => handleIntegrationDisable("zohobooks")}
-                              disabled={integrationLoading["zohobooks"]}
-                              title="Pause connection"
-                            >
-                              <Pause className="h-4 w-4" />
-                            </Button>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => handleIntegrationDisconnect("zohobooks")}
-                              disabled={integrationLoading["zohobooks"]}
-                            >
-                              {integrationLoading["zohobooks"] ? <Loader2 className="h-4 w-4 animate-spin" /> : "Disconnect"}
-                            </Button>
-                          </>
-                        ) : (integrationStatus["zohobooks"] ?? "disconnected") === "disabled" ? (
-                          <>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => handleIntegrationEnable("zohobooks")}
-                              disabled={integrationLoading["zohobooks"]}
-                              title="Resume connection"
-                            >
-                              <Play className="h-4 w-4" />
-                            </Button>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => handleIntegrationDisconnect("zohobooks")}
-                              disabled={integrationLoading["zohobooks"]}
-                            >
-                              {integrationLoading["zohobooks"] ? <Loader2 className="h-4 w-4 animate-spin" /> : "Disconnect"}
-                            </Button>
-                          </>
-                        ) : (
-                          <Button
-                            size="sm"
-                            onClick={() => handleIntegrationConnect("zohobooks")}
-                            disabled={integrationLoading["zohobooks"]}
-                          >
-                            {integrationLoading["zohobooks"] ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
-                            Connect
-                          </Button>
-                        )}
-                      </div>
-                    </div>
-                  </CardContent>
-                </Card>
-
-                {/* Gmail Card */}
-                <Card className="ui-card border-l-4 border-l-brand-teal">
-                  <CardContent className="pt-6">
-                    <div className="flex items-start justify-between gap-4">
-                      <div className="flex items-start gap-3 flex-1">
-                        <div className="p-2 rounded-lg bg-brand-teal/10 text-brand-teal">
-                          <Mail className="h-5 w-5" />
-                        </div>
-                        <div className="flex-1 space-y-2">
-                          <div className="flex items-center gap-2">
-                            <h3 className="font-semibold text-text-primary">Gmail</h3>
-                            {integrationLoading["gmail"] ? (
-                              <Loader2 className="h-4 w-4 animate-spin text-text-secondary" />
-                            ) : (integrationStatus["gmail"] ?? "disconnected") === "connected" ? (
-                              <Badge className="bg-status-success/15 text-status-success border border-status-success/30">
-                                <CheckCircle2 className="h-3 w-3 mr-1" />
-                                Connected
-                              </Badge>
-                            ) : (integrationStatus["gmail"] ?? "disconnected") === "disabled" ? (
-                              <Badge className="bg-yellow-500/15 text-yellow-600 border border-yellow-500/30">
-                                <Pause className="h-3 w-3 mr-1" />
-                                Paused
-                              </Badge>
-                            ) : (integrationStatus["gmail"] ?? "disconnected") === "pending" ? (
-                              <Badge className="bg-status-warning/15 text-status-warning border border-status-warning/30">
-                                <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                                Connecting
-                              </Badge>
-                            ) : (integrationStatus["gmail"] ?? "disconnected") === "disconnected" ? (
-                              <Badge variant="outline" className="border-border-color text-text-secondary">
-                                Not Connected
-                              </Badge>
-                            ) : (integrationStatus["gmail"] ?? "disconnected") === "error" ? (
-                              <Badge className="bg-status-error/15 text-status-error border border-status-error/30">
-                                <AlertCircle className="h-3 w-3 mr-1" />
-                                Error
-                              </Badge>
-                            ) : null}
-                          </div>
-                          <p className="text-sm text-text-secondary">
-                            Send emails and manage inbox
-                          </p>
-                          {integrationError["gmail"] && (
-                            <p className="text-xs text-status-error">{integrationError["gmail"]}</p>
-                          )}
-                          {troubleshootingHint["gmail"] && (
-                            <p className="text-xs text-blue-600 dark:text-blue-400">💡 {troubleshootingHint["gmail"]}</p>
-                          )}
-                          {integrationConnectionId["gmail"] && (
-                            <p className="text-xs text-text-secondary">ID: {integrationConnectionId["gmail"]}</p>
-                          )}
-                        </div>
-                      </div>
-                      <div className="flex gap-2">
-                        {(integrationStatus["gmail"] ?? "disconnected") === "connected" ? (
-                          <>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => handleIntegrationRefresh("gmail")}
-                              disabled={integrationLoading["gmail"]}
-                              title="Refresh connection"
-                            >
-                              <RefreshCw className="h-4 w-4" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => handleIntegrationDisable("gmail")}
-                              disabled={integrationLoading["gmail"]}
-                              title="Pause connection"
-                            >
-                              <Pause className="h-4 w-4" />
-                            </Button>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => handleIntegrationDisconnect("gmail")}
-                              disabled={integrationLoading["gmail"]}
-                            >
-                              {integrationLoading["gmail"] ? <Loader2 className="h-4 w-4 animate-spin" /> : "Disconnect"}
-                            </Button>
-                          </>
-                        ) : (integrationStatus["gmail"] ?? "disconnected") === "disabled" ? (
-                          <>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => handleIntegrationEnable("gmail")}
-                              disabled={integrationLoading["gmail"]}
-                              title="Resume connection"
-                            >
-                              <Play className="h-4 w-4" />
-                            </Button>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => handleIntegrationDisconnect("gmail")}
-                              disabled={integrationLoading["gmail"]}
-                            >
-                              {integrationLoading["gmail"] ? <Loader2 className="h-4 w-4 animate-spin" /> : "Disconnect"}
-                            </Button>
-                          </>
-                        ) : (
-                          <Button
-                            size="sm"
-                            onClick={() => handleIntegrationConnect("gmail")}
-                            disabled={integrationLoading["gmail"]}
-                          >
-                            {integrationLoading["gmail"] ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
-                            Connect
-                          </Button>
-                        )}
-                      </div>
-                    </div>
-                  </CardContent>
-                </Card>
+        </div>
+      </div>
+      
+      {/* Scrollable Content Area */}
+      <div className="flex-1 overflow-y-auto w-full">
+        <div className="p-6">
+          {toolkitsLoading ? (
+            <div className="flex justify-center items-center py-24">
+              <div className="text-center space-y-4">
+                <Loader2 className="h-12 w-12 animate-spin text-brand-teal mx-auto" />
+                <p className="text-text-secondary">Loading available integrations...</p>
               </div>
-            </CardContent>
-          </Card>
-
-
-        </main>
+            </div>
+          ) : filteredToolkits.length === 0 ? (
+            <div className="text-center py-24 text-text-secondary">
+              <div className="space-y-2">
+                <p className="text-lg font-medium">
+                  {searchQuery ? `No apps found for "${searchQuery}"` : "No integrations available"}
+                </p>
+                {searchQuery && (
+                  <Button
+                    variant="outline"
+                    onClick={() => setSearchQuery("")}
+                    className="mt-4"
+                  >
+                    Clear search
+                  </Button>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 gap-6 pb-12">
+              {filteredToolkits.map((toolkit) => renderToolkitCard(toolkit))}
+            </div>
+          )}
+        </div>
       </div>
     </SidebarInset>
   )

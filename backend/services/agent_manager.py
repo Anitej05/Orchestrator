@@ -9,6 +9,7 @@ import asyncio
 import logging
 import os
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,6 +27,7 @@ AGENT_EXECUTE_TIMEOUTS = {
     "spreadsheet_agent": 180.0,
     "browser": 900.0,
     "browser_agent": 900.0,
+    "browser_automation_agent": 900.0,  # SKILL.md id used by Brain dispatch
     "universal": 120.0,
     "universal_agent": 120.0,
     "mail": 120.0,
@@ -35,6 +37,8 @@ AGENT_EXECUTE_TIMEOUTS = {
     "integrations_agent": 120.0,
     "coding": 600.0,
     "coding_agent": 600.0,
+    "pdf_agent": 240.0,
+    "ppt_agent": 240.0,
 }
 
 
@@ -46,6 +50,34 @@ def _get_agent_timeout(agent_id: str) -> float:
         except ValueError:
             logger.warning(f"Invalid {env_key} value: {os.environ[env_key]}")
     return AGENT_EXECUTE_TIMEOUTS.get(agent_id, DEFAULT_AGENT_EXECUTE_TIMEOUT)
+
+
+class _ExternalProcess:
+    """
+    Sentinel for an agent NOT spawned by AgentManager (already running externally).
+
+    `ProcessManager.is_running()` calls `process.poll() is None`.
+    This sentinel always returns None so the agent is treated as "running".
+    The stop_agent() / is_running() helpers handle this gracefully.
+    """
+
+    returncode = None
+    pid = -1
+
+    def poll(self):
+        return None  # always "running"
+
+    def send_signal(self, sig):
+        pass  # we don't own this process
+
+    def terminate(self):
+        pass
+
+    def kill(self):
+        pass
+
+    def wait(self, timeout=None):
+        return 0
 
 
 @dataclass
@@ -71,6 +103,7 @@ class PortPool:
     DEFAULT_PORTS = {
         "browser": 8090,
         "browser_agent": 8090,
+        "browser_automation_agent": 8090,  # SKILL.md id used by Brain dispatch
         "spreadsheet": 9000,
         "spreadsheet_agent": 9000,
         "mail": 8040,
@@ -86,6 +119,8 @@ class PortPool:
         "universal_agent": 8070,
         "coding": 8080,
         "coding_agent": 8080,
+        "pdf_agent": 8055,
+        "ppt_agent": 8056,
     }
 
     DYNAMIC_RANGE = (9001, 9100)  # Ports 9001-9100 for dynamic allocation
@@ -164,6 +199,8 @@ class ProcessManager:
         "universal_agent": "agents.universal_agent",
         "coding": "agents.coding_agent",
         "coding_agent": "agents.coding_agent",
+        "pdf_agent": "agents.pdf_agent",
+        "ppt_agent": "agents.ppt_agent",
     }
 
     # Special cases: agents that don't use __init__.py pattern
@@ -191,7 +228,7 @@ class ProcessManager:
         if (agent_dir / "__init__.py").exists():
             # FastAPI pattern: uvicorn __init__:app
             cmd = [
-                "python",
+                sys.executable,
                 "-m",
                 "uvicorn",
                 f"{module_path}.__init__:app",
@@ -205,7 +242,7 @@ class ProcessManager:
         elif (agent_dir / "agent.py").exists():
             # Direct script pattern
             cmd = [
-                "python",
+                sys.executable,
                 "-m",
                 module_path,
                 "--port",
@@ -218,7 +255,7 @@ class ProcessManager:
                 # Run the specific file with uvicorn
                 module_name = startup_file.replace(".py", "")
                 cmd = [
-                    "python",
+                    sys.executable,
                     "-m",
                     "uvicorn",
                     f"{module_path}.{module_name}:app",
@@ -331,9 +368,26 @@ class ProcessManager:
 class HealthChecker:
     """Checks agent health before use."""
 
-    def __init__(self, timeout: int = 30):
-        self.timeout = timeout
+    # Per-agent startup timeouts (seconds).  Agents that load large models
+    # need more time; simple agents can be declared ready sooner.
+    AGENT_STARTUP_TIMEOUTS: dict = {
+        "spreadsheet_agent": 60,
+        "document_agent": 90,
+        "document_agent_lib": 90,
+        "coding_agent": 120,
+        "universal_agent": 60,
+        "pdf_agent": 90,
+        "ppt_agent": 60,
+    }
+    DEFAULT_TIMEOUT: int = 60  # raised from 30 → 60 for general safety
+
+    def __init__(self, timeout: int = DEFAULT_TIMEOUT):
+        self.default_timeout = timeout
         self.check_interval = 0.5  # Check every 500ms
+
+    def _get_timeout(self, agent_id: str) -> int:
+        """Return the appropriate startup timeout for the given agent."""
+        return self.AGENT_STARTUP_TIMEOUTS.get(agent_id, self.default_timeout)
 
     async def wait_for_ready(self, port: int, agent_id: str) -> bool:
         """
@@ -341,27 +395,29 @@ class HealthChecker:
 
         Returns True if healthy, False if timeout.
         """
+        timeout = self._get_timeout(agent_id)
         start_time = time.time()
         url = f"http://localhost:{port}/health"
 
-        logger.info(f"Waiting for agent on port {port} to be ready...")
+        logger.info(f"Waiting for {agent_id} on port {port} (timeout={timeout}s)...")
 
         async with httpx.AsyncClient() as client:
-            while time.time() - start_time < self.timeout:
+            while time.time() - start_time < timeout:
                 try:
                     response = await client.get(url, timeout=2.0)
                     if response.status_code == 200:
-                        logger.info(f"Agent on port {port} is healthy")
+                        elapsed = time.time() - start_time
+                        logger.info(f"Agent {agent_id} on port {port} is healthy ({elapsed:.1f}s)")
                         return True
                 except (httpx.ConnectError, httpx.TimeoutException):
                     # Not ready yet, wait and retry
                     pass
                 except Exception as e:
-                    logger.debug(f"Health check error: {e}")
+                    logger.debug(f"Health check error for {agent_id}: {e}")
 
                 await asyncio.sleep(self.check_interval)
 
-        logger.error(f"Agent on port {port} failed health check after {self.timeout}s")
+        logger.error(f"Agent {agent_id} on port {port} failed health check after {timeout}s")
         return False
 
     async def check_health(self, port: int) -> bool:
@@ -495,30 +551,53 @@ class AgentManager:
         """
         Spawn an agent if not already running.
 
+        If the agent is already listening on its default port (started externally),
+        we adopt it without spawning a new process.
+
         Returns the agent instance (existing or newly created).
         """
         async with self._lock:
-            # Check if already active
+            # Check if already tracked as active
             if agent_id in self.active_agents:
                 instance = self.active_agents[agent_id]
                 if self.process_manager.is_running(instance.process):
-                    # Update last used time
                     instance.last_used = time.time()
                     logger.debug(f"Reusing existing agent {agent_id}")
                     return instance
                 else:
-                    # Process died, remove it
                     logger.warning(f"Agent {agent_id} process died, respawning")
                     await self._cleanup_agent(agent_id)
 
-            # Allocate port
+            # ── Adopt externally-running agents on their default port ──────────
+            # This handles the case where the agent was started manually before
+            # the orchestrator. We reuse it rather than trying to start a second
+            # instance on a dynamic port (which would fail the health check).
+            default_port = PortPool.DEFAULT_PORTS.get(agent_id)
+            if default_port and await self.health_checker.check_health(default_port):
+                logger.info(
+                    f"Adopting externally-running {agent_id} on default port {default_port}"
+                )
+                # Register the port so PortPool won't try to allocate it again
+                self.port_pool.allocated_ports[agent_id] = default_port
+                self.port_pool.used_ports.add(default_port)
+
+                instance = AgentInstance(
+                    agent_id=agent_id,
+                    process=_ExternalProcess(),  # sentinel — we don't own this PID
+                    port=default_port,
+                    pid=-1,
+                    start_time=time.time(),
+                    healthy=True,
+                )
+                self.active_agents[agent_id] = instance
+                return instance
+
+            # ── Normal spawn: allocate a port and start the agent ─────────────
             port = await self.port_pool.allocate(agent_id)
 
             try:
-                # Start agent process
                 process = await self.process_manager.start_agent(agent_id, port)
 
-                # Create instance
                 instance = AgentInstance(
                     agent_id=agent_id,
                     process=process,
@@ -528,7 +607,6 @@ class AgentManager:
                     healthy=False,
                 )
 
-                # Wait for health check
                 healthy = await self.health_checker.wait_for_ready(port, agent_id)
                 if not healthy:
                     raise RuntimeError(f"Agent {agent_id} failed health check")
@@ -540,7 +618,6 @@ class AgentManager:
                     f"Agent {agent_id} spawned successfully "
                     f"(PID: {process.pid}, Port: {port})"
                 )
-
                 return instance
 
             except Exception:
@@ -550,13 +627,22 @@ class AgentManager:
                     await self.process_manager.stop_agent(process)
                 raise
 
-    async def execute(self, agent_id: str, task: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(
+        self,
+        agent_id: str,
+        task: Dict[str, Any],
+        progress_callback=None,
+    ) -> Dict[str, Any]:
         """
         Execute a task on an agent (spawns if needed).
 
         Args:
             agent_id: The agent to use
             task: Task dictionary with 'prompt', 'action', 'payload', etc.
+            progress_callback: Optional async callable(message: str) for real-time
+                progress updates. When provided, uses the agent's SSE streaming
+                endpoint (/execute/stream) and forwards each progress event.
+                Falls back to the regular /execute endpoint on any error.
 
         Returns:
             Agent response dictionary
@@ -567,9 +653,6 @@ class AgentManager:
         # Ensure agent is running
         instance = await self.spawn_agent(agent_id)
 
-        # Prepare request
-        url = f"http://localhost:{instance.port}/execute"
-
         # Standard UAP format (matches UAPExecuteRequest schema on agents)
         uap_request = {
             "prompt": task.get("prompt", ""),
@@ -579,27 +662,46 @@ class AgentManager:
             "user_id": task.get("user_id"),
         }
 
+        headers = {
+            "Content-Type": "application/json",
+            "X-User-ID": task.get("user_id", "anonymous"),
+        }
+
         timeout = _get_agent_timeout(agent_id)
         logger.info(f"Executing task on {agent_id} (port {instance.port}, timeout={timeout}s)")
 
+        # ── Streaming path ────────────────────────────────────────────────
+        if progress_callback is not None:
+            stream_url = f"http://localhost:{instance.port}/execute/stream"
+            try:
+                result = await self._execute_streaming(
+                    stream_url, uap_request, headers, timeout, progress_callback
+                )
+                instance.last_used = time.time()
+                logger.info(f"Task completed on {agent_id} (streaming)")
+                return result
+            except Exception as e:
+                logger.warning(
+                    f"Streaming execute failed for {agent_id} ({e}), "
+                    "falling back to regular execute"
+                )
+                # Fall through to regular path
+
+        # ── Regular (non-streaming) path ──────────────────────────────────
+        url = f"http://localhost:{instance.port}/execute"
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     url,
                     json=uap_request,
                     timeout=timeout,
-                    headers={
-                        "Content-Type": "application/json",
-                        "X-User-ID": task.get("user_id", "anonymous"),
-                    },
+                    headers=headers,
                 )
 
                 response.raise_for_status()
                 result = response.json()
 
-                # Update last used time
                 instance.last_used = time.time()
-
                 logger.info(f"Task completed on {agent_id}")
                 return result
 
@@ -621,6 +723,60 @@ class AgentManager:
                 "status": "error",
                 "error": f"Failed to execute on {agent_id}: {str(e)}",
             }
+
+    async def _execute_streaming(
+        self,
+        stream_url: str,
+        uap_request: Dict[str, Any],
+        headers: Dict[str, str],
+        timeout: float,
+        progress_callback,
+    ) -> Dict[str, Any]:
+        """
+        Call the agent's /execute/stream SSE endpoint and forward progress events.
+
+        Reads SSE lines and calls progress_callback(message) for each
+        'progress' event. Returns the final result from the 'done' event.
+        Raises on error or unexpected stream termination.
+        """
+        import json as _json
+
+        async with httpx.AsyncClient() as client:
+            async with client.stream(
+                "POST",
+                stream_url,
+                json=uap_request,
+                headers=headers,
+                timeout=timeout,
+            ) as response:
+                response.raise_for_status()
+
+                result: Optional[Dict[str, Any]] = None
+                async for line in response.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    try:
+                        payload = _json.loads(line[6:])
+                    except Exception:
+                        continue
+
+                    event_type = payload.get("type")
+                    if event_type == "progress":
+                        msg = payload.get("message", "")
+                        if msg:
+                            try:
+                                await progress_callback(msg)
+                            except Exception as cb_err:
+                                logger.debug(f"progress_callback error: {cb_err}")
+                    elif event_type == "done":
+                        result = payload.get("result", {})
+                    elif event_type == "error":
+                        raise RuntimeError(f"Agent stream error: {payload.get('message')}")
+                    # heartbeat — ignore
+
+                if result is None:
+                    raise RuntimeError("SSE stream ended without a 'done' event")
+                return result
 
     async def terminate_agent(self, agent_id: str) -> bool:
         """

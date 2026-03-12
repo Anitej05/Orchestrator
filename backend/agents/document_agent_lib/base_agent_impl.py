@@ -200,7 +200,7 @@ class DocumentAgent(BaseAgent):
         }
         
         return AgentResponse(
-            status="complete" if success else "error",
+            status="success" if success else "error",
             result=formatted_data,
             error_message=None if success else "Failed to complete some steps",
         )
@@ -729,27 +729,19 @@ class DocumentAgent(BaseAgent):
             # Extract content
             content, metadata = extract_document_content(file_path)
 
-            # Extract based on type
-            if extraction_type == "tables":
-                extracted = metadata.get("tables", [])
-            else:
-                # Use extract_structured_data for all other types
-                extraction_params = {
-                    "summary": {"extract_summary": True},
-                    "entities": {"extract_entities": True},
-                    "key_value": {"extract_key_values": True},
-                    "all": {
-                        "extract_summary": True,
-                        "extract_entities": True,
-                        "extract_key_values": True,
-                    },
-                }
-                params = extraction_params.get(
-                    extraction_type, extraction_params["all"]
-                )
-                extracted = await self.llm_client.extract_structured_data(
-                    content, **params
-                )
+            # Extract based on type — always route through LLM
+            # (metadata is a string file_type like "pdf", not a dict)
+            type_map = {
+                "tables": "tables",
+                "summary": "text",
+                "entities": "structured",
+                "key_value": "structured",
+                "all": "structured",
+            }
+            llm_type = type_map.get(extraction_type, "structured")
+            extracted = await self.llm_client.extract_structured_data(
+                content, extraction_type=llm_type
+            )
 
             return {
                 "success": True,

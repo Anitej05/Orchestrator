@@ -4,11 +4,10 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
-import { Switch } from '@/components/ui/switch';
-import { MessageCircle, Clock, CheckCircle, Paperclip, X, File as FileIcon, AlertCircle, Loader2, Brain, Search, Users, FileText, Play, BarChart3, ChevronDown, ChevronUp, Globe, Copy, Check, Volume2, VolumeX, Mic, MicOff, Square } from 'lucide-react';
+import { MessageCircle, CheckCircle, Paperclip, X, File as FileIcon, AlertCircle, Loader2, FileText, ChevronDown, ChevronUp, Globe, Copy, Check, Volume2, Mic, MicOff, Square, ArrowUp } from 'lucide-react';
+import { cn } from '@/lib/utils';
 import Markdown from '@/components/ui/markdown';
-import { type ProcessResponse, type ConversationState, type Message, type Attachment } from '@/lib/types';
-import { PlanApprovalModal } from '@/components/plan-approval-modal';
+import { type ProcessResponse, type ConversationState, type Message, type Attachment, type CanvasType } from '@/lib/types';
 import { useConversationStore } from '@/lib/conversation-store';
 import { authFetch } from '@/lib/auth-fetch';
 import { API_BASE_URL } from '@/lib/config';
@@ -16,6 +15,7 @@ import { useTTS } from '@/hooks/useTTS';
 import { useSpeechToText } from '@/hooks/useSpeechToText';
 import { AudioWaveSVG } from '@/components/ui/audio-wave-animation';
 import { EmailResultCard } from '@/components/email-result-card';
+import { ExposedFilesPanel } from '@/components/exposed-files-panel';
 
 interface InteractiveChatInterfaceProps {
   onWorkflowComplete?: (result: ProcessResponse) => void;
@@ -26,7 +26,7 @@ interface InteractiveChatInterfaceProps {
   startConversation: (input: string, files?: File[], planningMode?: boolean, owner?: string) => Promise<void>;
   continueConversation: (input: string, files?: File[], planningMode?: boolean, owner?: string) => Promise<void>;
   resetConversation: () => void;
-  onViewCanvas?: (canvasContent: string, canvasType: 'html' | 'markdown' | 'pdf' | 'spreadsheet' | 'email_preview' | 'document' | 'image' | 'json') => void;
+  onViewCanvas?: (canvasContent: string, canvasType: CanvasType) => void;
   owner?: string;
   onAcceptPlan?: (modifiedPrompt?: string) => Promise<void>;
 }
@@ -70,6 +70,12 @@ export function InteractiveChatInterface({
   const [expandedTraces, setExpandedTraces] = useState<Set<string>>(new Set());
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll to bottom on new messages or loading state change
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [state.messages.length, isLoading, state.status]);
   const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
 
   // TTS Hook for Read Aloud functionality
@@ -146,29 +152,6 @@ export function InteractiveChatInterface({
       }
       return next;
     });
-  };
-
-  // Plan approval modal handlers
-  const handleApprovePlan = async () => {
-    console.log('Plan approved by user');
-    // DON'T clear isWaitingForUser yet - continueConversation needs to see it's true
-    // Only clear approval_required to close the modal
-    useConversationStore.setState({
-      approval_required: false
-    });
-    // continueConversation will capture isWaitingForUser=true and send user_response
-    await continueConversation('approve', [], false, owner);
-  };
-
-  const handleCancelPlan = async () => {
-    console.log('Plan cancelled by user');
-    // DON'T clear isWaitingForUser yet - continueConversation needs to see it's true
-    // Only clear approval_required to close the modal
-    useConversationStore.setState({
-      approval_required: false
-    });
-    // continueConversation will capture isWaitingForUser=true and send user_response
-    await continueConversation('cancel', [], false, owner);
   };
 
   const handleModifyPlan = async () => {
@@ -349,13 +332,13 @@ export function InteractiveChatInterface({
   return (
     <div className={`flex flex-col h-full overflow-hidden ${className}`}>
       {/* Chat Messages - Full Width Edge-to-Edge */}
-      <div className="flex-1 overflow-y-auto bg-bg-subtle w-full">
+      <div className="flex-1 overflow-y-auto bg-bg-card w-full">
         {state.messages.length === 0 && !isBrowserRunning && (
           <div className="text-center py-8 h-full flex flex-col justify-center items-center">
             {state.metadata?.status === 'empty' ? (
               <>
-                <div className="p-6 rounded-full bg-yellow-50/10 backdrop-blur-sm mb-6 border border-yellow-500/20">
-                  <AlertCircle className="w-16 h-16 text-yellow-600" />
+                <div className="p-4 rounded-full bg-yellow-50/10 backdrop-blur-sm mb-4 border border-yellow-500/20">
+                  <AlertCircle className="w-10 h-10 text-yellow-600" />
                 </div>
                 <p className="ui-section-header mb-2">Conversation history unavailable</p>
                 <p className="text-text-tertiary max-w-md mb-6">
@@ -367,8 +350,8 @@ export function InteractiveChatInterface({
               </>
             ) : state.metadata?.status === 'recovered_from_database' ? (
               <>
-                <div className="p-6 rounded-full bg-blue-50/10 backdrop-blur-sm mb-6 border border-blue-500/20">
-                  <AlertCircle className="w-16 h-16 text-blue-600" />
+                <div className="p-4 rounded-full bg-blue-50/10 backdrop-blur-sm mb-4 border border-blue-500/20">
+                  <AlertCircle className="w-10 h-10 text-blue-600" />
                 </div>
                 <p className="ui-section-header mb-2">Conversation recovered</p>
                 <p className="text-text-tertiary max-w-md">
@@ -377,10 +360,14 @@ export function InteractiveChatInterface({
               </>
             ) : (
               <>
-                <div className="p-6 rounded-full bg-bg-card/40 backdrop-blur-sm mb-6 border border-border-color-light">
-                  <MessageCircle className="w-16 h-16 text-text-tertiary" />
+                <div className="relative mb-6">
+                  <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-brand-primary/10 to-status-active/10 border border-brand-primary/20 flex items-center justify-center shadow-md">
+                    <MessageCircle className="w-8 h-8 text-brand-primary" />
+                  </div>
+                  <span className="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full bg-status-active/30 border-2 border-bg-subtle animate-ping" />
                 </div>
-                <p className="ui-section-header">Start a conversation to orchestrate your workflow</p>
+                <p className="text-base font-semibold text-text-primary">Start a conversation</p>
+                <p className="text-sm text-text-tertiary mt-1 max-w-[200px] leading-relaxed text-center">Describe a task and your agents will handle it</p>
               </>
             )}
           </div>
@@ -393,174 +380,262 @@ export function InteractiveChatInterface({
             const hasAttachments = message.attachments && message.attachments.length > 0;
             const hasCanvas = message.has_canvas && (message.canvas_content || (message as any).canvas_data);
             const hasBrowsingTrace = message.browsing_trace && message.browsing_trace.length > 0;
-            
+
             return hasContent || hasAttachments || hasCanvas || hasBrowsingTrace;
           })
           .map((message: Message, index: number) => {
             // Ensure message.id is a valid string
             const messageId = message.id || `message-${index}-${Date.now()}`;
 
+            const isUser = message.type === 'user';
+            const isAssistant = message.type === 'assistant';
+
             return (
-              <div key={messageId} className={`message message-${message.type} w-full flex px-6 py-3 ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div className={`${message.type === 'user' 
-                  ? 'ui-user-bubble' 
-                  : message.type === 'system' 
-                    ? 'ui-system-bubble' 
-                    : 'ui-agent-bubble'
-                  }`}>
-                  <div className="message-content space-y-2">
-                    {message.content && message.content.trim() !== '' && (
-                      message.type === 'assistant' ? <Markdown content={message.content} /> : <p>{message.content}</p>
-                    )}
+              <div key={messageId} className={cn(
+                "message w-full flex items-start px-6 py-3",
+                isUser ? "justify-end" : "justify-start",
+                isAssistant && "gap-3"
+              )}>
+                {/* Avatar for assistant messages */}
+                {isAssistant && (
+                  <div className="flex-shrink-0 mt-[3px]">
+                    <svg width="26" height="26" viewBox="0 0 26 26" fill="none" xmlns="http://www.w3.org/2000/svg">
+                      <circle cx="13" cy="13" r="7.5" stroke="#2C4BA8" strokeWidth="6" fill="none" />
+                    </svg>
+                  </div>
+                )}
 
-                    {/* Collapsible browsing trace */}
-                    {message.browsing_trace && message.browsing_trace.length > 0 && (
-                      <div className="browsing-trace mt-3">
-                        <button
-                          onClick={() => toggleTrace(messageId)}
-                          className="flex items-center gap-2 ui-metadata-label hover:text-text-secondary transition-colors"
-                        >
-                          {expandedTraces.has(messageId) ? (
-                            <ChevronUp className="w-4 h-4" />
-                          ) : (
-                            <ChevronDown className="w-4 h-4" />
-                          )}
-                          <span>
-                            {expandedTraces.has(messageId) ? 'Hide' : 'View'} browsing trace
-                            ({message.browsing_trace.length} {message.browsing_trace.length === 1 ? 'action' : 'actions'})
-                          </span>
-                        </button>
-
-                        {expandedTraces.has(messageId) && (
-                          <div className="mt-2 space-y-2 ui-metadata-item">
-                            <h4 className="ui-metadata-label mb-2">Browsing Trace:</h4>
-                            {message.browsing_trace.map((step, i) => (
-                              <div key={`${messageId}-trace-${step.step_number || i}-${step.action}`} className="flex items-start gap-3 p-2 ui-card">
-                                <div className="flex-shrink-0 mt-0.5">
-                                  {step.status === 'success' && <CheckCircle className="w-4 h-4 text-status-success" />}
-                                  {step.status === 'error' && <AlertCircle className="w-4 h-4 text-status-error" />}
-                                  {step.status === 'pending' && <Loader2 className="w-4 h-4 animate-spin text-status-active" />}
-                                </div>
-                                <div className="flex-1 min-w-0">
-                                  <div className="flex items-center justify-between">
-                                    <span className="ui-task-name">
-                                      {step.step_number}. {step.action}
-                                    </span>
-                                    {step.duration && (
-                                      <span className="ui-metadata-mono">
-                                        {step.duration.toFixed(1)}s
-                                      </span>
-                                    )}
+                {/* For user messages: wrapper to put timestamp below bubble */}
+                {isUser ? (
+                  <div className="flex flex-col items-end gap-1">
+                    <div className="ui-user-bubble">
+                      <div className="message-content space-y-2">
+                        {message.content && message.content.trim() !== '' && (
+                          <p>{message.content}</p>
+                        )}
+                        {message.attachments && message.attachments.length > 0 && (
+                          <div className="flex flex-wrap gap-2 mt-2">
+                            {message.attachments.map((att: Attachment, attIndex: number) => (
+                              <div key={`${messageId}-attachment-${attIndex}`}>
+                                {att.type.startsWith('image/') && att.content ? (
+                                  <img src={att.content} alt={att.name} className="max-w-xs max-h-48 rounded-orbimesh-lg" />
+                                ) : (
+                                  <div className="flex items-center gap-2 px-3 py-2 rounded-orbimesh-md bg-bg-card border border-border-color">
+                                    <FileIcon className="w-4 h-4 text-text-tertiary" />
+                                    <span className="text-sm text-text-primary">{att.name}</span>
                                   </div>
-                                  <p className="ui-file-meta mt-1 truncate">
-                                    {step.description}
-                                  </p>
-                                </div>
+                                )}
                               </div>
                             ))}
                           </div>
                         )}
-                      </div>
-                    )}
+                        {/* Inline email results for email canvas type */}
+                        {message.has_canvas && (message as any).canvas_type === 'email' && (message as any).canvas_data && (
+                          <EmailResultCard
+                            messages={((message as any).canvas_data as any)?.messages || []}
+                            totalCount={((message as any).canvas_data as any)?.total_count}
+                            query={((message as any).canvas_data as any)?.query}
+                            className="mt-3"
+                          />
+                        )}
+                        {/* View in Canvas button for messages with canvas content or data (non-email) */}
+                        {message.has_canvas && (message.canvas_content || (message as any).canvas_data) && message.canvas_type && message.canvas_type !== 'email' && (
+                          <Button
+                            variant="ui-secondary"
+                            size="sm"
+                            className="mt-2 text-xs"
+                            onClick={() => onViewCanvas?.(message.canvas_content || JSON.stringify((message as any).canvas_data || {}), message.canvas_type!)}
+                          >
+                            <FileText className="w-3 h-3 mr-1" />
+                            View in Canvas
+                          </Button>
+                        )}
 
-                    {message.attachments && message.attachments.length > 0 && (
-                      <div className="flex flex-wrap gap-2 mt-2">
-                        {message.attachments.map((att: Attachment, attIndex: number) => (
-                          <div key={`${messageId}-attachment-${attIndex}`}>
-                            {att.type.startsWith('image/') && att.content ? (
-                              <img src={att.content} alt={att.name} className="max-w-xs max-h-48 rounded-orbimesh-lg" />
-                            ) : (
-                              <div className="flex items-center gap-2 px-3 py-2 rounded-orbimesh-md bg-bg-card border border-border-color">
-                                <FileIcon className="w-4 h-4 text-text-tertiary" />
-                                <span className="text-sm text-text-primary">{att.name}</span>
-                              </div>
-                            )}
-                          </div>
-                        ))}
+                        {/* Render exposed files for user message if any */}
+                        {message.exposed_files && message.exposed_files.length > 0 && (
+                          <ExposedFilesPanel files={message.exposed_files} />
+                        )}
                       </div>
-                    )}
-                    {/* Inline email results for email canvas type */}
-                    {message.has_canvas && (message as any).canvas_type === 'email' && (message as any).canvas_data && (
-                      <EmailResultCard
-                        messages={((message as any).canvas_data as any)?.messages || []}
-                        totalCount={((message as any).canvas_data as any)?.total_count}
-                        query={((message as any).canvas_data as any)?.query}
-                        className="mt-3"
-                      />
-                    )}
-                    {/* View in Canvas button for messages with canvas content or data (non-email) */}
-                    {message.has_canvas && (message.canvas_content || (message as any).canvas_data) && message.canvas_type && message.canvas_type !== 'email' && (
-                      <Button
-                        variant="ui-secondary"
-                        size="sm"
-                        className="mt-2 text-xs"
-                        onClick={() => onViewCanvas?.(message.canvas_content || JSON.stringify((message as any).canvas_data || {}), message.canvas_type!)}
-                      >
-                        <FileText className="w-3 h-3 mr-1" />
-                        View in Canvas
-                      </Button>
-                    )}
-                  </div>
-                  {/* Footer with timestamp and copy button */}
-                  <div className={`flex items-center justify-between mt-1.5 ${message.type === 'user' ? 'text-text-tertiary' : 'text-text-tertiary'}`}>
-                    <div className="ui-file-meta opacity-60">
-                      {message.timestamp.toLocaleTimeString()}
                     </div>
-                    {/* Action buttons for assistant messages */}
-                    {message.type === 'assistant' && message.content && (
-                      <div className="flex items-center gap-1">
-                        {/* Read Aloud button */}
-                        <button
-                          onClick={() => handleReadAloud(messageId, message.content!)}
-                          className={`p-1.5 rounded-orbimesh-lg transition-all duration-300 ease-out hover:bg-bg-hover ${speakingMessageId === messageId && isSpeaking
-                            ? 'text-brand-teal scale-110'
-                            : (speakingMessageId === messageId && isTTSGenerating) || (isTTSLoading && speakingMessageId === messageId)
-                              ? 'text-text-tertiary hover:text-text-secondary'
-                              : 'text-text-tertiary hover:text-text-secondary'
-                            }`}
-                          title={
-                            speakingMessageId === messageId && isSpeaking
-                              ? 'Stop reading'
-                              : speakingMessageId === messageId && isTTSGenerating
-                                ? 'Generating audio... (click to cancel)'
-                                : isTTSLoading && speakingMessageId === messageId
-                                  ? 'Loading TTS model...'
-                                  : 'Read aloud'
-                          }
-                          disabled={isTTSLoading && speakingMessageId !== messageId}
-                        >
-                          {speakingMessageId === messageId && isSpeaking ? (
-                            <Square className="w-4 h-4" />
-                          ) : speakingMessageId === messageId && isTTSGenerating ? (
-                            <Loader2 className="w-4 h-4 animate-spin" />
-                          ) : isTTSLoading && speakingMessageId === messageId ? (
-                            <Loader2 className="w-4 h-4 animate-spin" />
-                          ) : (
-                            <Volume2 className="w-4 h-4" />
-                          )}
-                        </button>
-                        {/* Copy button */}
-                        <button
-                          onClick={() => copyToClipboard(messageId, message.content!)}
-                          className={`p-1.5 rounded-orbimesh-lg transition-all duration-300 ease-out hover:bg-bg-hover ${copiedMessageId === messageId
-                            ? 'text-status-success scale-110'
-                            : 'text-text-tertiary hover:text-text-secondary'
-                            }`}
-                          title={copiedMessageId === messageId ? 'Copied!' : 'Copy message'}
-                        >
-                          {copiedMessageId === messageId ? (
-                            <Check className="w-4 h-4 animate-bounce" />
-                          ) : (
-                            <Copy className="w-4 h-4" />
-                          )}
-                        </button>
+                    {/* Footer with timestamp and copy button */}
+                    <div className={`flex items-center justify-between mt-1.5 ${message.type === 'user' ? 'text-text-tertiary' : 'text-text-tertiary'}`}>
+                      <div className="ui-file-meta opacity-60">
+                        {message.timestamp.toLocaleTimeString()}
                       </div>
-                    )}
+                      {/* Timestamp below bubble, outside */}
+                      <span className="text-[10px] text-text-disabled px-1">{message.timestamp.toLocaleTimeString()}</span>
+                    </div>
                   </div>
-                </div>
+                ) : (
+                  <div className={message.type === 'system' ? 'ui-system-bubble' : 'ui-agent-bubble'}>
+                    <div className="message-content space-y-2">
+                      {message.content && message.content.trim() !== '' && (
+                        isAssistant ? <Markdown content={message.content} /> : <p>{message.content}</p>
+                      )}
+
+                      {/* Collapsible browsing trace */}
+                      {message.browsing_trace && message.browsing_trace.length > 0 && (
+                        <div className="browsing-trace mt-3">
+                          <button
+                            onClick={() => toggleTrace(messageId)}
+                            className="flex items-center gap-2 ui-metadata-label hover:text-text-secondary transition-colors"
+                          >
+                            {expandedTraces.has(messageId) ? (
+                              <ChevronUp className="w-4 h-4" />
+                            ) : (
+                              <ChevronDown className="w-4 h-4" />
+                            )}
+                            <span>
+                              {expandedTraces.has(messageId) ? 'Hide' : 'View'} browsing trace
+                              ({message.browsing_trace.length} {message.browsing_trace.length === 1 ? 'action' : 'actions'})
+                            </span>
+                          </button>
+
+                          {expandedTraces.has(messageId) && (
+                            <div className="mt-2 space-y-2 ui-metadata-item">
+                              <h4 className="ui-metadata-label mb-2">Browsing Trace:</h4>
+                              {message.browsing_trace.map((step, i) => (
+                                <div key={`${messageId}-trace-${step.step_number || i}-${step.action}`} className="flex items-start gap-3 p-2 ui-card">
+                                  <div className="flex-shrink-0 mt-0.5">
+                                    {step.status === 'success' && <CheckCircle className="w-4 h-4 text-status-success" />}
+                                    {step.status === 'error' && <AlertCircle className="w-4 h-4 text-status-error" />}
+                                    {step.status === 'pending' && <Loader2 className="w-4 h-4 animate-spin text-status-active" />}
+                                  </div>
+                                  <div className="flex-1 min-w-0">
+                                    <div className="flex items-center justify-between">
+                                      <span className="ui-task-name">
+                                        {step.step_number}. {step.action}
+                                      </span>
+                                      {step.duration && (
+                                        <span className="ui-metadata-mono">
+                                          {step.duration.toFixed(1)}s
+                                        </span>
+                                      )}
+                                    </div>
+                                    <p className="ui-file-meta mt-1 truncate">
+                                      {step.description}
+                                    </p>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {message.attachments && message.attachments.length > 0 && (
+                        <div className="flex flex-wrap gap-2 mt-2">
+                          {message.attachments.map((att: Attachment, attIndex: number) => (
+                            <div key={`${messageId}-attachment-${attIndex}`}>
+                              {att.type.startsWith('image/') && att.content ? (
+                                <img src={att.content} alt={att.name} className="max-w-xs max-h-48 rounded-orbimesh-lg" />
+                              ) : (
+                                <div className="flex items-center gap-2 px-3 py-2 rounded-orbimesh-md bg-bg-card border border-border-color">
+                                  <FileIcon className="w-4 h-4 text-text-tertiary" />
+                                  <span className="text-sm text-text-primary">{att.name}</span>
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {/* View in Canvas button */}
+                      {message.has_canvas && (message.canvas_content || (message as any).canvas_data) && message.canvas_type && (
+                        <Button
+                          variant="ui-secondary"
+                          size="sm"
+                          className="mt-2 text-xs"
+                          onClick={() => onViewCanvas?.(message.canvas_content || JSON.stringify((message as any).canvas_data || {}), message.canvas_type!)}
+                        >
+                          <FileText className="w-3 h-3 mr-1" />
+                          View in Canvas
+                        </Button>
+                      )}
+
+                      {/* Render exposed files for assistant message */}
+                      {message.exposed_files && message.exposed_files.length > 0 && (
+                        <ExposedFilesPanel files={message.exposed_files} />
+                      )}
+                    </div>
+                    {/* Footer: timestamp + action buttons */}
+                    <div className="flex items-center justify-between mt-1.5 text-text-tertiary">
+                      <div className="ui-file-meta opacity-60">
+                        {message.timestamp.toLocaleTimeString()}
+                      </div>
+                      {isAssistant && message.content && (
+                        <div className="flex items-center gap-1">
+                          {/* Read Aloud button */}
+                          <button
+                            onClick={() => handleReadAloud(messageId, message.content!)}
+                            className={`p-1.5 rounded-orbimesh-lg transition-all duration-300 ease-out hover:bg-bg-hover ${speakingMessageId === messageId && isSpeaking
+                              ? 'text-brand-teal scale-110'
+                              : (speakingMessageId === messageId && isTTSGenerating) || (isTTSLoading && speakingMessageId === messageId)
+                                ? 'text-text-tertiary hover:text-text-secondary'
+                                : 'text-text-tertiary hover:text-text-secondary'
+                              }`}
+                            title={
+                              speakingMessageId === messageId && isSpeaking
+                                ? 'Stop reading'
+                                : speakingMessageId === messageId && isTTSGenerating
+                                  ? 'Generating audio... (click to cancel)'
+                                  : isTTSLoading && speakingMessageId === messageId
+                                    ? 'Loading TTS model...'
+                                    : 'Read aloud'
+                            }
+                            disabled={isTTSLoading && speakingMessageId !== messageId}
+                          >
+                            {speakingMessageId === messageId && isSpeaking ? (
+                              <Square className="w-4 h-4" />
+                            ) : speakingMessageId === messageId && isTTSGenerating ? (
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                            ) : isTTSLoading && speakingMessageId === messageId ? (
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                            ) : (
+                              <Volume2 className="w-4 h-4" />
+                            )}
+                          </button>
+                          {/* Copy button */}
+                          <button
+                            onClick={() => copyToClipboard(messageId, message.content!)}
+                            className={`p-1.5 rounded-orbimesh-lg transition-all duration-300 ease-out hover:bg-bg-hover ${copiedMessageId === messageId
+                              ? 'text-status-success scale-110'
+                              : 'text-text-tertiary hover:text-text-secondary'
+                              }`}
+                            title={copiedMessageId === messageId ? 'Copied!' : 'Copy message'}
+                          >
+                            {copiedMessageId === messageId ? (
+                              <Check className="w-4 h-4 animate-bounce" />
+                            ) : (
+                              <Copy className="w-4 h-4" />
+                            )}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
             );
           })}
+
+        {/* Thinking dots while loading */}
+        {(isLoading || state.status === 'processing') && !state.isWaitingForUser && !isBrowserRunning && (
+          <div className="w-full flex justify-start px-6 py-3 gap-3">
+            <div className="flex-shrink-0 mt-1">
+              <svg width="26" height="26" viewBox="0 0 26 26" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <circle cx="13" cy="13" r="7.5" stroke="#2C4BA8" strokeWidth="6" fill="none" />
+              </svg>
+            </div>
+            <div className="flex items-center gap-1.5 pt-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-text-tertiary animate-bounce [animation-delay:0ms]" />
+              <span className="w-1.5 h-1.5 rounded-full bg-text-tertiary animate-bounce [animation-delay:150ms]" />
+              <span className="w-1.5 h-1.5 rounded-full bg-text-tertiary animate-bounce [animation-delay:300ms]" />
+            </div>
+          </div>
+        )}
+
+        {/* Scroll anchor */}
+        <div ref={messagesEndRef} />
 
         {/* Live Browser Stream - shown AFTER messages while browser is running */}
         {isBrowserRunning && (
@@ -598,103 +673,11 @@ export function InteractiveChatInterface({
       </div>
 
       {/* Input Form */}
-      <div className="p-4 bg-bg-subtle/95 backdrop-blur-lg border-t border-border-color">
-        {/* Consolidated Status Indicator - Shows orchestration progress above input */}
-        {(isLoading || state.status === 'processing') && !state.isWaitingForUser && (
-          <div className={`status-indicator p-3 rounded-orbimesh-lg mb-4 ${state.isWaitingForUser
-            ? 'bg-status-pending-light border border-status-pending'
-            : state.metadata?.currentStage === 'completed'
-              ? 'bg-status-success-light border border-status-success'
-              : state.metadata?.currentStage === 'error'
-                ? 'bg-status-error-light border border-status-error'
-                : state.metadata?.currentStage === 'parsing'
-                  ? 'bg-status-active-light border border-status-active'
-                  : state.metadata?.currentStage === 'searching'
-                    ? 'bg-status-success-light border border-status-success'
-                    : state.metadata?.currentStage === 'ranking'
-                      ? 'bg-status-pending-light border border-status-pending'
-                      : state.metadata?.currentStage === 'planning'
-                        ? 'bg-status-active-light border border-status-active'
-                        : state.metadata?.currentStage === 'validating'
-                          ? 'bg-brand-teal-light border border-brand-teal'
-                          : state.metadata?.currentStage === 'executing'
-                            ? 'bg-status-error-light border border-status-error'
-                            : state.metadata?.currentStage === 'aggregating'
-                              ? 'bg-status-active-light border border-status-active'
-                              : 'bg-brand-teal-light border border-brand-teal'  // default initializing state
-            }`}>
-            <div className="flex items-center space-x-2">
-              {state.isWaitingForUser ? (
-                <AlertCircle className="w-4 h-4 text-status-pending" />
-              ) : state.metadata?.currentStage === 'completed' ? (
-                <CheckCircle className="w-4 h-4 text-status-success" />
-              ) : state.metadata?.currentStage === 'error' ? (
-                <AlertCircle className="w-4 h-4 text-status-error" />
-              ) : state.metadata?.currentStage === 'parsing' ? (
-                <Brain className="w-4 h-4 text-status-active" />
-              ) : state.metadata?.currentStage === 'searching' ? (
-                <Search className="w-4 h-4 text-status-success" />
-              ) : state.metadata?.currentStage === 'ranking' ? (
-                <Users className="w-4 h-4 text-status-pending" />
-              ) : state.metadata?.currentStage === 'planning' ? (
-                <FileText className="w-4 h-4 text-status-active" />
-              ) : state.metadata?.currentStage === 'validating' ? (
-                <CheckCircle className="w-4 h-4 text-brand-teal" />
-              ) : state.metadata?.currentStage === 'executing' ? (
-                <Play className="w-4 h-4 text-status-error" />
-              ) : state.metadata?.currentStage === 'aggregating' ? (
-                <BarChart3 className="w-4 h-4 text-status-active" />
-              ) : (
-                <Loader2 className={`w-4 h-4 animate-spin text-brand-teal`} />
-              )}
-              <span className={`ui-metadata-label ${state.isWaitingForUser
-                ? 'text-status-pending-dark'
-                : state.metadata?.currentStage === 'completed'
-                  ? 'text-status-success-dark'
-                  : state.metadata?.currentStage === 'error'
-                    ? 'text-status-error'
-                    : state.metadata?.currentStage === 'parsing'
-                      ? 'text-status-active-dark'
-                      : state.metadata?.currentStage === 'searching'
-                        ? 'text-status-success-dark'
-                        : state.metadata?.currentStage === 'ranking'
-                          ? 'text-status-pending-dark'
-                          : state.metadata?.currentStage === 'planning'
-                            ? 'text-status-active-dark'
-                            : state.metadata?.currentStage === 'validating'
-                              ? 'text-brand-teal'
-                              : state.metadata?.currentStage === 'executing'
-                                ? 'text-status-error'
-                                : state.metadata?.currentStage === 'aggregating'
-                                  ? 'text-status-active-dark'
-                                  : 'text-brand-teal'  // default initializing state
-                }`}>
-                {state.metadata?.stageMessage || (state.isWaitingForUser ? 'Waiting for your response...' : 'Processing your request...')}
-              </span>
-              {state.metadata?.progress && !state.isWaitingForUser && state.metadata?.currentStage !== 'completed' && state.metadata?.currentStage !== 'error' && (
-                <div className="flex-1 bg-border-DEFAULT rounded-full h-2 ml-4 overflow-hidden">
-                  <div
-                    className={`h-2 rounded-full transition-all duration-300 ${state.metadata?.currentStage === 'initializing' ? 'bg-brand-teal' :
-                      state.metadata?.currentStage === 'parsing' ? 'bg-status-active' :
-                        state.metadata?.currentStage === 'searching' ? 'bg-status-success' :
-                          state.metadata?.currentStage === 'ranking' ? 'bg-status-pending' :
-                            state.metadata?.currentStage === 'planning' ? 'bg-status-active' :
-                              state.metadata?.currentStage === 'validating' ? 'bg-brand-teal' :
-                                state.metadata?.currentStage === 'executing' ? 'bg-status-error' :
-                                  state.metadata?.currentStage === 'aggregating' ? 'bg-status-active' :
-                                    'bg-brand-teal'
-                      }`}
-                    style={{ width: `${state.metadata.progress}%` }}
-                  />
-                </div>
-              )}
-            </div>
-          </div>
-        )}
+      <div className="px-4 pb-4 pt-2 bg-bg-card border-t border-border-color">
 
-        {/* Hide input form when browser is running - only show progress bar */}
+        {/* Hide input form when browser is running */}
         {!isBrowserRunning && (
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <form onSubmit={handleSubmit} className="max-w-3xl mx-auto">
             {state.isWaitingForUser ? (
               <div className="space-y-3">
                 <Textarea
@@ -702,7 +685,7 @@ export function InteractiveChatInterface({
                   onChange={(e) => setUserResponse(e.target.value)}
                   placeholder="Type your response here..."
                   disabled={isLoading}
-                  className="ui-textarea min-h-[120px] text-base"
+                  className="ui-textarea min-h-[80px] text-base"
                   onKeyDown={handleKeyDown}
                   autoFocus
                 />
@@ -710,254 +693,216 @@ export function InteractiveChatInterface({
             ) : (
               <>
                 {/* Attached Files Preview */}
-                <div className="flex flex-wrap gap-2">
-                  {attachedFiles.filter(f => f.type.startsWith('image/')).map((file, index) => (
-                    <div key={file.name} className="relative">
-                      <img src={previewUrls[index]} alt={file.name} className="h-20 w-20 object-cover rounded-orbimesh-md" />
-                      <button
-                        type="button"
-                        onClick={() => removeFile(file.name)}
-                        className="absolute top-0 right-0 bg-status-error text-white rounded-full p-1 text-xs hover:bg-red-600 transition-colors"
-                      >
-                        <X className="w-3 h-3" />
-                      </button>
-                    </div>
-                  ))}
-                  {attachedFiles.filter(f => !f.type.startsWith('image/')).map(file => (
-                    <Badge key={file.name} variant="ui-pending" className="flex items-center gap-1 pr-1">
-                      <FileIcon className="w-4 h-4" />
-                      <span className="max-w-[200px] truncate">{file.name}</span>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          removeFile(file.name);
-                        }}
-                        className="ml-1 hover:bg-red-500/20 rounded-full p-0.5 transition-colors"
-                        title="Remove attachment"
-                      >
-                        <X className="w-3 h-3 cursor-pointer hover:text-status-error" />
-                      </button>
-                    </Badge>
-                  ))}
-                </div>
-
-                {/* Planning Mode Toggle - Above Textarea */}
-                <div className="flex items-center gap-2">
-                  <label className="planning-mode-switch">
-                    <input
-                      type="checkbox"
-                      checked={planningMode}
-                      onChange={(e) => setPlanningMode(e.target.checked)}
-                    />
-                    <div className="slider">
-                      <div className="circle">
-                        <svg className="cross" viewBox="0 0 365.696 365.696" height="6" width="6" xmlns="http://www.w3.org/2000/svg">
-                          <g>
-                            <path fill="currentColor" d="M243.188 182.86 356.32 69.726c12.5-12.5 12.5-32.766 0-45.247L341.238 9.398c-12.504-12.503-32.77-12.503-45.25 0L182.86 122.528 69.727 9.374c-12.5-12.5-32.766-12.5-45.247 0L9.375 24.457c-12.5 12.504-12.5 32.77 0 45.25l113.152 113.152L9.398 295.99c-12.503 12.503-12.503 32.769 0 45.25L24.48 356.32c12.5 12.5 32.766 12.5 45.247 0l113.132-113.132L295.99 356.32c12.503 12.5 32.769 12.5 45.25 0l15.081-15.082c12.5-12.504 12.5-32.77 0-45.25zm0 0"></path>
-                          </g>
-                        </svg>
-                        <svg className="checkmark" viewBox="0 0 24 24" height="10" width="10" xmlns="http://www.w3.org/2000/svg">
-                          <g>
-                            <path fill="currentColor" d="M9.707 19.121a.997.997 0 0 1-1.414 0l-5.646-5.647a1.5 1.5 0 0 1 0-2.121l.707-.707a1.5 1.5 0 0 1 2.121 0L9 14.171l9.525-9.525a1.5 1.5 0 0 1 2.121 0l.707.707a1.5 1.5 0 0 1 0 2.121z"></path>
-                          </g>
-                        </svg>
+                {attachedFiles.length > 0 && (
+                  <div className="flex flex-wrap gap-2 mb-2">
+                    {attachedFiles.filter(f => f.type.startsWith('image/')).map((file, index) => (
+                      <div key={file.name} className="relative">
+                        <img src={previewUrls[index]} alt={file.name} className="h-16 w-16 object-cover rounded-md" />
+                        <button
+                          type="button"
+                          onClick={() => removeFile(file.name)}
+                          className="absolute top-0 right-0 bg-status-error text-white rounded-full p-0.5 hover:bg-red-600 transition-colors"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
                       </div>
+                    ))}
+                    {attachedFiles.filter(f => !f.type.startsWith('image/')).map(file => (
+                      <Badge key={file.name} variant="ui-pending" className="flex items-center gap-1 pr-1">
+                        <FileIcon className="w-3.5 h-3.5" />
+                        <span className="max-w-[200px] truncate text-xs">{file.name}</span>
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); removeFile(file.name); }}
+                          className="ml-1 hover:bg-red-500/20 rounded-full p-0.5 transition-colors"
+                        >
+                          <X className="w-3 h-3 cursor-pointer hover:text-status-error" />
+                        </button>
+                      </Badge>
+                    ))}
+                  </div>
+                )}
+
+                {/* Textarea — subtle card with focus highlight */}
+                <div className="relative rounded-xl border border-border-color bg-bg-subtle px-3 py-2 transition-all duration-150 focus-within:border-brand-primary/50 focus-within:bg-bg-card focus-within:shadow-[0_0_0_3px_rgba(44,75,168,0.08)]">
+                  {isListening && (
+                    <div className="absolute inset-0 bg-brand-teal-light rounded-xl border-2 border-brand-teal flex flex-col items-center justify-center z-10">
+                      <AudioWaveSVG isActive={isListening} audioLevel={audioLevel} color="#0D9488" width={160} height={50} />
+                      <div className="flex items-center gap-2 mt-3">
+                        <div className="w-2 h-2 bg-status-error rounded-full animate-pulse"></div>
+                        <span className="ui-metadata-label text-brand-teal">Listening...</span>
+                      </div>
+                      {(transcript || interimTranscript) && (
+                        <p className="ui-file-meta mt-2 px-4 text-center max-w-full truncate">
+                          {transcript}{interimTranscript && <span className="opacity-60">{interimTranscript}</span>}
+                        </p>
+                      )}
                     </div>
-                  </label>
-                  <label
-                    htmlFor="planning-mode"
-                    className="ui-metadata-label cursor-pointer select-none"
-                  >
-                    Planning Mode
-                  </label>
-                  <Badge 
-                    variant="ui-pending" 
-                    className={`ui-file-meta transition-opacity duration-200 ${planningMode ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
-                  >
-                    Will pause for approval
-                  </Badge>
+                  )}
+                  <Textarea
+                    value={inputValue}
+                    onChange={(e) => setInputValue(e.target.value)}
+                    placeholder="Describe what you want to accomplish..."
+                    disabled={isLoading || isListening}
+                    className={`w-full resize-none bg-transparent border-none shadow-none text-sm text-text-primary placeholder:text-text-tertiary focus-visible:ring-0 focus-visible:ring-offset-0 focus:outline-none min-h-[60px] py-1 px-0 ${isListening ? 'opacity-0' : ''}`}
+                    onKeyDown={handleKeyDown}
+                  />
                 </div>
 
-                <div className="space-y-2">
-                  <div className="relative flex-1">
-                    {/* Audio Recording Overlay */}
-                    {isListening && (
-                      <div className="absolute inset-0 bg-brand-teal-light rounded-orbimesh-lg border-2 border-brand-teal flex flex-col items-center justify-center z-10">
-                        <AudioWaveSVG
-                          isActive={isListening}
-                          audioLevel={audioLevel}
-                          color="#0D9488"
-                          width={160}
-                          height={50}
-                        />
-                        <div className="flex items-center gap-2 mt-3">
-                          <div className="w-2 h-2 bg-status-error rounded-full animate-pulse"></div>
-                          <span className="ui-metadata-label text-brand-teal">
-                            Listening...
-                          </span>
+                {/* Toolbar row: planning mode | attachment | mic | send */}
+                <div className="flex items-center justify-between gap-2 mt-1 pt-2 border-t border-border-color/60">
+                  {/* Left: planning mode + attachment + mic */}
+                  <div className="flex items-center gap-1.5">
+                    {/* Planning Mode toggle */}
+                    <label className="planning-mode-switch">
+                      <input
+                        type="checkbox"
+                        checked={planningMode}
+                        onChange={(e) => setPlanningMode(e.target.checked)}
+                      />
+                      <div className="slider">
+                        <div className="circle">
+                          <svg className="cross" viewBox="0 0 365.696 365.696" height="6" width="6" xmlns="http://www.w3.org/2000/svg">
+                            <g><path fill="currentColor" d="M243.188 182.86 356.32 69.726c12.5-12.5 12.5-32.766 0-45.247L341.238 9.398c-12.504-12.503-32.77-12.503-45.25 0L182.86 122.528 69.727 9.374c-12.5-12.5-32.766-12.5-45.247 0L9.375 24.457c-12.5 12.504-12.5 32.77 0 45.25l113.152 113.152L9.398 295.99c-12.503 12.503-12.503 32.769 0 45.25L24.48 356.32c12.5 12.5 32.766 12.5 45.247 0l113.132-113.132L295.99 356.32c12.503 12.5 32.769 12.5 45.25 0l15.081-15.082c12.5-12.504 12.5-32.77 0-45.25zm0 0"></path></g>
+                          </svg>
+                          <svg className="checkmark" viewBox="0 0 24 24" height="10" width="10" xmlns="http://www.w3.org/2000/svg">
+                            <g><path fill="currentColor" d="M9.707 19.121a.997.997 0 0 1-1.414 0l-5.646-5.647a1.5 1.5 0 0 1 0-2.121l.707-.707a1.5 1.5 0 0 1 2.121 0L9 14.171l9.525-9.525a1.5 1.5 0 0 1 2.121 0l.707.707a1.5 1.5 0 0 1 0 2.121z"></path></g>
+                          </svg>
                         </div>
-                        {(transcript || interimTranscript) && (
-                          <p className="ui-file-meta mt-2 px-4 text-center max-w-full truncate">
-                            {transcript}{interimTranscript && <span className="opacity-60">{interimTranscript}</span>}
-                          </p>
+                      </div>
+                    </label>
+                    <span className="ui-metadata-label cursor-pointer select-none text-xs">
+                      Planning{planningMode && <span className="ml-1 text-brand-primary">·</span>}
+                    </span>
+
+                    <div className="h-4 w-px bg-border-color mx-1" />
+
+                    {/* Attachment */}
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={isLoading}
+                      className="w-7 h-7 p-0 rounded-md text-text-tertiary hover:text-text-primary hover:bg-bg-hover"
+                      title="Attach file"
+                    >
+                      <Paperclip className="w-3.5 h-3.5" />
+                    </Button>
+                    <input type="file" ref={fileInputRef} className="hidden" onChange={handleFileChange} multiple />
+
+                    {/* Mic */}
+                    {isSTTSupported && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        onClick={handleMicrophoneToggle}
+                        disabled={isLoading}
+                        className={cn(
+                          "w-7 h-7 p-0 rounded-md",
+                          isListening
+                            ? "text-status-error bg-status-error/10 hover:bg-status-error/20"
+                            : "text-text-tertiary hover:text-text-primary hover:bg-bg-hover"
                         )}
+                        title={isListening ? "Stop recording" : "Voice input"}
+                      >
+                        {isListening ? <MicOff className="w-3.5 h-3.5" /> : <Mic className="w-3.5 h-3.5" />}
+                      </Button>
+                    )}
+                  </div>
+
+                  {/* Right: approval buttons + send */}
+                  <div className="flex items-center gap-2">
+                    {state.pending_action_approval && (
+                      <div className="flex items-center gap-2 px-2 py-1 rounded-md bg-amber-50 border border-amber-200">
+                        <AlertCircle className="w-3.5 h-3.5 text-amber-600" />
+                        <span className="text-xs text-amber-800">{state.currentQuestion || 'Approval required.'}</span>
+                        <Button type="button" size="sm" className="bg-status-active text-foreground h-6 text-xs px-2" onClick={handleApproveAction}>Approve</Button>
+                        <Button type="button" size="sm" variant="ui-secondary" className="h-6 text-xs px-2" onClick={handleRejectAction}>Reject</Button>
                       </div>
                     )}
-                    <Textarea
-                      value={inputValue}
-                      onChange={(e) => setInputValue(e.target.value)}
-                      placeholder="Describe what you want to accomplish..."
-                      disabled={isLoading || isListening}
-                      className={`ui-textarea min-h-[60px] text-base ${isListening ? 'opacity-0' : ''}`}
-                      onKeyDown={handleKeyDown}
-                    />
+
+                    {((planningMode && state.approval_required) || ((state.metadata?.currentStage === 'validating' || state.status === 'planning_complete') && onAcceptPlan && state.metadata?.from_workflow)) && (
+                      <>
+                        {planningMode && !state.metadata?.from_workflow && (
+                          <Button type="button" variant="ui-secondary" size="sm" onClick={handleModifyPlan} className="h-7 text-xs">Modify Plan</Button>
+                        )}
+                        <Button
+                          type="button"
+                          size="sm"
+                          onClick={handleAcceptAndExecute}
+                          className="h-7 text-xs bg-gradient-to-r from-brand-teal to-status-active hover:from-brand-teal-hover hover:to-status-active text-foreground"
+                        >
+                          Accept & Execute
+                        </Button>
+                      </>
+                    )}
+
+                    {(() => {
+                      const hasContent = !!(inputValue.trim() || attachedFiles.length > 0);
+                      return (
+                        <Button
+                          type="submit"
+                          disabled={isLoading || !hasContent}
+                          className={cn(
+                            "transition-all duration-200 h-7 w-7 p-0 rounded-md",
+                            hasContent
+                              ? "bg-brand-primary hover:bg-brand-primary-hover text-white shadow-sm"
+                              : "bg-bg-subtle text-text-disabled cursor-not-allowed"
+                          )}
+                          title="Send"
+                        >
+                          {isLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ArrowUp className="w-3.5 h-3.5" />}
+                        </Button>
+                      );
+                    })()}
+
+                    {state.messages.length > 0 && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        onClick={resetConversation}
+                        disabled={isLoading}
+                        className="w-7 h-7 p-0 rounded-md text-text-disabled hover:text-status-error hover:bg-status-error/10 transition-colors"
+                        title="Reset conversation"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </Button>
+                    )}
                   </div>
                 </div>
               </>
             )}
 
-            <div className="flex items-center justify-between gap-2">
-              {/* Attachment and Audio Buttons - Left Side */}
-              <div className="flex items-center gap-2">
-                <Button
-                  type="button"
-                  variant="ui-secondary"
-                  size="sm"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={isLoading}
-                >
-                  <Paperclip className="w-4 h-4" />
-                </Button>
-                <input
-                  type="file"
-                  ref={fileInputRef}
-                  className="hidden"
-                  onChange={handleFileChange}
-                  multiple
-                />
-                {/* Microphone button for voice input */}
-                {isSTTSupported && (
-                  <Button
-                    type="button"
-                    variant={isListening ? "default" : "ui-secondary"}
-                    size="sm"
-                    onClick={handleMicrophoneToggle}
-                    disabled={isLoading}
-                    className={isListening
-                      ? "bg-status-error hover:bg-status-error text-foreground border-status-error"
-                      : ""
-                    }
-                    title={isListening ? "Stop recording" : "Start voice input"}
-                  >
-                    {isListening ? (
-                      <MicOff className="w-4 h-4" />
-                    ) : (
-                      <Mic className="w-4 h-4" />
-                    )}
-                  </Button>
-                )}
+            {/* Waiting for user: simple toolbar with just send */}
+            {state.isWaitingForUser && (
+              <div className="flex justify-end mt-2">
+                {(() => {
+                  const hasContent = !!userResponse.trim();
+                  return (
+                    <Button
+                      type="submit"
+                      disabled={isLoading || !hasContent}
+                      className={cn(
+                        "transition-all duration-200 gap-1.5",
+                        hasContent
+                          ? "bg-brand-primary hover:bg-brand-primary-hover text-white rounded-full px-4 shadow-sm"
+                          : "rounded-full w-8 h-8 p-0 bg-bg-subtle text-text-disabled cursor-not-allowed"
+                      )}
+                    >
+                      {isLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ArrowUp className="w-3.5 h-3.5" />}
+                      {hasContent && <span className="text-sm">Send Response</span>}
+                    </Button>
+                  );
+                })()}
               </div>
-
-              {/* Action Buttons - Right Side */}
-              <div className="flex items-center gap-2">
-                {state.pending_action_approval && (
-                  <div className="flex items-center gap-2 px-2 py-1 rounded-md bg-amber-50 border border-amber-200">
-                    <AlertCircle className="w-4 h-4 text-amber-600" />
-                    <span className="text-xs text-amber-800">
-                      {state.currentQuestion || 'Action approval required.'}
-                    </span>
-                    <Button
-                      type="button"
-                      size="sm"
-                      className="bg-status-active text-foreground"
-                      onClick={handleApproveAction}
-                    >
-                      Approve
-                    </Button>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ui-secondary"
-                      onClick={handleRejectAction}
-                    >
-                      Reject
-                    </Button>
-                  </div>
-                )}
-
-                {/* Plan Approval Buttons - Only show when in planning mode with approval required, or executing saved workflows */}
-                {((planningMode && state.approval_required) || ((state.metadata?.currentStage === 'validating' || state.status === 'planning_complete') && onAcceptPlan && state.metadata?.from_workflow)) ? (
-                  <>
-                    {/* Only show Modify button for non-saved workflows when in planning mode */}
-                    {planningMode && !state.metadata?.from_workflow && (
-                      <Button
-                        type="button"
-                        variant="ui-secondary"
-                        size="sm"
-                        onClick={handleModifyPlan}
-                      >
-                        Modify Plan
-                      </Button>
-                    )}
-
-                    {/* Show Accept button when approval is needed in planning mode or for saved workflows */}
-                    <Button
-                      type="button"
-                      size="sm"
-                      onClick={handleAcceptAndExecute}
-                      className="bg-gradient-to-r from-brand-teal to-status-active hover:from-brand-teal-hover hover:to-status-active text-foreground shadow-md"
-                    >
-                      Accept & Execute
-                    </Button>
-                  </>
-                ) : null}
-
-                <Button
-                  type="submit"
-                  disabled={
-                    isLoading ||
-                    (state.isWaitingForUser ? !userResponse.trim() : (!inputValue.trim() && attachedFiles.length === 0))
-                  }
-                  variant="ui-primary"
-                >
-                  {isLoading
-                    ? 'Processing...'
-                    : (state.metadata?.currentStage === 'validating' || state.status === 'planning_complete')
-                      ? 'Modify'
-                      : state.isWaitingForUser
-                        ? 'Send Response'
-                        : 'Start Workflow'}
-                </Button>
-
-                {state.messages.length > 0 && (
-                  <Button
-                    type="button"
-                    variant="ui-secondary"
-                    onClick={resetConversation}
-                    disabled={isLoading}
-                  >
-                    Reset
-                  </Button>
-                )}
-              </div>
-            </div>
+            )}
           </form>
         )}
       </div>
 
-      {/* Plan Approval Modal - Disabled, now using chat interface buttons */}
-      <PlanApprovalModal
-        isOpen={false}
-        onClose={() => { }}
-        onApprove={handleApprovePlan}
-        onModify={handleModifyPlan}
-        onCancel={handleCancelPlan}
-        taskPlan={state.task_plan || []}
-        taskAgentPairs={state.task_agent_pairs || []}
-        estimatedCost={state.estimated_cost || 0}
-        taskCount={state.task_count || 0}
-      />
     </div>
   );
 }

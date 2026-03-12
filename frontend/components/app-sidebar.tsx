@@ -2,7 +2,6 @@
 "use client"
 
 import Link from "next/link"
-import Image from "next/image"
 import { usePathname, useRouter } from "next/navigation"
 import { useState, useEffect } from "react"
 import { UserButtonWrapper } from "@/components/user-button-wrapper"
@@ -19,7 +18,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
-import { Plus, Users, Workflow, BarChart3, History, X, Link2, Loader2, CalendarClock, Save, Settings } from "lucide-react"
+import { Plus, Users, Workflow, History, X, Link2, Loader2, CalendarClock, Save, Settings } from "lucide-react"
 import ConversationsDropdown from "./conversations-dropdown"
 import { ThemeToggle } from "./theme-toggle"
 import { cn } from "@/lib/utils"
@@ -71,14 +70,9 @@ export default function AppSidebar({ onConversationSelect, onNewConversation, cu
       <TooltipProvider delayDuration={0}>
         <div className="fixed left-0 top-0 h-screen w-16 bg-bg-card border-r border-border-color z-40 flex flex-col items-center py-4 gap-2">
             <Link href="/" className="flex items-center gap-2 bottom-0 mb-4 transition-transform active:scale-95">
-              <Image
-                src="/logo.png"
-                alt="Orbimesh Logo"
-                width={32}
-                height={32}
-                className="rounded"
-                priority
-              />
+              <svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <circle cx="16" cy="16" r="10" stroke="#2C4BA8" strokeWidth="7" fill="none"/>
+              </svg>
             </Link>
 
             <Tooltip>
@@ -190,14 +184,15 @@ export default function AppSidebar({ onConversationSelect, onNewConversation, cu
           open ? "translate-x-0" : "-translate-x-full"
         )}
       >
-        <div className="flex h-full flex-col overflow-hidden">
+        <div className="flex h-full flex-col overflow-hidden" suppressHydrationWarning>
           <SidebarHeader className="border-b border-border-color p-4 flex-shrink-0">
-            <div className="flex items-center justify-between">
-              <span className="ui-nav-brand">Conversations</span>
+            <div className="flex items-center justify-between" suppressHydrationWarning>
+              <span className="ui-section-header">Conversations</span>
               <button
                 onClick={toggleSidebar}
                 className="p-2 rounded-orbimesh-lg hover:bg-bg-hover transition-colors flex items-center justify-center"
                 aria-label="Close conversation history"
+                suppressHydrationWarning
               >
                 <X className="w-5 h-5 text-text-secondary" />
               </button>

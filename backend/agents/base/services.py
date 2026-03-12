@@ -65,11 +65,11 @@ class AgentServices:
 
     @property
     def credentials(self):
-        """Credential service for API keys and secrets."""
+        """Credential manager for API keys and secrets."""
         if self._credentials is None:
-            from backend.services.credential_service import credential_service
+            from backend.services.credential_service import credential_manager
 
-            self._credentials = credential_service
+            self._credentials = credential_manager
         return self._credentials
 
     @property

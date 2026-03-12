@@ -1,9 +1,39 @@
 ---
 id: browser_agent
-name: browser_agent
+name: Browser Agent
 port: 8090
 version: 1.0.0
-description: LLM-driven web browser automation for navigation, interaction, and data extraction.
+description: >
+  LLM-driven web browser automation for navigation, interaction, 
+  data extraction, and screenshots using Playwright.
+model: cerebras/llama-3.3-70b
+context_strategy: minimal
+requires_auth: false
+triggers:
+  - website
+  - browse
+  - navigate
+  - web page
+  - click
+  - fill form
+  - scrape
+  - screenshot
+  - web search
+  - url
+  - http
+capabilities:
+  - navigate_to_url
+  - click_element
+  - fill_form
+  - extract_data
+  - take_screenshot
+  - multi_step_automation
+not_for:
+  - local files
+  - CSV or Excel
+  - PDF documents
+  - emails
+  - running Python code
 ---
 
 # Browser Automation Agent
@@ -35,14 +65,6 @@ Use this agent when the user:
 - PDF/Word documents → use Document Agent
 - Emails → use Mail Agent
 - Running Python code → use Python Sandbox
-
-## Example Prompts
-
-- "Go to leetcode.com and find upcoming contests"
-- "Navigate to amazon.com and search for 'laptop stand'"
-- "Fill out the contact form on example.com"
-- "Extract all product prices from this shopping page"
-- "Take a screenshot of the current page"
 
 ## Notes
 

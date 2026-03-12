@@ -101,7 +101,7 @@ def serialize_complex_object(obj):
                         data_content = d.pop('data')
                         d.update(data_content)
                     return d
-            except:
+            except Exception:
                 pass
 
         # For collections, recurse
@@ -175,6 +175,32 @@ def get_hf_embeddings():
     return _hf_embeddings
 
 
+# =============================================================================
+# STARTUP PRE-LOADING (Background initialization)
+# =============================================================================
+
+def _preload_embedding_model_async():
+    """
+    Pre-load embedding model in background after server starts.
+    Benefit: First request using get_hf_embeddings() is fast.
+    """
+    import threading
+    
+    def _load():
+        try:
+            get_hf_embeddings()
+            logger.info("✅ nodes/utils: HuggingFace embeddings pre-loaded (background)")
+        except Exception as e:
+            logger.warning(f"⚠️ nodes/utils: Embedding pre-load failed: {e}")
+    
+    threading.Thread(target=_load, daemon=True, name="HuggingFaceEmbeddingPreload").start()
+    logger.info("🔄 nodes/utils: Embedding pre-load started (background)")
+
+
+# Trigger pre-loading at module import time
+_preload_embedding_model_async()
+
+
 def save_conversation_history(state: dict, config=None, *args, **kwargs):
     """Saves the conversation history to a JSON file. Accepts extra args for compatibility."""
     thread_id = state.get("thread_id")
@@ -229,9 +255,16 @@ def save_conversation_history(state: dict, config=None, *args, **kwargs):
         # Serialize messages if they are objects
         try:
             serialized_messages = messages_to_dict(messages)
-        except:
-            # Fallback for already serialized or mixed content
+        except (ValueError, TypeError, AttributeError) as deser_err:
+            # Fallback for already-serialized dicts or mixed content
+            logger.warning(
+                f"messages_to_dict failed ({deser_err}), "
+                "falling back to serialize_complex_object"
+            )
             serialized_messages = [serialize_complex_object(m) for m in messages]
+        except Exception as deser_err:
+            logger.error(f"Unexpected message serialization error: {deser_err}")
+            serialized_messages = []
         
         # Determine overall status
         status = "completed"

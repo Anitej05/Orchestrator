@@ -456,3 +456,31 @@ def get_persistent_memory() -> PersistentMemory:
     if _persistent_memory is None:
         _persistent_memory = PersistentMemory()
     return _persistent_memory
+
+
+# =============================================================================
+# STARTUP PRE-LOADING (Background initialization)
+# =============================================================================
+
+def _preload_embedding_model_async():
+    """
+    Pre-load embedding model in background after server starts.
+    Benefit: First browser memory semantic search is fast.
+    """
+    import threading
+    
+    def _load():
+        try:
+            # Trigger lazy loading by calling _get_embedding with dummy text
+            pm = PersistentMemory()
+            pm._get_embedding("preload")
+            logger.info("✅ browser_agent: Embedding model pre-loaded (background)")
+        except Exception as e:
+            logger.warning(f"⚠️ browser_agent: Embedding pre-load failed: {e}")
+    
+    threading.Thread(target=_load, daemon=True, name="BrowserEmbeddingPreload").start()
+    logger.info("🔄 browser_agent: Embedding pre-load started (background)")
+
+
+# Trigger pre-loading at module import time
+_preload_embedding_model_async()

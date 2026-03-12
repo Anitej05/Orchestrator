@@ -162,20 +162,50 @@ def get_user_from_request(request: Request) -> Dict[str, Any]:
     """
     Extract and verify user from request Authorization header.
     Returns the JWT payload with user claims.
+
+    Dev-mode: when CLERK_JWKS_URL is not set, JWT verification is skipped.
+    The subject is read from the unverified token (or "dev-user" if absent).
     """
+    jwks_url = os.getenv("CLERK_JWKS_URL")
+
+    # ── DEV MODE: Clerk not configured ──────────────────────────────────────
+    if not jwks_url:
+        auth_header = request.headers.get("Authorization", "")
+        dev_user_id = "dev-user"
+        if auth_header.startswith("Bearer "):
+            token = auth_header.split(" ", 1)[1]
+            try:
+                unverified = jwt.get_unverified_claims(token)
+                dev_user_id = unverified.get("sub") or "dev-user"
+            except Exception:
+                pass
+        logger.warning(
+            f"[DEV MODE] CLERK_JWKS_URL not set — skipping JWT verification. "
+            f"Using user_id={dev_user_id}"
+        )
+        return {"sub": dev_user_id, "user_id": dev_user_id, "dev_mode": True}
+
+    # ── PRODUCTION: Full Clerk JWT verification ──────────────────────────────
     auth_header = request.headers.get("Authorization")
-    logger.debug(f"Authorization header present: {bool(auth_header)}")
-    
+    logger.info(f"Authorization header present: {bool(auth_header)}")
+    if auth_header:
+        logger.info(f"Authorization header value: {auth_header[:50]}...")
+
     if not auth_header or not auth_header.startswith("Bearer "):
         logger.error("Missing or invalid Authorization header")
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
-    
+
     token = auth_header.split(" ")[1]
-    
     try:
         payload = _decode_and_verify_token(token)
         logger.info(f"User authenticated: user_id={payload.get('sub')}, email={payload.get('email')}")
         return payload
+    except jwt.ExpiredSignatureError:
+        logger.error("JWT expired")
+        raise HTTPException(status_code=401, detail="Token expired")
+    except JWTError as e:
+        logger.error(f"JWT error: {e}")
+        raise HTTPException(status_code=401, detail=f"JWT error: {str(e)}")
     except HTTPException:
         raise
     except Exception as e:
@@ -191,101 +221,15 @@ def get_current_user_id(request: Request) -> str:
     try:
         payload = get_user_from_request(request)
         user_id = payload.get("sub")
-        
+
         if not user_id:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="User ID not found in token"
             )
-        
+
         return user_id
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to extract user ID: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Failed to authenticate user"
-        )
 
-
-
-
-def get_user_from_request(request: Request):
-    auth_header = request.headers.get("Authorization")
-    logger.info(f"Authorization header present: {bool(auth_header)}")
-    if auth_header:
-        logger.info(f"Authorization header value: {auth_header[:50]}...")
-    
-    if not auth_header or not auth_header.startswith("Bearer "):
-        logger.error("Missing or invalid Authorization header")
-        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
-    
-    token = auth_header.split(" ")[1]
-    try:
-        # Fetch JWKS
-        jwks_response = requests.get(os.getenv("CLERK_JWKS_URL"))
-        jwks = jwks_response.json()
-        public_key = None
-        from jose.utils import base64url_decode
-        def jwk_to_pem(jwk):
-            # Only supports RSA keys
-            if jwk["kty"] != "RSA":
-                raise ValueError("Only RSA keys are supported")
-            n = int.from_bytes(base64url_decode(jwk["n"].encode()), "big")
-            e = int.from_bytes(base64url_decode(jwk["e"].encode()), "big")
-            from cryptography.hazmat.primitives.asymmetric import rsa
-            from cryptography.hazmat.primitives import serialization
-            pubkey = rsa.RSAPublicNumbers(e, n).public_key()
-            return pubkey.public_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PublicFormat.SubjectPublicKeyInfo
-            )
-        for key in jwks["keys"]:
-            if key["kid"] == jwt.get_unverified_header(token)["kid"]:
-                public_key = jwk_to_pem(key)
-                break
-        if not public_key:
-            logger.error("Invalid token: No matching key")
-            raise HTTPException(status_code=401, detail="Invalid token: No matching key")
-        # Decode and verify
-        payload = jwt.decode(
-            token,
-            public_key,
-            algorithms=["RS256"],
-            audience=os.getenv("CLERK_JWT_AUDIENCE"),
-            issuer=os.getenv("CLERK_JWT_ISSUER")
-        )
-        logger.info(f"Full JWT payload: {payload}")
-        logger.info(f"User authenticated successfully: user_id={payload.get('sub')}, email={payload.get('email')}")
-        return payload
-    except jwt.ExpiredSignatureError:
-        logger.error("JWT expired")
-        raise HTTPException(status_code=401, detail="Token expired")
-    except JWTError as e:
-        # python-jose does not have InvalidAudienceError/InvalidIssuerError, so handle generically
-        logger.error(f"JWT error: {e}")
-        raise HTTPException(status_code=401, detail=f"JWT error: {str(e)}")
-
-
-def get_current_user_id(request: Request) -> str:
-    """
-    Extract user ID from JWT token in request.
-    Used by credential management endpoints.
-    """
-    try:
-        payload = get_user_from_request(request)
-        user_id = payload.get("sub")
-        
-        if not user_id:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="User ID not found in token"
-            )
-        
-        return user_id
-        
     except HTTPException:
         raise
     except Exception as e:

@@ -6,7 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation"
 import dynamic from "next/dynamic"
 import { SidebarInset, useSidebar } from "@/components/ui/sidebar"
 import OrchestrationDetailsSidebar, { type OrchestrationDetailsSidebarRef } from "@/components/orchestration-details-sidebar"
-import { type TaskAgentPair, type ProcessResponse } from "@/lib/types"
+import { type TaskAgentPair, type ProcessResponse, type CanvasType } from "@/lib/types"
 import { useToast } from "@/hooks/use-toast"
 import { useConversationStore } from "@/lib/conversation-store"
 import { useWebSocketManager } from "@/hooks/use-websocket-conversation"
@@ -188,10 +188,7 @@ function HomeContent() {
     }
   };
 
-  const handleViewCanvas = (
-    canvasContent: string,
-    canvasType: 'html' | 'markdown' | 'pdf' | 'spreadsheet' | 'email_preview' | 'document' | 'image' | 'json'
-  ) => {
+  const handleViewCanvas = (canvasContent: string, canvasType: CanvasType) => {
     sidebarRef.current?.viewCanvas(canvasContent, canvasType);
   };
 

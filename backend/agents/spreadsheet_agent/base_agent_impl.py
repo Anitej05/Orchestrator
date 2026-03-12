@@ -117,6 +117,7 @@ class SpreadsheetAgent(BaseAgent):
                 "zip": zip,
                 "print": print,
                 "isinstance": isinstance,
+                "issubclass": issubclass,
                 "type": type,
                 "set": set,
                 "hasattr": hasattr,
@@ -132,9 +133,26 @@ class SpreadsheetAgent(BaseAgent):
                 "True": True,
                 "False": False,
                 "None": None,
+                # Allow import so LLM code can do `import json`, `import re`, etc.
+                "__import__": __import__,
+                "__build_class__": __build_class__,
+                # Common exceptions LLM code may need to raise/catch
+                "Exception": Exception,
+                "ValueError": ValueError,
+                "KeyError": KeyError,
+                "IndexError": IndexError,
+                "TypeError": TypeError,
+                "AttributeError": AttributeError,
+                "RuntimeError": RuntimeError,
             },
             "pd": pd,
             "np": np,
+            # Pre-inject stdlib modules so LLM code works without `import`
+            "json": __import__("json"),
+            "re": __import__("re"),
+            "datetime": __import__("datetime"),
+            "math": __import__("math"),
+            "collections": __import__("collections"),
         }
 
     async def _get_step_context(self, request: AgentRequest, context: ExecutionContext, previous_results: List[Any]) -> Any:
@@ -201,12 +219,37 @@ class SpreadsheetAgent(BaseAgent):
             is_success: bool = Field(description="Did the agent succeed?")
             
         sys_prompt = "You are synthesizing the final outcome of the Spreadsheet Agent execution.\n"
-        sys_prompt += "Review the task and the results of the steps to provide a final summary."
-        
+        sys_prompt += "Review the task and the results of the steps to provide a final summary.\n"
+        sys_prompt += "CRITICAL: Your summary MUST include ALL specific numbers, values, table rows, and computed results visible in the step data below. Do NOT just say 'the table was generated' — write out the actual data (department names, counts, totals, etc.) so the user can read the answer directly from your summary.\n"
+        sys_prompt += "If no steps were executed but session context is provided, answer directly from it and set is_success=True."
+
         user_content = f"Task: {request.prompt}\n\nStep Results:\n"
         for i, res in enumerate(results, 1):
-            msg = (res.metadata or {}).get('message', str(res.data)[:200] if res.data else res.error or 'No details')
-            user_content += f"Step {i} ({'Success' if res.success else 'Failed'}): {msg}\n"
+            # Include the full data, not just the message — Brain needs actual numbers
+            data_str = ""
+            if res.data is not None:
+                try:
+                    import json as _json
+                    data_str = _json.dumps(res.data, default=str)[:600]
+                except Exception:
+                    data_str = str(res.data)[:600]
+            msg = (res.metadata or {}).get('message', data_str or res.error or 'No details')
+            if data_str and data_str not in msg:
+                msg = f"{msg} | data: {data_str}"
+            user_content += f"Step {i} ({'Success' if res.success else 'Failed'}): {msg[:700]}\n"
+
+        # When no capabilities were executed (LLM called 'finish' because answer
+        # was visible in the step context), provide session data so synthesis can
+        # answer directly instead of reporting failure.
+        if not results:
+            thread_id = request.thread_id or "default"
+            session = self.state.get_or_create(thread_id)
+            if session.dataframes:
+                user_content += "\n(No capability steps ran — agent answered from session context)\n"
+                user_content += "LOADED DATA CONTEXT:\n"
+                for fid, df in session.dataframes.items():
+                    user_content += f"  File '{fid}': {df.shape[0]} rows × {df.shape[1]} columns\n"
+                    user_content += f"  Columns: {', '.join(df.columns.tolist())}\n"
             
         from langchain_core.messages import SystemMessage, HumanMessage
         synthesis = await self.services.inference.generate_structured(
@@ -705,7 +748,41 @@ class SpreadsheetAgent(BaseAgent):
                 "df": df.copy(),
             }
 
-            exec(code, exec_globals)
+            try:
+                exec(code, exec_globals)
+            except Exception as exec_err:
+                # Code failed — ask LLM to fix it (one retry attempt)
+                logger.warning(
+                    f"[process_data] Code execution error: {exec_err}. "
+                    "Requesting LLM fix..."
+                )
+                try:
+                    fix_prompt = (
+                        f"{instruction}\n\n"
+                        f"[The previous attempt generated code that failed with: "
+                        f"{exec_err}. Available columns: {list(df.columns)}. "
+                        f"Please generate corrected code.]"
+                    )
+                    fix_answer = await self.llm.answer_question(
+                        fix_prompt, df_context, session.get_recent_history()
+                    )
+                    fixed_code = fix_answer.get("code")
+                    if fixed_code:
+                        exec_globals = {**self.SAFE_BUILTINS, "df": df.copy()}
+                        exec(fixed_code, exec_globals)
+                        code = fixed_code
+                        logger.info("[process_data] LLM fix succeeded.")
+                    else:
+                        return {
+                            "success": False,
+                            "error": f"Processing failed: {exec_err}",
+                        }
+                except Exception as fix_err:
+                    logger.error(f"[process_data] Fix attempt failed: {fix_err}")
+                    return {
+                        "success": False,
+                        "error": f"Processing failed: {exec_err}",
+                    }
 
             result_data = exec_globals.get("result")
             modified_df = exec_globals.get("df")
@@ -746,7 +823,7 @@ class SpreadsheetAgent(BaseAgent):
                     "modified": df_modified,
                 },
                 "canvas_display": canvas,
-                "message": f"Data processed: {computed_answer[:100]}..."
+                "message": f"Data processed: {str(computed_answer)[:100]}..."
                 if len(str(computed_answer)) > 100
                 else f"Data processed: {computed_answer}",
             }

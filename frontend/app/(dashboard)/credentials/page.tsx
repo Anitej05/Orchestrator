@@ -11,14 +11,14 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { 
-  CheckCircle2, 
-  XCircle, 
-  Key, 
-  Eye, 
-  EyeOff, 
-  Save, 
-  Trash2, 
+import {
+  CheckCircle2,
+  XCircle,
+  Key,
+  Eye,
+  EyeOff,
+  Save,
+  Trash2,
   AlertCircle,
   Shield,
   Loader2
@@ -45,6 +45,15 @@ interface AgentCredentialStatus {
   updated_at?: string;
 }
 
+interface ScopedCredential {
+  scope: string;
+  scope_id: string;
+  is_configured: boolean;
+  configured_fields: string[];
+  created_at?: string;
+  updated_at?: string;
+}
+
 export default function CredentialsPage() {
   const { getToken } = useAuth();
   const [agents, setAgents] = useState<AgentCredentialStatus[]>([]);
@@ -54,10 +63,49 @@ export default function CredentialsPage() {
   const [credentials, setCredentials] = useState<Record<string, string>>({});
   const [showValues, setShowValues] = useState<Record<string, boolean>>({});
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [scopedCredentials, setScopedCredentials] = useState<{ system: ScopedCredential[]; tool: ScopedCredential[] }>({ system: [], tool: [] });
+  const [scopedForm, setScopedForm] = useState<Record<string, string>>({});
 
   useEffect(() => {
     loadCredentialsStatus();
+    loadScopedCredentials("system");
+    loadScopedCredentials("tool");
   }, []);
+
+  const loadScopedCredentials = async (scope: string) => {
+    try {
+      const response = await authFetch(`${API_BASE_URL}/api/credentials/scope/${scope}/status`);
+      if (response.ok) {
+        const data = await response.json();
+        setScopedCredentials((prev) => ({ ...prev, [scope]: data.credentials || [] }));
+      }
+    } catch (error) {
+      console.error(`Error loading ${scope} credentials:`, error);
+    }
+  };
+
+  const handleSaveScopedCredentials = async (scope: string, scopeId: string) => {
+    setSaving(`${scope}:${scopeId}`);
+    setMessage(null);
+    try {
+      const credsArray = Object.entries(scopedForm)
+        .filter(([, v]) => v)
+        .map(([k, v]) => ({ field_name: k, value: v }));
+      const response = await authFetch(`${API_BASE_URL}/api/credentials/scope/${scope}/${scopeId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ credentials: credsArray }),
+      });
+      if (!response.ok) throw new Error("Failed to save");
+      setMessage({ type: "success", text: `${scope} credentials saved!` });
+      setScopedForm({});
+      loadScopedCredentials(scope);
+    } catch (error) {
+      setMessage({ type: "error", text: `Failed to save ${scope} credentials` });
+    } finally {
+      setSaving(null);
+    }
+  };
 
   const loadCredentialsStatus = async () => {
     try {
@@ -103,10 +151,10 @@ export default function CredentialsPage() {
       if (!response.ok) throw new Error("Failed to save credentials");
 
       setMessage({ type: "success", text: "Credentials saved successfully!" });
-      
+
       // Reload status
       await loadCredentialsStatus();
-      
+
       // Clear form
       setCredentials({});
       setSelectedAgent(null);
@@ -199,9 +247,11 @@ export default function CredentialsPage() {
       {/* Tabs */}
       <Tabs defaultValue="all" className="space-y-4">
         <TabsList>
-          <TabsTrigger value="all">All Agents ({agentsNeedingCredentials.length})</TabsTrigger>
+          <TabsTrigger value="all">Agents ({agentsNeedingCredentials.length})</TabsTrigger>
           <TabsTrigger value="configured">Configured ({configuredAgents.length})</TabsTrigger>
           <TabsTrigger value="unconfigured">Need Setup ({unconfiguredAgents.length})</TabsTrigger>
+          <TabsTrigger value="system">System ({scopedCredentials.system.length})</TabsTrigger>
+          <TabsTrigger value="tools">Tools ({scopedCredentials.tool.length})</TabsTrigger>
         </TabsList>
 
         <TabsContent value="all" className="space-y-4">
@@ -256,6 +306,77 @@ export default function CredentialsPage() {
               isSaving={saving === agent.agent_id}
             />
           ))}
+        </TabsContent>
+
+        {/* System credentials tab */}
+        <TabsContent value="system" className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>System Credentials</CardTitle>
+              <CardDescription>Shared credentials used across all agents and tools</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {scopedCredentials.system.length > 0 ? (
+                scopedCredentials.system.map((cred) => (
+                  <div key={cred.scope_id} className="flex items-center justify-between p-3 border rounded">
+                    <div>
+                      <span className="font-medium">{cred.scope_id}</span>
+                      <Badge variant="default" className="ml-2 bg-green-600"><CheckCircle2 className="h-3 w-3 mr-1" />Active</Badge>
+                    </div>
+                    <span className="text-sm text-muted-foreground">{cred.configured_fields.join(", ")}</span>
+                  </div>
+                ))
+              ) : (
+                <p className="text-muted-foreground text-sm">No system credentials configured yet.</p>
+              )}
+              <div className="border-t pt-4 space-y-3">
+                <Label>Add System Credential</Label>
+                <div className="grid grid-cols-2 gap-2">
+                  <Input placeholder="Credential name (e.g. SERP_API_KEY)" value={scopedForm["_name"] || ""} onChange={(e) => setScopedForm((p) => ({ ...p, _name: e.target.value }))} />
+                  <Input type="password" placeholder="Value" value={scopedForm["_value"] || ""} onChange={(e) => setScopedForm((p) => ({ ...p, _value: e.target.value }))} />
+                </div>
+                <Button onClick={() => { if (scopedForm["_name"] && scopedForm["_value"]) { handleSaveScopedCredentials("system", "global"); } }} disabled={!scopedForm["_name"] || !scopedForm["_value"]}>
+                  <Save className="h-4 w-4 mr-2" />Save
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* Tools credentials tab */}
+        <TabsContent value="tools" className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>Tool Credentials</CardTitle>
+              <CardDescription>API keys and secrets for specific tools</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {scopedCredentials.tool.length > 0 ? (
+                scopedCredentials.tool.map((cred) => (
+                  <div key={cred.scope_id} className="flex items-center justify-between p-3 border rounded">
+                    <div>
+                      <span className="font-medium">{cred.scope_id}</span>
+                      <Badge variant="default" className="ml-2 bg-green-600"><CheckCircle2 className="h-3 w-3 mr-1" />Active</Badge>
+                    </div>
+                    <span className="text-sm text-muted-foreground">{cred.configured_fields.join(", ")}</span>
+                  </div>
+                ))
+              ) : (
+                <p className="text-muted-foreground text-sm">No tool credentials configured yet.</p>
+              )}
+              <div className="border-t pt-4 space-y-3">
+                <Label>Add Tool Credential</Label>
+                <div className="grid grid-cols-3 gap-2">
+                  <Input placeholder="Tool name (e.g. web_search)" value={scopedForm["_tool"] || ""} onChange={(e) => setScopedForm((p) => ({ ...p, _tool: e.target.value }))} />
+                  <Input placeholder="Key name" value={scopedForm["_tname"] || ""} onChange={(e) => setScopedForm((p) => ({ ...p, _tname: e.target.value }))} />
+                  <Input type="password" placeholder="Value" value={scopedForm["_tvalue"] || ""} onChange={(e) => setScopedForm((p) => ({ ...p, _tvalue: e.target.value }))} />
+                </div>
+                <Button onClick={() => { if (scopedForm["_tool"] && scopedForm["_tname"] && scopedForm["_tvalue"]) { setScopedForm((p) => ({ ...p, [scopedForm["_tname"]]: scopedForm["_tvalue"] })); handleSaveScopedCredentials("tool", scopedForm["_tool"]); } }} disabled={!scopedForm["_tool"] || !scopedForm["_tname"] || !scopedForm["_tvalue"]}>
+                  <Save className="h-4 w-4 mr-2" />Save
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
         </TabsContent>
       </Tabs>
     </div>

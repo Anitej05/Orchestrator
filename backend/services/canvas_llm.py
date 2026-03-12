@@ -24,7 +24,7 @@ logger = logging.getLogger("CanvasLLM")
 class CanvasDecision(BaseModel):
     """LLM's decision on how to display output in the canvas."""
     canvas_type: str = Field(
-        description="One of: code, markdown, html, json, chart, image, spreadsheet, email_preview, pdf"
+        description="One of: code, markdown, html, json, chart, image, spreadsheet, email_preview, pdf, pptx"
     )
     canvas_title: str = Field(description="Short title for the canvas panel (under 60 chars)")
     canvas_content: Optional[str] = Field(
@@ -65,6 +65,7 @@ Given an agent's output, decide the BEST visual format for the Canvas panel.
 | spreadsheet    | Tabular data with headers and rows                       | canvas_data with headers/rows   |
 | email_preview  | Email drafts with to/subject/body                        | canvas_data with to/subject/body|
 | pdf            | PDF documents                                            | canvas_data with file_path      |
+| pptx           | PowerPoint presentations (created, edited, previewed)    | canvas_data with file_path      |
 | image          | Generated images                                         | canvas_data with src            |
 
 ## Registered Templates
@@ -204,7 +205,7 @@ def _parse_decision(
         if not data:
             raise ValueError("No JSON found in LLM response")
 
-        valid_types = {"code", "markdown", "html", "json", "chart", "spreadsheet", "email_preview", "pdf", "image"}
+        valid_types = {"code", "markdown", "html", "json", "chart", "spreadsheet", "email_preview", "pdf", "pptx", "image"}
         if data.get("canvas_type") not in valid_types:
             data["canvas_type"] = "markdown"
 
@@ -264,6 +265,22 @@ def _fallback_decision(
             canvas_content=output or "No output",
             requires_confirmation=False,
             reasoning="Fallback: mail agent non-email output",
+        )
+    if primary_canvas_type == "pdf":
+        return CanvasDecision(
+            canvas_type="markdown",
+            canvas_title=capability_name.replace("_", " ").title() or "PDF Result",
+            canvas_content=output or "No output",
+            requires_confirmation=False,
+            reasoning="Fallback: pdf agent text output",
+        )
+    if primary_canvas_type == "pptx":
+        return CanvasDecision(
+            canvas_type="markdown",
+            canvas_title=capability_name.replace("_", " ").title() or "Presentation Result",
+            canvas_content=output or "No output",
+            requires_confirmation=False,
+            reasoning="Fallback: ppt agent text output",
         )
 
     return CanvasDecision(

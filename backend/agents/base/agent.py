@@ -3,6 +3,8 @@ Base Agent
 Abstract base class for all intelligent agents.
 """
 
+import asyncio
+import json
 import logging
 import time
 from abc import ABC, abstractmethod
@@ -63,6 +65,11 @@ class AgentConfig:
     request_timeout: float = 120.0
     execution_mode: ExecutionMode = ExecutionMode.REACT
     max_react_steps: int = 15
+    max_duplicate_step_repeats: int = 2
+    max_llm_result_chars: int = 1200
+    max_llm_context_chars: int = 2500
+    max_llm_list_items: int = 6
+    max_llm_dict_items: int = 12
 
 
 class BaseAgent(ABC):
@@ -107,7 +114,378 @@ class BaseAgent(ABC):
         # Execution tracking
         self.execution_history: List[Dict] = []
 
+        # Per-request progress queue (set by /execute/stream endpoint)
+        self._progress_queue: Optional[asyncio.Queue] = None
+
         logger.info(f"BaseAgent initialized: {agent_name} ({agent_id})")
+
+    # ------------------------------------------------------------------
+    # Credential helpers — delegate to CredentialManager singleton
+    # ------------------------------------------------------------------
+
+    def get_credential(self, key: str, user_id: str = "system") -> Optional[str]:
+        """
+        Get a single credential for this agent from the DB (with .env fallback).
+
+        Usage from any agent subclass::
+
+            api_key = self.get_credential("COMPOSIO_API_KEY")
+        """
+        return self.services.credentials.get(
+            scope="agent",
+            scope_id=self.agent_id,
+            key=key,
+            user_id=user_id,
+        )
+
+    def get_all_credentials(self, user_id: str = "system") -> Dict[str, str]:
+        """
+        Get all credentials for this agent.
+        Returns a dict of ``{credential_name: plaintext_value}``.
+        """
+        return self.services.credentials.get_all(
+            scope="agent",
+            scope_id=self.agent_id,
+            user_id=user_id,
+        )
+
+    def _get_prompt_guidance(self, request: Optional[AgentRequest] = None) -> str:
+        """
+        Hook for agent-specific LLM instructions.
+
+        Subclasses can override this to inject operational rules into the
+        shared planning / ReAct prompts without replacing the BaseAgent logic.
+        """
+        return ""
+
+    def _get_shared_prompt_guidance(
+        self, request: Optional[AgentRequest] = None
+    ) -> str:
+        """
+        Shared operational rules for every BaseAgent-derived planner.
+
+        These instructions bias the model toward deterministic completion and
+        away from redundant ReAct loops.
+        """
+        return (
+            "- Finish immediately once the user's stated goal is satisfied.\n"
+            "- Do NOT repeat the same capability with materially identical "
+            "parameters after a successful result unless the earlier result was "
+            "empty, explicitly incomplete, or failed to satisfy a required field.\n"
+            "- Prefer the minimum number of steps needed to complete the task.\n"
+            "- If a single successful read/search/fetch/get/list/extract step "
+            "already answers the request, choose 'finish' next.\n"
+            "- Use 'escalate' only when external user information is truly "
+            "required and cannot be inferred from the current context."
+        )
+
+    def _compose_prompt_guidance(
+        self, request: Optional[AgentRequest] = None
+    ) -> str:
+        parts = [
+            self._get_shared_prompt_guidance(request).strip(),
+            self._get_prompt_guidance(request).strip(),
+        ]
+        return "\n".join(part for part in parts if part)
+
+    def _truncate_text(self, value: Any, max_chars: int) -> str:
+        text = value if isinstance(value, str) else str(value)
+        if len(text) <= max_chars:
+            return text
+        return text[: max_chars - 3] + "..."
+
+    def _compress_for_llm(self, value: Any, depth: int = 0) -> Any:
+        if depth >= 2:
+            return self._truncate_text(value, self.config.max_llm_result_chars // 2)
+
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+
+        if isinstance(value, str):
+            return self._truncate_text(value, self.config.max_llm_result_chars // 2)
+
+        if isinstance(value, dict):
+            items = list(value.items())
+            compressed = {
+                str(k): self._compress_for_llm(v, depth + 1)
+                for k, v in items[: self.config.max_llm_dict_items]
+            }
+            if len(items) > self.config.max_llm_dict_items:
+                compressed["__truncated_keys__"] = (
+                    len(items) - self.config.max_llm_dict_items
+                )
+            return compressed
+
+        if isinstance(value, (list, tuple, set)):
+            seq = list(value)
+            compressed = [
+                self._compress_for_llm(v, depth + 1)
+                for v in seq[: self.config.max_llm_list_items]
+            ]
+            if len(seq) > self.config.max_llm_list_items:
+                compressed.append(
+                    {
+                        "__truncated_items__": (
+                            len(seq) - self.config.max_llm_list_items
+                        )
+                    }
+                )
+            return compressed
+
+        return self._truncate_text(repr(value), self.config.max_llm_result_chars // 2)
+
+    def _serialize_for_llm(self, value: Any, max_chars: Optional[int] = None) -> str:
+        limit = max_chars or self.config.max_llm_result_chars
+        try:
+            text = json.dumps(
+                self._compress_for_llm(value),
+                ensure_ascii=True,
+                default=str,
+                sort_keys=True,
+            )
+        except Exception:
+            text = self._truncate_text(repr(value), limit)
+        return self._truncate_text(text, limit)
+
+    def _summarize_capability_result_for_llm(self, result: CapabilityResult) -> str:
+        meta = result.metadata if isinstance(result.metadata, dict) else {}
+        parts = [f"success={result.success}"]
+
+        if result.success and result.data is not None:
+            parts.append(f"data={self._serialize_for_llm(result.data)}")
+        elif result.error:
+            parts.append(
+                f"error={self._truncate_text(result.error, self.config.max_llm_result_chars // 2)}"
+            )
+
+        important_meta = {}
+        for key in (
+            "summary",
+            "message",
+            "question",
+            "question_type",
+            "canvas_display",
+            "file_id",
+            "file_path",
+            "total_count",
+            "query",
+            "agent_response_status",
+        ):
+            if key in meta and meta.get(key) is not None:
+                important_meta[key] = meta.get(key)
+        if important_meta:
+            parts.append(f"meta={self._serialize_for_llm(important_meta)}")
+
+        return "; ".join(parts)
+
+    def _summarize_previous_results_for_llm(
+        self, results: List[CapabilityResult]
+    ) -> str:
+        if not results:
+            return "None"
+        tail = results[-min(len(results), self.config.max_llm_list_items) :]
+        lines = []
+        offset = len(results) - len(tail)
+        for idx, result in enumerate(tail, start=1 + offset):
+            lines.append(
+                f"Step {idx}: {self._summarize_capability_result_for_llm(result)}"
+            )
+        return "\n".join(lines)
+
+    def _normalize_step_parameters_for_signature(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        filtered: Dict[str, Any] = {}
+        for key, value in sorted((params or {}).items()):
+            if key in {"thread_id", "task_id", "session_id", "timestamp", "attempt"}:
+                continue
+            filtered[key] = self._compress_for_llm(value)
+        return filtered
+
+    def _build_step_signature(self, capability_name: str, params: Dict[str, Any]) -> str:
+        payload = {
+            "capability": capability_name,
+            "params": self._normalize_step_parameters_for_signature(params),
+        }
+        return json.dumps(payload, ensure_ascii=True, sort_keys=True, default=str)
+
+    def _has_meaningful_result(self, result: CapabilityResult) -> bool:
+        if not result.success:
+            return False
+
+        data = result.data
+        if isinstance(data, dict):
+            return bool(data)
+        if isinstance(data, (list, tuple, set)):
+            return len(data) > 0
+        if isinstance(data, str):
+            return bool(data.strip())
+        if data is not None:
+            return True
+
+        meta = result.metadata if isinstance(result.metadata, dict) else {}
+        return any(
+            meta.get(key)
+            for key in ("summary", "message", "canvas_display", "file_id", "file_path")
+        )
+
+    def _extract_needs_input(self, result: CapabilityResult) -> Optional[Dict[str, Any]]:
+        meta = result.metadata if isinstance(result.metadata, dict) else {}
+        if meta.get("agent_response_status") != "needs_input":
+            return None
+        return {
+            "question": meta.get("question") or result.error or "Additional input required.",
+            "question_type": meta.get("question_type") or "text",
+            "options": meta.get("options"),
+            "metadata": {
+                k: v
+                for k, v in meta.items()
+                if k
+                not in {
+                    "agent_response_status",
+                    "question",
+                    "question_type",
+                    "options",
+                }
+            },
+        }
+
+    def _capability_result_to_agent_response(
+        self, cap_result: CapabilityResult, default_summary: str
+    ) -> AgentResponse:
+        needs_input = self._extract_needs_input(cap_result)
+        if needs_input:
+            return AgentResponse.needs_input(
+                question=needs_input["question"],
+                question_type=needs_input["question_type"],
+                options=needs_input["options"],
+                metadata=needs_input["metadata"],
+            )
+
+        meta = cap_result.metadata if isinstance(cap_result.metadata, dict) else {}
+        if cap_result.success:
+            summary = meta.get("message") or meta.get("summary") or default_summary
+            data_payload = (
+                meta.get("data")
+                if isinstance(meta.get("data"), dict)
+                else cap_result.data
+                if isinstance(cap_result.data, dict)
+                else None
+            )
+            extra_meta = {
+                k: v
+                for k, v in meta.items()
+                if k
+                not in {
+                    "message",
+                    "summary",
+                    "canvas_display",
+                    "data",
+                    "execution_time_ms",
+                    "agent_response_status",
+                }
+            }
+            return AgentResponse.success(
+                result=cap_result.data,
+                summary=summary,
+                data=data_payload,
+                canvas_display=meta.get("canvas_display"),
+                execution_time_ms=meta.get("execution_time_ms"),
+                metadata=extra_meta,
+            )
+
+        return AgentResponse.error(
+            message=cap_result.error or "Capability failed",
+            execution_time_ms=meta.get("execution_time_ms"),
+            metadata={
+                k: v for k, v in meta.items() if k != "agent_response_status"
+            },
+        )
+
+    def _try_build_deterministic_response(
+        self,
+        results: List[CapabilityResult],
+        understanding: Dict[str, Any],
+        request: AgentRequest,
+    ) -> Optional[AgentResponse]:
+        if not results or any(not r.success for r in results):
+            return None
+
+        # Single-step successes should not require another LLM pass just to
+        # restate the same result.
+        if len(results) == 1:
+            return self._capability_result_to_agent_response(
+                results[0],
+                default_summary=understanding.get("intent") or "Task completed",
+            )
+
+        last = results[-1]
+        meta = last.metadata if isinstance(last.metadata, dict) else {}
+        if meta.get("final") is True:
+            return self._capability_result_to_agent_response(
+                last,
+                default_summary=understanding.get("intent") or "Task completed",
+            )
+
+        return None
+
+    def _should_finish_after_step(
+        self,
+        request: AgentRequest,
+        step: ExecutionStep,
+        result: CapabilityResult,
+        prior_results: List[CapabilityResult],
+    ) -> bool:
+        meta = result.metadata if isinstance(result.metadata, dict) else {}
+        if meta.get("final") is True:
+            return True
+
+        if not self._has_meaningful_result(result):
+            return False
+
+        capability_name = (step.capability_name or "").lower()
+        terminal_prefixes = (
+            "get_",
+            "fetch_",
+            "read_",
+            "search_",
+            "list_",
+            "summarize_",
+            "send_",
+            "reply_",
+            "forward_",
+        )
+        terminal_exact = {
+            "analyze",
+            "research",
+            "solve_problem",
+            "creative_write",
+        }
+        non_terminal_prefixes = (
+            "load_",
+            "open_",
+            "navigate",
+            "click",
+            "type",
+            "scroll",
+            "select_",
+            "switch_",
+            "run_",
+            "execute_javascript",
+            "prepare_",
+            "initialize_",
+        )
+
+        if capability_name.startswith(non_terminal_prefixes):
+            return False
+
+        return capability_name.startswith(terminal_prefixes) or capability_name in terminal_exact
+
+    async def emit_progress(self, message: str) -> None:
+        """Push a progress message to the streaming queue (no-op if not streaming)."""
+        if self._progress_queue is not None:
+            try:
+                self._progress_queue.put_nowait(message)
+            except asyncio.QueueFull:
+                pass  # Drop silently if queue is full
 
     def register_capabilities(self):
         """Override in subclass to register agent capabilities."""
@@ -191,20 +569,21 @@ class BaseAgent(ABC):
                         params={**{"prompt": request.prompt}, **(request.payload or {})},
                         context=context,
                     )
-                    if cap_result.success:
-                        # Surface metadata (message, canvas_display, etc.) in AgentResponse
-                        meta = cap_result.metadata or {}
-                        return AgentResponse.success(
-                            result=cap_result.data,
-                            summary=meta.get("message", f"{request.action} completed"),
-                            data=meta,
-                            execution_time_ms=(time.time() - start_time) * 1000,
-                        )
-                    else:
-                        return AgentResponse.error(
-                            message=cap_result.error or "Capability failed",
-                            execution_time_ms=(time.time() - start_time) * 1000,
-                        )
+                    # Reset status to READY *before* inspecting cap_result.
+                    # This must happen regardless of success/failure so the agent
+                    # isn't stuck in BUSY if the capability raises or returns an error.
+                    # The caller (agent_manager) reads .status after this returns, so
+                    # it must reflect the idle state by the time we branch on success.
+                    self.status = AgentStatus.READY
+                    direct_response = self._capability_result_to_agent_response(
+                        cap_result,
+                        default_summary=f"{request.action} completed",
+                    )
+                    if direct_response.execution_time_ms is None:
+                        direct_response.execution_time_ms = (
+                            time.time() - start_time
+                        ) * 1000
+                    return direct_response
                 else:
                     logger.warning(
                         f"Action '{request.action}' not found in registry, "
@@ -381,6 +760,14 @@ class BaseAgent(ABC):
             step = self._enrich_step_params(step, results)
 
             result = await self._execute_step(step, context)
+            needs_input = self._extract_needs_input(result)
+            if needs_input:
+                return AgentResponse.needs_input(
+                    question=needs_input["question"],
+                    question_type=needs_input["question_type"],
+                    options=needs_input["options"],
+                    metadata=needs_input["metadata"],
+                )
             results.append(result)
 
             # Store result for subsequent steps
@@ -397,6 +784,12 @@ class BaseAgent(ABC):
                 )
 
         # Step 4: LLM synthesizes final response
+        deterministic_response = self._try_build_deterministic_response(
+            results, understanding, request
+        )
+        if deterministic_response is not None:
+            return deterministic_response
+
         final_response = await self._llm_synthesize_response(
             results=results, understanding=understanding, request=request
         )
@@ -429,6 +822,7 @@ class BaseAgent(ABC):
         skip_count = len(completed_results)
 
         # Step 1: LLM understands the task
+        await self.emit_progress("Analyzing task...")
         understanding = await self._llm_understand_task(request)
 
         context = ExecutionContext(
@@ -439,6 +833,7 @@ class BaseAgent(ABC):
 
         # Seed context with results from previously completed steps
         results: List[CapabilityResult] = []
+        signature_results: Dict[str, List[CapabilityResult]] = {}
         for i, prev_result in enumerate(completed_results):
             results.append(prev_result)
             context.set(f"step_{i + 1}_result", prev_result)
@@ -452,6 +847,7 @@ class BaseAgent(ABC):
             step_context = await self._get_step_context(request, context, results)
 
             # 2. Decide next action
+            await self.emit_progress(f"Deciding next action (step {step_num})...")
             plan_step = await self._llm_decide_next_react_step(request, understanding, step_context, results, step_num)
 
             # 3. Check for completion or escalation
@@ -472,13 +868,62 @@ class BaseAgent(ABC):
                 expected_outcome=plan_step.expected_outcome
             )
 
+            step_signature = self._build_step_signature(
+                step.capability_name, step.parameters
+            )
+            prior_same_steps = signature_results.get(step_signature, [])
+            if prior_same_steps:
+                if any(self._has_meaningful_result(r) for r in prior_same_steps):
+                    logger.warning(
+                        "ReAct loop guard: refusing to repeat successful identical "
+                        f"step '{step.capability_name}'. Finalizing instead."
+                    )
+                    await self.emit_progress(
+                        "Task already has a successful result; finalizing answer..."
+                    )
+                    break
+                if len(prior_same_steps) >= self.config.max_duplicate_step_repeats:
+                    raise _StepFailure(
+                        failed_step=step.step_number,
+                        original_error=Exception(
+                            "Loop guard triggered: repeated identical step without progress"
+                        ),
+                        completed_results=results,
+                    )
+
             # Execution
+            cap_label = plan_step.capability_name.replace("_", " ")
+            await self.emit_progress(f"Running: {cap_label}...")
             result = await self._execute_step(step, context)
+            needs_input = self._extract_needs_input(result)
+            if needs_input:
+                return AgentResponse.needs_input(
+                    question=needs_input["question"],
+                    question_type=needs_input["question_type"],
+                    options=needs_input["options"],
+                    metadata=needs_input["metadata"],
+                )
             results.append(result)
+            signature_results.setdefault(step_signature, []).append(result)
             context.set(f"step_{step_num}_result", result)
+
+            if result.success:
+                await self.emit_progress(f"Completed: {cap_label}")
+            else:
+                await self.emit_progress(f"Step failed: {cap_label} — retrying...")
 
             # 4. Update post step
             await self._update_state_post_step(step, result, context)
+
+            if self._should_finish_after_step(request, step, result, results[:-1]):
+                logger.info(
+                    "Deterministic finish: step '%s' produced a sufficient final result.",
+                    step.capability_name,
+                )
+                await self.emit_progress(
+                    "Task has the required result; finalizing answer..."
+                )
+                break
 
             # In ReAct, if a step fails, we expose it to the standard error recovery
             if not result.success:
@@ -491,6 +936,13 @@ class BaseAgent(ABC):
                 )
 
         # Step 5: Synthesize
+        deterministic_response = self._try_build_deterministic_response(
+            results, understanding, request
+        )
+        if deterministic_response is not None:
+            return deterministic_response
+
+        await self.emit_progress("Synthesizing answer...")
         final_response = await self._llm_synthesize_response(
             results=results, understanding=understanding, request=request
         )
@@ -515,7 +967,7 @@ class BaseAgent(ABC):
                 return self
 
         sys_prompt = f"""You are determining the NEXT immediate action for the agent: '{self.agent_name}'.
-You are using a ReAct (Reason + Act) loop. 
+You are using a ReAct (Reason + Act) loop.
 Review the original task, the current context, and previous step results.
 
 AVAILABLE CAPABILITIES:
@@ -532,17 +984,36 @@ SPECIAL CAPABILITIES:
 - finish: Use this when the user's task is fully complete. Leave parameters empty.
 - escalate: Use this to ask the user a clarifying question before proceeding. Set the question as the description.
 
+DECISION RULES:
+- If the latest successful result already satisfies the user's request, choose finish.
+- Do NOT repeat the same capability with materially identical parameters after success unless the prior result was empty or incomplete.
+- Prefer the minimum number of steps needed to complete the task.
+
 Your job: output the singular NEXT step to take. Output strictly as JSON.
 """
+        prompt_guidance = self._compose_prompt_guidance(request)
+        if prompt_guidance:
+            sys_prompt += f"\nAGENT-SPECIFIC RULES:\n{prompt_guidance}\n"
         
         # Prepare context payload
-        user_content = f"Task: {request.prompt}\n\nUnderstanding: {understanding}\n\n"
+        understanding_summary = self._serialize_for_llm(
+            understanding, self.config.max_llm_context_chars
+        )
+        user_content = (
+            f"Task: {request.prompt}\n\n"
+            f"Understanding: {understanding_summary}\n\n"
+        )
         if previous_results:
-            user_content += "Previous Step Results:\n"
-            for i, res in enumerate(previous_results, 1):
-                user_content += f"Step {i}: Success={res.success}, Output={str(res.data)[:500]}\n"
+            user_content += (
+                "Previous Step Results:\n"
+                + self._summarize_previous_results_for_llm(previous_results)
+                + "\n"
+            )
         
-        user_content += f"\nCurrent State Context:\n{str(step_context)[:2000]}\n\n"
+        user_content += (
+            "\nCurrent State Context:\n"
+            f"{self._serialize_for_llm(step_context, self.config.max_llm_context_chars)}\n\n"
+        )
         user_content += f"Determine Step {step_num}."
 
         messages = [
@@ -610,6 +1081,7 @@ Your job: output the singular NEXT step to take. Output strictly as JSON.
         Use LLM to understand the task intent and requirements.
         """
         capabilities_context = self.capability_registry.to_llm_context()
+        prompt_guidance = self._compose_prompt_guidance(request)
 
         system_prompt = f"""You are an intelligent agent understanding system.
 You are running LOCALLY on the user's machine with FULL access to the local filesystem.
@@ -618,6 +1090,8 @@ Analyze the user's request and extract key information.
 
 You have these capabilities available:
 {capabilities_context}"""
+        if prompt_guidance:
+            system_prompt += f"\n\nAGENT-SPECIFIC RULES:\n{prompt_guidance}"
 
         user_prompt = f"""User Request: {request.prompt}
 
@@ -658,6 +1132,7 @@ Respond with structured JSON."""
         Use LLM to create execution plan with capabilities.
         """
         capabilities_context = self.capability_registry.to_llm_context()
+        prompt_guidance = self._compose_prompt_guidance(request)
 
         # Build session context: tell the LLM what data is already loaded
         session_context = ""
@@ -705,6 +1180,8 @@ Guidelines:
 - Include fallback options for critical steps
 - If data is already loaded, reference it by file_id and thread_id — do NOT re-load it
 - If a file path is mentioned, use it directly with load_file — you have full filesystem access"""
+        if prompt_guidance:
+            system_prompt += f"\n\nAGENT-SPECIFIC RULES:\n{prompt_guidance}"
 
         user_prompt = f"""Task Understanding:
 - Intent: {understanding.get("intent")}
@@ -797,11 +1274,11 @@ Respond with structured JSON."""
 
         logger.debug(f"Executing step {step.step_number}: {step.capability_name}")
 
-        # Ensure thread_id is always present in params (LLM plans often omit it)
+        # Always enforce correct thread_id from request context.
+        # LLM plans often omit it OR pass wrong values ("", null, "default"),
+        # which would create a new empty session instead of using the loaded data.
         params = dict(step.parameters)
-        # Use context.thread_id if available, otherwise default to "default"
-        if "thread_id" not in params:
-            params["thread_id"] = context.thread_id if context.thread_id else "default"
+        params["thread_id"] = context.thread_id if context.thread_id else "default"
 
         # Execute capability
         result = await capability.execute(
@@ -828,13 +1305,9 @@ Guidelines:
 - Provide actionable insights
 - Use natural, helpful language"""
 
-        # Build results summary
-        results_summary = "\n".join(
-            [
-                f"Step {i + 1}: {'Success' if r.success else 'Failed'} - {r.data if r.success else r.error}"
-                for i, r in enumerate(results)
-            ]
-        )
+        # Build results summary with bounded context so synthesis does not
+        # inherit large intermediate payloads.
+        results_summary = self._summarize_previous_results_for_llm(results)
 
         user_prompt = f"""Original Request: {request.prompt}
 Task Intent: {understanding.get("intent")}
@@ -892,6 +1365,7 @@ Respond with structured JSON."""
         """
         Use LLM to analyze error and plan recovery strategy.
         """
+        prompt_guidance = self._compose_prompt_guidance(request)
         system_prompt = """You are an error recovery planning system.
 You are running LOCALLY on the user's machine with FULL access to the local filesystem.
 You CAN read and write files at any path. Never escalate just because a file path was mentioned — you CAN access it.
@@ -904,6 +1378,8 @@ Strategies:
 4. FAIL - Cannot recover (critical error)
 
 Prefer RETRY over ESCALATE when the error is about missing data or wrong parameters."""
+        if prompt_guidance:
+            system_prompt += f"\n\nAGENT-SPECIFIC RULES:\n{prompt_guidance}"
 
         capabilities_context = self.capability_registry.to_llm_context()
 

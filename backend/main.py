@@ -5,19 +5,18 @@ import json
 import asyncio
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from fastapi import UploadFile, File
 from aiofiles import open as aio_open
-
+from pathlib import Path
 
 import os
 import subprocess
 import sys
 import platform
-import socket
 import re
 
 # Ensure both import styles resolve without requiring external PYTHONPATH.
@@ -44,7 +43,7 @@ import httpx
 CONVERSATION_HISTORY_DIR = "conversation_history"
 from database import SessionLocal, get_db
 from models import Agent, StatusEnum, Workflow, WorkflowExecution, UserThread, WorkflowSchedule, WorkflowWebhook
-from backend.schemas import ProcessRequest, ProcessResponse, PlanResponse, FileObject, ActionApprovalRequest, ActionRejectRequest
+from backend.schemas import ProcessRequest, ProcessResponse, PlanResponse, FileObject, ActionApprovalRequest, ActionRejectRequest, ExposedFile
 from backend.orchestrator.graph import create_graph_with_checkpointer, create_execution_subgraph, serialize_complex_object
 from langgraph.checkpoint.memory import MemorySaver
 from routers import connect_router
@@ -789,181 +788,8 @@ class UpdateScheduleRequest(BaseModel):
     error_message: Optional[str] = None
 
 # --- Agent Server Startup ---
-def is_port_in_use(port: int) -> bool:
-    """Checks if a local port is already in use."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        return s.connect_ex(('127.0.0.1', port)) == 0
-
-def wait_for_port(port: int, agent_file: str, timeout: int = 15):
-    """Waits for a network port to become active."""
-    start_time = time.time()
-    logger.info(f"Waiting for agent '{agent_file}' to start on port {port}...")
-    while time.time() - start_time < timeout:
-        if is_port_in_use(port):
-            logger.info(f"Agent '{agent_file}' is now running on port {port}.")
-            return True
-        time.sleep(0.5)
-    logger.error(f"Agent '{agent_file}' did not start on port {port} within {timeout} seconds.")
-    return False
-
-def start_agent_servers():
-    """
-    Finds and starts agent servers, with enhanced logging and better error handling
-    to track which agents start successfully and which fail.
-    """
-    global agent_processes
-    
-    # Use absolute path based on the project root directory
-    project_root = os.path.dirname(os.path.abspath(__file__))  # This gets the backend directory
-    agents_dir = os.path.join(project_root, "agents")
-    
-    if not os.path.isdir(agents_dir):
-        logger.warning(f"'{agents_dir}' directory not found. Skipping agent server startup.")
-        return
-
-    logs_dir = "logs"
-    os.makedirs(logs_dir, exist_ok=True)
-    logger.info(f"Agent logs will be stored in the '{logs_dir}' directory.")
-
-    started_agents = []
-    failed_agents = []
-
-    # UAP: Read from SKILL.md definitions (Source of Truth)
-    agent_configs = {}
-    
-    # SKILL.md directories to scan (each contains SKILL.md with port)
-    skill_dirs = [
-        ("spreadsheet_agent", "spreadsheet_agent/__init__.py"),
-        ("mail_agent", "mail_agent/agent.py"),
-        ("gmail_agent", "gmail_agent/__init__.py"),
-        ("browser_agent", "browser_agent/__init__.py"),
-        ("document_agent_lib", "document_agent_lib/__init__.py"),
-        ("zoho_books", "zoho_books/zoho_books_agent.py"),
-    ]
-    
-    import yaml
-    for skill_dir, script_path in skill_dirs:
-        skill_file = os.path.join(agents_dir, skill_dir, "SKILL.md")
-        full_script_path = os.path.join(agents_dir, script_path)
-        
-        if not os.path.exists(skill_file):
-            continue
-            
-        if not os.path.exists(full_script_path):
-            logger.warning(f"Script not found for {skill_dir}: {script_path}")
-            continue
-            
-        try:
-            with open(skill_file, 'r', encoding='utf-8') as f:
-                content = f.read()
-                # Extract YAML frontmatter
-                if content.startswith('---'):
-                    parts = content.split('---', 2)
-                    if len(parts) >= 3:
-                        yaml_content = parts[1]
-                        config = yaml.safe_load(yaml_content)
-                        port = config.get('port')
-                        if port:
-                            agent_configs[script_path] = int(port)  # Store relative path, not full path
-                            logger.info(f"UAP: Found {skill_dir} on port {port}")
-        except Exception as e:
-            logger.warning(f"Failed to parse SKILL.md for {skill_dir}: {e}")
-
-    logger.info(f"Target Agent Configurations: {len(agent_configs)} agents")
-
-    for agent_file, port in agent_configs.items():
-        agent_path = os.path.join(agents_dir, agent_file)
-        # Extract agent name from path (e.g., "spreadsheet_agent/__init__.py" -> "spreadsheet_agent")
-        agent_name = agent_file.split('/')[0].split('\\')[0]
-        
-        if is_port_in_use(port):
-            logger.info(f"Agent '{agent_name}' is already running on port {port}.")
-            started_agents.append({
-                'agent': agent_name,
-                'port': port,
-                'status': 'already_running'
-            })
-            continue
-
-        logger.info(f"Attempting to start '{agent_name}' on port {port}...")
-        log_path = os.path.join(logs_dir, f"{agent_name}.log")
-
-        # Create the subprocess
-        process = None
-        try:
-            with open(log_path, 'w') as log_file:
-                if platform.system() == "Windows":
-                    process = subprocess.Popen(
-                        [sys.executable, agent_path],
-                        stdout=log_file,
-                        stderr=log_file,
-                        creationflags=subprocess.CREATE_NO_WINDOW
-                    )
-                else:
-                    process = subprocess.Popen(
-                        [sys.executable, agent_path],
-                        stdout=log_file,
-                        stderr=log_file
-                    )
-                agent_processes.append(process)
-        except Exception as e:
-            logger.error(f"Failed to start {agent_name}: {e}")
-            failed_agents.append({
-                'agent': agent_name,
-                'reason': f'Failed to spawn process: {e}',
-                'port': port
-            })
-            continue
-
-        # Wait for the port to be in use with a timeout
-        # With lazy imports and reload=False, agents should start quickly
-        agent_timeout = 15  # Reasonable timeout for fast startup
-        
-        if wait_for_port(port, agent_name, timeout=agent_timeout):
-            logger.info(f"Successfully started agent '{agent_name}' on port {port}")
-            started_agents.append({
-                'agent': agent_name,
-                'port': port,
-                'status': 'started',
-                'process': process
-            })
-        else:
-            logger.error(f"Timed out waiting for agent '{agent_name}' to start on port {port}")
-            failed_agents.append({
-                'agent': agent_name,
-                'reason': f'Timed out waiting for port {port} to become available',
-                'port': port
-            })
-            if process:
-                try:
-                    process.terminate()
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-
-
-
-    # Log summary of agent startup results
-    logger.info(f"Agent startup completed. Started: {len(started_agents)}, Failed: {len(failed_agents)}")
-    
-    if started_agents:
-        logger.info("Successfully started agents:")
-        for agent_info in started_agents:
-            logger.info(f"  - {agent_info['agent']} on port {agent_info['port']} ({agent_info['status']})")
-    
-    if failed_agents:
-        logger.error("Failed to start agents:")
-        for agent_info in failed_agents:
-            logger.error(f"  - {agent_info['agent']}: {agent_info['reason']}")
-        
-        # Provide detailed instructions for manual startup
-        logger.info("To start agents manually, run these commands in separate terminals:")
-        for agent_info in failed_agents:
-            agent_file = agent_info['agent']
-            agent_path = os.path.join(agents_dir, agent_file)
-            logger.info(f"  - python {agent_path}")
-    
-    logger.info("Agent startup check completed.")
+# NOTE: start_agent_servers() has been removed - it was dead code (never called).
+# The active agent startup logic is in start_agents_async() below.
 
 os.makedirs("storage/images", exist_ok=True)
 os.makedirs("storage/documents", exist_ok=True)
@@ -995,7 +821,7 @@ async def upload_files(files: List[UploadFile] = File(...)):
             
             # **FIX 3: Use pathlib for cross-platform path handling**
             from pathlib import Path as PathlibPath
-            save_dir = PathlibPath("storage") / f"{file_type}s"
+            save_dir = PathlibPath(__file__).parent / "storage" / f"{file_type}s"
             
             # Create storage directory if it doesn't exist
             try:
@@ -1046,30 +872,8 @@ async def upload_files(files: List[UploadFile] = File(...)):
     logger.info(f"Upload complete: {len(file_objects)} file(s) uploaded successfully")
     return file_objects
 
-@app.get("/api/files/{file_path:path}")
-async def serve_file(file_path: str):
-    """
-    Serves uploaded files (images, documents) from the storage directory.
-    """
-    # Decode the file path
-    from urllib.parse import unquote
-    file_path = unquote(file_path)
-    
-    # Security: ensure the path doesn't escape the storage directory
-    if ".." in file_path or file_path.startswith("/"):
-        raise HTTPException(status_code=400, detail="Invalid file path")
-    
-    # Check if file exists
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File not found")
-    
-    # Determine media type based on file extension
-    from mimetypes import guess_type
-    media_type, _ = guess_type(file_path)
-    
-    # Return the file
-    from fastapi.responses import FileResponse
-    return FileResponse(file_path, media_type=media_type)
+# NOTE: File serving is handled by the secure /files/{file_path:path} endpoint above
+# which includes proper authentication, path traversal protection, and MIME type detection.
 
 # --- Unified Orchestration Service ---
 async def execute_orchestration(
@@ -1346,17 +1150,25 @@ async def execute_orchestration(
             "canvas_title": current_conversation.get("canvas_title"),
 
             # --- NEW ORCHESTRATOR FIELDS ---
-            "todo_list": current_conversation.get("todo_list", []),
+            # Reset todo_list/execution state fresh for each new turn so the planner
+            # creates a new task plan rather than carrying over the previous turn's completed tasks.
+            "todo_list": [],
             "memory": current_conversation.get("memory", {}),
-            "iteration_count": current_conversation.get("iteration_count", 0),
-            "failure_count": current_conversation.get("failure_count", 0),
+            "iteration_count": 0,
+            "failure_count": 0,
             "max_iterations": 25,
             "action_history": current_conversation.get("action_history", []),
             "insights": current_conversation.get("insights", {}),
-            "execution_plan": current_conversation.get("execution_plan"),
-            "current_phase_id": current_conversation.get("current_phase_id"),
+            "execution_plan": None,
+            "current_phase_id": None,
             "pending_approval": current_conversation.get("pending_approval", False),
             "pending_decision": current_conversation.get("pending_decision"),
+            # If the user approved an action via the REST endpoint, carry the approved
+            # decision + flag forward so the brain skips re-planning and hands executes
+            # it directly. Without this, brain re-plans from scratch and picks a
+            # different agent, causing an infinite approval loop.
+            "pending_action_approval": current_conversation.get("pending_action_approval", False),
+            "decision": current_conversation.get("decision") if current_conversation.get("pending_action_approval") else None,
         }
         
         # Extract user_id from owner if available
@@ -1420,6 +1232,7 @@ async def execute_orchestration(
             "current_phase_id": None,
             "pending_approval": False,
             "pending_decision": None,
+            "pending_action_approval": False,
         }
         
         # Extract user_id from owner if available
@@ -1427,6 +1240,7 @@ async def execute_orchestration(
             initial_state["user_id"] = owner["user_id"]
             initial_state["owner_id"] = owner["user_id"]  # Add both for compatibility
         
+
         # --- NEW THREAD DB PERSISTENCE ---
         if owner and owner.get("user_id"):
             try:
@@ -1618,6 +1432,7 @@ async def execute_orchestration(
             logger.error(f"Failed to save conversation history for {thread_id}: {e}")
 
         # Plan file saving is handled by orchestrator checkpointer
+
 
         logger.info(f"Orchestration completed for thread_id: {thread_id}")
 
@@ -1946,16 +1761,22 @@ async def find_agents(request: ProcessRequest, api_request: Request):
             owner=owner
         )
 
-        # Check if workflow is paused for user input
-        if final_state.get("pending_user_input"):
-            logger.info(f"Workflow paused for user input in thread_id: {thread_id}")
+        # Check if workflow is paused for user input or approval
+        if final_state.get("pending_user_input") or final_state.get("pending_approval"):
+            logger.info(f"Workflow paused for user input/approval in thread_id: {thread_id}")
+            
+            # Extract the appropriate question/reason
+            question = final_state.get("question_for_user")
+            if not question and final_state.get("pending_decision"):
+                question = final_state.get("pending_decision").get("approval_reason")
+                
             return ProcessResponse(
-                message="Additional information required to complete your request.",
+                message="Additional information or authorization is required to complete your request.",
                 thread_id=thread_id,
                 task_agent_pairs=[],
                 final_response=None,
-                pending_user_input=True,
-                question_for_user=final_state.get("question_for_user")
+                pending_user_input=True,  # Frontend handles this uniformly
+                question_for_user=question
             )
 
         task_agent_pairs = final_state.get("task_agent_pairs", [])
@@ -1997,6 +1818,41 @@ async def find_agents(request: ProcessRequest, api_request: Request):
         state_registry = final_state.get('canvas_registry')
         state_active = final_state.get('active_canvas_id')
 
+        # Map created files to ExposedFile objects
+        exposed_files = []
+        created_files = final_state.get("created_files", [])
+        for f in created_files:
+            # Safely handle both dict and object formats from state
+            f_dict = f if isinstance(f, dict) else (f.dict() if hasattr(f, 'dict') else {})
+            if not f_dict: continue
+            
+            # Extract basic data
+            file_name = f_dict.get('file_name', 'Unnamed File')
+            file_id = f_dict.get('file_id') or f_dict.get('content_id') or str(uuid.uuid4())
+            file_path = f_dict.get('file_path', '')
+            file_type = f_dict.get('file_type', 'other')
+            
+            # Map paths to download URLs - use the relative paths for standard storage locations
+            from pathlib import Path
+            abs_path = Path(file_path)
+            # Find the path relative to the storage dir, or just use filename
+            try:
+                storage_idx = abs_path.parts.index('storage')
+                rel_parts = abs_path.parts[storage_idx+1:]
+                virtual_path = '/'.join(rel_parts)
+            except ValueError:
+                virtual_path = abs_path.name
+                
+            exposed_files.append(ExposedFile(
+                id=str(file_id),
+                name=file_name,
+                path=virtual_path,
+                type=file_type if file_type in ['image', 'document', 'spreadsheet', 'code', 'archive', 'other'] else 'other',
+                size_bytes=f_dict.get('size'),
+                mime_type=f_dict.get('mime_type'),
+                description=f_dict.get('content_summary', f"Generated {file_type} file")
+            ))
+
         return ProcessResponse(
             message="Successfully processed the request.",
             thread_id=thread_id,
@@ -2004,6 +1860,7 @@ async def find_agents(request: ProcessRequest, api_request: Request):
             final_response=final_response_str,
             pending_user_input=False,
             question_for_user=None,
+            exposed_files=exposed_files,
             # Canvas Registry (NEW)
             canvas_registry=registry_state if registry_state.canvases else None,
             active_canvas_id=canvas_registry.get_active_id() or state_active,
@@ -2112,6 +1969,37 @@ async def continue_conversation(user_response: UserResponse, api_request: Reques
         registry_state = canvas_registry.get_registry_state()
         compat = canvas_registry.get_backward_compat_fields()
 
+        # Map created files to ExposedFile objects
+        exposed_files = []
+        created_files = final_state.get("created_files", [])
+        for f in created_files:
+            f_dict = f if isinstance(f, dict) else (f.dict() if hasattr(f, 'dict') else {})
+            if not f_dict: continue
+            
+            file_name = f_dict.get('file_name', 'Unnamed File')
+            file_id = f_dict.get('file_id') or f_dict.get('content_id') or str(uuid.uuid4())
+            file_path = f_dict.get('file_path', '')
+            file_type = f_dict.get('file_type', 'other')
+            
+            from pathlib import Path
+            abs_path = Path(file_path)
+            try:
+                storage_idx = abs_path.parts.index('storage')
+                rel_parts = abs_path.parts[storage_idx+1:]
+                virtual_path = '/'.join(rel_parts)
+            except ValueError:
+                virtual_path = abs_path.name
+                
+            exposed_files.append(ExposedFile(
+                id=str(file_id),
+                name=file_name,
+                path=virtual_path,
+                type=file_type if file_type in ['image', 'document', 'spreadsheet', 'code', 'archive', 'other'] else 'other',
+                size_bytes=f_dict.get('size'),
+                mime_type=f_dict.get('mime_type'),
+                description=f_dict.get('content_summary', f"Generated {file_type} file")
+            ))
+
         return ProcessResponse(
             message="Successfully processed the continued conversation.",
             thread_id=user_response.thread_id,
@@ -2119,6 +2007,7 @@ async def continue_conversation(user_response: UserResponse, api_request: Reques
             final_response=final_response_str,
             pending_user_input=False,
             question_for_user=None,
+            exposed_files=exposed_files,
             canvas_registry=registry_state if registry_state.canvases else None,
             active_canvas_id=canvas_registry.get_active_id(),
             has_canvas=compat.get('has_canvas', False),
@@ -2271,6 +2160,7 @@ async def screenshots_websocket(websocket: WebSocket, thread_id: str):
 
 # NOTE: Workflow routes (/api/workflows/*, /api/schedules/*, /api/plan/*) are defined in routers/workflows_router.py
 # and included via app.include_router(workflows_router.router)
+@app.post("/api/workflows", tags=["Workflows"])
 async def save_workflow(request: Request, thread_id: str, name: str, description: str = "", db: Session = Depends(get_db)):
     """Save conversation as reusable workflow"""
     from auth import get_user_from_request
@@ -2463,6 +2353,71 @@ async def get_workflow(workflow_id: str, request: Request, db: Session = Depends
         "plan_graph": workflow.plan_graph,
         "created_at": workflow.created_at.isoformat()
     }
+
+@app.delete("/api/workflows/{workflow_id}", tags=["Workflows"])
+async def delete_workflow(workflow_id: str, request: Request, db: Session = Depends(get_db)):
+    """Delete a saved workflow and its associated schedules"""
+    from auth import get_user_from_request
+
+    user = get_user_from_request(request)
+    user_id = user.get("sub") or user.get("user_id") or user.get("id")
+
+    workflow = db.query(Workflow).filter_by(workflow_id=workflow_id, user_id=user_id).first()
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    # Cancel any active schedules for this workflow
+    try:
+        from backend.services.workflow_scheduler import get_scheduler
+        scheduler = get_scheduler()
+        schedules = db.query(WorkflowSchedule).filter_by(workflow_id=workflow_id).all()
+        for schedule in schedules:
+            try:
+                scheduler.remove_schedule(str(schedule.schedule_id))
+            except Exception:
+                pass
+    except Exception as e:
+        logger.warning(f"Could not cancel schedules for workflow {workflow_id}: {e}")
+
+    db.delete(workflow)
+    db.commit()
+    logger.info(f"Workflow {workflow_id} deleted by user {user_id}")
+    return {"status": "deleted", "workflow_id": workflow_id}
+
+
+@app.post("/api/workflows/{workflow_id}/clone", tags=["Workflows"])
+async def clone_workflow(workflow_id: str, request: Request, body: Dict[str, Any] = Body(default={}), db: Session = Depends(get_db)):
+    """Clone an existing workflow with an optional new name"""
+    from auth import get_user_from_request
+
+    user = get_user_from_request(request)
+    user_id = user.get("sub") or user.get("user_id") or user.get("id")
+
+    source = db.query(Workflow).filter_by(workflow_id=workflow_id, user_id=user_id).first()
+    if not source:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    new_id = str(uuid.uuid4())
+    new_name = body.get("new_name") or f"Copy of {source.name}"
+
+    clone = Workflow(
+        workflow_id=new_id,
+        user_id=user_id,
+        name=new_name,
+        description=source.description,
+        blueprint={**(source.blueprint or {}), "workflow_id": new_id},
+        plan_graph=source.plan_graph,
+    )
+    db.add(clone)
+    db.commit()
+    logger.info(f"Workflow {workflow_id} cloned as {new_id} by user {user_id}")
+    return {
+        "workflow_id": new_id,
+        "name": new_name,
+        "description": clone.description,
+        "status": "cloned",
+    }
+
 
 @app.post("/api/workflows/{workflow_id}/execute", tags=["Workflows"])
 async def execute_workflow(workflow_id: str, request: Request, inputs: Dict[str, Any] = Body(default={}), db: Session = Depends(get_db)):
@@ -3110,12 +3065,27 @@ async def websocket_workflow_execute(websocket: WebSocket, workflow_id: str, tok
         if db:
             db.close()
 
+def _sanitize_for_json(obj):
+    """Recursively replace NaN/Infinity float values with None (JSON null).
+    Python's json module serializes float('nan') as NaN which is invalid JSON."""
+    import math
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_for_json(v) for v in obj]
+    return obj
+
+
 async def safe_websocket_send(websocket: WebSocket, data: dict, thread_id: str = "unknown"):
     """
     Safely send JSON data through WebSocket, handling closed connections gracefully.
     """
     try:
-        await websocket.send_json(data)
+        await websocket.send_json(_sanitize_for_json(data))
         return True
     except Exception as e:
         # Connection is closed or broken - log as error to debug issues
@@ -3176,6 +3146,7 @@ async def websocket_chat(websocket: WebSocket):
                 owner = {"user_id": owner}
             elif owner and not isinstance(owner, dict):
                 owner = None
+
             planning_mode = data.get("planning_mode", False)  # Get planning mode flag
 
             logger.info(f"WebSocket received message with thread_id: {thread_id}, planning_mode: {planning_mode}")
@@ -3322,6 +3293,28 @@ async def websocket_chat(websocket: WebSocket):
 
             logger.info(f"Received {'prompt' if prompt else 'user response'} for thread_id {thread_id}")
 
+            # Register UserThread in DB BEFORE sending __start__ so that the
+            # 'conversation-created' event that the frontend dispatches on __start__
+            # can immediately find this conversation in GET /api/conversations.
+            if owner and prompt:
+                owner_id_for_reg = owner.get("user_id") or owner.get("sub") if isinstance(owner, dict) else str(owner)
+                if owner_id_for_reg:
+                    try:
+                        from database import SessionLocal as _SL
+                        from models import UserThread as _UT
+                        _db = _SL()
+                        try:
+                            existing = _db.query(_UT).filter_by(thread_id=thread_id).first()
+                            if not existing:
+                                clean_title = (prompt[:97] + "...") if len(prompt) > 100 else prompt
+                                _db.add(_UT(thread_id=thread_id, user_id=owner_id_for_reg, title=clean_title))
+                                _db.commit()
+                                logger.info(f"Pre-registered UserThread {thread_id} for user {owner_id_for_reg}")
+                        finally:
+                            _db.close()
+                    except Exception as _pre_reg_err:
+                        logger.warning(f"Pre-registration of UserThread failed (non-fatal): {_pre_reg_err}")
+
             # Send acknowledgment
             await websocket.send_json({
                 "node": "__start__",
@@ -3453,58 +3446,96 @@ async def websocket_chat(websocket: WebSocket):
                 except Exception as e:
                     logger.error(f"Error in stream_callback: {e}", exc_info=True)
             
+            # Monotonic sequence counter for task events — lets the frontend
+            # enforce delivery order (task_started always before task_completed).
+            _task_event_seq = {"n": 0}
+
+            def _next_seq() -> int:
+                _task_event_seq["n"] += 1
+                return _task_event_seq["n"]
+
             # Define task event callback for REAL-TIME task status streaming
             async def task_event_callback(event: dict):
                 """Stream task events in real-time as tasks start/complete"""
                 try:
                     event_type = event.get("event_type")
                     task_name = event.get("task_name")
-                    
+                    seq = _next_seq()
+
                     if event_type == "task_started":
                         # Generate activity description (clean one-liner for UI)
                         task_desc = event.get("task_description", "")
-                        activity_desc = task_desc.split('.')[0] if task_desc else task_name
-                        if len(activity_desc) > 80:
+                        activity_desc = event.get("activity_description") or (
+                            task_desc.split('.')[0] if task_desc else task_name
+                        )
+                        if activity_desc and len(activity_desc) > 80:
                             activity_desc = activity_desc[:77] + "..."
-                        
+
                         await safe_websocket_send(websocket, {
                             "node": "task_started",
+                            "seq": seq,
                             "thread_id": thread_id,
                             "task_name": task_name,
                             "task_description": task_desc,
                             "activity_description": activity_desc,
                             "agent_name": event.get("agent_name"),
-                            "timestamp": event.get("timestamp", time.time())
+                            "timestamp": event.get("timestamp", time.time()),
                         }, thread_id)
-                        logger.info(f"📡 REAL-TIME: Task started - '{task_name}'")
-                        
+                        logger.info(f"📡 REAL-TIME: Task started - '{task_name}' (seq={seq})")
+
                     elif event_type == "task_completed":
-                        # Include result summary if available
                         result_summary = event.get("result_summary", "Completed successfully")
-                        
+
                         await safe_websocket_send(websocket, {
                             "node": "task_completed",
+                            "seq": seq,
                             "thread_id": thread_id,
                             "task_name": task_name,
                             "task_description": event.get("task_description"),
                             "result_summary": result_summary,
                             "agent_name": event.get("agent_name"),
                             "execution_time": event.get("execution_time", 0),
-                            "timestamp": event.get("timestamp", time.time())
+                            "timestamp": event.get("timestamp", time.time()),
                         }, thread_id)
-                        logger.info(f"📡 REAL-TIME: Task completed - '{task_name}' ({event.get('execution_time', 0):.2f}s)")
-                        
+                        logger.info(
+                            f"📡 REAL-TIME: Task completed - '{task_name}' "
+                            f"({event.get('execution_time', 0):.2f}s, seq={seq})"
+                        )
+
                     elif event_type == "task_failed":
                         await safe_websocket_send(websocket, {
                             "node": "task_failed",
+                            "seq": seq,
                             "thread_id": thread_id,
                             "task_name": task_name,
+                            "task_description": event.get("task_description"),
                             "error": event.get("error"),
+                            "agent_name": event.get("agent_name"),
                             "execution_time": event.get("execution_time", 0),
-                            "timestamp": event.get("timestamp", time.time())
+                            "timestamp": event.get("timestamp", time.time()),
                         }, thread_id)
-                        logger.warning(f"📡 REAL-TIME: Task failed - '{task_name}': {event.get('error')}")
-                        
+                        logger.warning(
+                            f"📡 REAL-TIME: Task failed - '{task_name}': "
+                            f"{event.get('error')} (seq={seq})"
+                        )
+
+                    elif event_type == "task_progress":
+                        # Real-time agent progress message (from SSE stream)
+                        message = event.get("message", "")
+                        if message:
+                            await safe_websocket_send(websocket, {
+                                "node": "task_progress",
+                                "seq": seq,
+                                "thread_id": thread_id,
+                                "task_name": task_name,
+                                "activity_description": message,
+                                "agent_name": event.get("agent_name"),
+                                "timestamp": event.get("timestamp", time.time()),
+                            }, thread_id)
+                            logger.debug(
+                                f"📡 REAL-TIME: Task progress - '{task_name}': {message} (seq={seq})"
+                            )
+
                 except Exception as e:
                     logger.error(f"Error in task_event_callback: {e}", exc_info=True)
 
@@ -3657,16 +3688,61 @@ async def websocket_chat(websocket: WebSocket):
                     "warning": f"Some data could not be processed: {str(serialize_err)[:100]}"
                 }
 
+            # Map created files to ExposedFile dicts for the frontend
+            exposed_files = []
+            created_files = final_state.get("created_files", [])
+            for f in created_files:
+                f_dict = f if isinstance(f, dict) else (f.dict() if hasattr(f, 'dict') else {})
+                if not f_dict: continue
+                
+                file_name = f_dict.get('file_name', 'Unnamed File')
+                file_id = f_dict.get('file_id') or f_dict.get('content_id') or str(uuid.uuid4())
+                file_path = f_dict.get('file_path', '')
+                file_type = f_dict.get('file_type', 'other')
+                
+                from pathlib import Path
+                abs_path = Path(file_path)
+                try:
+                    storage_idx = abs_path.parts.index('storage')
+                    rel_parts = abs_path.parts[storage_idx+1:]
+                    virtual_path = '/'.join(rel_parts)
+                except ValueError:
+                    virtual_path = abs_path.name
+                    
+                exposed_files.append({
+                    "id": str(file_id),
+                    "name": file_name,
+                    "path": virtual_path,
+                    "type": file_type if file_type in ['image', 'document', 'spreadsheet', 'code', 'archive', 'other'] else 'other',
+                    "size_bytes": f_dict.get('size'),
+                    "mime_type": f_dict.get('mime_type'),
+                    "description": f_dict.get('content_summary', f"Generated {file_type} file")
+                })
+
             # Try to send the __end__ event, but handle if connection is already closed
             try:
-                await websocket.send_json({
+                # Explicitly surface the most important fields so the frontend
+                # doesn't have to dig through the nested state dict.
+                end_payload = {
                     "node": "__end__",
                     "thread_id": thread_id,
-                    "data": serializable_state, # Send the entire state object
+                    # --- Top-level convenience fields ---
+                    "final_response": final_state.get("final_response"),
+                    "canvas_display": (
+                        final_state.get("canvas_data")
+                        or final_state.get("canvas_display")
+                    ),
+                    "canvas_type": final_state.get("canvas_type"),
+                    "canvas_title": final_state.get("canvas_title"),
+                    "has_canvas": final_state.get("has_canvas", False),
+                    "exposed_files": exposed_files,
+                    # --- Full serialized state for components that need it ---
+                    "data": serializable_state,
                     "message": "Agent orchestration completed successfully.",
                     "status": "completed",
-                    "timestamp": time.time()
-                })
+                    "timestamp": time.time(),
+                }
+                await safe_websocket_send(websocket, end_payload, thread_id)
                 logger.info(f"WebSocket stream completed successfully for thread_id {thread_id}")
             except Exception as send_error:
                 # Connection might be closed already - that's okay, the data is saved in the database
@@ -4032,45 +4108,6 @@ def cleanup_agents():
                 pass
     agent_processes = []
     agent_status.clear()
-
-async def wait_for_agent_ready(agent_name: str, port: int, timeout: float = 30.0) -> bool:
-    """
-    Wait for a specific agent to be ready by checking its health endpoint.
-    Returns True if agent is ready, False if timeout or failed.
-    """
-    import time
-    
-    start_time = time.time()
-    # Try /health first (standard), then fall back to / for legacy agents
-    health_endpoints = [f"http://localhost:{port}/health", f"http://localhost:{port}/"]
-    
-    while time.time() - start_time < timeout:
-        async with agent_status_lock:
-            status = agent_status.get(agent_name, {}).get('status')
-            if status == 'ready':
-                return True
-            elif status == 'failed':
-                return False
-        
-        # Try to connect to the agent using multiple endpoints
-        for health_url in health_endpoints:
-            try:
-                async with httpx.AsyncClient(timeout=2.0) as client:
-                    response = await client.get(health_url)
-                    if response.status_code == 200:
-                        async with agent_status_lock:
-                            if agent_name in agent_status:
-                                agent_status[agent_name]['status'] = 'ready'
-                        return True
-            except:
-                pass
-        
-        await asyncio.sleep(0.5)
-    
-    async with agent_status_lock:
-        if agent_name in agent_status:
-            agent_status[agent_name]['status'] = 'failed'
-    return False
 
 async def check_agent_health_background():
     """Background task to check agent health and update status"""

@@ -127,9 +127,8 @@ class FileProcessor:
         )
         
         # Save vector store
-        # Fix: Use absolute path to project root to avoid backend/storage split
-        PROJECT_ROOT = Path(__file__).parent.parent.parent.resolve()
-        storage_dir = PROJECT_ROOT / "storage" / "vector_store"
+        from backend.storage_config import VECTOR_STORE_DIR
+        storage_dir = VECTOR_STORE_DIR
         index_path = str(storage_dir / f"{os.path.basename(file_path)}.faiss")
         
         # Ensure directory exists

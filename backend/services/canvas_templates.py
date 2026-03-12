@@ -153,7 +153,7 @@ CANVAS_TEMPLATES: Dict[str, Dict[str, Any]] = {
             }
         },
         "default_config": {"zoom": 125},
-        "agent_hints": ["document_agent"],
+        "agent_hints": ["document_agent", "pdf_agent"],
     },
 
     "markdown_viewer": {
@@ -171,6 +171,67 @@ CANVAS_TEMPLATES: Dict[str, Dict[str, Any]] = {
         },
         "default_config": {},
         "agent_hints": ["document_agent", "universal_agent"],
+    },
+
+    # ------------------------------------------------------------------
+    # PRESENTATION TEMPLATES
+    # ------------------------------------------------------------------
+    "pptx_viewer": {
+        "template_id": "pptx_viewer",
+        "canvas_type": "pptx",
+        "display_name": "Presentation Viewer",
+        "description": "Embedded PPTX presentation viewer with slide navigation and download",
+        "category": "document",
+        "data_schema": {
+            "required": ["file_path"],
+            "properties": {
+                "file_path": {"type": "string", "description": "Path to PPTX file"},
+                "pptx_data": {"type": "string", "description": "Base64-encoded PPTX (alternative to file_path)"},
+                "title": {"type": "string"},
+                "status": {"type": "string", "enum": ["preview", "created", "edited"]},
+                "slide_count": {"type": "integer"},
+            }
+        },
+        "default_config": {},
+        "agent_hints": ["ppt_agent"],
+    },
+
+    "pptx_summary": {
+        "template_id": "pptx_summary",
+        "canvas_type": "markdown",
+        "display_name": "Presentation Summary",
+        "description": "Structured slide-by-slide summary of a PPTX, with layout info and text preview per slide",
+        "category": "document",
+        "data_schema": {
+            "required": ["content"],
+            "properties": {
+                "content": {"type": "string", "description": "Markdown summary of all slides"},
+                "title": {"type": "string"},
+                "slide_count": {"type": "integer"},
+                "file_path": {"type": "string"},
+            }
+        },
+        "default_config": {},
+        "agent_hints": ["ppt_agent"],
+    },
+
+    "pdf_summary": {
+        "template_id": "pdf_summary",
+        "canvas_type": "markdown",
+        "display_name": "PDF Summary",
+        "description": "Structured text extraction or metadata summary from a PDF document",
+        "category": "document",
+        "data_schema": {
+            "required": ["content"],
+            "properties": {
+                "content": {"type": "string", "description": "Extracted text or metadata summary as markdown"},
+                "title": {"type": "string"},
+                "page_count": {"type": "integer"},
+                "file_path": {"type": "string"},
+            }
+        },
+        "default_config": {},
+        "agent_hints": ["pdf_agent"],
     },
 
     # ------------------------------------------------------------------

@@ -39,9 +39,8 @@ from utils.mega_logger import setup_mega_logger
 
 logger = setup_mega_logger("ArtifactStore")
 
-# Base storage path
-STORAGE_BASE = Path(__file__).parent.parent / "storage"
-ARTIFACTS_BASE = STORAGE_BASE / "artifacts"
+# Centralized storage paths
+from backend.storage_config import STORAGE_ROOT as STORAGE_BASE, ARTIFACTS_DIR as ARTIFACTS_BASE
 
 # ── Lazy-loaded embedding model (shared across all stores) ───────────────────
 _embed_lock = threading.Lock()
@@ -1005,3 +1004,33 @@ def get_artifact_store(user_id: str = "default") -> ArtifactStore:
     if user_id not in _stores:
         _stores[user_id] = ArtifactStore(user_id)
     return _stores[user_id]
+
+
+# =============================================================================
+# STARTUP PRE-LOADING (Background initialization)
+# =============================================================================
+
+def _preload_embedding_model_async():
+    """
+    Pre-load embedding model in background after server starts.
+    
+    Thread-safe: Uses existing double-checked locking in _get_embed_model().
+    Benefit: First user message is fast (~200-800ms) if sent >14s after startup.
+    
+    If a request arrives before pre-loading completes, it will wait for the
+    model to finish loading (graceful degradation to lazy-loading behavior).
+    """
+    def _load():
+        try:
+            _get_embed_model()
+            logger.info("✅ ArtifactStore: Embedding model pre-loaded (background)")
+        except Exception as e:
+            logger.warning(f"⚠️ ArtifactStore: Embedding model pre-load failed: {e}")
+    
+    # Daemon thread: won't block server shutdown
+    threading.Thread(target=_load, daemon=True, name="ArtifactEmbeddingPreload").start()
+    logger.info("🔄 ArtifactStore: Embedding model pre-load started (background)")
+
+
+# Trigger pre-loading at module import time (server startup)
+_preload_embedding_model_async()

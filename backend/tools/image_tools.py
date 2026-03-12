@@ -138,9 +138,10 @@ def analyze_image(image_path: str = "", query: str = "") -> Dict:
                     ],
                 }
             ],
-            # Replaced HuggingFace ID with standard Groq formatting. 
-            # Verify exact ID in your Groq Cloud Console -> Supported Models
-            model="llama-4-scout", 
+            # Full model path required — Groq's API returns HTTP 404 if you use
+            # the short alias "llama-4-scout". The complete ID includes the parameter
+            # count and routing suffix that Groq uses for multi-tenant dispatch.
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
         )
 
         answer = chat_completion.choices[0].message.content

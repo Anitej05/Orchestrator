@@ -61,6 +61,28 @@ class GmailAgent(BaseAgent):
         self.memory = agent_memory
         
         logger.info(f"GmailAgent initialized with config: {self.config}")
+
+    def _get_prompt_guidance(self, request=None) -> str:
+        """
+        Gmail-specific rules for the shared BaseAgent prompts.
+
+        Gmail access is already bound to the authenticated Orbimesh user via
+        request.user_id / context.user_id and the active Composio connection.
+        The model should not invent a separate "Gmail user ID" requirement for
+        inbox reads or searches.
+        """
+        return (
+            "- The Gmail account is already authenticated through the active "
+            "Composio connection for this Orbimesh user.\n"
+            "- Use the connected Gmail account by default for inbox reads, "
+            "searches, drafts, labels, and settings.\n"
+            "- Do NOT ask the user for their Gmail address, Gmail user ID, or "
+            "confirmation that the connected account exists just to read or "
+            "search their own inbox.\n"
+            "- Only ask for an email address when the task specifically needs "
+            "a recipient, sender filter, CC/BCC target, or another explicit "
+            "email field required by the Gmail action."
+        )
     
     def register_capabilities(self) -> None:
         """Register Gmail capabilities."""
@@ -127,6 +149,7 @@ class GmailAgent(BaseAgent):
         try:
             # Get user_id from ExecutionContext (set by BaseAgent)
             user_id = context.user_id
+
             
             # Extract query from params
             query = params.get("query") or params.get("prompt", "")
@@ -196,6 +219,7 @@ class GmailAgent(BaseAgent):
         try:
             # Get user_id from ExecutionContext (set by BaseAgent)
             user_id = context.user_id
+
             
             to = params.get("to")
             subject = params.get("subject")
@@ -261,6 +285,7 @@ class GmailAgent(BaseAgent):
             # Get user_id from ExecutionContext (set by BaseAgent)
             user_id = context.user_id
             
+
             message_id = params.get("message_id")
             body = params.get("body")
             
@@ -319,6 +344,7 @@ class GmailAgent(BaseAgent):
             # Get user_id from ExecutionContext (set by BaseAgent)
             user_id = context.user_id
             
+
             message_id = params.get("message_id")
             
             if not message_id:
@@ -453,3 +479,417 @@ class GmailAgent(BaseAgent):
             logger.error(f"[extract_action_items] Error: {e}")
             return AgentResponse.error(f"Extraction failed: {str(e)}")
 
+    # ------------------------------------------------------------------
+    # NEW CAPABILITIES (v2 — covers remaining Composio Gmail tools)
+    # ------------------------------------------------------------------
+
+    @capability(
+        name="forward_email",
+        description="Forward an email to another recipient",
+        parameters=[
+            ParameterSchema(
+                name="message_id",
+                type="string",
+                description="Message ID of the email to forward",
+                required=True,
+            ),
+            ParameterSchema(
+                name="to",
+                type="string",
+                description="Recipient email to forward to",
+                required=True,
+            ),
+            ParameterSchema(
+                name="additional_message",
+                type="string",
+                description="Optional message to include above the forwarded email",
+                required=False,
+            ),
+        ]
+    )
+    async def forward_email(self, params: Dict[str, Any], context: ExecutionContext) -> AgentResponse:
+        """Forward an email to another recipient."""
+        try:
+            user_id = context.user_id
+            message_id = params.get("message_id")
+            to = params.get("to")
+            if not message_id or not to:
+                return AgentResponse.error("Missing required: message_id, to")
+
+            service = self._get_service(user_id)
+            result = await service.tools.forward_message(
+                message_id=message_id,
+                to=to,
+                additional_message=params.get("additional_message"),
+            )
+            if result.get("success"):
+                return AgentResponse.success(
+                    result=result.get("data", {}),
+                    summary=f"Email forwarded to {to}"
+                )
+            return AgentResponse.error(result.get("error", "Forward failed"))
+        except Exception as e:
+            logger.error(f"[forward_email] Error: {e}")
+            return AgentResponse.error(f"Forward failed: {str(e)}")
+
+    @capability(
+        name="manage_drafts",
+        description="Manage email drafts: get, update, list, send, or delete a draft",
+        parameters=[
+            ParameterSchema(
+                name="action",
+                type="string",
+                description="Action: 'get', 'update', 'list', 'send', or 'delete'",
+                required=True,
+            ),
+            ParameterSchema(
+                name="draft_id",
+                type="string",
+                description="Draft ID (required for get/update/send/delete)",
+                required=False,
+            ),
+            ParameterSchema(
+                name="to",
+                type="string",
+                description="Recipient (for update)",
+                required=False,
+            ),
+            ParameterSchema(
+                name="subject",
+                type="string",
+                description="Subject (for update)",
+                required=False,
+            ),
+            ParameterSchema(
+                name="body",
+                type="string",
+                description="Body (for update)",
+                required=False,
+            ),
+        ]
+    )
+    async def manage_drafts(self, params: Dict[str, Any], context: ExecutionContext) -> AgentResponse:
+        """Manage email drafts."""
+        try:
+            user_id = context.user_id
+            action = (params.get("action") or "list").lower()
+            draft_id = params.get("draft_id")
+            service = self._get_service(user_id)
+
+            if action == "list":
+                result = await service.list_drafts()
+            elif action == "get" and draft_id:
+                result = await service.tools.get_draft(draft_id)
+            elif action == "update" and draft_id:
+                result = await service.tools.update_draft(
+                    draft_id=draft_id,
+                    to=params.get("to"),
+                    subject=params.get("subject"),
+                    body=params.get("body"),
+                )
+            elif action == "send" and draft_id:
+                result = await service.send_draft(draft_id)
+            elif action == "delete" and draft_id:
+                result = await service.delete_draft(draft_id)
+            else:
+                return AgentResponse.error(
+                    f"Invalid action '{action}' or missing draft_id"
+                )
+
+            if result.get("success"):
+                return AgentResponse.success(
+                    result=result.get("data", {}),
+                    summary=f"Draft {action} completed"
+                )
+            return AgentResponse.error(result.get("error", f"Draft {action} failed"))
+        except Exception as e:
+            logger.error(f"[manage_drafts] Error: {e}")
+            return AgentResponse.error(f"Draft operation failed: {str(e)}")
+
+    @capability(
+        name="manage_labels",
+        description="Manage Gmail labels: list, create, delete, or rename labels",
+        parameters=[
+            ParameterSchema(
+                name="action",
+                type="string",
+                description="Action: 'list', 'create', 'delete', or 'rename'",
+                required=True,
+            ),
+            ParameterSchema(
+                name="label_name",
+                type="string",
+                description="Label name (for create/rename)",
+                required=False,
+            ),
+            ParameterSchema(
+                name="label_id",
+                type="string",
+                description="Label ID (for delete/rename)",
+                required=False,
+            ),
+        ]
+    )
+    async def manage_labels(self, params: Dict[str, Any], context: ExecutionContext) -> AgentResponse:
+        """Manage Gmail labels."""
+        try:
+            user_id = context.user_id
+            action = (params.get("action") or "list").lower()
+            service = self._get_service(user_id)
+
+            if action == "list":
+                result = await service.list_labels()
+            elif action == "create" and params.get("label_name"):
+                result = await service.create_label(params["label_name"])
+            elif action == "delete" and params.get("label_id"):
+                result = await service.tools.delete_label(params["label_id"])
+            elif action == "rename" and params.get("label_id") and params.get("label_name"):
+                result = await service.tools.patch_label(
+                    label_id=params["label_id"],
+                    name=params["label_name"],
+                )
+            else:
+                return AgentResponse.error(
+                    f"Invalid action '{action}' or missing required parameters"
+                )
+
+            if result.get("success"):
+                return AgentResponse.success(
+                    result=result.get("data", {}),
+                    summary=f"Label {action} completed"
+                )
+            return AgentResponse.error(result.get("error", f"Label {action} failed"))
+        except Exception as e:
+            logger.error(f"[manage_labels] Error: {e}")
+            return AgentResponse.error(f"Label operation failed: {str(e)}")
+
+    @capability(
+        name="batch_operations",
+        description="Perform batch operations: archive, delete, label, or modify multiple emails at once",
+        parameters=[
+            ParameterSchema(
+                name="action",
+                type="string",
+                description="Action: 'delete', 'archive', 'label', 'mark_read', 'mark_unread', 'star', 'unstar'",
+                required=True,
+            ),
+            ParameterSchema(
+                name="message_ids",
+                type="array",
+                description="List of message IDs to apply the batch action to",
+                required=True,
+            ),
+            ParameterSchema(
+                name="label_ids",
+                type="array",
+                description="Label IDs to add (for 'label' action)",
+                required=False,
+            ),
+        ]
+    )
+    async def batch_operations(self, params: Dict[str, Any], context: ExecutionContext) -> AgentResponse:
+        """Perform batch operations on multiple emails."""
+        try:
+            user_id = context.user_id
+            action = (params.get("action") or "").lower()
+            message_ids = params.get("message_ids", [])
+            if not message_ids:
+                return AgentResponse.error("message_ids required")
+
+            service = self._get_service(user_id)
+
+            label_action_map = {
+                "archive": (None, ["INBOX"]),
+                "mark_read": (None, ["UNREAD"]),
+                "mark_unread": (["UNREAD"], None),
+                "star": (["STARRED"], None),
+                "unstar": (None, ["STARRED"]),
+            }
+
+            if action == "delete":
+                result = await service.tools.batch_delete_messages(message_ids)
+            elif action == "label" and params.get("label_ids"):
+                result = await service.tools.batch_modify_messages(
+                    message_ids=message_ids,
+                    add_label_ids=params["label_ids"],
+                )
+            elif action in label_action_map:
+                add_ids, remove_ids = label_action_map[action]
+                result = await service.tools.batch_modify_messages(
+                    message_ids=message_ids,
+                    add_label_ids=add_ids,
+                    remove_label_ids=remove_ids,
+                )
+            else:
+                return AgentResponse.error(
+                    f"Unknown action '{action}'. Use: delete, archive, label, "
+                    "mark_read, mark_unread, star, unstar"
+                )
+
+            if result.get("success"):
+                return AgentResponse.success(
+                    result=result.get("data", {}),
+                    summary=f"Batch {action} applied to {len(message_ids)} emails"
+                )
+            return AgentResponse.error(result.get("error", f"Batch {action} failed"))
+        except Exception as e:
+            logger.error(f"[batch_operations] Error: {e}")
+            return AgentResponse.error(f"Batch operation failed: {str(e)}")
+
+    @capability(
+        name="manage_filters",
+        description="Manage Gmail filters: list, create, or delete filter rules",
+        parameters=[
+            ParameterSchema(
+                name="action",
+                type="string",
+                description="Action: 'list', 'create', 'get', or 'delete'",
+                required=True,
+            ),
+            ParameterSchema(
+                name="filter_id",
+                type="string",
+                description="Filter ID (for get/delete)",
+                required=False,
+            ),
+            ParameterSchema(
+                name="criteria",
+                type="object",
+                description="Filter criteria (for create): {from, to, subject, query, hasAttachment, etc.}",
+                required=False,
+            ),
+            ParameterSchema(
+                name="filter_action",
+                type="object",
+                description="Filter action (for create): {addLabelIds, removeLabelIds, forward, skipInbox, markRead, star, etc.}",
+                required=False,
+            ),
+        ]
+    )
+    async def manage_filters(self, params: Dict[str, Any], context: ExecutionContext) -> AgentResponse:
+        """Manage Gmail filters."""
+        try:
+            user_id = context.user_id
+            action = (params.get("action") or "list").lower()
+            service = self._get_service(user_id)
+
+            if action == "list":
+                result = await service.tools.list_filters()
+            elif action == "get" and params.get("filter_id"):
+                result = await service.tools.get_filter(params["filter_id"])
+            elif action == "delete" and params.get("filter_id"):
+                result = await service.tools.delete_filter(params["filter_id"])
+            elif action == "create" and params.get("criteria") and params.get("filter_action"):
+                result = await service.tools.create_filter(
+                    criteria=params["criteria"],
+                    action=params["filter_action"],
+                )
+            else:
+                return AgentResponse.error(
+                    f"Invalid action '{action}' or missing required parameters"
+                )
+
+            if result.get("success"):
+                return AgentResponse.success(
+                    result=result.get("data", {}),
+                    summary=f"Filter {action} completed"
+                )
+            return AgentResponse.error(result.get("error", f"Filter {action} failed"))
+        except Exception as e:
+            logger.error(f"[manage_filters] Error: {e}")
+            return AgentResponse.error(f"Filter operation failed: {str(e)}")
+
+    @capability(
+        name="get_settings",
+        description="Get Gmail account settings: vacation auto-reply, forwarding, language, profile, send-as aliases",
+        parameters=[
+            ParameterSchema(
+                name="setting",
+                type="string",
+                description="Setting to retrieve: 'vacation', 'forwarding', 'language', 'profile', 'aliases'",
+                required=True,
+            ),
+        ]
+    )
+    async def get_settings(self, params: Dict[str, Any], context: ExecutionContext) -> AgentResponse:
+        """Get Gmail account settings."""
+        try:
+            user_id = context.user_id
+            setting = (params.get("setting") or "").lower()
+            service = self._get_service(user_id)
+
+            setting_methods = {
+                "vacation": service.tools.get_vacation_settings,
+                "forwarding": service.tools.get_auto_forwarding,
+                "language": service.tools.get_language_settings,
+                "profile": service.tools.get_profile,
+                "aliases": service.tools.list_send_as_aliases,
+            }
+
+            method = setting_methods.get(setting)
+            if not method:
+                return AgentResponse.error(
+                    f"Unknown setting '{setting}'. Use: vacation, forwarding, "
+                    "language, profile, aliases"
+                )
+
+            result = await method()
+            if result.get("success"):
+                return AgentResponse.success(
+                    result=result.get("data", {}),
+                    summary=f"Retrieved {setting} settings"
+                )
+            return AgentResponse.error(result.get("error", f"Failed to get {setting}"))
+        except Exception as e:
+            logger.error(f"[get_settings] Error: {e}")
+            return AgentResponse.error(f"Settings retrieval failed: {str(e)}")
+
+    @capability(
+        name="execute_gmail_tool",
+        description=(
+            "Execute ANY Gmail tool by its Composio slug. "
+            "Use this for advanced/uncommon actions not covered by other capabilities. "
+            "Discover available tools with the 'discover_tools' query 'gmail'."
+        ),
+        parameters=[
+            ParameterSchema(
+                name="tool_slug",
+                type="string",
+                description="Composio tool slug (e.g., 'GMAIL_IMPORT_MESSAGE', 'GMAIL_INSERT_MESSAGE')",
+                required=True,
+            ),
+            ParameterSchema(
+                name="parameters",
+                type="object",
+                description="Tool parameters as key-value pairs",
+                required=False,
+            ),
+        ]
+    )
+    async def execute_gmail_tool(self, params: Dict[str, Any], context: ExecutionContext) -> AgentResponse:
+        """Execute any Gmail tool by slug — universal fallback for all 60 tools."""
+        try:
+            user_id = context.user_id
+            tool_slug = params.get("tool_slug", "")
+            tool_params = params.get("parameters", {})
+
+            if not tool_slug:
+                return AgentResponse.error("Missing tool_slug parameter")
+
+            if not tool_slug.upper().startswith("GMAIL_"):
+                return AgentResponse.error(
+                    f"Tool slug must start with 'GMAIL_', got '{tool_slug}'"
+                )
+
+            service = self._get_service(user_id)
+            result = await service.tools.execute_any_tool(tool_slug, tool_params)
+
+            if result.get("success"):
+                return AgentResponse.success(
+                    result=result.get("data", {}),
+                    summary=f"Executed {tool_slug}"
+                )
+            return AgentResponse.error(result.get("error", f"{tool_slug} failed"))
+        except Exception as e:
+            logger.error(f"[execute_gmail_tool] Error: {e}")
+            return AgentResponse.error(f"Tool execution failed: {str(e)}")

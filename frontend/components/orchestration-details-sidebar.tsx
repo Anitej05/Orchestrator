@@ -1,19 +1,17 @@
 // components/orchestration-details-sidebar.tsx
 "use client"
 
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
-import { DollarSign, Clock, FileIcon, FileText, Image as ImageIcon } from "lucide-react"
+import { FileIcon, FileText, Image as ImageIcon } from "lucide-react"
 import ActionHistoryTimeline from "@/components/action-history-timeline"
 import SaveWorkflowButton from "@/components/save-workflow-button"
-import TaskCardList from "@/components/task-card-list"
-import { useEffect, useState } from "react"
+import { OrchestrationFlow } from "@/components/orchestration-flow"
+import { useEffect, useRef, useState } from "react"
+import { toast } from "sonner"
 import { useConversationStore } from "@/lib/conversation-store"
-import Markdown from '@/components/ui/markdown'
 import { CanvasRenderer } from '@/components/canvas-renderer'
-import type { Agent, Message, TaskAgentPair } from "@/lib/types"
+import type { Message } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { API_BASE_URL } from "@/lib/config"
 import DocumentViewer from "@/components/document-viewer"
@@ -47,180 +45,6 @@ interface Plan {
     todoList?: any[]; // Support for todo_list from new orchestrator system
 }
 
-// Task List View Component - Display real todo_list from Brain
-interface TaskListViewProps {
-    todoList: any[];
-    taskStatuses: Record<string, any>;
-    pendingTasks: any[];
-}
-
-const TaskListView: React.FC<TaskListViewProps> = ({ todoList, taskStatuses, pendingTasks }) => {
-    // Use todoList if available (new system from Brain), otherwise fall back to pendingTasks
-    const tasks = todoList.length > 0 ? todoList : pendingTasks.flat();
-    
-    const getStatusIcon = (status: any) => {
-        const statusStr = typeof status === 'string' ? status : String(status || '');
-        switch (statusStr.toLowerCase()) {
-            case 'completed':
-                return <span className="text-status-success text-lg">✓</span>;
-            case 'in_progress':
-            case 'in-progress':
-                return <span className="text-status-active text-lg animate-pulse">●</span>;
-            case 'failed':
-                return <span className="text-status-error text-lg">✕</span>;
-            case 'blocked':
-                return <span className="text-status-warning text-lg">⊘</span>;
-            case 'skipped':
-                return <span className="text-text-tertiary text-lg">-</span>;
-            case 'pending':
-            default:
-                return <span className="text-text-disabled text-lg">○</span>;
-        }
-    };
-
-    const getStatusColor = (status: any) => {
-        const statusStr = typeof status === 'string' ? status : String(status || '');
-        switch (statusStr.toLowerCase()) {
-            case 'completed':
-                return 'text-status-success';
-            case 'in_progress':
-            case 'in-progress':
-                return 'text-status-active';
-            case 'failed':
-                return 'text-status-error';
-            case 'blocked':
-                return 'text-status-warning';
-            case 'skipped':
-                return 'text-text-tertiary';
-            case 'pending':
-            default:
-                return 'text-text-secondary';
-        }
-    };
-
-    const getPriorityBadge = (priority?: any) => {
-        if (!priority) return null;
-        // Ensure priority is a string (handle enum, object, or string)
-        const priorityStr = typeof priority === 'string' ? priority : String(priority);
-        const priorityLower = priorityStr.toLowerCase();
-        const colors: Record<string, string> = {
-            'critical': 'bg-status-error-light text-status-error-dark',
-            'high': 'bg-status-warning-light text-status-warning-dark',
-            'medium': 'bg-status-pending-light text-status-pending-dark',
-            'low': 'bg-bg-subtle text-text-tertiary',
-        };
-        return (
-            <span className={`text-xs px-2 py-0.5 rounded-full font-medium capitalize ${colors[priorityLower] || colors['medium']}`}>
-                {priorityStr}
-            </span>
-        );
-    };
-
-    const getToolBadge = (assignedTool?: any) => {
-        if (!assignedTool) return null;
-        const toolStr = typeof assignedTool === 'string' ? assignedTool : String(assignedTool);
-        return (
-            <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-bg-card text-text-secondary border border-border-color">
-                {toolStr}
-            </span>
-        );
-    };
-
-    if (tasks.length === 0) {
-        return (
-            <div className="text-center text-text-tertiary py-8">
-                <p className="text-orbimesh-section-header font-semibold mb-2">No Tasks</p>
-                <p className="text-orbimesh-section-subtitle">Tasks will appear here once the workflow creates them</p>
-            </div>
-        );
-    }
-
-    return (
-        <div className="space-y-3">
-            {tasks.map((task: any, index: number) => {
-                // Real todo_list structure from Backend TaskItem
-                // Backend uses 'task_id' field, not 'id'
-                const taskId = task.task_id || task.id;
-                const description = task.description || 'Unknown task';
-                const status = task.status || 'pending';
-                const priority = task.priority;
-                const assignedTool = task.assigned_tool;
-                const dependencies = task.dependencies || [];
-                const result = task.result;
-                const error = task.error;
-                
-                return (
-                    <div
-                        key={taskId || index}
-                        className="p-4 rounded-lg border border-border-color bg-bg-card hover:bg-bg-hover transition-colors max-w-full overflow-hidden"
-                    >
-                        <div className="flex items-start gap-3 min-w-0">
-                            {/* Status Icon */}
-                            <div className="flex-shrink-0 mt-0.5">
-                                {getStatusIcon(status)}
-                            </div>
-                            
-                            <div className="flex-1 min-w-0 overflow-hidden">
-                                {/* Task Title + ID */}
-                                <div className="flex items-start justify-between gap-2 mb-2">
-                                    <h4 className={`font-semibold leading-snug break-words ${getStatusColor(status)}`}>
-                                        {description}
-                                    </h4>
-                                    <span className="flex-shrink-0 text-xs text-text-disabled font-mono bg-bg-subtle px-2 py-1 rounded">
-                                        #{taskId}
-                                    </span>
-                                </div>
-
-                                {/* Priority + Tool + Status badges */}
-                                <div className="flex flex-wrap items-center gap-2 mb-3">
-                                    {getPriorityBadge(priority)}
-                                    {getToolBadge(assignedTool)}
-                                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium capitalize ${
-                                        String(status).toLowerCase().includes('in_progress') || String(status).toLowerCase().includes('in-progress')
-                                            ? 'animate-pulse bg-status-active-light text-status-active-dark'
-                                            : 'bg-bg-subtle text-text-tertiary'
-                                    }`}>
-                                        {String(status).replace('_', ' ')}
-                                    </span>
-                                </div>
-
-                                {/* Dependencies info */}
-                                {dependencies && dependencies.length > 0 && (
-                                    <div className="text-xs text-text-tertiary mb-2">
-                                        <span className="font-medium">Depends on:</span> {dependencies.join(', ')}
-                                    </div>
-                                )}
-
-                                {/* Error Message */}
-                                {error && (
-                                    <div className="mt-2 p-2 bg-status-error-light rounded text-xs text-status-error-dark font-medium break-words overflow-hidden">
-                                        <span className="font-bold">Error:</span> {error}
-                                    </div>
-                                )}
-
-                                {/* Result Summary */}
-                                {result && String(status).toLowerCase() === 'completed' && (
-                                    <div className="mt-2 p-2 bg-status-success-light rounded text-xs text-status-success-dark break-words overflow-hidden">
-                                        <span className="font-bold">Result:</span>{' '}
-                                        <span className="break-all">
-                                            {typeof result === 'string' 
-                                                ? (result.length > 150 ? result.substring(0, 150) + '...' : result)
-                                                : (JSON.stringify(result, null, 2).length > 150 
-                                                    ? JSON.stringify(result).substring(0, 150) + '...' 
-                                                    : JSON.stringify(result, null, 2))
-                                            }
-                                        </span>
-                                    </div>
-                                )}
-                            </div>
-                        </div>
-                    </div>
-                );
-            })}
-        </div>
-    );
-};
-
 import { forwardRef, useImperativeHandle } from 'react';
 
 export interface OrchestrationDetailsSidebarRef {
@@ -229,9 +53,8 @@ export interface OrchestrationDetailsSidebarRef {
 }
 
 const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, OrchestrationDetailsSidebarProps>(
-    ({ executionResults, threadId, className, onThreadIdUpdate, onAcceptPlan, onRejectPlan }, ref) => {
+    ({ executionResults: _executionResults, threadId, className, onThreadIdUpdate: _onThreadIdUpdate, onAcceptPlan: _onAcceptPlan, onRejectPlan: _onRejectPlan }, ref) => {
         const [plan, setPlan] = useState<Plan>({ pendingTasks: [], completedTasks: [], todoList: undefined });
-        const [isLoadingPlan, setIsLoadingPlan] = useState(false);
         const [activeTab, setActiveTab] = useState<string>("plan");
         const [lastCanvasContent, setLastCanvasContent] = useState<string | undefined>(undefined);
         // State for viewing specific canvas content from messages
@@ -253,13 +76,11 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
         const canvasData = (conversationState as any).canvas_data;
         const canvasType = conversationState.canvas_type;
         const browserView = (conversationState as any).browser_view;
-        const taskStatuses = conversationState.task_statuses || {};
 
         // Determine which canvas to display - viewed canvas takes precedence
         // Browser view is now shown in chat interface, not in canvas
         // Support both canvas_content (string) and canvas_data (structured object)
         const displayCanvasContent = viewedCanvasContent || canvasContent || canvasData;
-        const displayCanvasType = viewedCanvasType || canvasType;
 
         // Process plan data from conversation store
         useEffect(() => {
@@ -276,7 +97,6 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                     completedTasks: [],
                     todoList: todoList // Pass through directly
                 });
-                setIsLoadingPlan(false);
                 return;
             }
             // Fallback to process pending tasks from planData (the original plan structure for old system)
@@ -326,21 +146,36 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                 pendingTasks: pendingTasks,
                 completedTasks: [] // Always empty - we use task_statuses for real-time updates
             });
-            setIsLoadingPlan(false);
         }, [planData, taskAgentPairs, todoList]);
 
-        // Auto-switch to Plan tab when plan is created (validate_plan_for_execution starts)
+        // Auto-switch to Plan tab when tasks arrive
         useEffect(() => {
             const currentStage = conversationState.metadata?.currentStage;
+            const brainModeActive = todoList.length > 0;  // Brain emits todo_list → always switch
+            const oldPipelineActive = currentStage === 'validating' || currentStage === 'executing' || currentStage === 'planning';
 
-            // Switch to plan tab when validation starts or execution begins
-            if (currentStage === 'validating' || currentStage === 'executing') {
-                if (plan.pendingTasks.flat().length > 0 || plan.completedTasks.length > 0) {
-                    console.log('Auto-switching to plan tab - execution started');
-                    setActiveTab('plan');
-                }
+            if (brainModeActive || (oldPipelineActive && plan.pendingTasks.flat().length > 0)) {
+                console.log('Auto-switching to plan tab - tasks visible');
+                setActiveTab('plan');
             }
-        }, [conversationState.metadata?.currentStage, plan.pendingTasks.length, plan.completedTasks.length]);
+        }, [conversationState.metadata?.currentStage, plan.pendingTasks.length, todoList.length]);
+
+        // Toast when execution completes
+        const prevStatusRef = useRef<string | undefined>(undefined);
+        useEffect(() => {
+            const prev = prevStatusRef.current;
+            const curr = conversationState.status;
+            if (prev && prev !== 'completed' && curr === 'completed') {
+                const taskCount = todoList.length || plan.pendingTasks.flat().length;
+                toast.success(
+                    taskCount > 0
+                        ? `All ${taskCount} task${taskCount !== 1 ? 's' : ''} completed`
+                        : 'Workflow completed',
+                    { description: 'The orchestrator has finished all tasks.', duration: 5000 }
+                );
+            }
+            prevStatusRef.current = curr;
+        }, [conversationState.status]);
 
         // Helper function to check if canvas type is a document/file viewer type
         const isFileViewerType = (canvasType: string | undefined): boolean => {
@@ -405,16 +240,12 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
         // Expose methods via ref
         useImperativeHandle(ref, () => ({
             refreshPlan: async () => {
-                setIsLoadingPlan(true);
-                setTimeout(() => setIsLoadingPlan(false), 500);
+                // no-op: TaskPlanViewer reads live from store
             },
             viewCanvas
         }));
 
 
-        const totalCost = executionResults.reduce((sum, result) => sum + result.cost, 0)
-        const totalTime = executionResults.reduce((sum, result) => sum + result.executionTime, 0)
-        const allTasks = [...plan.pendingTasks.flat(), ...plan.completedTasks];
         // Collect attachments - merge uploadedFiles with message attachments to get content
         const messageAttachments = messages.flatMap((m: Message) => m.attachments || []);
 
@@ -451,72 +282,40 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
             };
         });
 
-        const hasResults = executionResults.length > 0 || allTasks.length > 0
 
         return (
             <aside className={cn("border-l border-border-color bg-bg-card text-text-primary p-4 flex flex-col h-full overflow-hidden", className)}>
                 <Tabs value={activeTab} onValueChange={setActiveTab} className="h-full flex flex-col overflow-hidden min-w-0">
                     <TabsList className="grid w-full grid-cols-4 bg-bg-subtle/80 backdrop-blur-xl border border-border-color/50 shadow-orbimesh-panel">
-                        <TabsTrigger value="plan" className="relative text-xs">
+                        <TabsTrigger value="plan" className="relative text-xs data-[state=active]:text-brand-primary data-[state=active]:font-semibold">
                             Plan
                             {(conversationState.metadata?.currentStage === 'executing' ||
                                 conversationState.metadata?.currentStage === 'validating') && (
-                                    <span className="ml-1 px-1.5 py-0.5 text-[10px] font-semibold bg-status-pending text-foreground rounded-full animate-pulse">
+                                    <span className="ml-1 px-1.5 py-0.5 text-[10px] font-semibold bg-status-active text-white rounded-full animate-pulse">
                                         Running
                                     </span>
                                 )}
                         </TabsTrigger>
-                        <TabsTrigger value="history" className="text-xs">History</TabsTrigger>
-                        <TabsTrigger value="attachments" className="text-xs">Files</TabsTrigger>
-                        <TabsTrigger value="canvas" className="text-xs">Canvas</TabsTrigger>
+                        <TabsTrigger value="history" className="text-xs data-[state=active]:text-brand-primary data-[state=active]:font-semibold">History</TabsTrigger>
+                        <TabsTrigger value="attachments" className="text-xs data-[state=active]:text-brand-primary data-[state=active]:font-semibold">Files</TabsTrigger>
+                        <TabsTrigger value="canvas" className="text-xs data-[state=active]:text-brand-primary data-[state=active]:font-semibold">Canvas</TabsTrigger>
                     </TabsList>
 
-                    <TabsContent value="plan" className="flex-1 flex flex-col">
-                        {/* Plan Tab Header with Save Workflow Button */}
-                        <div className="flex items-center justify-between mt-4 px-4 py-3">
-                            <div className="flex-1">
-                                <div className="flex items-center gap-2">
-                                    <h3 className="text-orbimesh-section-header">Workflow Visualization</h3>
-                                    {((plan.todoList && plan.todoList.length > 0) || plan.pendingTasks.length > 0) && (() => {
-                                        const completedCount = Object.values(taskStatuses).filter((t: any) => t.status === 'completed').length;
-                                        const totalTasks = plan.todoList?.length || plan.pendingTasks.flat().length;
-                                        return (
-                                            <span className="text-orbimesh-badge px-2 py-1 bg-bg-subtle text-text-secondary rounded-full font-medium border border-border-color">
-                                                {completedCount} / {totalTasks} tasks
-                                            </span>
-                                        );
-                                    })()}
-                                </div>
-                                <p className="text-orbimesh-section-subtitle text-text-tertiary mt-1">
-                                    {conversationState.metadata?.currentStage === 'executing'
-                                        ? `Executing tasks... ${conversationState.current_executing_task ? `(${conversationState.current_executing_task})` : ''}`
-                                        : conversationState.metadata?.currentStage === 'validating'
-                                            ? 'Validating execution plan...'
-                                            : 'View workflow structure'}
-                                </p>
-                            </div>
+                    <TabsContent value="plan" className="flex-1 flex flex-col overflow-hidden">
+                        {/* TaskPlanViewer is fully self-contained — reads from Zustand store */}
+                        <div className="flex-1 overflow-hidden min-h-0">
+                            <OrchestrationFlow />
+                        </div>
 
-                            {/* Approval buttons have been moved to the interactive chat interface */}
-
-                            {/* Show save button after execution completes */}
-                            {conversationState.status === 'completed' && (
+                        {/* Save workflow button — shown after completion */}
+                        {conversationState.status === 'completed' && (
+                            <div className="flex-shrink-0 px-4 py-2 border-t border-border-color/40">
                                 <SaveWorkflowButton
                                     threadId={conversationState.thread_id || threadId || ''}
                                     disabled={!conversationState.thread_id && !threadId}
                                 />
-                            )}
-                        </div>
-
-                        <div className="flex-1 overflow-y-auto p-4">
-                            <TaskCardList
-                                todoList={plan.todoList || []}
-                                taskStatuses={taskStatuses}
-                                actionHistory={actionHistory}
-                                fallbackTasks={Array.isArray(plan.pendingTasks) ? plan.pendingTasks.flat() : []}
-                                emptySubtitle="Tasks will appear here once the workflow creates them"
-                            />
-                        </div>
-
+                            </div>
+                        )}
                     </TabsContent>
 
                     {/* Action History Tab - Shows detailed execution log */}
@@ -579,10 +378,12 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                                 })}
                             </div>
                         ) : (
-                            <div className="text-center text-text-tertiary py-8">
-                                <FileIcon className="w-12 h-12 mx-auto mb-2 text-text-disabled" />
-                                <p className="text-orbimesh-section-header font-semibold">No Attachments</p>
-                                <p className="text-orbimesh-section-subtitle mt-2">Files you upload will appear here.</p>
+                            <div className="flex flex-col items-center justify-center h-full py-12 px-4 text-center">
+                                <div className="w-16 h-16 rounded-2xl bg-brand-primary-light border-2 border-dashed border-brand-primary/30 flex items-center justify-center mb-4">
+                                    <FileIcon className="w-7 h-7 text-brand-primary/60" />
+                                </div>
+                                <p className="text-sm font-semibold text-text-secondary">No Attachments</p>
+                                <p className="text-xs text-text-tertiary mt-1.5 max-w-[160px] leading-relaxed">Files you upload will appear here</p>
                             </div>
                         )}
                     </TabsContent>
@@ -677,7 +478,7 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                                             setActiveTab('plan');
                                         }
                                         // Define resolvedCanvasType before return
-                                        const resolvedCanvasType = viewedCanvasType || canvasData?.type || 'spreadsheet';
+                                        const resolvedCanvasType = viewedCanvasType || canvasType || canvasData?.type || 'spreadsheet';
                                         console.log('🎯 RESOLVED_CANVAS_TYPE_PASSED_TO_RENDERER:', resolvedCanvasType);
 
                                         const effectiveData = typeof displayCanvasContent === 'object' ? displayCanvasContent : (conversationState as any).canvas_data;
@@ -742,10 +543,12 @@ const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, O
                                 </div>
                             </div>
                         ) : (
-                            <div className="text-center text-text-tertiary py-8">
-                                <p className="text-orbimesh-section-header font-semibold">No Canvas Content</p>
-                                <p className="text-orbimesh-section-subtitle mt-2">Interactive content from responses will appear here.</p>
-                                <p className="text-orbimesh-file-meta mt-1 text-text-disabled">Browser live view is shown in the chat area.</p>
+                            <div className="flex flex-col items-center justify-center h-full py-12 px-4 text-center">
+                                <div className="w-16 h-16 rounded-2xl bg-brand-primary-light border-2 border-dashed border-brand-primary/30 flex items-center justify-center mb-4">
+                                    <FileText className="w-7 h-7 text-brand-primary/60" />
+                                </div>
+                                <p className="text-sm font-semibold text-text-secondary">No Canvas Content</p>
+                                <p className="text-xs text-text-tertiary mt-1.5 max-w-[160px] leading-relaxed">Interactive output from agent responses will appear here</p>
                             </div>
                         )}
                     </TabsContent>

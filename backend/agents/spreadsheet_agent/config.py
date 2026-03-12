@@ -8,7 +8,9 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).parent.parent.parent / ".env")
+# .env lives in backend/ — resolve the path so it works regardless of cwd
+_backend_dir = Path(__file__).resolve().parent.parent.parent
+load_dotenv(_backend_dir / ".env")
 
 # ============================================================================
 # PATHS
@@ -50,28 +52,23 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 # Provider configurations (same order as mail agent: Cerebras → NVIDIA → Groq)
-LLM_PROVIDERS = [
-    {
+# API keys are loaded from .env — NEVER hardcode keys in source code.
+CEREBRAS_KEYS = [k.strip() for k in (os.getenv("CEREBRAS_API_KEYS", "") or "").split(",") if k.strip()]
+if not CEREBRAS_KEYS and CEREBRAS_API_KEY:
+    CEREBRAS_KEYS = [CEREBRAS_API_KEY]
+
+LLM_PROVIDERS = []
+# Add one provider entry per Cerebras key for round-robin
+for _key in CEREBRAS_KEYS:
+    LLM_PROVIDERS.append({
         "name": "cerebras",
-        "api_key": "csk-nnj93n833cr4c9rd2vttjeew3nwv494px62jfy45fmwjdch8",
+        "api_key": _key,
         "model": "gpt-oss-120b",
         "summary_model": "llama-3.3-70b",
         "base_url": "https://api.cerebras.ai/v1"
-    },
-    {
-        "name": "cerebras",
-        "api_key": "csk-c2jjpt5k9kttxd44t9jwyn55vje4m2vmrvdjjkd6h2wphv6m",
-        "model": "gpt-oss-120b",
-        "summary_model": "llama-3.3-70b",
-        "base_url": "https://api.cerebras.ai/v1"
-    },
-    {
-        "name": "cerebras",
-        "api_key": "csk-hhcmv35w3kcvt9nffdyhp5f6m6epre8w3mcx32hwxxmyx85y",
-        "model": "gpt-oss-120b",
-        "summary_model": "llama-3.3-70b",
-        "base_url": "https://api.cerebras.ai/v1"
-    },
+    })
+# Fallback providers
+LLM_PROVIDERS.extend([
     {
         "name": "nvidia",
         "api_key": NVIDIA_API_KEY,
@@ -86,7 +83,7 @@ LLM_PROVIDERS = [
         "summary_model": "llama-3.3-70b-versatile",
         "base_url": "https://api.groq.com/openai/v1"
     }
-]
+])
 
 
 LLM_TEMPERATURE = 0.1

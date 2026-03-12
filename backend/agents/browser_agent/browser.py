@@ -67,6 +67,7 @@ class Browser:
         self.page: Optional[Page] = None
         self.profile_name = profile_name
         self._stealth_enabled = True
+        self._headless = False  # Stored at launch, used by _restart_browser
         self._download_handler: Optional[Callable] = None
         self._browser_pids: set = set()  # Track PIDs for safe cleanup
         self._is_restarting = False  # Guard: prevent _handle_new_page from killing pages during restart/recovery
@@ -97,6 +98,7 @@ class Browser:
             restore_session: Restore cookies/storage from previous session
         """
         self._stealth_enabled = stealth
+        self._headless = headless
         self._download_handler = on_download
         
         try:
@@ -494,7 +496,7 @@ class Browser:
                 self.playwright = await async_playwright().start()
 
             self.browser = await self.playwright.chromium.launch(
-                headless=False,
+                headless=self._headless,
                 args=launch_args,
                 handle_sigint=False,
                 handle_sigterm=False,
@@ -551,24 +553,37 @@ class Browser:
         """Navigate to URL with smart waiting"""
         if timeout is None:
             timeout = CONFIG.NAVIGATION_TIMEOUT
-            
+
         try:
             # Ensure URL has protocol
             if not url.startswith(('http://', 'https://')):
                 url = 'https://' + url
-            
+
+            # Check page health before navigating — stale pages cause silent failures
+            try:
+                page_dead = (not self.page) or self.page.is_closed()
+            except Exception:
+                page_dead = True
+
+            if page_dead:
+                logger.warning(f"⚠️ Page is closed/None before navigating to {url}, recovering...")
+                recovered = await self.recover_page()
+                if not recovered:
+                    logger.error("❌ Page recovery failed, cannot navigate")
+                    return False
+
             await self.page.goto(url, wait_until='domcontentloaded', timeout=timeout)
-            
+
             # Smart wait: try networkidle briefly, but don't block too long
             try:
                 await self.page.wait_for_load_state('networkidle', timeout=5000)
             except Exception:
                 pass  # Page is interactive even if network isn't idle
-            
+
             logger.info(f"✅ Navigated to: {url}")
             return True
         except Exception as e:
-            logger.error(f"Navigation failed: {e}")
+            logger.error(f"❌ Navigation to {url} failed: {type(e).__name__}: {e}")
             return False
     
     async def wait_for_element(

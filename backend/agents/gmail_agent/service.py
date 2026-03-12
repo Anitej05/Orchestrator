@@ -30,7 +30,12 @@ class GmailService:
         self.memory = agent_memory
         
         logger.info(f"[GmailService] Initialized for user {user_id}")
-    
+
+    @property
+    def tools(self) -> ComposioToolManager:
+        """Alias for tool_mgr — used by base_agent_impl capabilities."""
+        return self.tool_mgr
+
     # === Email Operations ===
     
     async def search_emails(

@@ -244,7 +244,7 @@ class TestTimeoutHandling:
         mock_composio_class.return_value = mock_client
         
         # Simulate timeout exception
-        mock_client.connected_accounts.initiate.side_effect = Exception("Request timeout")
+        mock_client.connected_accounts.link.side_effect = Exception("Request timeout")
         
         # Create auth manager with mocked client
         auth_manager = ComposioAuthManager()
@@ -272,7 +272,7 @@ class TestTimeoutHandling:
         mock_composio_class.return_value = mock_client
         
         # Simulate timeout exception
-        mock_client.connected_accounts.get.side_effect = Exception("Connection timeout")
+        mock_client.connected_accounts.list.side_effect = Exception("Connection timeout")
         
         # Create auth manager with mocked client
         auth_manager = ComposioAuthManager()
@@ -330,7 +330,7 @@ class TestTimeoutHandling:
         mock_composio_class.return_value = mock_client
         
         # Simulate timeout exception
-        mock_client.connected_accounts.get.side_effect = Exception("Timeout refreshing token")
+        mock_client.connected_accounts.list.side_effect = Exception("Timeout refreshing token")
         
         # Create auth manager with mocked client
         auth_manager = ComposioAuthManager()

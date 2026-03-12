@@ -4,7 +4,7 @@ Integrations Router
 Manages OAuth authentication with external services via Composio.
 """
 
-from typing import List, Optional
+from typing import List, Optional, Any, Dict
 import logging
 
 from fastapi import APIRouter, HTTPException
@@ -51,6 +51,79 @@ class ConnectionStatusResponse(BaseModel):
     connected_apps: List[str]
     pending_apps: List[str]
     all_toolkits: Optional[List[ToolkitStatus]] = None
+
+
+# ------------------------------------------------------------------
+# NEW: List all available Composio apps (not just connected ones)
+# ------------------------------------------------------------------
+
+@router.get("/available")
+async def list_available_toolkits(search: Optional[str] = None):
+    """
+    List ALL available Composio toolkits/apps that can be connected.
+    
+    This returns the full catalog of Composio integrations with complete metadata
+    including logos, descriptions, and categories.
+    
+    Example:
+    GET /api/integrations/available
+    GET /api/integrations/available?search=gmail
+    
+    Returns:
+    {
+        "success": true,
+        "toolkits": [
+            {
+                "name": "Gmail",
+                "slug": "gmail",
+                "description": "Send and receive emails with Gmail",
+                "logo": "https://logos.composio.dev/gmail.svg",
+                "category": "Communication"
+            },
+            ...
+        ],
+        "total_count": 150
+    }
+    """
+    logger.info(f"🔵 LIST AVAILABLE TOOLKITS - search={search}")
+    try:
+        from services.integrations.composio_tools import get_tool_manager
+        
+        # Get tool manager (doesn't require user auth)
+        tool_manager = get_tool_manager()
+        
+        # List all toolkits from Composio
+        toolkits = tool_manager.list_toolkits(search=search)
+        
+        # Enhance with logo URLs and better metadata
+        enhanced_toolkits = []
+        for tk in toolkits:
+            slug = tk.get('slug', tk.get('name', '').lower().replace(' ', ''))
+            # Use GitHub raw CDN - the ACTUAL working Composio logo source
+            # See: https://github.com/ComposioHQ/open-logos
+            logo_url = f"https://raw.githubusercontent.com/ComposioHQ/open-logos/master/icons/{slug}.png"
+            
+            enhanced = {
+                **tk,
+                # Try multiple logo formats
+                'logo': logo_url,
+                # Also provide fallbacks
+                'logo_svg': f"https://raw.githubusercontent.com/ComposioHQ/open-logos/master/icons/{slug}.svg",
+                # Fallback description if not provided
+                'description': tk.get('description') or tk.get('long_description') or f"Connect and automate workflows with {tk.get('name', slug)}",
+            }
+            enhanced_toolkits.append(enhanced)
+        
+        logger.info(f"✅ Found {len(enhanced_toolkits)} available toolkits")
+        
+        return {
+            "success": True,
+            "toolkits": enhanced_toolkits,
+            "total_count": len(enhanced_toolkits),
+        }
+    except Exception as e:
+        logger.error(f"❌ Failed to list toolkits: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to fetch available toolkits: {str(e)}")
 
 
 # Endpoints
@@ -421,4 +494,111 @@ async def enable_connection(user_id: str, app_slug: str):
         raise
     except Exception as e:
         logger.error(f"❌ Exception in enable_connection: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Dynamic tool discovery & toolkit catalog (v2)
+# ---------------------------------------------------------------------------
+
+class SearchToolsRequest(BaseModel):
+    query: str
+    limit: int = 15
+
+
+@router.get("/toolkits")
+async def list_toolkits(search: Optional[str] = None):
+    """
+    Browse the Composio toolkit catalog.
+
+    Returns a list of all available toolkits (apps) with optional search filter.
+    This powers the frontend "Browse Integrations" catalog.
+
+    Example:
+    ```
+    GET /api/integrations/toolkits?search=slack
+
+    Response:
+    [
+        {"name": "Slack", "slug": "slack", "description": "Send messages..."},
+        ...
+    ]
+    ```
+    """
+    try:
+        from services.integrations.composio_tools import get_tool_manager
+        manager = get_tool_manager()
+        toolkits = manager.list_toolkits(search=search)
+        return {
+            "success": True,
+            "toolkits": toolkits[:50],
+            "total_count": len(toolkits),
+        }
+    except Exception as e:
+        logger.error(f"Failed to list toolkits: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/toolkits/{user_id}/status")
+async def get_toolkit_status(user_id: str):
+    """
+    Get connection status for all toolkits for a specific user.
+
+    Returns each toolkit with its connection state, useful for the
+    frontend connections page to show connected/not-connected badges.
+    """
+    try:
+        from services.integrations.composio_tools import get_tool_manager
+        manager = get_tool_manager()
+        status = manager.get_toolkit_connection_status(user_id)
+        return {
+            "success": True,
+            "user_id": user_id,
+            "toolkits": status,
+        }
+    except Exception as e:
+        logger.error(f"Failed to get toolkit status: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/search-tools")
+async def search_tools(request: SearchToolsRequest):
+    """
+    Search for available Composio tools by natural language query.
+
+    Example:
+    ```
+    POST /api/integrations/search-tools
+    {"query": "send slack message", "limit": 10}
+
+    Response:
+    {
+        "success": true,
+        "tools": [
+            {"name": "SLACK_SEND_MESSAGE", "description": "Send a message to a Slack channel"},
+            ...
+        ],
+        "total_found": 5
+    }
+    ```
+    """
+    try:
+        from services.integrations.composio_tools import get_tool_manager
+        manager = get_tool_manager()
+        results = manager.search_tools(query=request.query)
+        limited = results[:request.limit]
+        return {
+            "success": True,
+            "query": request.query,
+            "tools": [
+                {
+                    "name": r.get("name") or r.get("slug", ""),
+                    "description": r.get("description", "")[:200],
+                }
+                for r in limited
+            ],
+            "total_found": len(results),
+        }
+    except Exception as e:
+        logger.error(f"Tool search failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

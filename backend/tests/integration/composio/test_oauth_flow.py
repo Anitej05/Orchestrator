@@ -34,15 +34,25 @@ def test_start_auth_flow_returns_redirect_url(composio_client, test_user_id):
     # Initiate connection for Gmail
     app_slug = "gmail"
     
-    # SDK v0.7.x: entity.initiate_connection(app_name=...) is the simplest approach
-    entity = composio_client.get_entity(id=test_user_id)
-    connection_request = entity.initiate_connection(app_name=app_slug.upper())
+    # SDK v0.10.x: use auth_configs.list and connected_accounts.link
+    auth_configs = composio_client.auth_configs.list(toolkit_slug="gmail")
+    if hasattr(auth_configs, 'items') and auth_configs.items:
+        auth_config_id = auth_configs.items[0].id
+    elif isinstance(auth_configs, list) and len(auth_configs) > 0:
+        auth_config_id = auth_configs[0].id
+    else:
+        pytest.skip("No auth configs found for Gmail")
+
+    connection_request = composio_client.connected_accounts.link(
+        auth_config_id=auth_config_id,
+        entity_id=test_user_id,
+        redirect_uri="http://localhost:3000"
+    )
     
     # Verify response structure
     assert connection_request is not None, "Connection request should not be None"
-    assert hasattr(connection_request, "redirectUrl"), "Response should have redirectUrl"
     
-    redirect_url = connection_request.redirectUrl
+    redirect_url = getattr(connection_request, "redirectUrl", None)
     
     # Verify redirect URL format
     assert redirect_url is not None, "Redirect URL should not be None"
@@ -136,7 +146,8 @@ def test_check_connection_status_for_active_connections(
     Task: 2.2.2 Test check_connection_status for active connections
     """
     # Get all connections for test user
-    connections = composio_client.connected_accounts.get(entity_ids=[test_user_id]) or []
+    resp = composio_client.connected_accounts.list(user_ids=[test_user_id])
+    connections = getattr(resp, 'items', None) or (resp if isinstance(resp, list) else [])
     if not isinstance(connections, list):
         connections = [connections]
     
@@ -268,7 +279,8 @@ def test_disconnect_app_removes_connection(composio_client, test_user_id):
     app_slug = "slack"
     
     # Step 1: Check if Slack connection already exists
-    connections_before = composio_client.connected_accounts.get(entity_ids=[test_user_id]) or []
+    resp_before = composio_client.connected_accounts.list(user_ids=[test_user_id])
+    connections_before = getattr(resp_before, 'items', None) or (resp_before if isinstance(resp_before, list) else [])
     if not isinstance(connections_before, list):
         connections_before = [connections_before]
     slack_conn_before = next(
@@ -317,7 +329,8 @@ def test_disconnect_app_removes_connection(composio_client, test_user_id):
     # Wait a moment for the deletion to propagate
     time.sleep(2)
     
-    connections_after = composio_client.connected_accounts.get(entity_ids=[test_user_id]) or []
+    resp_after = composio_client.connected_accounts.list(user_ids=[test_user_id])
+    connections_after = getattr(resp_after, 'items', None) or (resp_after if isinstance(resp_after, list) else [])
     if not isinstance(connections_after, list):
         connections_after = [connections_after]
     slack_conn_after = next(
@@ -388,9 +401,6 @@ def test_disconnect_app_error_handling_nonexistent_connection(test_user_id):
     
     print(f"✓ Error handled gracefully: {error_message}")
     # Note: connection_logs table has been dropped; error event logging removed.
-            
-    finally:
-        db.close()
 
 
 def test_oauth_flow_error_handling_invalid_app(composio_client, test_user_id):
@@ -406,10 +416,9 @@ def test_oauth_flow_error_handling_invalid_app(composio_client, test_user_id):
     """
     invalid_app_slug = "nonexistent_app_12345"
     
-    # SDK v0.7.x: entity.initiate_connection raises an exception for unknown apps
+    # SDK v0.10.x requires valid auth config ID, so linking an invalid app directly raises an exception
     with pytest.raises(Exception) as exc_info:
-        entity = composio_client.get_entity(id=test_user_id)
-        entity.initiate_connection(app_name=invalid_app_slug.upper())
+        composio_client.auth_configs.list(toolkit_slug=invalid_app_slug)
     
     # Verify an exception was raised
     assert exc_info.value is not None, "Should raise an exception for invalid app"
@@ -428,7 +437,8 @@ def test_multiple_connections_same_user(composio_client, test_user_id):
     Additional test for multi-app support
     """
     # Get all connections for test user
-    connections = composio_client.connected_accounts.get(entity_ids=[test_user_id]) or []
+    resp_conns = composio_client.connected_accounts.list(user_ids=[test_user_id])
+    connections = getattr(resp_conns, 'items', None) or (resp_conns if isinstance(resp_conns, list) else [])
     if not isinstance(connections, list):
         connections = [connections]
     

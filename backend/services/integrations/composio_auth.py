@@ -57,9 +57,14 @@ class ComposioAuthManager:
     """
     
     def __init__(self):
-        self.api_key = os.getenv("COMPOSIO_API_KEY")
+        # Get COMPOSIO_API_KEY via credential_manager (DB → .env fallback)
+        try:
+            from backend.services.credential_service import credential_manager
+            self.api_key = credential_manager.get("agent", "integrations", "COMPOSIO_API_KEY")
+        except Exception:
+            self.api_key = os.getenv("COMPOSIO_API_KEY")
         if not self.api_key:
-            logger.error("COMPOSIO_API_KEY not set in environment")
+            logger.error("COMPOSIO_API_KEY not set in credentials or environment")
             raise ValueError("COMPOSIO_API_KEY required")
         
         # Initialize Composio client directly (official SDK pattern)
@@ -212,26 +217,21 @@ class ComposioAuthManager:
             logger.warning("Connection ID appears to be unencrypted (or wrong key). Using as-is.")
             return encrypted_id
     
-    def _get_auth_config_id(self, app_slug: str) -> str:
+    def _get_auth_config_id(self, app_slug: str) -> Optional[str]:
         """
         Map app slug to auth config ID from environment.
-        
-        Auth configs must be created in Composio dashboard first:
-        https://app.composio.dev → Integrations → Apps → Configure
-        
-        Args:
-            app_slug: App identifier (e.g., 'gmail', 'zohobooks')
-                Note: Use 'zohobooks' (normalized). 'zoho_books' is deprecated.
-        
-        Returns:
-            Auth config ID (e.g., 'ac_gmail_123')
-        
-        Raises:
-            ValueError: If auth config not found for app
+
+        Returns the auth config ID if the env var is set, or None if it isn't.
+        None is acceptable — _get_integration_id will fall back to Composio's
+        integrations API to resolve the integration UUID, so you don't need to
+        create a custom auth config just to connect a standard app like Gmail.
+
+        If you DO have a custom auth config (e.g. your own OAuth client), set:
+            COMPOSIO_AUTH_CONFIG_GMAIL=ac_gmail_xxx  in backend/.env
         """
         # Normalize app slug
         normalized_slug = app_slug.lower()
-        
+
         # Handle deprecated 'zoho_books' slug
         if normalized_slug == "zoho_books":
             logger.warning(
@@ -240,7 +240,7 @@ class ComposioAuthManager:
                 "Support for 'zoho_books' will be removed in a future version."
             )
             normalized_slug = "zohobooks"
-        
+
         # Map common app slugs to environment variables
         auth_config_map = {
             "gmail": os.getenv("COMPOSIO_AUTH_CONFIG_GMAIL"),
@@ -249,17 +249,18 @@ class ComposioAuthManager:
             "slack": os.getenv("COMPOSIO_AUTH_CONFIG_SLACK"),
             "notion": os.getenv("COMPOSIO_AUTH_CONFIG_NOTION"),
         }
-        
+
         auth_config_id = auth_config_map.get(normalized_slug)
-        
+
         if not auth_config_id:
-            raise ValueError(
-                f"No auth config found for '{app_slug}'. "
-                f"Please create auth config in Composio dashboard and add "
-                f"COMPOSIO_AUTH_CONFIG_{normalized_slug.upper()} to .env file. "
-                f"Supported apps: {', '.join(auth_config_map.keys())}"
+            # No custom auth config — that's fine. _get_integration_id will
+            # look up the integration directly via Composio's API.
+            logger.info(
+                f"COMPOSIO_AUTH_CONFIG_{normalized_slug.upper()} not set; "
+                f"will resolve integration via Composio API instead."
             )
-        
+            return None
+
         return auth_config_id
 
     def _get_integration_id(self, app_slug: str, auth_config_id: Optional[str] = None) -> str:
@@ -343,29 +344,54 @@ class ComposioAuthManager:
             if callback_url:
                 logger.info(f"Using callback URL: {callback_url}")
 
-            # SDK v0.7.x: get_entity(user_id).initiate_connection(app_name=...)
-            # This is the simplest pattern that works with the installed version.
-            entity = self._composio.get_entity(id=user_id)
-            connection_request = entity.initiate_connection(
-                app_name=app_slug.upper(),
-                redirect_url=callback_url or None,
+            # ── Step 1: Resolve auth_config_id for this app ──
+            # Check environment variable first (custom OAuth client)
+            auth_config_id = self._get_auth_config_id(app_slug)
+
+            if not auth_config_id:
+                # Look up via Composio API: list auth configs for this toolkit
+                normalized_slug = app_slug.lower().replace("_", "")
+                logger.info(f"Looking up auth config for toolkit: {normalized_slug}")
+                try:
+                    auth_configs_response = self._composio.auth_configs.list(
+                        toolkit_slug=normalized_slug
+                    )
+                    items = getattr(auth_configs_response, "items", None) or []
+                    if items:
+                        auth_config_id = items[0].id
+                        logger.info(f"Resolved auth_config_id={auth_config_id} for {normalized_slug}")
+                    else:
+                        # Fallback: try uppercase variant
+                        auth_configs_response = self._composio.auth_configs.list(
+                            toolkit_slug=app_slug.upper()
+                        )
+                        items = getattr(auth_configs_response, "items", None) or []
+                        if items:
+                            auth_config_id = items[0].id
+                            logger.info(f"Resolved auth_config_id={auth_config_id} for {app_slug.upper()}")
+                except Exception as lookup_err:
+                    logger.warning(f"Auth config lookup failed: {lookup_err}")
+
+            if not auth_config_id:
+                raise ValueError(
+                    f"No auth config found for '{app_slug}'. "
+                    "Set COMPOSIO_AUTH_CONFIG_{APP} in .env or create one in the Composio dashboard."
+                )
+
+            # ── Step 2: Create a Composio Connect Link ──
+            # v0.10.6 SDK: connected_accounts.link(user_id, auth_config_id)
+            logger.info(f"Creating Composio link for user={user_id}, auth_config={auth_config_id}")
+            connection_request = self._composio.connected_accounts.link(
+                user_id=user_id,
+                auth_config_id=auth_config_id,
+                callback_url=callback_url or None,
             )
 
-            # Extract redirect URL
-            redirect_url = None
-            if hasattr(connection_request, "redirectUrl"):
-                redirect_url = connection_request.redirectUrl
-            elif hasattr(connection_request, "redirect_url"):
-                redirect_url = connection_request.redirect_url
+            redirect_url = connection_request.redirect_url
+            connection_id = connection_request.id
 
-            # Extract connection ID
-            connection_id = None
-            if hasattr(connection_request, "connectedAccountId"):
-                connection_id = connection_request.connectedAccountId
-            elif hasattr(connection_request, "connected_account_id"):
-                connection_id = connection_request.connected_account_id
-            elif hasattr(connection_request, "id"):
-                connection_id = connection_request.id
+            logger.info(f"✅ Got redirect URL: {redirect_url}")
+            logger.info(f"✅ Connection request ID: {connection_id}")
 
             # Persist INITIATED status to DB for tracking
             if connection_id:
@@ -417,20 +443,22 @@ class ComposioAuthManager:
             Connection status for the user's toolkits
         """
         try:
-            # SDK v0.7.x: fetch by entity_ids; support canonical + legacy mapped entity IDs.
+            # SDK v0.10.6: fetch by user_ids; support canonical + legacy mapped entity IDs.
             connections: List[Any] = []
             seen_connection_ids = set()
             for entity_id in self._get_candidate_entity_ids(user_id, app_slug):
                 try:
-                    connections_response = self._composio.connected_accounts.get(
-                        entity_ids=[entity_id]
+                    connections_response = self._composio.connected_accounts.list(
+                        user_ids=[entity_id]
                     )
-                    if isinstance(connections_response, list):
+                    # v0.10.6 list returns an object with .items
+                    raw_connections = []
+                    if hasattr(connections_response, 'items'):
+                        raw_connections = connections_response.items or []
+                    elif isinstance(connections_response, list):
                         raw_connections = connections_response
                     elif connections_response is not None:
                         raw_connections = [connections_response]
-                    else:
-                        raw_connections = []
 
                     for raw_conn in raw_connections:
                         conn_id = getattr(raw_conn, "id", None)
@@ -487,6 +515,13 @@ class ComposioAuthManager:
                 integration_id = integration_id or getattr(conn, "integration_id", None) or getattr(conn, "integrationId", None)
                 app_name = app_name or getattr(conn, "app_name", None) or getattr(conn, "appName", None)
                 app_unique_id = app_unique_id or getattr(conn, "app_unique_id", None) or getattr(conn, "appUniqueId", None)
+                
+                # SDK v0.10.6 fallbacks: look in toolkit mapping
+                toolkit_slug = None
+                if conn_dict and conn_dict.get("toolkit") and isinstance(conn_dict["toolkit"], dict):
+                    toolkit_slug = conn_dict["toolkit"].get("slug")
+                app_unique_id = app_unique_id or toolkit_slug or getattr(conn, "app_slug", None)
+                
                 status = self._normalize_status(status or getattr(conn, "status", "") or "")
                 connected_account_id = connected_account_id or getattr(conn, "id", None)
                 entity_id = getattr(conn, "entityId", None) or getattr(conn, "entity_id", None)
@@ -618,21 +653,34 @@ class ComposioAuthManager:
     def disconnect_app(self, user_id: str, app_slug: str) -> Dict[str, Any]:
         """Disconnect a user from a specific app and remove from database."""
         try:
-            # Get user's connections using v0.7.x SDK
-            connections_response = self._composio.connected_accounts.get(
-                entity_ids=[user_id]
-            )
-            connections = connections_response if isinstance(connections_response, list) else ([connections_response] if connections_response else [])
+            # Get user's connections using v0.10.x SDK
+            connections = []
+            seen_connection_ids = set()
+            for entity_id in self._get_candidate_entity_ids(user_id, app_slug):
+                try:
+                    resp = self._composio.connected_accounts.list(user_ids=[entity_id])
+                    items = getattr(resp, 'items', None) or (resp if isinstance(resp, list) else [])
+                    for c in items:
+                        if getattr(c, "id", None) not in seen_connection_ids:
+                            seen_connection_ids.add(getattr(c, "id", None))
+                            connections.append(c)
+                except Exception as e:
+                    logger.debug(f"Could not fetch connections for entity {entity_id}: {e}")
             
             for conn in connections:
-                conn_dict = conn.model_dump() if hasattr(conn, "model_dump") else {}
+                conn_dict = conn.model_dump() if hasattr(conn, "model_dump") else getattr(conn, "__dict__", {})
                 slug = (
                     conn_dict.get("appUniqueId")
                     or conn_dict.get("appName")
                     or getattr(conn, "appUniqueId", None)
                     or getattr(conn, "appName", None)
-                    or ""
-                ).lower()
+                )
+                if not slug:
+                    # v0.10.6 SDK moved slug to nested toolkit.slug
+                    toolkit_info = getattr(conn, "toolkit", None) or conn_dict.get("toolkit", {})
+                    slug = getattr(toolkit_info, "slug", None) or (toolkit_info.get("slug") if isinstance(toolkit_info, dict) else None)
+                
+                slug = (slug or "").lower()
                 if slug == app_slug.lower():
                     # Use official SDK delete method
                     self._composio.connected_accounts.delete(conn.id)
@@ -1080,6 +1128,7 @@ class ComposioAuthManager:
                     try:
                         # Quick status check using v0.7.15 API
                         decrypted_id = self._decrypt_connection_id(connection.connection_id)
+
                         
                         # Get all connections for user (try both actual user_id and "default" fallback)
                         # Some connections may be registered under "default" entity_id
@@ -1088,8 +1137,9 @@ class ComposioAuthManager:
                         all_connections = []
                         for entity_id in entity_ids_to_check:
                             try:
-                                connections = self._composio.connected_accounts.get(entity_ids=[entity_id])
-                                all_connections.extend(connections)
+                                resp = self._composio.connected_accounts.list(user_ids=[entity_id])
+                                items = getattr(resp, 'items', None) or (resp if isinstance(resp, list) else [])
+                                all_connections.extend(items)
                             except Exception as e:
                                 logger.debug(f"Could not fetch connections for entity {entity_id}: {e}")
                         
@@ -1134,6 +1184,7 @@ class ComposioAuthManager:
                     "app_slug": connection.app_slug,
                     "status": connection.status,
                     "created_at": connection.created_at,  # Fixed: model uses created_at not connected_at
+
                     "metadata": connection.app_metadata
                 }
                 
