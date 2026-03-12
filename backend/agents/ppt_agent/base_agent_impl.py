@@ -121,16 +121,16 @@ class PPTAgent(BaseAgent):
         results: List[Any],
         understanding: Dict[str, Any],
         request: AgentRequest,
-    ) -> Dict[str, Any]:
+    ) -> Any:  # Returns AgentResponse
         """Synthesize final response with CanvasService-powered display."""
         successful = [r for r in results if getattr(r, "success", False)]
 
+        from backend.agents.base import AgentResponse
+
         if not successful:
-            return {
-                "status": "error",
-                "message": "No presentation operations completed successfully.",
-                "task_summary": "Failed to process presentation.",
-            }
+            return AgentResponse.error(
+                message="No presentation operations completed successfully.",
+            )
 
         all_data = {}
         canvas_display = None
@@ -196,16 +196,14 @@ class PPTAgent(BaseAgent):
             except Exception as e:
                 logger.warning(f"Canvas generation failed (non-fatal): {e}")
 
-        response = {
-            "status": "complete",
-            "message": " | ".join(messages) if messages else "Presentation operation completed.",
-            "task_summary": " | ".join(messages) if messages else "Presentation processed.",
-            "extracted_data": all_data,
-        }
-        if canvas_display:
-            response["canvas_display"] = canvas_display
-
-        return response
+        summary_msg = " | ".join(messages) if messages else "Presentation operation completed."
+        
+        return AgentResponse.success(
+            result=summary_msg,
+            summary=summary_msg,
+            data=all_data,
+            canvas_display=canvas_display
+        )
 
     # =========================================================================
     # CAPABILITIES

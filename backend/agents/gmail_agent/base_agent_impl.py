@@ -61,6 +61,28 @@ class GmailAgent(BaseAgent):
         self.memory = agent_memory
         
         logger.info(f"GmailAgent initialized with config: {self.config}")
+
+    def _get_prompt_guidance(self, request=None) -> str:
+        """
+        Gmail-specific rules for the shared BaseAgent prompts.
+
+        Gmail access is already bound to the authenticated Orbimesh user via
+        request.user_id / context.user_id and the active Composio connection.
+        The model should not invent a separate "Gmail user ID" requirement for
+        inbox reads or searches.
+        """
+        return (
+            "- The Gmail account is already authenticated through the active "
+            "Composio connection for this Orbimesh user.\n"
+            "- Use the connected Gmail account by default for inbox reads, "
+            "searches, drafts, labels, and settings.\n"
+            "- Do NOT ask the user for their Gmail address, Gmail user ID, or "
+            "confirmation that the connected account exists just to read or "
+            "search their own inbox.\n"
+            "- Only ask for an email address when the task specifically needs "
+            "a recipient, sender filter, CC/BCC target, or another explicit "
+            "email field required by the Gmail action."
+        )
     
     def register_capabilities(self) -> None:
         """Register Gmail capabilities."""

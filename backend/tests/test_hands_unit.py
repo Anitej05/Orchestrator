@@ -590,6 +590,43 @@ class TestLastAgentResultInjectedIntoState:
         assert updates.get("last_agent_result") is None
 
 
+class TestNeedsInputHandling:
+
+    @pytest.mark.asyncio
+    async def test_nested_needs_input_pauses_workflow_and_keeps_task_in_progress(self):
+        """Nested agent needs_input payloads must pause the graph instead of completing the task."""
+        hands = Hands()
+        state = _base_state(
+            decision={
+                "action_type": "agent",
+                "resource_id": "gmail_agent",
+                "payload": {"prompt": "Read unread emails"},
+            }
+        )
+
+        raw_agent_output = {
+            "status": "needs_input",
+            "question": "Please confirm the connected Gmail account.",
+        }
+
+        result = ActionResult(
+            action_id="agent_gmail_agent",
+            success=True,
+            output={"result": raw_agent_output, "status": "completed"},
+            execution_time_ms=12.0,
+        )
+        result._raw_output = raw_agent_output
+
+        with ExitStack() as stack:
+            _enter_common_patches(stack)
+            updates = hands._update_state_with_result(state, result, _make_config())
+
+        assert updates["pending_user_input"] is True
+        assert updates["question_for_user"] == "Please confirm the connected Gmail account."
+        assert updates["last_agent_result"] is None
+        assert updates["todo_list"][0]["status"] == TaskStatus.IN_PROGRESS
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. Agent action posts to correct agent_id
 # ─────────────────────────────────────────────────────────────────────────────

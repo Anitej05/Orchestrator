@@ -14,11 +14,37 @@ Provides:
 
 import logging
 import json
+import os
 from typing import Dict, Any, Optional, List
 
 from .config import COMPOSIO_API_KEY
 
 logger = logging.getLogger("gmail_agent")
+_VERSION_FALLBACK_WARNED: set[str] = set()
+
+
+def _get_toolkit_version(toolkit_slug: str) -> Optional[str]:
+    env_key = f"COMPOSIO_TOOLKIT_VERSION_{toolkit_slug.upper()}"
+    value = os.getenv(env_key, "").strip()
+    return value or None
+
+
+def _apply_version_policy(tool_slug: str, execute_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    toolkit_slug = (tool_slug or "").split("_", 1)[0].lower()
+    toolkit_version = _get_toolkit_version(toolkit_slug)
+    if toolkit_version:
+        execute_kwargs["version"] = toolkit_version
+        return execute_kwargs
+
+    execute_kwargs["dangerously_skip_version_check"] = True
+    if toolkit_slug and toolkit_slug not in _VERSION_FALLBACK_WARNED:
+        logger.warning(
+            "[Tools] No COMPOSIO toolkit version configured for %s; "
+            "using dangerously_skip_version_check fallback",
+            toolkit_slug,
+        )
+        _VERSION_FALLBACK_WARNED.add(toolkit_slug)
+    return execute_kwargs
 
 
 class ComposioToolManager:
@@ -47,11 +73,22 @@ class ComposioToolManager:
 
         self.user_id = user_id
         self.connection_id = connection["connection_id"]
+        self.toolkit_version = _get_toolkit_version("gmail")
 
         from composio import Composio
-        self.composio = Composio(api_key=COMPOSIO_API_KEY)
+        composio_kwargs: Dict[str, Any] = {"api_key": COMPOSIO_API_KEY}
+        if self.toolkit_version:
+            composio_kwargs["toolkit_versions"] = {"gmail": self.toolkit_version}
+        self.composio = Composio(**composio_kwargs)
 
-        logger.info(f"[ComposioToolManager] v3 init for user {user_id}")
+        if self.toolkit_version:
+            logger.info(
+                "[ComposioToolManager] v3 init for user %s with gmail toolkit version %s",
+                user_id,
+                self.toolkit_version,
+            )
+        else:
+            logger.info(f"[ComposioToolManager] v3 init for user {user_id}")
 
     # ------------------------------------------------------------------
     # Core execution (v3 SDK)
@@ -76,11 +113,17 @@ class ComposioToolManager:
             logger.info(f"[Tools] Executing {tool_slug} for user {self.user_id}")
             logger.debug(f"[Tools] Parameters: {json.dumps(parameters, indent=2)}")
 
-            result = self.composio.tools.execute(
-                slug=tool_slug,
-                arguments=parameters or {},
-                connected_account_id=self.connection_id,
+            execute_kwargs = _apply_version_policy(
+                tool_slug,
+                {
+                    "slug": tool_slug,
+                    "arguments": parameters or {},
+                    "connected_account_id": self.connection_id,
+                    "user_id": self.user_id,
+                },
             )
+
+            result = self.composio.tools.execute(**execute_kwargs)
 
             # Handle ToolExecutionResponse
             if hasattr(result, "model_dump"):

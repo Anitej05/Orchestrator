@@ -421,6 +421,33 @@ class SkillRegistry:
         self.initialize()
 
 
+# =============================================================================
+# STARTUP PRE-LOADING (Background initialization)
+# =============================================================================
+
+def _preload_embedding_model_async():
+    """
+    Pre-load embedding model in background after server starts.
+    
+    Thread-safe: Uses existing double-checked locking in _get_embed_model().
+    Benefit: First skill matching request is fast if sent >14s after startup.
+    """
+    def _load():
+        try:
+            _get_embed_model()
+            logger.info("✅ SkillRegistry: Embedding model pre-loaded (background)")
+        except Exception as e:
+            logger.warning(f"⚠️ SkillRegistry: Embedding model pre-load failed: {e}")
+    
+    # Daemon thread: won't block server shutdown
+    threading.Thread(target=_load, daemon=True, name="SkillEmbeddingPreload").start()
+    logger.info("🔄 SkillRegistry: Embedding model pre-load started (background)")
+
+
+# Trigger pre-loading at module import time (server startup)
+_preload_embedding_model_async()
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # SINGLETON
 # ══════════════════════════════════════════════════════════════════════════

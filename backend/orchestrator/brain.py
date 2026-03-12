@@ -11,6 +11,7 @@ The Brain is stateless - it takes the current state and returns a decision.
 The Hands node will execute that decision and return a new state.
 """
 
+import os
 import logging
 import json
 import uuid
@@ -403,7 +404,22 @@ class Brain:
         except Exception as e:
             logger.debug(f"Artifact retrieval skipped: {e}")
 
-                # Build the last-agent-result block as a separate variable
+        # === FETCH ACTIVE CONNECTIONS ===
+        active_connections_str = "None"
+        try:
+            from services.integrations.composio_auth import get_auth_manager
+            user_id = state.get("user_id", "default")
+            auth_mgr = get_auth_manager()
+            # This triggers a DB check (and optionally a Composio sync if verified)
+            connections = auth_mgr.check_connection_status(user_id)
+            if connections and getattr(connections, "get", lambda k: None)("success"):
+                connected_apps = connections.get("connected_apps", [])
+                if connected_apps:
+                    active_connections_str = ", ".join(app if isinstance(app, str) else app.get("app_slug", str(app)) for app in connected_apps)
+        except Exception as e:
+            logger.warning(f"Failed to fetch active connections for prompt: {e}")
+
+        # Build the last-agent-result block as a separate variable
         # (extracted to avoid nested triple-quoted f-strings which Python 3.11 doesn't support)
         if last_agent_result_str:
             last_result_block = f"""## LATEST AGENT/TOOL RESULT -- MANDATORY FINISH REQUIRED
@@ -516,13 +532,14 @@ You are a helpful, intelligent, and expressive AI assistant.
 ## CONSECUTIVE FAILURES: {state.get("failure_count", 0)}
 {self._build_failure_guidance(state)}
 
+## ACTIVE CONNECTIONS
+The user has actively authenticated and connected the following apps: {active_connections_str}
+
 ## AUTH-REQUIRED RESPONSES
 If the last execution result contains `"status": "pending_auth"` or `"auth_required": true`:
-1. The user has NOT connected the required app (e.g., Gmail, Zoho Books) yet.
-2. You MUST set `action_type = "finish"` immediately.
-3. Set `user_response` to the `"message"` field from the auth result — it contains a clickable auth link.
-4. Do NOT retry the agent — the user must authenticate in their browser first.
-5. Do NOT call integrations_agent to "check connections" — the auth URL is already provided.
+1. Check the ACTIVE CONNECTIONS list above. 
+2. If the required app (e.g. gmail) IS in the active connections list, the user HAS just authenticated. **DO NOT** finish with an auth link! Instead, RETRY the agent call immediately since the connection is now ready.
+3. If the required app is NOT in the active connections list, you MUST set `action_type = "finish"` immediately. Set `user_response` to the `"message"` field from the auth result — it contains a clickable auth link. Do NOT retry the agent.
 
 ## RELEVANT EXPERIENCE (from past interactions)
 {artifacts_str or 'No relevant past experience.'}
@@ -1512,6 +1529,11 @@ Example for "summarise a PDF and email it":
             from services.integrations.composio_auth import get_auth_manager
 
             auth_mgr = get_auth_manager()
+            
+            # Sync from Composio first — after OAuth, the DB may still show INITIATED
+            # while Composio already has the connection as ACTIVE. This sync updates the DB.
+            auth_mgr.check_connection_status(user_id, app_slug)
+            
             connection = auth_mgr.get_connection_for_agent(user_id, app_slug)
 
             if connection:

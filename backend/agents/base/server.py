@@ -125,7 +125,7 @@ class AgentServer:
                 )
         
         @self.app.post("/execute/stream")
-        async def execute_stream(request: AgentRequest):
+        async def execute_stream(request: AgentRequest, raw_request: Request):
             """
             Execute a task and stream progress events as SSE.
 
@@ -147,6 +147,11 @@ class AgentServer:
                 await self.agent.initialize()
 
             # Bounded queue for progress messages (max 64 items — never blocks)
+            if not request.user_id:
+                header_user_id = raw_request.headers.get("X-User-ID")
+                if header_user_id:
+                    request.user_id = header_user_id
+
             progress_queue: asyncio.Queue = asyncio.Queue(maxsize=64)
             self.agent._progress_queue = progress_queue
 

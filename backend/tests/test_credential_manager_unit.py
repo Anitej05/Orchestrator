@@ -19,10 +19,10 @@ if str(backend_dir) not in sys.path:
 # Use SQLite in-memory for tests — must set before importing database/models
 # ---------------------------------------------------------------------------
 os.environ["DATABASE_URL"] = "sqlite:///:memory:"
-os.environ["ENCRYPTION_KEY"] = "test-key-DoNotUseInProd-32chars00="
+os.environ["ENCRYPTION_KEY"] = "BjdP6Q1R1JcR4wYp8nXl16rYPDhmPEw24kTx5cDIeEw="
 
 from database import Base, engine, SessionLocal
-from models import Credential, AgentCredential
+from models import Credential
 from backend.utils.encryption import encrypt, decrypt
 
 

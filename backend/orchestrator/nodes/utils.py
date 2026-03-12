@@ -175,6 +175,32 @@ def get_hf_embeddings():
     return _hf_embeddings
 
 
+# =============================================================================
+# STARTUP PRE-LOADING (Background initialization)
+# =============================================================================
+
+def _preload_embedding_model_async():
+    """
+    Pre-load embedding model in background after server starts.
+    Benefit: First request using get_hf_embeddings() is fast.
+    """
+    import threading
+    
+    def _load():
+        try:
+            get_hf_embeddings()
+            logger.info("✅ nodes/utils: HuggingFace embeddings pre-loaded (background)")
+        except Exception as e:
+            logger.warning(f"⚠️ nodes/utils: Embedding pre-load failed: {e}")
+    
+    threading.Thread(target=_load, daemon=True, name="HuggingFaceEmbeddingPreload").start()
+    logger.info("🔄 nodes/utils: Embedding pre-load started (background)")
+
+
+# Trigger pre-loading at module import time
+_preload_embedding_model_async()
+
+
 def save_conversation_history(state: dict, config=None, *args, **kwargs):
     """Saves the conversation history to a JSON file. Accepts extra args for compatibility."""
     thread_id = state.get("thread_id")

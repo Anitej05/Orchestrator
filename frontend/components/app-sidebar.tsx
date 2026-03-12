@@ -184,14 +184,15 @@ export default function AppSidebar({ onConversationSelect, onNewConversation, cu
           open ? "translate-x-0" : "-translate-x-full"
         )}
       >
-        <div className="flex h-full flex-col overflow-hidden">
+        <div className="flex h-full flex-col overflow-hidden" suppressHydrationWarning>
           <SidebarHeader className="border-b border-border-color p-4 flex-shrink-0">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between" suppressHydrationWarning>
               <span className="ui-section-header">Conversations</span>
               <button
                 onClick={toggleSidebar}
                 className="p-2 rounded-orbimesh-lg hover:bg-bg-hover transition-colors flex items-center justify-center"
                 aria-label="Close conversation history"
+                suppressHydrationWarning
               >
                 <X className="w-5 h-5 text-text-secondary" />
               </button>

@@ -318,14 +318,36 @@ class CredentialManager:
     def _load_from_legacy_table(
         self, db: Session, agent_id: str, user_id: str
     ) -> Dict[str, str]:
-        """Load from legacy ``agent_credentials`` table (backward compat)."""
-        from models import AgentCredential
+        """
+        Load from legacy ``agent_credentials`` table when it still exists.
 
-        row = (
-            db.query(AgentCredential)
-            .filter_by(agent_id=agent_id, user_id=user_id, is_active=True)
-            .first()
-        )
+        Newer deployments have removed both the ORM model and the table. In
+        that case this lookup should quietly no-op instead of surfacing a
+        misleading DB warning to the caller.
+        """
+        try:
+            from models import AgentCredential
+        except ImportError:
+            logger.debug(
+                "Legacy AgentCredential model unavailable; skipping lookup for %s",
+                agent_id,
+            )
+            return {}
+
+        try:
+            row = (
+                db.query(AgentCredential)
+                .filter_by(agent_id=agent_id, user_id=user_id, is_active=True)
+                .first()
+            )
+        except Exception as e:
+            logger.debug(
+                "Legacy agent_credentials lookup skipped for %s: %s",
+                agent_id,
+                e,
+            )
+            return {}
+
         if not row:
             return {}
 

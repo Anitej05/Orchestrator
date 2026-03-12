@@ -1,0 +1,604 @@
+{
+  "current_page": 1.0,
+  "items": [
+    {
+      "id": "ca_zf6ajLjUkE-F",
+      "auth_config": {
+        "id": "ac_lG3d9ae4mxmV",
+        "auth_scheme": "OAUTH2",
+        "is_composio_managed": true,
+        "is_disabled": false,
+        "deprecated": {
+          "uuid": "52950f35-1a9c-490f-a00c-4c9cbaca31db"
+        }
+      },
+      "created_at": "2026-03-11T14:47:42.249Z",
+      "data": {
+        "status": "INITIALIZING"
+      },
+      "is_disabled": false,
+      "state": {
+        "auth_scheme": "OAUTH2",
+        "val": {
+          "status": "INITIALIZING",
+          "account_id": null,
+          "account_url": null,
+          "api_url": null,
+          "base_url": null,
+          "borneo_dashboard_url": null,
+          "companydomain": null,
+          "dc": null,
+          "domain": null,
+          "extension": null,
+          "form_api_base_url": null,
+          "instance_endpoint": null,
+          "instance_name": null,
+          "long_redirect_url": null,
+          "proxy_password": null,
+          "proxy_username": null,
+          "region": null,
+          "server_location": null,
+          "shop": null,
+          "site_name": null,
+          "state_prefix": null,
+          "subdomain": null,
+          "version": null,
+          "your_server": null,
+          "your_domain": null
+        }
+      },
+      "status": "INITIALIZING",
+      "status_reason": null,
+      "toolkit": {
+        "slug": "gmail"
+      },
+      "updated_at": "2026-03-11T14:47:42.249Z",
+      "user_id": "user_35pWcBuOLxoD0MyUaFZ0epQuTbY",
+      "deprecated": {
+        "labels": [],
+        "uuid": "1d34d505-6ac0-4b51-b532-bf1dfdfa1711"
+      },
+      "test_request_endpoint": null,
+      "authScheme": "OAUTH2",
+      "uuid": "1d34d505-6ac0-4b51-b532-bf1dfdfa1711"
+    },
+    {
+      "id": "ca_DHw0usL_R6Yd",
+      "auth_config": {
+        "id": "ac_lG3d9ae4mxmV",
+        "auth_scheme": "OAUTH2",
+        "is_composio_managed": true,
+        "is_disabled": false,
+        "deprecated": {
+          "uuid": "52950f35-1a9c-490f-a00c-4c9cbaca31db"
+        }
+      },
+      "created_at": "2026-03-11T14:46:59.257Z",
+      "data": {
+        "status": "ACTIVE",
+        "access_token": "ya29...",
+        "id_token": "eyJh...",
+        "token_type": "Bearer",
+        "refresh_token": "1//0...",
+        "expires_in": 3599,
+        "scope": "https://mail.google.com/ https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/user.addresses.read https://www.googleapis.com/auth/user.emails.read https://www.googleapis.com/auth/contacts.readonly openid https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/profile.emails.read https://www.googleapis.com/auth/contacts.other.readonly https://www.googleapis.com/auth/profile.language.read https://www.googleapis.com/auth/user.birthday.read https://www.googleapis.com/auth/user.phonenumbers.read",
+        "code_verifier": "cfab...",
+        "callback_url": "https://backend.composio.dev/api/v1/auth-apps/add"
+      },
+      "is_disabled": false,
+      "state": {
+        "auth_scheme": "OAUTH2",
+        "val": {
+          "access_token": "ya29...",
+          "status": "ACTIVE",
+          "account_id": null,
+          "account_url": null,
+          "api_url": null,
+          "authed_user": null,
+          "base_url": null,
+          "borneo_dashboard_url": null,
+          "companydomain": null,
+          "dc": null,
+          "domain": null,
+          "expires_in": 3599.0,
+          "extension": null,
+          "form_api_base_url": null,
+          "id_token": "eyJh...",
+          "instance_endpoint": null,
+          "instance_name": null,
+          "long_redirect_url": null,
+          "proxy_password": null,
+          "proxy_username": null,
+          "refresh_token": "1//0...",
+          "region": null,
+          "scope": "https://mail.google.com/ https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/user.addresses.read https://www.googleapis.com/auth/user.emails.read https://www.googleapis.com/auth/contacts.readonly openid https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/profile.emails.read https://www.googleapis.com/auth/contacts.other.readonly https://www.googleapis.com/auth/profile.language.read https://www.googleapis.com/auth/user.birthday.read https://www.googleapis.com/auth/user.phonenumbers.read",
+          "server_location": null,
+          "shop": null,
+          "site_name": null,
+          "state_prefix": null,
+          "subdomain": null,
+          "token_type": "Bearer",
+          "version": null,
+          "webhook_signature": null,
+          "your_server": null,
+          "your_domain": null,
+          "code_verifier": "cfab...",
+          "callback_url": "https://backend.composio.dev/api/v1/auth-apps/add"
+        }
+      },
+      "status": "ACTIVE",
+      "status_reason": null,
+      "toolkit": {
+        "slug": "gmail"
+      },
+      "updated_at": "2026-03-11T14:47:19.167Z",
+      "user_id": "user_35pWcBuOLxoD0MyUaFZ0epQuTbY",
+      "deprecated": {
+        "labels": [],
+        "uuid": "7acca21d-5f9a-4d00-b544-3a68f5e6ca81"
+      },
+      "test_request_endpoint": null,
+      "authScheme": "OAUTH2",
+      "uuid": "7acca21d-5f9a-4d00-b544-3a68f5e6ca81"
+    },
+    {
+      "id": "ca_o1NFQKvkN3_k",
+      "auth_config": {
+        "id": "ac_lG3d9ae4mxmV",
+        "auth_scheme": "OAUTH2",
+        "is_composio_managed": true,
+        "is_disabled": false,
+        "deprecated": {
+          "uuid": "52950f35-1a9c-490f-a00c-4c9cbaca31db"
+        }
+      },
+      "created_at": "2026-03-11T14:45:39.301Z",
+      "data": {
+        "status": "INITIALIZING"
+      },
+      "is_disabled": false,
+      "state": {
+        "auth_scheme": "OAUTH2",
+        "val": {
+          "status": "INITIALIZING",
+          "account_id": null,
+          "account_url": null,
+          "api_url": null,
+          "base_url": null,
+          "borneo_dashboard_url": null,
+          "companydomain": null,
+          "dc": null,
+          "domain": null,
+          "extension": null,
+          "form_api_base_url": null,
+          "instance_endpoint": null,
+          "instance_name": null,
+          "long_redirect_url": null,
+          "proxy_password": null,
+          "proxy_username": null,
+          "region": null,
+          "server_location": null,
+          "shop": null,
+          "site_name": null,
+          "state_prefix": null,
+          "subdomain": null,
+          "version": null,
+          "your_server": null,
+          "your_domain": null
+        }
+      },
+      "status": "INITIALIZING",
+      "status_reason": null,
+      "toolkit": {
+        "slug": "gmail"
+      },
+      "updated_at": "2026-03-11T14:45:39.301Z",
+      "user_id": "user_35pWcBuOLxoD0MyUaFZ0epQuTbY",
+      "deprecated": {
+        "labels": [],
+        "uuid": "a906c9a4-2953-4396-832e-9ad646d89b3c"
+      },
+      "test_request_endpoint": null,
+      "authScheme": "OAUTH2",
+      "uuid": "a906c9a4-2953-4396-832e-9ad646d89b3c"
+    },
+    {
+      "id": "ca_DBAVY6f7-dBs",
+      "auth_config": {
+        "id": "ac_lG3d9ae4mxmV",
+        "auth_scheme": "OAUTH2",
+        "is_composio_managed": true,
+        "is_disabled": false,
+        "deprecated": {
+          "uuid": "52950f35-1a9c-490f-a00c-4c9cbaca31db"
+        }
+      },
+      "created_at": "2026-03-11T14:44:18.307Z",
+      "data": {
+        "status": "ACTIVE",
+        "access_token": "ya29...",
+        "id_token": "eyJh...",
+        "token_type": "Bearer",
+        "refresh_token": "1//0...",
+        "expires_in": 3599,
+        "scope": "https://www.googleapis.com/auth/contacts.other.readonly https://www.googleapis.com/auth/profile.language.read https://www.googleapis.com/auth/user.phonenumbers.read https://www.googleapis.com/auth/profile.emails.read https://www.googleapis.com/auth/user.birthday.read https://mail.google.com/ https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/user.addresses.read https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/contacts.readonly openid https://www.googleapis.com/auth/user.emails.read",
+        "code_verifier": "8bb2...",
+        "callback_url": "https://backend.composio.dev/api/v1/auth-apps/add"
+      },
+      "is_disabled": false,
+      "state": {
+        "auth_scheme": "OAUTH2",
+        "val": {
+          "access_token": "ya29...",
+          "status": "ACTIVE",
+          "account_id": null,
+          "account_url": null,
+          "api_url": null,
+          "authed_user": null,
+          "base_url": null,
+          "borneo_dashboard_url": null,
+          "companydomain": null,
+          "dc": null,
+          "domain": null,
+          "expires_in": 3599.0,
+          "extension": null,
+          "form_api_base_url": null,
+          "id_token": "eyJh...",
+          "instance_endpoint": null,
+          "instance_name": null,
+          "long_redirect_url": null,
+          "proxy_password": null,
+          "proxy_username": null,
+          "refresh_token": "1//0...",
+          "region": null,
+          "scope": "https://www.googleapis.com/auth/contacts.other.readonly https://www.googleapis.com/auth/profile.language.read https://www.googleapis.com/auth/user.phonenumbers.read https://www.googleapis.com/auth/profile.emails.read https://www.googleapis.com/auth/user.birthday.read https://mail.google.com/ https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/user.addresses.read https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/contacts.readonly openid https://www.googleapis.com/auth/user.emails.read",
+          "server_location": null,
+          "shop": null,
+          "site_name": null,
+          "state_prefix": null,
+          "subdomain": null,
+          "token_type": "Bearer",
+          "version": null,
+          "webhook_signature": null,
+          "your_server": null,
+          "your_domain": null,
+          "code_verifier": "8bb2...",
+          "callback_url": "https://backend.composio.dev/api/v1/auth-apps/add"
+        }
+      },
+      "status": "ACTIVE",
+      "status_reason": null,
+      "toolkit": {
+        "slug": "gmail"
+      },
+      "updated_at": "2026-03-11T14:45:03.654Z",
+      "user_id": "user_35pWcBuOLxoD0MyUaFZ0epQuTbY",
+      "deprecated": {
+        "labels": [],
+        "uuid": "1f37f267-0975-490f-9a85-60740816e1af"
+      },
+      "test_request_endpoint": null,
+      "authScheme": "OAUTH2",
+      "uuid": "1f37f267-0975-490f-9a85-60740816e1af"
+    },
+    {
+      "id": "ca_2hFszvoMCLgf",
+      "auth_config": {
+        "id": "ac_lG3d9ae4mxmV",
+        "auth_scheme": "OAUTH2",
+        "is_composio_managed": true,
+        "is_disabled": false,
+        "deprecated": {
+          "uuid": "52950f35-1a9c-490f-a00c-4c9cbaca31db"
+        }
+      },
+      "created_at": "2026-03-11T14:42:28.829Z",
+      "data": {
+        "status": "ACTIVE",
+        "access_token": "ya29...",
+        "id_token": "eyJh...",
+        "token_type": "Bearer",
+        "refresh_token": "1//0...",
+        "expires_in": 3599,
+        "scope": "https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/profile.emails.read https://www.googleapis.com/auth/contacts.other.readonly https://www.googleapis.com/auth/profile.language.read https://www.googleapis.com/auth/user.birthday.read https://www.googleapis.com/auth/user.phonenumbers.read openid https://mail.google.com/ https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/user.addresses.read https://www.googleapis.com/auth/user.emails.read https://www.googleapis.com/auth/contacts.readonly",
+        "code_verifier": "4aa3...",
+        "callback_url": "https://backend.composio.dev/api/v1/auth-apps/add"
+      },
+      "is_disabled": false,
+      "state": {
+        "auth_scheme": "OAUTH2",
+        "val": {
+          "access_token": "ya29...",
+          "status": "ACTIVE",
+          "account_id": null,
+          "account_url": null,
+          "api_url": null,
+          "authed_user": null,
+          "base_url": null,
+          "borneo_dashboard_url": null,
+          "companydomain": null,
+          "dc": null,
+          "domain": null,
+          "expires_in": 3599.0,
+          "extension": null,
+          "form_api_base_url": null,
+          "id_token": "eyJh...",
+          "instance_endpoint": null,
+          "instance_name": null,
+          "long_redirect_url": null,
+          "proxy_password": null,
+          "proxy_username": null,
+          "refresh_token": "1//0...",
+          "region": null,
+          "scope": "https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/profile.emails.read https://www.googleapis.com/auth/contacts.other.readonly https://www.googleapis.com/auth/profile.language.read https://www.googleapis.com/auth/user.birthday.read https://www.googleapis.com/auth/user.phonenumbers.read openid https://mail.google.com/ https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/user.addresses.read https://www.googleapis.com/auth/user.emails.read https://www.googleapis.com/auth/contacts.readonly",
+          "server_location": null,
+          "shop": null,
+          "site_name": null,
+          "state_prefix": null,
+          "subdomain": null,
+          "token_type": "Bearer",
+          "version": null,
+          "webhook_signature": null,
+          "your_server": null,
+          "your_domain": null,
+          "code_verifier": "4aa3...",
+          "callback_url": "https://backend.composio.dev/api/v1/auth-apps/add"
+        }
+      },
+      "status": "ACTIVE",
+      "status_reason": null,
+      "toolkit": {
+        "slug": "gmail"
+      },
+      "updated_at": "2026-03-11T14:45:03.653Z",
+      "user_id": "user_35pWcBuOLxoD0MyUaFZ0epQuTbY",
+      "deprecated": {
+        "labels": [],
+        "uuid": "52f077a8-0f3b-4440-ba9f-c1e9593a9563"
+      },
+      "test_request_endpoint": null,
+      "authScheme": "OAUTH2",
+      "uuid": "52f077a8-0f3b-4440-ba9f-c1e9593a9563"
+    },
+    {
+      "id": "ca_9Z1uew-kpLDM",
+      "auth_config": {
+        "id": "ac_lG3d9ae4mxmV",
+        "auth_scheme": "OAUTH2",
+        "is_composio_managed": true,
+        "is_disabled": false,
+        "deprecated": {
+          "uuid": "52950f35-1a9c-490f-a00c-4c9cbaca31db"
+        }
+      },
+      "created_at": "2026-03-11T14:33:01.116Z",
+      "data": {
+        "status": "ACTIVE",
+        "access_token": "ya29...",
+        "id_token": "eyJh...",
+        "token_type": "Bearer",
+        "refresh_token": "1//0...",
+        "expires_in": 3599,
+        "scope": "https://mail.google.com/ https://www.googleapis.com/auth/profile.emails.read https://www.googleapis.com/auth/user.birthday.read https://www.googleapis.com/auth/profile.language.read https://www.googleapis.com/auth/contacts.other.readonly https://www.googleapis.com/auth/user.phonenumbers.read https://www.googleapis.com/auth/user.emails.read https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/contacts.readonly https://www.googleapis.com/auth/userinfo.email openid https://www.googleapis.com/auth/user.addresses.read",
+        "code_verifier": "620b...",
+        "callback_url": "https://backend.composio.dev/api/v1/auth-apps/add"
+      },
+      "is_disabled": false,
+      "state": {
+        "auth_scheme": "OAUTH2",
+        "val": {
+          "access_token": "ya29...",
+          "status": "ACTIVE",
+          "account_id": null,
+          "account_url": null,
+          "api_url": null,
+          "authed_user": null,
+          "base_url": null,
+          "borneo_dashboard_url": null,
+          "companydomain": null,
+          "dc": null,
+          "domain": null,
+          "expires_in": 3599.0,
+          "extension": null,
+          "form_api_base_url": null,
+          "id_token": "eyJh...",
+          "instance_endpoint": null,
+          "instance_name": null,
+          "long_redirect_url": null,
+          "proxy_password": null,
+          "proxy_username": null,
+          "refresh_token": "1//0...",
+          "region": null,
+          "scope": "https://mail.google.com/ https://www.googleapis.com/auth/profile.emails.read https://www.googleapis.com/auth/user.birthday.read https://www.googleapis.com/auth/profile.language.read https://www.googleapis.com/auth/contacts.other.readonly https://www.googleapis.com/auth/user.phonenumbers.read https://www.googleapis.com/auth/user.emails.read https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/contacts.readonly https://www.googleapis.com/auth/userinfo.email openid https://www.googleapis.com/auth/user.addresses.read",
+          "server_location": null,
+          "shop": null,
+          "site_name": null,
+          "state_prefix": null,
+          "subdomain": null,
+          "token_type": "Bearer",
+          "version": null,
+          "webhook_signature": null,
+          "your_server": null,
+          "your_domain": null,
+          "code_verifier": "620b...",
+          "callback_url": "https://backend.composio.dev/api/v1/auth-apps/add"
+        }
+      },
+      "status": "ACTIVE",
+      "status_reason": null,
+      "toolkit": {
+        "slug": "gmail"
+      },
+      "updated_at": "2026-03-11T14:45:04.466Z",
+      "user_id": "user_35pWcBuOLxoD0MyUaFZ0epQuTbY",
+      "deprecated": {
+        "labels": [],
+        "uuid": "4c1d6cd9-3418-44f5-bbb5-63c00554fc7a"
+      },
+      "test_request_endpoint": null,
+      "authScheme": "OAUTH2",
+      "uuid": "4c1d6cd9-3418-44f5-bbb5-63c00554fc7a"
+    },
+    {
+      "id": "ca_YI4Z9EgZattr",
+      "auth_config": {
+        "id": "ac_lG3d9ae4mxmV",
+        "auth_scheme": "OAUTH2",
+        "is_composio_managed": true,
+        "is_disabled": false,
+        "deprecated": {
+          "uuid": "52950f35-1a9c-490f-a00c-4c9cbaca31db"
+        }
+      },
+      "created_at": "2026-03-11T14:25:39.761Z",
+      "data": {
+        "status": "ACTIVE",
+        "access_token": "ya29...",
+        "id_token": "eyJh...",
+        "token_type": "Bearer",
+        "refresh_token": "1//0...",
+        "expires_in": 3599,
+        "scope": "https://www.googleapis.com/auth/profile.language.read https://www.googleapis.com/auth/user.birthday.read https://www.googleapis.com/auth/contacts.readonly https://www.googleapis.com/auth/user.emails.read https://www.googleapis.com/auth/user.phonenumbers.read https://www.googleapis.com/auth/userinfo.email openid https://www.googleapis.com/auth/user.addresses.read https://mail.google.com/ https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/profile.emails.read https://www.googleapis.com/auth/contacts.other.readonly",
+        "code_verifier": "b145...",
+        "callback_url": "https://backend.composio.dev/api/v1/auth-apps/add"
+      },
+      "is_disabled": false,
+      "state": {
+        "auth_scheme": "OAUTH2",
+        "val": {
+          "access_token": "ya29...",
+          "status": "ACTIVE",
+          "account_id": null,
+          "account_url": null,
+          "api_url": null,
+          "authed_user": null,
+          "base_url": null,
+          "borneo_dashboard_url": null,
+          "companydomain": null,
+          "dc": null,
+          "domain": null,
+          "expires_in": 3599.0,
+          "extension": null,
+          "form_api_base_url": null,
+          "id_token": "eyJh...",
+          "instance_endpoint": null,
+          "instance_name": null,
+          "long_redirect_url": null,
+          "proxy_password": null,
+          "proxy_username": null,
+          "refresh_token": "1//0...",
+          "region": null,
+          "scope": "https://www.googleapis.com/auth/profile.language.read https://www.googleapis.com/auth/user.birthday.read https://www.googleapis.com/auth/contacts.readonly https://www.googleapis.com/auth/user.emails.read https://www.googleapis.com/auth/user.phonenumbers.read https://www.googleapis.com/auth/userinfo.email openid https://www.googleapis.com/auth/user.addresses.read https://mail.google.com/ https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/profile.emails.read https://www.googleapis.com/auth/contacts.other.readonly",
+          "server_location": null,
+          "shop": null,
+          "site_name": null,
+          "state_prefix": null,
+          "subdomain": null,
+          "token_type": "Bearer",
+          "version": null,
+          "webhook_signature": null,
+          "your_server": null,
+          "your_domain": null,
+          "code_verifier": "b145...",
+          "callback_url": "https://backend.composio.dev/api/v1/auth-apps/add"
+        }
+      },
+      "status": "ACTIVE",
+      "status_reason": null,
+      "toolkit": {
+        "slug": "gmail"
+      },
+      "updated_at": "2026-03-11T14:45:03.709Z",
+      "user_id": "user_35pWcBuOLxoD0MyUaFZ0epQuTbY",
+      "deprecated": {
+        "labels": [],
+        "uuid": "c53b9324-0c3c-4d8e-ad60-4cd927321476"
+      },
+      "test_request_endpoint": null,
+      "authScheme": "OAUTH2",
+      "uuid": "c53b9324-0c3c-4d8e-ad60-4cd927321476"
+    },
+    {
+      "id": "ca_X3Qe57scvwwj",
+      "auth_config": {
+        "id": "ac_lG3d9ae4mxmV",
+        "auth_scheme": "OAUTH2",
+        "is_composio_managed": true,
+        "is_disabled": false,
+        "deprecated": {
+          "uuid": "52950f35-1a9c-490f-a00c-4c9cbaca31db"
+        }
+      },
+      "created_at": "2026-03-11T14:22:51.974Z",
+      "data": {
+        "status": "ACTIVE",
+        "access_token": "ya29...",
+        "id_token": "eyJh...",
+        "token_type": "Bearer",
+        "refresh_token": "1//0...",
+        "expires_in": 3599,
+        "scope": "https://www.googleapis.com/auth/contacts.readonly https://www.googleapis.com/auth/profile.emails.read https://www.googleapis.com/auth/user.birthday.read https://www.googleapis.com/auth/user.emails.read https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/user.addresses.read openid https://www.googleapis.com/auth/userinfo.email https://mail.google.com/ https://www.googleapis.com/auth/contacts.other.readonly https://www.googleapis.com/auth/profile.language.read https://www.googleapis.com/auth/user.phonenumbers.read",
+        "code_verifier": "9766...",
+        "callback_url": "https://backend.composio.dev/api/v1/auth-apps/add"
+      },
+      "is_disabled": false,
+      "state": {
+        "auth_scheme": "OAUTH2",
+        "val": {
+          "access_token": "ya29...",
+          "status": "ACTIVE",
+          "account_id": null,
+          "account_url": null,
+          "api_url": null,
+          "authed_user": null,
+          "base_url": null,
+          "borneo_dashboard_url": null,
+          "companydomain": null,
+          "dc": null,
+          "domain": null,
+          "expires_in": 3599.0,
+          "extension": null,
+          "form_api_base_url": null,
+          "id_token": "eyJh...",
+          "instance_endpoint": null,
+          "instance_name": null,
+          "long_redirect_url": null,
+          "proxy_password": null,
+          "proxy_username": null,
+          "refresh_token": "1//0...",
+          "region": null,
+          "scope": "https://www.googleapis.com/auth/contacts.readonly https://www.googleapis.com/auth/profile.emails.read https://www.googleapis.com/auth/user.birthday.read https://www.googleapis.com/auth/user.emails.read https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/user.addresses.read openid https://www.googleapis.com/auth/userinfo.email https://mail.google.com/ https://www.googleapis.com/auth/contacts.other.readonly https://www.googleapis.com/auth/profile.language.read https://www.googleapis.com/auth/user.phonenumbers.read",
+          "server_location": null,
+          "shop": null,
+          "site_name": null,
+          "state_prefix": null,
+          "subdomain": null,
+          "token_type": "Bearer",
+          "version": null,
+          "webhook_signature": null,
+          "your_server": null,
+          "your_domain": null,
+          "code_verifier": "9766...",
+          "callback_url": "https://backend.composio.dev/api/v1/auth-apps/add"
+        }
+      },
+      "status": "ACTIVE",
+      "status_reason": null,
+      "toolkit": {
+        "slug": "gmail"
+      },
+      "updated_at": "2026-03-11T14:45:03.804Z",
+      "user_id": "user_35pWcBuOLxoD0MyUaFZ0epQuTbY",
+      "deprecated": {
+        "labels": [],
+        "uuid": "9d0c3fc9-47ce-4821-a8f0-4742ab2bcfab"
+      },
+      "test_request_endpoint": null,
+      "authScheme": "OAUTH2",
+      "uuid": "9d0c3fc9-47ce-4821-a8f0-4742ab2bcfab"
+    }
+  ],
+  "total_items": 8.0,
+  "total_pages": 1.0,
+  "next_cursor": null
+}

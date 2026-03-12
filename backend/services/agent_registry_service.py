@@ -479,7 +479,7 @@ class AgentRegistryService:
     def _serialize_agent(self, agent: Agent) -> Dict[str, Any]:
         """Convert Agent ORM object to dictionary"""
         endpoints_info = []
-        for ep in agent.endpoints:
+        for ep in getattr(agent, "endpoints", []) or []:
             endpoints_info.append(
                 {
                     "endpoint": ep.endpoint,

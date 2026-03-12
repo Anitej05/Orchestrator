@@ -340,34 +340,58 @@ class ComposioAuthManager:
             4. POST /webhooks/composio fires → DB updated to ACTIVE
         """
         try:
-
             logger.info(f"Starting auth for {app_slug} (user: {user_id})")
             if callback_url:
                 logger.info(f"Using callback URL: {callback_url}")
 
-            # SDK v0.7.x: get_entity(user_id).initiate_connection(app_name=...)
-            # This is the simplest pattern that works with the installed version.
-            entity = self._composio.get_entity(id=user_id)
-            connection_request = entity.initiate_connection(
-                app_name=app_slug.upper(),
-                redirect_url=callback_url or None,
+            # ── Step 1: Resolve auth_config_id for this app ──
+            # Check environment variable first (custom OAuth client)
+            auth_config_id = self._get_auth_config_id(app_slug)
+
+            if not auth_config_id:
+                # Look up via Composio API: list auth configs for this toolkit
+                normalized_slug = app_slug.lower().replace("_", "")
+                logger.info(f"Looking up auth config for toolkit: {normalized_slug}")
+                try:
+                    auth_configs_response = self._composio.auth_configs.list(
+                        toolkit_slug=normalized_slug
+                    )
+                    items = getattr(auth_configs_response, "items", None) or []
+                    if items:
+                        auth_config_id = items[0].id
+                        logger.info(f"Resolved auth_config_id={auth_config_id} for {normalized_slug}")
+                    else:
+                        # Fallback: try uppercase variant
+                        auth_configs_response = self._composio.auth_configs.list(
+                            toolkit_slug=app_slug.upper()
+                        )
+                        items = getattr(auth_configs_response, "items", None) or []
+                        if items:
+                            auth_config_id = items[0].id
+                            logger.info(f"Resolved auth_config_id={auth_config_id} for {app_slug.upper()}")
+                except Exception as lookup_err:
+                    logger.warning(f"Auth config lookup failed: {lookup_err}")
+
+            if not auth_config_id:
+                raise ValueError(
+                    f"No auth config found for '{app_slug}'. "
+                    "Set COMPOSIO_AUTH_CONFIG_{APP} in .env or create one in the Composio dashboard."
+                )
+
+            # ── Step 2: Create a Composio Connect Link ──
+            # v0.10.6 SDK: connected_accounts.link(user_id, auth_config_id)
+            logger.info(f"Creating Composio link for user={user_id}, auth_config={auth_config_id}")
+            connection_request = self._composio.connected_accounts.link(
+                user_id=user_id,
+                auth_config_id=auth_config_id,
+                callback_url=callback_url or None,
             )
 
-            # Extract redirect URL
-            redirect_url = None
-            if hasattr(connection_request, "redirectUrl"):
-                redirect_url = connection_request.redirectUrl
-            elif hasattr(connection_request, "redirect_url"):
-                redirect_url = connection_request.redirect_url
+            redirect_url = connection_request.redirect_url
+            connection_id = connection_request.id
 
-            # Extract connection ID
-            connection_id = None
-            if hasattr(connection_request, "connectedAccountId"):
-                connection_id = connection_request.connectedAccountId
-            elif hasattr(connection_request, "connected_account_id"):
-                connection_id = connection_request.connected_account_id
-            elif hasattr(connection_request, "id"):
-                connection_id = connection_request.id
+            logger.info(f"✅ Got redirect URL: {redirect_url}")
+            logger.info(f"✅ Connection request ID: {connection_id}")
 
             # Persist INITIATED status to DB for tracking
             if connection_id:
@@ -392,7 +416,6 @@ class ComposioAuthManager:
                 "poll_status_url": f"/api/integrations/status/{user_id}/{app_slug}",
             }
 
-
         except Exception as e:
             error_msg = self._format_composio_error(e)
             logger.error(f"Auth flow failed for {app_slug}: {error_msg}", exc_info=True)
@@ -402,7 +425,6 @@ class ComposioAuthManager:
                 "success": False,
                 "error": error_msg,
                 "app_slug": app_slug,
-
             }
     
     def check_connection_status(
@@ -421,20 +443,22 @@ class ComposioAuthManager:
             Connection status for the user's toolkits
         """
         try:
-            # SDK v0.7.x: fetch by entity_ids; support canonical + legacy mapped entity IDs.
+            # SDK v0.10.6: fetch by user_ids; support canonical + legacy mapped entity IDs.
             connections: List[Any] = []
             seen_connection_ids = set()
             for entity_id in self._get_candidate_entity_ids(user_id, app_slug):
                 try:
-                    connections_response = self._composio.connected_accounts.get(
-                        entity_ids=[entity_id]
+                    connections_response = self._composio.connected_accounts.list(
+                        user_ids=[entity_id]
                     )
-                    if isinstance(connections_response, list):
+                    # v0.10.6 list returns an object with .items
+                    raw_connections = []
+                    if hasattr(connections_response, 'items'):
+                        raw_connections = connections_response.items or []
+                    elif isinstance(connections_response, list):
                         raw_connections = connections_response
                     elif connections_response is not None:
                         raw_connections = [connections_response]
-                    else:
-                        raw_connections = []
 
                     for raw_conn in raw_connections:
                         conn_id = getattr(raw_conn, "id", None)
@@ -491,6 +515,13 @@ class ComposioAuthManager:
                 integration_id = integration_id or getattr(conn, "integration_id", None) or getattr(conn, "integrationId", None)
                 app_name = app_name or getattr(conn, "app_name", None) or getattr(conn, "appName", None)
                 app_unique_id = app_unique_id or getattr(conn, "app_unique_id", None) or getattr(conn, "appUniqueId", None)
+                
+                # SDK v0.10.6 fallbacks: look in toolkit mapping
+                toolkit_slug = None
+                if conn_dict and conn_dict.get("toolkit") and isinstance(conn_dict["toolkit"], dict):
+                    toolkit_slug = conn_dict["toolkit"].get("slug")
+                app_unique_id = app_unique_id or toolkit_slug or getattr(conn, "app_slug", None)
+                
                 status = self._normalize_status(status or getattr(conn, "status", "") or "")
                 connected_account_id = connected_account_id or getattr(conn, "id", None)
                 entity_id = getattr(conn, "entityId", None) or getattr(conn, "entity_id", None)
@@ -622,21 +653,34 @@ class ComposioAuthManager:
     def disconnect_app(self, user_id: str, app_slug: str) -> Dict[str, Any]:
         """Disconnect a user from a specific app and remove from database."""
         try:
-            # Get user's connections using v0.7.x SDK
-            connections_response = self._composio.connected_accounts.get(
-                entity_ids=[user_id]
-            )
-            connections = connections_response if isinstance(connections_response, list) else ([connections_response] if connections_response else [])
+            # Get user's connections using v0.10.x SDK
+            connections = []
+            seen_connection_ids = set()
+            for entity_id in self._get_candidate_entity_ids(user_id, app_slug):
+                try:
+                    resp = self._composio.connected_accounts.list(user_ids=[entity_id])
+                    items = getattr(resp, 'items', None) or (resp if isinstance(resp, list) else [])
+                    for c in items:
+                        if getattr(c, "id", None) not in seen_connection_ids:
+                            seen_connection_ids.add(getattr(c, "id", None))
+                            connections.append(c)
+                except Exception as e:
+                    logger.debug(f"Could not fetch connections for entity {entity_id}: {e}")
             
             for conn in connections:
-                conn_dict = conn.model_dump() if hasattr(conn, "model_dump") else {}
+                conn_dict = conn.model_dump() if hasattr(conn, "model_dump") else getattr(conn, "__dict__", {})
                 slug = (
                     conn_dict.get("appUniqueId")
                     or conn_dict.get("appName")
                     or getattr(conn, "appUniqueId", None)
                     or getattr(conn, "appName", None)
-                    or ""
-                ).lower()
+                )
+                if not slug:
+                    # v0.10.6 SDK moved slug to nested toolkit.slug
+                    toolkit_info = getattr(conn, "toolkit", None) or conn_dict.get("toolkit", {})
+                    slug = getattr(toolkit_info, "slug", None) or (toolkit_info.get("slug") if isinstance(toolkit_info, dict) else None)
+                
+                slug = (slug or "").lower()
                 if slug == app_slug.lower():
                     # Use official SDK delete method
                     self._composio.connected_accounts.delete(conn.id)
@@ -1093,8 +1137,9 @@ class ComposioAuthManager:
                         all_connections = []
                         for entity_id in entity_ids_to_check:
                             try:
-                                connections = self._composio.connected_accounts.get(entity_ids=[entity_id])
-                                all_connections.extend(connections)
+                                resp = self._composio.connected_accounts.list(user_ids=[entity_id])
+                                items = getattr(resp, 'items', None) or (resp if isinstance(resp, list) else [])
+                                all_connections.extend(items)
                             except Exception as e:
                                 logger.debug(f"Could not fetch connections for entity {entity_id}: {e}")
                         

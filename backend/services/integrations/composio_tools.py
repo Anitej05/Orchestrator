@@ -16,6 +16,45 @@ import os
 from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger("composio_tools")
+_VERSION_FALLBACK_WARNED: set[str] = set()
+
+
+def _normalize_toolkit_slug(action_or_toolkit: str) -> str:
+    token = (action_or_toolkit or "").strip().upper()
+    slug = token.split("_", 1)[0].lower() if "_" in token else token.lower()
+    return "zohobooks" if slug == "zoho" else slug
+
+
+def _load_toolkit_versions_from_env() -> Dict[str, str]:
+    prefix = "COMPOSIO_TOOLKIT_VERSION_"
+    versions: Dict[str, str] = {}
+    for key, value in os.environ.items():
+        if not key.startswith(prefix):
+            continue
+        cleaned = (value or "").strip()
+        if not cleaned:
+            continue
+        slug = key[len(prefix):].lower()
+        versions[slug] = cleaned
+    return versions
+
+
+def _apply_version_policy(tool_slug: str, execute_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    toolkit_slug = _normalize_toolkit_slug(tool_slug)
+    toolkit_version = os.getenv(f"COMPOSIO_TOOLKIT_VERSION_{toolkit_slug.upper()}", "").strip()
+    if toolkit_version:
+        execute_kwargs["version"] = toolkit_version
+        return execute_kwargs
+
+    execute_kwargs["dangerously_skip_version_check"] = True
+    if toolkit_slug and toolkit_slug not in _VERSION_FALLBACK_WARNED:
+        logger.warning(
+            "No Composio toolkit version configured for %s; "
+            "using dangerously_skip_version_check fallback",
+            toolkit_slug,
+        )
+        _VERSION_FALLBACK_WARNED.add(toolkit_slug)
+    return execute_kwargs
 
 # Import Composio exceptions for better error messages
 try:
@@ -56,11 +95,16 @@ class ComposioActionAdapter:
     async def ainvoke(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the action via the v3 SDK tools.execute() API."""
         try:
-            result = self._client.tools.execute(
-                slug=self.name,
-                arguments=params or {},
-                connected_account_id=self._connected_account,
+            execute_kwargs = _apply_version_policy(
+                self.name,
+                {
+                    "slug": self.name,
+                    "arguments": params or {},
+                    "connected_account_id": self._connected_account,
+                    "user_id": self._user_id,
+                },
             )
+            result = self._client.tools.execute(**execute_kwargs)
             # Handle ToolExecutionResponse object
             if hasattr(result, "model_dump"):
                 return result.model_dump()
@@ -94,8 +138,12 @@ class ComposioToolManager:
             self.api_key = os.getenv("COMPOSIO_API_KEY")
         if not self.api_key:
             raise ValueError("COMPOSIO_API_KEY required")
+        self._toolkit_versions = _load_toolkit_versions_from_env()
         from composio import Composio
-        self._composio = Composio(api_key=self.api_key)
+        composio_kwargs: Dict[str, Any] = {"api_key": self.api_key}
+        if self._toolkit_versions:
+            composio_kwargs["toolkit_versions"] = self._toolkit_versions
+        self._composio = Composio(**composio_kwargs)
         logger.info("Initialized Composio v3 client for tools")
 
     # ------------------------------------------------------------------
@@ -128,10 +176,7 @@ class ComposioToolManager:
         try:
             from services.integrations.composio_auth import get_auth_manager
 
-            token = (action_or_toolkit or "").strip().upper()
-            app_slug = token.split("_", 1)[0].lower() if "_" in token else token.lower()
-            if app_slug == "zoho":
-                app_slug = "zohobooks"
+            app_slug = _normalize_toolkit_slug(action_or_toolkit)
 
             connection = get_auth_manager().get_connection_for_agent(user_id, app_slug)
             if not connection:
@@ -292,11 +337,16 @@ class ComposioToolManager:
         try:
             connected_account_id = self._resolve_connected_account_id(user_id, tool_slug)
 
-            result = self._composio.tools.execute(
-                slug=tool_slug.upper(),
-                arguments=arguments or {},
-                connected_account_id=connected_account_id,
+            execute_kwargs = _apply_version_policy(
+                tool_slug,
+                {
+                    "slug": tool_slug.upper(),
+                    "arguments": arguments or {},
+                    "connected_account_id": connected_account_id,
+                    "user_id": user_id,
+                },
             )
+            result = self._composio.tools.execute(**execute_kwargs)
 
             # Handle ToolExecutionResponse
             if hasattr(result, "model_dump"):

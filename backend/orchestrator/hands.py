@@ -43,6 +43,35 @@ class Hands:
             "python": 60.0,
         }
 
+    @staticmethod
+    def _extract_needs_input_payload(output: Any) -> Optional[Dict[str, Any]]:
+        """
+        Normalize agent responses that request user input.
+
+        Raw agent output may be a direct ``needs_input`` payload or the same
+        payload nested under ``result`` / ``standard_response`` after other
+        wrappers are applied. Hands must recognize all shapes so the graph
+        pauses instead of retrying the same agent call.
+        """
+        if not isinstance(output, dict):
+            return None
+
+        if output.get("status") == "needs_input":
+            return output
+
+        nested_result = output.get("result")
+        if isinstance(nested_result, dict) and nested_result.get("status") == "needs_input":
+            return nested_result
+
+        standard_response = output.get("standard_response")
+        if (
+            isinstance(standard_response, dict)
+            and standard_response.get("status") == "needs_input"
+        ):
+            return standard_response
+
+        return None
+
     async def execute(
         self, state: Dict[str, Any], config: Optional[RunnableConfig] = None
     ) -> Dict[str, Any]:
@@ -58,9 +87,15 @@ class Hands:
         resource_id = decision_dict.get("resource_id")
         payload = decision_dict.get("payload", {})
 
-        # Get thread_id and user_id for credential lookup
+        # Get thread_id and user_id for credential lookup.
+        # Prefer the persisted state user because some orchestrator entry points
+        # invoke the graph without configurable.owner, and falling back to
+        # "system" breaks per-user OAuth-backed agents like Gmail.
         owner = (config or {}).get("configurable", {}).get("owner", {})
-        if isinstance(owner, str):
+        state_user_id = state.get("user_id") or state.get("owner_id")
+        if state_user_id:
+            user_id = state_user_id
+        elif isinstance(owner, str):
             user_id = owner
         else:
             user_id = owner.get("user_id", "system")
@@ -1007,22 +1042,29 @@ os.chdir(r'{workspace_path}')
             "shared_workspace": str(shared_manager.get_workspace_path()),
         }
 
+        needs_input_payload = None
+        if action_type == "agent":
+            needs_input_payload = self._extract_needs_input_payload(raw_output)
+            if needs_input_payload is None:
+                needs_input_payload = self._extract_needs_input_payload(result.output)
+
         # === INTERCEPT NEEDS_INPUT FROM AGENTS ===
         # If an agent explicitly requires user input (like credentials), 
         # pause execution and ask the user directly.
-        if action_type == "agent" and isinstance(result.output, dict):
-            status = result.output.get("status")
-            if status == "needs_input":
-                question = result.output.get("question", "The agent needs more information to proceed.")
-                updates["pending_user_input"] = True
-                updates["question_for_user"] = question
-                logger.info(f"⏸️ Agent {decision_dict.get('resource_id')} needs input: {question}")
+        if needs_input_payload:
+            question = needs_input_payload.get(
+                "question",
+                "The agent needs more information to proceed.",
+            )
+            updates["pending_user_input"] = True
+            updates["question_for_user"] = question
+            logger.info(f"⏸️ Agent {decision_dict.get('resource_id')} needs input: {question}")
 
         # === LAST AGENT RESULT: Expose raw output so Brain can finish immediately ===
         # When an agent or tool call succeeds, store the full uncompressed result in a
         # dedicated state field. Brain reads this directly instead of trying to reload
         # JSON files, eliminating the 8+ wasted iterations after a successful agent call.
-        if action_type in ("agent", "tool") and result.success:
+        if action_type in ("agent", "tool") and result.success and not needs_input_payload:
             try:
                 # Serialize raw_output to a clean string Brain can read
                 if isinstance(raw_output, dict):
@@ -1045,8 +1087,8 @@ os.chdir(r'{workspace_path}')
                 }
             except Exception:
                 pass  # Non-critical; Brain falls back to action_history
-        elif action_type in ("agent", "tool") and not result.success:
-            # Clear any stale last_agent_result on failure
+        elif action_type in ("agent", "tool"):
+            # Clear any stale last_agent_result on failure or needs_input.
             updates["last_agent_result"] = None
 
         # === CANVAS REGISTRY: Extract and register canvases from agent responses ===
@@ -1159,9 +1201,12 @@ os.chdir(r'{workspace_path}')
                 if task.get("task_id") == current_task_id:
                     task["result"] = result.output
                     task["error"] = result.error_message
-                    task["status"] = (
-                        TaskStatus.COMPLETED if result.success else TaskStatus.FAILED
-                    )
+                    if needs_input_payload:
+                        task["status"] = TaskStatus.IN_PROGRESS
+                    else:
+                        task["status"] = (
+                            TaskStatus.COMPLETED if result.success else TaskStatus.FAILED
+                        )
                     break
 
             updates["todo_list"] = todo_list

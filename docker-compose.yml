@@ -33,6 +33,7 @@ services:
       
       # Composio Integration
       COMPOSIO_API_KEY: ${COMPOSIO_API_KEY}
+      COMPOSIO_TOOLKIT_VERSION_GMAIL: ${COMPOSIO_TOOLKIT_VERSION_GMAIL}
       
       # Encryption
       CONNECTION_ENCRYPTION_KEY: ${CONNECTION_ENCRYPTION_KEY}
@@ -81,6 +82,7 @@ services:
       
       # Composio Integration
       COMPOSIO_API_KEY: ${COMPOSIO_API_KEY}
+      COMPOSIO_TOOLKIT_VERSION_GMAIL: ${COMPOSIO_TOOLKIT_VERSION_GMAIL}
       
       # Encryption
       CONNECTION_ENCRYPTION_KEY: ${CONNECTION_ENCRYPTION_KEY}
@@ -117,6 +119,7 @@ services:
       
       # Composio Integration
       COMPOSIO_API_KEY: ${COMPOSIO_API_KEY}
+      COMPOSIO_TOOLKIT_VERSION_GMAIL: ${COMPOSIO_TOOLKIT_VERSION_GMAIL}
       
       # Encryption
       CONNECTION_ENCRYPTION_KEY: ${CONNECTION_ENCRYPTION_KEY}

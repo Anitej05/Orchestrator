@@ -4,7 +4,7 @@ Integrations Router
 Manages OAuth authentication with external services via Composio.
 """
 
-from typing import List, Optional
+from typing import List, Optional, Any, Dict
 import logging
 
 from fastapi import APIRouter, HTTPException
@@ -51,6 +51,79 @@ class ConnectionStatusResponse(BaseModel):
     connected_apps: List[str]
     pending_apps: List[str]
     all_toolkits: Optional[List[ToolkitStatus]] = None
+
+
+# ------------------------------------------------------------------
+# NEW: List all available Composio apps (not just connected ones)
+# ------------------------------------------------------------------
+
+@router.get("/available")
+async def list_available_toolkits(search: Optional[str] = None):
+    """
+    List ALL available Composio toolkits/apps that can be connected.
+    
+    This returns the full catalog of Composio integrations with complete metadata
+    including logos, descriptions, and categories.
+    
+    Example:
+    GET /api/integrations/available
+    GET /api/integrations/available?search=gmail
+    
+    Returns:
+    {
+        "success": true,
+        "toolkits": [
+            {
+                "name": "Gmail",
+                "slug": "gmail",
+                "description": "Send and receive emails with Gmail",
+                "logo": "https://logos.composio.dev/gmail.svg",
+                "category": "Communication"
+            },
+            ...
+        ],
+        "total_count": 150
+    }
+    """
+    logger.info(f"🔵 LIST AVAILABLE TOOLKITS - search={search}")
+    try:
+        from services.integrations.composio_tools import get_tool_manager
+        
+        # Get tool manager (doesn't require user auth)
+        tool_manager = get_tool_manager()
+        
+        # List all toolkits from Composio
+        toolkits = tool_manager.list_toolkits(search=search)
+        
+        # Enhance with logo URLs and better metadata
+        enhanced_toolkits = []
+        for tk in toolkits:
+            slug = tk.get('slug', tk.get('name', '').lower().replace(' ', ''))
+            # Use GitHub raw CDN - the ACTUAL working Composio logo source
+            # See: https://github.com/ComposioHQ/open-logos
+            logo_url = f"https://raw.githubusercontent.com/ComposioHQ/open-logos/master/icons/{slug}.png"
+            
+            enhanced = {
+                **tk,
+                # Try multiple logo formats
+                'logo': logo_url,
+                # Also provide fallbacks
+                'logo_svg': f"https://raw.githubusercontent.com/ComposioHQ/open-logos/master/icons/{slug}.svg",
+                # Fallback description if not provided
+                'description': tk.get('description') or tk.get('long_description') or f"Connect and automate workflows with {tk.get('name', slug)}",
+            }
+            enhanced_toolkits.append(enhanced)
+        
+        logger.info(f"✅ Found {len(enhanced_toolkits)} available toolkits")
+        
+        return {
+            "success": True,
+            "toolkits": enhanced_toolkits,
+            "total_count": len(enhanced_toolkits),
+        }
+    except Exception as e:
+        logger.error(f"❌ Failed to list toolkits: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to fetch available toolkits: {str(e)}")
 
 
 # Endpoints

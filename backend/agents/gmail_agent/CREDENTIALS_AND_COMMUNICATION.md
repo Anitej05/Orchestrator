@@ -156,7 +156,8 @@ if needs_verification:
         all_connections = []
         for entity_id in entity_ids:
             try:
-                connections = self._composio.connected_accounts.get(entity_ids=[entity_id])
+                resp = self._composio.connected_accounts.list(user_ids=[entity_id])
+                connections = getattr(resp, 'items', None) or (resp if isinstance(resp, list) else [])
                 all_connections.extend(connections)
             except Exception as e:
                 logger.debug(f"Could not fetch for entity {entity_id}: {e}")

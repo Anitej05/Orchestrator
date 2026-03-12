@@ -1761,16 +1761,22 @@ async def find_agents(request: ProcessRequest, api_request: Request):
             owner=owner
         )
 
-        # Check if workflow is paused for user input
-        if final_state.get("pending_user_input"):
-            logger.info(f"Workflow paused for user input in thread_id: {thread_id}")
+        # Check if workflow is paused for user input or approval
+        if final_state.get("pending_user_input") or final_state.get("pending_approval"):
+            logger.info(f"Workflow paused for user input/approval in thread_id: {thread_id}")
+            
+            # Extract the appropriate question/reason
+            question = final_state.get("question_for_user")
+            if not question and final_state.get("pending_decision"):
+                question = final_state.get("pending_decision").get("approval_reason")
+                
             return ProcessResponse(
-                message="Additional information required to complete your request.",
+                message="Additional information or authorization is required to complete your request.",
                 thread_id=thread_id,
                 task_agent_pairs=[],
                 final_response=None,
-                pending_user_input=True,
-                question_for_user=final_state.get("question_for_user")
+                pending_user_input=True,  # Frontend handles this uniformly
+                question_for_user=question
             )
 
         task_agent_pairs = final_state.get("task_agent_pairs", [])

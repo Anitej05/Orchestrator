@@ -200,7 +200,7 @@ class DocumentAgent(BaseAgent):
         }
         
         return AgentResponse(
-            status="complete" if success else "error",
+            status="success" if success else "error",
             result=formatted_data,
             error_message=None if success else "Failed to complete some steps",
         )
