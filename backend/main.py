@@ -3147,7 +3147,7 @@ async def websocket_chat(websocket: WebSocket):
             elif owner and not isinstance(owner, dict):
                 owner = None
 
-            planning_mode = data.get("planning_mode", False)  # Get planning mode flag
+            planning_mode = False  # Planning mode removed from client controls
 
             logger.info(f"WebSocket received message with thread_id: {thread_id}, planning_mode: {planning_mode}")
             logger.info(f"Message details: has_prompt={bool(prompt)}, has_user_response={bool(user_response)}, prompt_value='{prompt[:50] if prompt else None}', user_response_value='{user_response[:50] if user_response else None}'")
@@ -3626,10 +3626,10 @@ async def websocket_chat(websocket: WebSocket):
                 # Check for Omni-Dispatcher approval
                 pending_approval = final_state.get("pending_approval", False)
                 pending_decision = final_state.get("pending_decision")
-                
-                # Check if this is an approval request
-                needs_approval = final_state.get("needs_approval", False) or pending_approval
-                
+
+                # Planning approval removed: only agent action approval uses approval flow
+                needs_approval = pending_approval
+
                 # Calculate cost if approval is needed
                 estimated_cost = 0.0
                 task_count = 0

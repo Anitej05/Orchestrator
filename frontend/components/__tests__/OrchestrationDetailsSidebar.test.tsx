@@ -147,14 +147,15 @@ describe('OrchestrationDetailsSidebar', () => {
 
     it('shows Plan tab by default', () => {
       renderSidebar();
-      expect(screen.getByText('Tasks')).toBeTruthy();
+      // OrchestrationFlow renders EmptyState when no flow activity yet
+      expect(screen.getByText('No activity yet')).toBeTruthy();
     });
   });
 
   // ── Plan tab ──────────────────────────────────────────────────────────
 
   describe('Plan tab', () => {
-    it('passes todoList to TaskCardList', () => {
+    it('shows OrchestrationFlow inside Plan tab', () => {
       storeState = {
         ...BASE_STORE_STATE,
         todo_list: [
@@ -163,57 +164,55 @@ describe('OrchestrationDetailsSidebar', () => {
         ],
       };
       renderSidebar();
-      expect(screen.getByTestId('task-card-list')).toBeTruthy();
-      expect(screen.getByText('2 tasks')).toBeTruthy();
+      // Plan tab renders OrchestrationFlow, which shows EmptyState when flow_events is empty
+      expect(screen.getByText('No activity yet')).toBeTruthy();
     });
 
-    it('shows "Waiting for tasks" subtitle in idle state', () => {
+    it('shows empty state in idle state when no flow events', () => {
       renderSidebar();
-      expect(screen.getByText('Waiting for tasks')).toBeTruthy();
+      expect(screen.getByText('No activity yet')).toBeTruthy();
     });
 
-    it('shows "Running..." subtitle when status is executing', () => {
+    it('shows live indicator when status is processing', () => {
+      storeState = {
+        ...BASE_STORE_STATE,
+        status: 'processing',
+      };
+      renderSidebar();
+      // OrchestrationFlow shows ThinkingRow when processing with no flow events yet
+      expect(screen.getByText('Analysing your request')).toBeTruthy();
+    });
+
+    it('shows "Running" badge on Plan tab trigger when executing', () => {
       storeState = {
         ...BASE_STORE_STATE,
         metadata: { currentStage: 'executing' },
       };
       renderSidebar();
-      expect(screen.getByText('Running tasks...')).toBeTruthy();
+      // Sidebar adds a "Running" badge to the Plan tab trigger when currentStage is executing
+      expect(screen.getByText('Running')).toBeTruthy();
     });
 
-    it('shows "Planning..." subtitle when status is planning', () => {
-      storeState = {
-        ...BASE_STORE_STATE,
-        metadata: { currentStage: 'planning' },
-      };
-      renderSidebar();
-      expect(screen.getByText('Planning...')).toBeTruthy();
-    });
-
-    it('shows "All done" subtitle when status is completed', () => {
+    it('shows "All done" when completed with flow events', () => {
       storeState = {
         ...BASE_STORE_STATE,
         status: 'completed',
+        flow_events: [
+          { id: 'e1', type: 'brain', action_type: 'agent', status: 'completed', label: 'Selected Spreadsheet Agent' },
+        ],
       };
       renderSidebar();
       expect(screen.getByText('All done')).toBeTruthy();
     });
 
-    it('shows task count badge when todo_list has tasks', () => {
+    it('shows "Running" badge on Plan tab trigger when validating', () => {
       storeState = {
         ...BASE_STORE_STATE,
-        todo_list: [
-          { task_id: '1', description: 'Task 1', status: 'pending' },
-          { task_id: '2', description: 'Task 2', status: 'completed' },
-        ],
-        task_statuses: {
-          '1': { status: 'pending', taskName: 'Task 1' },
-          '2': { status: 'completed', taskName: 'Task 2' },
-        },
+        metadata: { currentStage: 'validating' },
       };
       renderSidebar();
-      // Should show "1 / 2" count badge (1 completed out of 2)
-      expect(screen.getByText(/1 \/ 2/)).toBeTruthy();
+      // Sidebar adds a "Running" badge to the Plan tab trigger when currentStage is validating
+      expect(screen.getByText('Running')).toBeTruthy();
     });
 
     it('shows Save Workflow button when status is completed', () => {

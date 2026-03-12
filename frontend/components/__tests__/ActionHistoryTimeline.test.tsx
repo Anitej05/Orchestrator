@@ -30,19 +30,19 @@ const makeEntry = (overrides: Partial<ActionEntry> = {}): ActionEntry => ({
 
 describe('ActionHistoryTimeline', () => {
   describe('empty state', () => {
-    it('shows "No actions executed yet" when history is empty', () => {
+    it('shows "No actions yet" when history is empty', () => {
       render(<ActionHistoryTimeline history={[]} />);
-      expect(screen.getByText('No actions executed yet')).toBeTruthy();
+      expect(screen.getByText('No actions yet')).toBeTruthy();
     });
 
     it('shows hint text in empty state', () => {
       render(<ActionHistoryTimeline history={[]} />);
-      expect(screen.getByText(/Actions will appear here as they execute/)).toBeTruthy();
+      expect(screen.getByText(/Agent actions will appear here as they execute/)).toBeTruthy();
     });
 
     it('handles null/undefined history gracefully', () => {
       render(<ActionHistoryTimeline history={null as any} />);
-      expect(screen.getByText('No actions executed yet')).toBeTruthy();
+      expect(screen.getByText('No actions yet')).toBeTruthy();
     });
   });
 
@@ -99,13 +99,13 @@ describe('ActionHistoryTimeline', () => {
     it('renders error details section when entry has failed with error', () => {
       const entry = makeEntry({ success: false, error: 'Connection timed out', result_summary: '' });
       render(<ActionHistoryTimeline history={[entry]} />);
-      expect(screen.getByText('Error Details:')).toBeTruthy();
+      expect(screen.getByText('Error')).toBeTruthy();
       expect(screen.getByText('Connection timed out')).toBeTruthy();
     });
 
     it('does not render error details section for successful entries', () => {
       render(<ActionHistoryTimeline history={[makeEntry({ success: true })]} />);
-      expect(screen.queryByText('Error Details:')).toBeNull();
+      expect(screen.queryByText('Error')).toBeNull();
     });
 
     it('shows "Completed successfully" when result_summary is empty and success', () => {

@@ -367,6 +367,11 @@ class DocumentAgent(BaseAgent):
             return {
                 "success": True,
                 "data": {"answer": answer, "file_path": str(path_obj), "query": query},
+                "canvas_display": {
+                    "canvas_type": "markdown",
+                    "canvas_title": f"Analysis: {path_obj.name}",
+                    "canvas_content": answer,
+                },
                 "message": "Document analyzed successfully",
             }
 
@@ -440,12 +445,26 @@ class DocumentAgent(BaseAgent):
             # Create initial version
             self.version_manager.save_version(str(file_path), "Initial creation")
 
+            _filename_only = Path(filename).name
+            _doc_title = title or _filename_only
             return {
                 "success": True,
                 "data": {
                     "file_path": str(file_path),
                     "filename": filename,
                     "file_type": ext,
+                },
+                "canvas_display": {
+                    "canvas_type": "document",
+                    "canvas_title": _filename_only,
+                    "canvas_data": {
+                        "title": _doc_title,
+                        "content": content,
+                        "status": "created",
+                        "file_path": str(file_path),
+                        "file_type": ext.lstrip("."),
+                        "download_url": f"/api/storage/document_agent/{_filename_only}",
+                    },
                 },
                 "message": f"Created {filename}",
             }
@@ -557,12 +576,31 @@ class DocumentAgent(BaseAgent):
             editor.save()
             self.version_manager.save_version(file_path, f"Edit: {instruction[:50]}")
 
+            # Re-read content for canvas display
+            try:
+                edited_content, _ = extract_document_content(file_path)
+            except Exception:
+                edited_content = content
+
+            _edit_filename = Path(file_path).name
             return {
                 "success": True,
                 "data": {
                     "file_path": file_path,
                     "actions_executed": len(results),
                     "results": results,
+                },
+                "canvas_display": {
+                    "canvas_type": "document",
+                    "canvas_title": _edit_filename,
+                    "canvas_data": {
+                        "title": _edit_filename,
+                        "content": edited_content,
+                        "status": "edited",
+                        "file_path": file_path,
+                        "file_type": Path(file_path).suffix.lstrip("."),
+                        "download_url": f"/api/storage/document_agent/{_edit_filename}",
+                    },
                 },
                 "message": f"Applied {len(results)} edits",
             }

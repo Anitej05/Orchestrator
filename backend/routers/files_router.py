@@ -4,10 +4,11 @@ Files Router - Handles file upload and serving endpoints.
 Extracted from main.py to improve code organization and maintainability.
 """
 
+import io
 import os
-from typing import List
-from fastapi import APIRouter, HTTPException, File, UploadFile
-from fastapi.responses import FileResponse
+from typing import List, Optional
+from fastapi import APIRouter, HTTPException, File, Query, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
 from aiofiles import open as aio_open
 from urllib.parse import unquote
 from mimetypes import guess_type
@@ -18,6 +19,9 @@ router = APIRouter(prefix="/api", tags=["Files"])
 
 # Centralized storage paths
 from backend.storage_config import STORAGE_ROOT, BACKEND_DIR
+
+# Spreadsheet agent storage directory (resolved at import time)
+_SPREADSHEET_STORAGE = STORAGE_ROOT / "spreadsheet_agent"
 
 
 @router.post("/upload", response_model=List[FileObject])
@@ -87,3 +91,107 @@ async def serve_file(file_path: str):
     
     # Return the file
     return FileResponse(str(full_path), media_type=media_type)
+
+
+@router.get("/storage/{file_path:path}")
+async def serve_storage_file(file_path: str):
+    """
+    Serves files from the shared storage root directory.
+    Used by agents that save files under storage/ (documents, spreadsheets, etc.)
+    """
+    file_path = unquote(file_path)
+
+    # Security: reject path traversal attempts
+    if ".." in file_path or file_path.startswith("/") or file_path.startswith("\\"):
+        raise HTTPException(status_code=400, detail="Invalid file path")
+
+    full_path = (STORAGE_ROOT / file_path).resolve()
+
+    # Confirm resolved path is still inside STORAGE_ROOT
+    try:
+        full_path.relative_to(STORAGE_ROOT.resolve())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid file path")
+
+    if not full_path.exists() or not full_path.is_file():
+        raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+
+    media_type, _ = guess_type(str(full_path))
+    filename = full_path.name
+    return FileResponse(
+        str(full_path),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/spreadsheet/download/{file_id}")
+async def download_spreadsheet(
+    file_id: str,
+    format: Optional[str] = Query(default="xlsx", regex="^(xlsx|csv)$"),
+):
+    """
+    Download a spreadsheet from the spreadsheet agent's storage.
+    Supports on-the-fly format conversion between xlsx and csv.
+    """
+    file_id = unquote(file_id)
+
+    # Security: reject path traversal
+    if ".." in file_id or "/" in file_id or "\\" in file_id:
+        raise HTTPException(status_code=400, detail="Invalid file id")
+
+    # Search for the file - it may have been saved as xlsx or csv
+    source_path = _SPREADSHEET_STORAGE / file_id
+    if not source_path.exists():
+        raise HTTPException(status_code=404, detail=f"Spreadsheet not found: {file_id}")
+
+    source_ext = source_path.suffix.lower()
+    target_format = (format or "xlsx").lower()
+
+    # Fast path: requested format matches source format
+    if (source_ext == ".xlsx" and target_format == "xlsx") or \
+       (source_ext == ".csv" and target_format == "csv"):
+        media_type = (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            if target_format == "xlsx" else "text/csv"
+        )
+        stem = source_path.stem
+        return FileResponse(
+            str(source_path),
+            media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="{stem}.{target_format}"'},
+        )
+
+    # Conversion path: use pandas to convert in memory
+    try:
+        import pandas as pd
+
+        if source_ext == ".csv":
+            df = pd.read_csv(source_path)
+        else:
+            df = pd.read_excel(source_path, engine="openpyxl")
+
+        buf = io.BytesIO()
+        stem = source_path.stem
+
+        if target_format == "csv":
+            csv_str = df.to_csv(index=False)
+            return StreamingResponse(
+                io.BytesIO(csv_str.encode("utf-8")),
+                media_type="text/csv",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{stem}.csv"'
+                },
+            )
+        else:  # xlsx
+            df.to_excel(buf, index=False, engine="openpyxl")
+            buf.seek(0)
+            return StreamingResponse(
+                buf,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{stem}.xlsx"'
+                },
+            )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Format conversion failed: {e}")

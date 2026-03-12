@@ -206,9 +206,8 @@ export function CanvasRenderer({
     // If we have structured data, use it (preferred)
     if (effectiveData) {
       switch (canvasType) {
-        case 'spreadsheet':
-        case 'spreadsheet_plan': // Fallback or explicit handling
-          console.log('🚀 ENTERING SPREADSHEET RENDER BLOCK');
+        case 'spreadsheet_plan':
+          console.log('🚀 ENTERING SPREADSHEET PLAN RENDER BLOCK');
           // Render spreadsheet execution plan for approval
           const planActions = effectiveData.rows || []
           const planHeaders = effectiveData.headers || ['Step', 'Action', 'Description']
@@ -475,14 +474,28 @@ export function CanvasRenderer({
           const docFilePath = effectiveData.file_path
           const docFileType = effectiveData.file_type
           const docMetadata = effectiveData.metadata || {}
+          const docDownloadUrl = effectiveData.download_url
 
           return (
             <div className="p-6">
               <div className="mb-4 pb-4 border-b border-gray-200 dark:border-gray-700">
-                <h3 className="text-lg font-semibold flex items-center gap-2 text-gray-900 dark:text-gray-100">
-                  <FileText className="w-5 h-5" />
-                  {docTitle}
-                </h3>
+                <div className="flex items-start justify-between gap-4">
+                  <h3 className="text-lg font-semibold flex items-center gap-2 text-gray-900 dark:text-gray-100">
+                    <FileText className="w-5 h-5" />
+                    {docTitle}
+                  </h3>
+                  {docDownloadUrl && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => window.open(docDownloadUrl, '_blank')}
+                      className="flex-shrink-0 flex items-center gap-1"
+                    >
+                      <Download className="w-4 h-4" />
+                      Download
+                    </Button>
+                  )}
+                </div>
                 <div className="flex items-center gap-2 mt-2">
                   {docStatus && (
                     <span className={`inline-block px-2 py-1 text-xs rounded ${docStatus === 'preview' ? 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300' :
@@ -730,6 +743,16 @@ export function CanvasRenderer({
             setTimeout(() => setCodeCopied(false), 2000)
           }
 
+          const handleCodeDownload = () => {
+            const blob = new Blob([codeContent], { type: 'text/plain' })
+            const url = URL.createObjectURL(blob)
+            const a = document.createElement('a')
+            a.href = url
+            a.download = codeFilename || `code.${codeLanguage}`
+            a.click()
+            URL.revokeObjectURL(url)
+          }
+
           return (
             <div className="flex flex-col h-full bg-gray-900">
               <div className="bg-gradient-to-r from-gray-700 to-gray-600 px-4 py-3 flex items-center justify-between">
@@ -742,15 +765,28 @@ export function CanvasRenderer({
                     <span className="text-xs text-gray-300">{codeLanguage}</span>
                   </div>
                 </div>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={handleCopy}
-                  className="bg-white/20 hover:bg-white/30 text-white border-0 text-xs"
-                >
-                  {codeCopied ? <Check className="w-3 h-3 mr-1" /> : <Copy className="w-3 h-3 mr-1" />}
-                  {codeCopied ? 'Copied!' : 'Copy'}
-                </Button>
+                <div className="flex items-center gap-2">
+                  {codeFilename && (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={handleCodeDownload}
+                      className="bg-white/20 hover:bg-white/30 text-white border-0 text-xs"
+                    >
+                      <Download className="w-3 h-3 mr-1" />
+                      Save
+                    </Button>
+                  )}
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={handleCopy}
+                    className="bg-white/20 hover:bg-white/30 text-white border-0 text-xs"
+                  >
+                    {codeCopied ? <Check className="w-3 h-3 mr-1" /> : <Copy className="w-3 h-3 mr-1" />}
+                    {codeCopied ? 'Copied!' : 'Copy'}
+                  </Button>
+                </div>
               </div>
               <div className="flex-1 overflow-auto">
                 <pre className="p-4 text-sm font-mono text-gray-100 leading-relaxed">

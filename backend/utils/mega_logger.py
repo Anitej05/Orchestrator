@@ -15,21 +15,26 @@ import threading
 from logging.handlers import TimedRotatingFileHandler
 
 _init_lock = threading.Lock()
-_initialized = False
+# NOTE: _initialized is intentionally NOT used as the sole guard because this module
+# can be imported under two different paths (e.g. "utils.mega_logger" vs
+# "backend.utils.mega_logger") when both the project root and the backend directory
+# are on sys.path, giving two module objects each with _initialized=False.
+# We use a sentinel attribute on the root logger object itself as the canonical guard,
+# since logging.getLogger() always returns the same singleton regardless of import path.
+_SENTINEL = "_mega_logger_initialized"
 
 
 def _initialize_root_logger() -> None:
     """Attach console + file handlers to the root logger exactly once."""
-    global _initialized
-    if _initialized:
+    root = logging.getLogger()
+    if getattr(root, _SENTINEL, False):
         return
 
     with _init_lock:
         # Double-check inside the lock (thread-safe singleton pattern)
-        if _initialized:
+        if getattr(root, _SENTINEL, False):
             return
 
-        root = logging.getLogger()
         root.setLevel(logging.INFO)
 
         # Formatter shared by all handlers
@@ -71,7 +76,7 @@ def _initialize_root_logger() -> None:
                        "uvicorn.access", "asyncio", "watchfiles"):
             logging.getLogger(noisy).setLevel(logging.WARNING)
 
-        _initialized = True
+        setattr(root, _SENTINEL, True)
 
 
 def setup_mega_logger(logger_name: str = None) -> logging.Logger:

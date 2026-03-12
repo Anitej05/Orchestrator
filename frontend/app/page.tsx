@@ -208,50 +208,6 @@ function HomeContent() {
     setCurrentThreadId(threadId)
   }
 
-  const handleAcceptPlan = async (modifiedPrompt?: string) => {
-    try {
-      // If prompt was modified, we need to re-plan (not implemented in initial version)
-      // For now, just accept and execute the pre-seeded plan
-      if (modifiedPrompt && modifiedPrompt !== conversationState.original_prompt) {
-        // TODO: Implement re-planning with modified prompt
-        console.log('Modified prompt execution not yet implemented')
-        toast({
-          title: "Info",
-          description: "Modified prompt execution will be available soon. Using original plan for now.",
-        })
-      }
-      
-      toast({
-        title: "Executing Workflow",
-        description: "Starting workflow execution...",
-      })
-      
-      // For saved workflows with pre-seeded plans, send approval via WebSocket
-      // This will skip re-planning and go straight to execution
-      if (conversationState.status === 'planning_complete' && conversationState.thread_id) {
-        const { continueConversation } = useConversationStore.getState().actions
-        // Send "approve" as user_response to trigger execution of pre-seeded plan
-        await continueConversation("approve", [], false, user?.id)
-      }
-      
-    } catch (error) {
-      console.error('Error accepting plan:', error)
-      toast({
-        title: "Error",
-        description: error instanceof Error ? error.message : "Failed to process plan. Please try again.",
-        variant: "destructive"
-      })
-    }
-  }
-
-  const handleRejectPlan = () => {
-    resetConversation()
-    toast({
-      title: "Workflow cancelled",
-      description: "Workflow execution was cancelled. You can start a new conversation."
-    })
-  }
-
   return (
     <SidebarInset className="h-screen overflow-hidden">
       <div className="flex-1 bg-bg-page relative flex flex-col overflow-hidden w-full h-full max-w-full">
@@ -276,7 +232,6 @@ function HomeContent() {
                     resetConversation={resetConversation}
                     onViewCanvas={handleViewCanvas}
                     owner={clerkLoaded && user?.id ? user.id : undefined}
-                    onAcceptPlan={handleAcceptPlan}
                   />
                 </div>
               </main>
@@ -290,8 +245,6 @@ function HomeContent() {
                 executionResults={executionResults}
                 threadId={currentThreadId || conversationState.thread_id || null}
                 onThreadIdUpdate={handleThreadIdUpdate}
-                onAcceptPlan={handleAcceptPlan}
-                onRejectPlan={handleRejectPlan}
               />
             </ResizablePanel>
           </ResizablePanelGroup>

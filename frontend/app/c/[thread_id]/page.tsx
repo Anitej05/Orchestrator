@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useParams, useRouter } from "next/navigation"
 import { useConversationStore } from "@/lib/conversation-store"
 import { useWebSocketManager } from "@/hooks/use-websocket-conversation"
@@ -8,7 +8,7 @@ import { useToast } from "@/hooks/use-toast"
 import { useUser } from "@clerk/nextjs"
 import dynamic from "next/dynamic"
 import { SidebarInset } from "@/components/ui/sidebar"
-import OrchestrationDetailsSidebar from "@/components/orchestration-details-sidebar"
+import OrchestrationDetailsSidebar, { type OrchestrationDetailsSidebarRef } from "@/components/orchestration-details-sidebar"
 import { convertTasksToExecutionResults, type ExecutionResult } from "@/lib/execution-utils"
 import {
   ResizablePanelGroup,
@@ -33,6 +33,7 @@ export default function ConversationPage() {
   const [loadError, setLoadError] = useState(false)
   const [executionResults, setExecutionResults] = useState<ExecutionResult[]>([])
   const [isExecuting, setIsExecuting] = useState(false)
+  const sidebarRef = useRef<OrchestrationDetailsSidebarRef>(null)
   
   const conversationState = useConversationStore()
   const { loadConversation, startConversation, continueConversation, resetConversation } = useConversationStore(state => state.actions)
@@ -118,30 +119,8 @@ export default function ConversationPage() {
     canvasContent: string,
     canvasType: 'html' | 'markdown' | 'pdf' | 'spreadsheet' | 'email_preview' | 'document' | 'image' | 'json'
   ) => {
-    console.log('View canvas:', canvasType);
+    sidebarRef.current?.viewCanvas(canvasContent, canvasType);
   };
-
-  // Handle plan approval
-  const handleAcceptPlan = async () => {
-    try {
-      await continueConversation("approve", [], false, user?.id)
-    } catch (error) {
-      console.error('Error accepting plan:', error)
-      toast({
-        title: "Error",
-        description: error instanceof Error ? error.message : "Failed to process plan. Please try again.",
-        variant: "destructive"
-      })
-    }
-  }
-
-  const handleRejectPlan = () => {
-    resetConversation()
-    toast({
-      title: "Workflow cancelled",
-      description: "Workflow execution was cancelled. You can start a new conversation."
-    })
-  }
 
   // Show loading state
   if (isLoading) {
@@ -190,7 +169,6 @@ export default function ConversationPage() {
                   resetConversation={resetConversation}
                   onViewCanvas={handleViewCanvas}
                   owner={clerkLoaded && user?.id ? user.id : undefined}
-                  onAcceptPlan={handleAcceptPlan}
                 />
               </div>
             </main>
@@ -200,6 +178,7 @@ export default function ConversationPage() {
 
           <ResizablePanel defaultSize={50} maxSize={65} minSize={35} className="overflow-hidden w-full min-w-0">
             <OrchestrationDetailsSidebar 
+              ref={sidebarRef}
               executionResults={executionResults}
               threadId={conversationState.thread_id} 
             />

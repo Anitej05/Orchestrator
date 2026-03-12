@@ -190,6 +190,7 @@ class Hands:
                         resource_id, payload, user_id, start_time,
                         task_event_callback=task_event_callback,
                         current_task_id=current_task_id,
+                        uploaded_files=state.get("uploaded_files", []),
                     ),
                     timeout=timeout,
                 )
@@ -357,7 +358,8 @@ class Hands:
             try:
                 if action_type == "agent":
                     result = await self._execute_agent(
-                        resource_id, payload, user_id, action_start
+                        resource_id, payload, user_id, action_start,
+                        uploaded_files=state.get("uploaded_files", []),
                     )
                 elif action_type == "tool":
                     result = await self._execute_tool(
@@ -466,6 +468,7 @@ class Hands:
         start_time: float,
         task_event_callback=None,
         current_task_id: Optional[str] = None,
+        uploaded_files: Optional[List] = None,
     ) -> ActionResult:
         """
         Execute an agent task with on-demand spawning.
@@ -564,6 +567,23 @@ class Hands:
 
         # Prepare task
         instruction = payload.get("instruction", payload.get("prompt", ""))
+
+        # Inject uploaded file paths into the prompt so the agent LLM knows which
+        # files are available and can pass the correct file_path to load_file.
+        if uploaded_files:
+            file_lines = []
+            for f in uploaded_files:
+                if isinstance(f, dict):
+                    name = f.get("file_name") or f.get("filename", "Unknown")
+                    path = f.get("file_path", "")
+                else:
+                    name = getattr(f, "file_name", "Unknown")
+                    path = getattr(f, "file_path", "")
+                if path:
+                    file_lines.append(f"- {name}: {path}")
+            if file_lines:
+                instruction = instruction + "\n\nAvailable uploaded files:\n" + "\n".join(file_lines)
+
         task = {
             "prompt": instruction,
             "action": payload.get("action"),

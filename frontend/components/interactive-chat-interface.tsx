@@ -23,12 +23,11 @@ interface InteractiveChatInterfaceProps {
   className?: string;
   state: ConversationState;
   isLoading: boolean;
-  startConversation: (input: string, files?: File[], planningMode?: boolean, owner?: string) => Promise<void>;
-  continueConversation: (input: string, files?: File[], planningMode?: boolean, owner?: string) => Promise<void>;
+  startConversation: (input: string, files?: File[], owner?: string) => Promise<void>;
+  continueConversation: (input: string, files?: File[], owner?: string) => Promise<void>;
   resetConversation: () => void;
   onViewCanvas?: (canvasContent: string, canvasType: CanvasType) => void;
   owner?: string;
-  onAcceptPlan?: (modifiedPrompt?: string) => Promise<void>;
 }
 
 export function InteractiveChatInterface({
@@ -47,8 +46,7 @@ export function InteractiveChatInterface({
   continueConversation,
   resetConversation,
   onViewCanvas,
-  owner,
-  onAcceptPlan
+  owner
 }: InteractiveChatInterfaceProps) {
   useEffect(() => {
     if (!state) {
@@ -66,7 +64,6 @@ export function InteractiveChatInterface({
   const [userResponse, setUserResponse] = useState('');
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
   const [previewUrls, setPreviewUrls] = useState<string[]>([]);
-  const [planningMode, setPlanningMode] = useState(false);
   const [expandedTraces, setExpandedTraces] = useState<Set<string>>(new Set());
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -154,15 +151,6 @@ export function InteractiveChatInterface({
     });
   };
 
-  const handleModifyPlan = async () => {
-    console.log('User wants to modify plan');
-    // Just close the approval modal and let user type modifications
-    // The modify logic will be handled in handleSubmit when they click "Modify" button
-    useConversationStore.setState({
-      approval_required: false
-    });
-  };
-
   const handleApproveAction = async () => {
     if (!state.thread_id) return;
 
@@ -182,7 +170,7 @@ export function InteractiveChatInterface({
       pending_action: undefined
     });
 
-    await continueConversation('approve', [], false, owner);
+    await continueConversation('approve', [], owner);
   };
 
   const handleRejectAction = async () => {
@@ -204,27 +192,7 @@ export function InteractiveChatInterface({
       pending_action: undefined
     });
 
-    await continueConversation('reject', [], false, owner);
-  };
-
-  // Handler for Accept & Execute button (uses parent's logic)
-  const handleAcceptAndExecute = async () => {
-    console.log('User accepts and executes plan');
-
-    // Check if this is from planning mode (approval_required) or saved workflow
-    if (state.approval_required) {
-      // Planning mode - send 'approve' to backend to continue execution
-      useConversationStore.setState({
-        approval_required: false
-      });
-      await continueConversation('approve', [], false, owner);
-    } else if (onAcceptPlan) {
-      // Saved workflow - use parent's logic
-      useConversationStore.setState({
-        approval_required: false
-      });
-      await onAcceptPlan();
-    }
+    await continueConversation('reject', [], owner);
   };
 
   useEffect(() => {
@@ -247,7 +215,7 @@ export function InteractiveChatInterface({
         setInputValue(prompt);
         // Auto-submit after a short delay to ensure state is ready
         setTimeout(() => {
-          startConversation(prompt, [], planningMode, owner);
+          startConversation(prompt, [], owner);
         }, 100);
       }
     };
@@ -257,7 +225,7 @@ export function InteractiveChatInterface({
     return () => {
       window.removeEventListener('autoExecuteWorkflow' as any, handleAutoExecute as any);
     };
-  }, [state.thread_id, startConversation, planningMode, owner]);
+  }, [state.thread_id, startConversation, owner]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
@@ -283,18 +251,9 @@ export function InteractiveChatInterface({
     if (state.isWaitingForUser) {
       // User is responding to a question from the system
       if (userResponse.trim()) {
-        await continueConversation(userResponse, attachedFiles, planningMode, owner);
+        await continueConversation(userResponse, attachedFiles, owner);
         setUserResponse('');
         setAttachedFiles([]); // Clear files after submission
-        if (fileInputRef.current) fileInputRef.current.value = ''; // Reset file input
-      }
-    } else if (state.metadata?.currentStage === 'validating' || state.status === 'planning_complete') {
-      // User is modifying a saved workflow plan
-      if (inputValue.trim() || attachedFiles.length > 0) {
-        // Send the modification as a regular user message - backend will handle combining it with original prompt
-        await continueConversation(inputValue, attachedFiles, false, owner);
-        setInputValue('');
-        setAttachedFiles([]);
         if (fileInputRef.current) fileInputRef.current.value = ''; // Reset file input
       }
     } else {
@@ -303,11 +262,9 @@ export function InteractiveChatInterface({
 
       if (inputValue.trim() || attachedFiles.length > 0) {
         if (hasExistingConversation) {
-          // Continue existing conversation with planning mode
-          await continueConversation(inputValue, attachedFiles, planningMode, owner);
+          await continueConversation(inputValue, attachedFiles, owner);
         } else {
-          // Start new conversation with planning mode
-          await startConversation(inputValue, attachedFiles, planningMode, owner);
+          await startConversation(inputValue, attachedFiles, owner);
         }
         setInputValue('');
         setAttachedFiles([]);
@@ -430,7 +387,7 @@ export function InteractiveChatInterface({
                           </div>
                         )}
                         {/* Inline email results for email canvas type */}
-                        {message.has_canvas && (message as any).canvas_type === 'email' && (message as any).canvas_data && (
+                        {message.has_canvas && ((message as any).canvas_type === 'email' || (message as any).canvas_type === 'email_preview') && (message as any).canvas_data && (
                           <EmailResultCard
                             messages={((message as any).canvas_data as any)?.messages || []}
                             totalCount={((message as any).canvas_data as any)?.total_count}
@@ -439,7 +396,7 @@ export function InteractiveChatInterface({
                           />
                         )}
                         {/* View in Canvas button for messages with canvas content or data (non-email) */}
-                        {message.has_canvas && (message.canvas_content || (message as any).canvas_data) && message.canvas_type && message.canvas_type !== 'email' && (
+                        {message.has_canvas && (message.canvas_content || (message as any).canvas_data) && message.canvas_type && message.canvas_type !== 'email_preview' && (
                           <Button
                             variant="ui-secondary"
                             size="sm"
@@ -749,34 +706,10 @@ export function InteractiveChatInterface({
                   />
                 </div>
 
-                {/* Toolbar row: planning mode | attachment | mic | send */}
+                {/* Toolbar row: attachment | mic | send */}
                 <div className="flex items-center justify-between gap-2 mt-1 pt-2 border-t border-border-color/60">
-                  {/* Left: planning mode + attachment + mic */}
+                  {/* Left: attachment + mic */}
                   <div className="flex items-center gap-1.5">
-                    {/* Planning Mode toggle */}
-                    <label className="planning-mode-switch">
-                      <input
-                        type="checkbox"
-                        checked={planningMode}
-                        onChange={(e) => setPlanningMode(e.target.checked)}
-                      />
-                      <div className="slider">
-                        <div className="circle">
-                          <svg className="cross" viewBox="0 0 365.696 365.696" height="6" width="6" xmlns="http://www.w3.org/2000/svg">
-                            <g><path fill="currentColor" d="M243.188 182.86 356.32 69.726c12.5-12.5 12.5-32.766 0-45.247L341.238 9.398c-12.504-12.503-32.77-12.503-45.25 0L182.86 122.528 69.727 9.374c-12.5-12.5-32.766-12.5-45.247 0L9.375 24.457c-12.5 12.504-12.5 32.77 0 45.25l113.152 113.152L9.398 295.99c-12.503 12.503-12.503 32.769 0 45.25L24.48 356.32c12.5 12.5 32.766 12.5 45.247 0l113.132-113.132L295.99 356.32c12.503 12.5 32.769 12.5 45.25 0l15.081-15.082c12.5-12.504 12.5-32.77 0-45.25zm0 0"></path></g>
-                          </svg>
-                          <svg className="checkmark" viewBox="0 0 24 24" height="10" width="10" xmlns="http://www.w3.org/2000/svg">
-                            <g><path fill="currentColor" d="M9.707 19.121a.997.997 0 0 1-1.414 0l-5.646-5.647a1.5 1.5 0 0 1 0-2.121l.707-.707a1.5 1.5 0 0 1 2.121 0L9 14.171l9.525-9.525a1.5 1.5 0 0 1 2.121 0l.707.707a1.5 1.5 0 0 1 0 2.121z"></path></g>
-                          </svg>
-                        </div>
-                      </div>
-                    </label>
-                    <span className="ui-metadata-label cursor-pointer select-none text-xs">
-                      Planning{planningMode && <span className="ml-1 text-brand-primary">·</span>}
-                    </span>
-
-                    <div className="h-4 w-px bg-border-color mx-1" />
-
                     {/* Attachment */}
                     <Button
                       type="button"
@@ -821,22 +754,6 @@ export function InteractiveChatInterface({
                         <Button type="button" size="sm" className="bg-status-active text-foreground h-6 text-xs px-2" onClick={handleApproveAction}>Approve</Button>
                         <Button type="button" size="sm" variant="ui-secondary" className="h-6 text-xs px-2" onClick={handleRejectAction}>Reject</Button>
                       </div>
-                    )}
-
-                    {((planningMode && state.approval_required) || ((state.metadata?.currentStage === 'validating' || state.status === 'planning_complete') && onAcceptPlan && state.metadata?.from_workflow)) && (
-                      <>
-                        {planningMode && !state.metadata?.from_workflow && (
-                          <Button type="button" variant="ui-secondary" size="sm" onClick={handleModifyPlan} className="h-7 text-xs">Modify Plan</Button>
-                        )}
-                        <Button
-                          type="button"
-                          size="sm"
-                          onClick={handleAcceptAndExecute}
-                          className="h-7 text-xs bg-gradient-to-r from-brand-teal to-status-active hover:from-brand-teal-hover hover:to-status-active text-foreground"
-                        >
-                          Accept & Execute
-                        </Button>
-                      </>
                     )}
 
                     {(() => {

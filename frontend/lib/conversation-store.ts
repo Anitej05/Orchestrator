@@ -50,8 +50,8 @@ const createMessageId = (content: string, type: string, timestampMs: number): st
 interface ConversationStore extends ConversationState {
   isLoading: boolean;
   actions: {
-    startConversation: (input: string, files?: File[], planningMode?: boolean, owner?: string) => Promise<void>;
-    continueConversation: (input: string, files?: File[], planningMode?: boolean, owner?: string) => Promise<void>;
+    startConversation: (input: string, files?: File[], owner?: string) => Promise<void>;
+    continueConversation: (input: string, files?: File[], owner?: string) => Promise<void>;
     loadConversation: (threadId: string) => Promise<void>;
     resetConversation: () => void;
     sendCanvasConfirmation: (action: 'confirm' | 'cancel', taskName?: string) => Promise<void>;
@@ -104,9 +104,9 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
   isNewConversation: false,
 
   actions: {
-    startConversation: async (input: string, files: File[] = [], planningMode: boolean = false, owner?: string) => {
+    startConversation: async (input: string, files: File[] = [], owner?: string) => {
       // Clear previous conversation state when starting a new conversation
-      console.debug(`Starting conversation with planning mode: ${planningMode}`);
+      console.debug('Starting conversation');
       set({
         isLoading: true,
         status: 'processing',
@@ -196,7 +196,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
                   const message = {
                     thread_id: get().thread_id,
                     prompt: input,
-                    planning_mode: planningMode,
+                    planning_mode: false,
                     owner: owner,
                     files: uploadedFiles.map(file => ({
                       file_name: file.file_name,
@@ -207,7 +207,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
                   console.log('📤 Sending WebSocket message:', {
                     thread_id: message.thread_id,
                     has_prompt: !!message.prompt,
-                    planning_mode: message.planning_mode,
+                    planning_mode: false,
                     has_owner: !!message.owner,
                     files_count: message.files.length
                   });
@@ -271,7 +271,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
       }
     },
 
-    continueConversation: async (input: string, files: File[] = [], planningMode: boolean = false, owner?: string) => {
+    continueConversation: async (input: string, files: File[] = [], owner?: string) => {
       const thread_id = get().thread_id;
       if (!thread_id) {
         console.error('Cannot continue conversation without a thread ID.');
@@ -281,7 +281,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
       // Capture isWaitingForUser BEFORE we modify it
       const wasWaitingForUser = get().isWaitingForUser;
 
-      console.log(`Continuing conversation with thread_id: ${thread_id}, planning_mode: ${planningMode}, wasWaitingForUser: ${wasWaitingForUser}`);
+      console.log(`Continuing conversation with thread_id: ${thread_id}, wasWaitingForUser: ${wasWaitingForUser}`);
       set({ isLoading: true, status: 'processing', isWaitingForUser: false, task_statuses: {}, current_executing_task: null, todo_list: [], brain_reasoning: undefined, flow_events: [] });
 
       try {
@@ -339,7 +339,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
                 thread_id: thread_id,
                 // Use 'user_response' only when answering a question, otherwise use 'prompt'
                 ...(isAnsweringQuestion ? { user_response: input } : { prompt: input }),
-                planning_mode: planningMode,
+                planning_mode: false,
                 owner: owner,
                 files: uploadedFiles.map(file => ({
                   file_name: file.file_name,
@@ -352,7 +352,7 @@ export const useConversationStore = create<ConversationStore>((set: any, get: an
               console.debug('  isAnsweringQuestion:', isAnsweringQuestion);
               console.debug('  sending as:', isAnsweringQuestion ? 'user_response' : 'prompt');
               console.debug('  input:', input);
-              console.debug('  planning_mode:', planningMode);
+              console.debug('  planning_mode:', false);
               console.debug('  full message:', messageData);
 
               try {

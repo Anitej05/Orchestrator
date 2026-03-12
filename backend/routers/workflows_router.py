@@ -372,12 +372,12 @@ async def create_workflow_conversation(workflow_id: str, request: Request, db: S
             "messages": [],
             "completed_tasks": [],
             "final_response": None,
-            "pending_user_input": True,
-            "question_for_user": "Review the execution plan and approve to proceed.",
-            "needs_approval": True,
-            "approval_required": True,
-            "plan_approved": False,
-            "status": "planning_complete",
+            "pending_user_input": False,
+            "question_for_user": None,
+            "needs_approval": False,
+            "approval_required": False,
+            "plan_approved": True,
+            "status": "ready",
             "metadata": {"from_workflow": workflow_id, "workflow_name": workflow.name},
             "uploaded_files": []
         }
@@ -393,8 +393,8 @@ async def create_workflow_conversation(workflow_id: str, request: Request, db: S
         "task_agent_pairs": task_agent_pairs,
         "task_plan": task_plan,
         "task_count": len(task_agent_pairs),
-        "status": "planning_complete",
-        "message": "Plan loaded. Review and run from the input box."
+        "status": "ready",
+        "message": "Workflow loaded and ready to execute."
     }
 
 

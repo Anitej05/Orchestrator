@@ -7,6 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge';
 import { ArrowLeft, Play, Trash2, Calendar, Clock, Users, ChevronDown, ChevronUp, Loader2, MessageSquare } from 'lucide-react';
 import { authFetch } from '@/lib/auth-fetch';
+import { API_BASE_URL } from '@/lib/config';
 import { toast } from 'sonner';
 import TaskCardList from '@/components/task-card-list';
 import WorkflowExecutionChat from '@/components/workflow-execution-chat';
@@ -85,7 +86,6 @@ export default function WorkflowDetailPage() {
     setError(null);
     
     try {
-      import { API_BASE_URL, WS_BASE_URL } from '@/lib/config';
       const response = await authFetch(`${API_BASE_URL}/api/workflows/${workflowId}`);
       
       if (!response.ok) {

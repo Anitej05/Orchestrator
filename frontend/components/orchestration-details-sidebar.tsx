@@ -34,8 +34,6 @@ interface OrchestrationDetailsSidebarProps {
     threadId: string | null;
     className?: string;
     onThreadIdUpdate?: (threadId: string) => void;
-    onAcceptPlan?: (modifiedPrompt?: string) => Promise<void>;
-    onRejectPlan?: () => void;
 }
 
 interface Plan {
@@ -53,7 +51,7 @@ export interface OrchestrationDetailsSidebarRef {
 }
 
 const OrchestrationDetailsSidebar = forwardRef<OrchestrationDetailsSidebarRef, OrchestrationDetailsSidebarProps>(
-    ({ executionResults: _executionResults, threadId, className, onThreadIdUpdate: _onThreadIdUpdate, onAcceptPlan: _onAcceptPlan, onRejectPlan: _onRejectPlan }, ref) => {
+    ({ executionResults: _executionResults, threadId, className, onThreadIdUpdate: _onThreadIdUpdate }, ref) => {
         const [plan, setPlan] = useState<Plan>({ pendingTasks: [], completedTasks: [], todoList: undefined });
         const [activeTab, setActiveTab] = useState<string>("plan");
         const [lastCanvasContent, setLastCanvasContent] = useState<string | undefined>(undefined);
