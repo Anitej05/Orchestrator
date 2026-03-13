@@ -406,19 +406,20 @@ class BaseAgent(ABC):
         understanding: Dict[str, Any],
         request: AgentRequest,
     ) -> Optional[AgentResponse]:
-        if not results or any(not r.success for r in results):
+        """
+        Build a deterministic response without LLM synthesis when safe.
+        
+        We only bypass LLM synthesis when the capability explicitly marked
+        its result as final. Otherwise, let the LLM synthesize a natural
+        response and verify multi-part intent satisfaction.
+        """
+        if not results:
             return None
-
-        # Single-step successes should not require another LLM pass just to
-        # restate the same result.
-        if len(results) == 1:
-            return self._capability_result_to_agent_response(
-                results[0],
-                default_summary=understanding.get("intent") or "Task completed",
-            )
 
         last = results[-1]
         meta = last.metadata if isinstance(last.metadata, dict) else {}
+        
+        # Only use deterministic response for explicit final markers
         if meta.get("final") is True:
             return self._capability_result_to_agent_response(
                 last,
@@ -434,50 +435,14 @@ class BaseAgent(ABC):
         result: CapabilityResult,
         prior_results: List[CapabilityResult],
     ) -> bool:
+        """
+        Check if we should finish after this step.
+        
+        We only force-finish if the capability itself marked its result as final.
+        Otherwise, trust the LLM to decide when to finish via its action selection.
+        """
         meta = result.metadata if isinstance(result.metadata, dict) else {}
-        if meta.get("final") is True:
-            return True
-
-        if not self._has_meaningful_result(result):
-            return False
-
-        capability_name = (step.capability_name or "").lower()
-        terminal_prefixes = (
-            "get_",
-            "fetch_",
-            "read_",
-            "search_",
-            "list_",
-            "summarize_",
-            "send_",
-            "reply_",
-            "forward_",
-        )
-        terminal_exact = {
-            "analyze",
-            "research",
-            "solve_problem",
-            "creative_write",
-        }
-        non_terminal_prefixes = (
-            "load_",
-            "open_",
-            "navigate",
-            "click",
-            "type",
-            "scroll",
-            "select_",
-            "switch_",
-            "run_",
-            "execute_javascript",
-            "prepare_",
-            "initialize_",
-        )
-
-        if capability_name.startswith(non_terminal_prefixes):
-            return False
-
-        return capability_name.startswith(terminal_prefixes) or capability_name in terminal_exact
+        return meta.get("final") is True
 
     async def emit_progress(self, message: str) -> None:
         """Push a progress message to the streaming queue (no-op if not streaming)."""
@@ -875,13 +840,15 @@ class BaseAgent(ABC):
             if prior_same_steps:
                 if any(self._has_meaningful_result(r) for r in prior_same_steps):
                     logger.warning(
-                        "ReAct loop guard: refusing to repeat successful identical "
-                        f"step '{step.capability_name}'. Finalizing instead."
+                        "ReAct loop guard: skipping duplicate successful step "
+                        f"'{step.capability_name}'. Continuing with next action..."
                     )
                     await self.emit_progress(
-                        "Task already has a successful result; finalizing answer..."
+                        "Skipping duplicate step; deciding next action..."
                     )
-                    break
+                    # Skip this duplicate step but continue the loop
+                    # The LLM will see the prior result in context and choose a different action
+                    continue
                 if len(prior_same_steps) >= self.config.max_duplicate_step_repeats:
                     raise _StepFailure(
                         failed_step=step.step_number,

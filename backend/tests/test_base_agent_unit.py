@@ -152,8 +152,15 @@ async def test_direct_action_bubbles_needs_input():
 
 @pytest.mark.asyncio
 async def test_react_auto_finishes_after_single_terminal_step():
+    """
+    Test that ReAct flow completes successfully.
+    
+    The LLM decides when to finish based on task completion,
+    not hardcoded capability name rules.
+    """
     inference = _FakeInference(
         [
+            # 1. Understand task
             {
                 "intent": "Fetch unread items",
                 "entities": {},
@@ -161,12 +168,28 @@ async def test_react_auto_finishes_after_single_terminal_step():
                 "complexity": "simple",
                 "confidence": 0.99,
             },
+            # 2. Decide first action: fetch
             {
-                "reasoning": "A single fetch is enough.",
+                "reasoning": "Fetch the data first.",
                 "capability_name": "fetch_data",
                 "description": "Fetch the data now.",
                 "parameters": {},
                 "expected_outcome": "Return the requested data.",
+            },
+            # 3. Decide next action after fetch: finish
+            {
+                "reasoning": "Task is complete after fetch.",
+                "capability_name": "finish",
+                "description": "Task complete.",
+                "parameters": {},
+                "expected_outcome": "Finish the task.",
+            },
+            # 4. Synthesize final response
+            {
+                "summary": "Successfully fetched the data.",
+                "detailed_result": "The data was retrieved successfully.",
+                "key_data": {"items": [{"id": 1, "value": "ok"}]},
+                "next_steps": None,
             },
         ]
     )
@@ -176,8 +199,9 @@ async def test_react_auto_finishes_after_single_terminal_step():
 
     assert resp.status == "success"
     assert agent.fetch_calls == 1
-    assert len(inference.calls) == 2
-    assert resp.result == {"items": [{"id": 1, "value": "ok"}]}
+    assert len(inference.calls) == 4
+    # Result is the synthesized response, not raw data
+    assert "retrieved successfully" in resp.result.lower()
 
 
 @pytest.mark.asyncio
