@@ -1,4 +1,4 @@
-# agents/document_agent_lib/llm.py
+# agents/document_agent/llm.py
 """
 Document Agent LLM - Deprecated
 

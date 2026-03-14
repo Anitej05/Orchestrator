@@ -34,13 +34,13 @@ class CredentialManager:
         from backend.services.credential_service import credential_manager
 
         # Get a single credential (agent scope)
-        key = credential_manager.get("agent", "gmail_agent", "COMPOSIO_API_KEY")
+        key = credential_manager.get("agent", "mail_agent", "COMPOSIO_API_KEY")
 
         # Get all credentials for a tool
         creds = credential_manager.get_all("tool", "web_search")
 
         # Save credentials from the frontend
-        credential_manager.save("agent", "gmail_agent", {"COMPOSIO_API_KEY": "sk-..."})
+        credential_manager.save("agent", "mail_agent", {"COMPOSIO_API_KEY": "sk-..."})
     """
 
     def __init__(self):
@@ -136,11 +136,6 @@ class CredentialManager:
         db = self._get_db()
         try:
             creds = self._load_from_generic_table(db, scope, scope_id, user_id)
-
-            # Legacy fallback for agent-scoped credentials
-            if not creds and scope == "agent":
-                creds = self._load_from_legacy_table(db, scope_id, user_id)
-
             self._set_cache(ck, creds)
             return creds
         except Exception as e:
@@ -244,59 +239,6 @@ class CredentialManager:
         return bool(creds)
 
     # ------------------------------------------------------------------
-    # Legacy API — backward-compat wrappers used by existing code
-    # ------------------------------------------------------------------
-
-    def get_agent_credentials(
-        self, db: Session, agent_id: str, user_id: str
-    ) -> Dict[str, str]:
-        """Legacy wrapper. Prefer ``get_all("agent", agent_id, user_id)``."""
-        return self.get_all("agent", agent_id, user_id)
-
-    def save_agent_credentials(
-        self, db: Session, agent_id: str, user_id: str, credentials: Dict[str, str]
-    ) -> bool:
-        """Legacy wrapper."""
-        return self.save("agent", agent_id, credentials, user_id)
-
-    def delete_agent_credentials(
-        self, db: Session, agent_id: str, user_id: str
-    ) -> bool:
-        """Legacy wrapper."""
-        return self.delete("agent", agent_id, user_id)
-
-    def has_valid_credentials(
-        self, db: Session, agent_id: str, user_id: str
-    ) -> bool:
-        """Legacy wrapper."""
-        return self.has_valid("agent", agent_id, user_id)
-
-    def get_credentials_for_headers(
-        self, db: Session, agent_id: str, user_id: str, agent_type: str = "http_rest"
-    ) -> Dict[str, str]:
-        """Legacy wrapper — formats credentials as HTTP headers."""
-        credentials = self.get_all("agent", agent_id, user_id)
-        headers = {}
-
-        if agent_type == "mcp_http":
-            if "composio_api_key" in credentials:
-                headers["x-api-key"] = credentials["composio_api_key"]
-            elif "api_key" in credentials:
-                headers["x-api-key"] = credentials["api_key"]
-        else:
-            if "api_key" in credentials:
-                headers["Authorization"] = f"Bearer {credentials['api_key']}"
-            elif "access_token" in credentials:
-                auth_header = credentials.get("auth_header_name", "Authorization")
-                headers[auth_header] = f"Bearer {credentials['access_token']}"
-
-        for key, value in credentials.items():
-            if key not in ("api_key", "access_token", "auth_header_name", "composio_api_key"):
-                headers[key] = value
-
-        return headers
-
-    # ------------------------------------------------------------------
     # Internal loaders
     # ------------------------------------------------------------------
 
@@ -315,80 +257,9 @@ class CredentialManager:
             return {}
         return self._decrypt_credentials(row.encrypted_credentials)
 
-    def _load_from_legacy_table(
-        self, db: Session, agent_id: str, user_id: str
-    ) -> Dict[str, str]:
-        """
-        Load from legacy ``agent_credentials`` table when it still exists.
-
-        Newer deployments have removed both the ORM model and the table. In
-        that case this lookup should quietly no-op instead of surfacing a
-        misleading DB warning to the caller.
-        """
-        try:
-            from models import AgentCredential
-        except ImportError:
-            logger.debug(
-                "Legacy AgentCredential model unavailable; skipping lookup for %s",
-                agent_id,
-            )
-            return {}
-
-        try:
-            row = (
-                db.query(AgentCredential)
-                .filter_by(agent_id=agent_id, user_id=user_id, is_active=True)
-                .first()
-            )
-        except Exception as e:
-            logger.debug(
-                "Legacy agent_credentials lookup skipped for %s: %s",
-                agent_id,
-                e,
-            )
-            return {}
-
-        if not row:
-            return {}
-
-        credentials = {}
-
-        # New-style encrypted JSON
-        if row.encrypted_credentials:
-            credentials = self._decrypt_credentials(row.encrypted_credentials)
-        # Legacy single-token fields
-        elif row.encrypted_access_token:
-            try:
-                credentials["access_token"] = decrypt(row.encrypted_access_token)
-                credentials["auth_header_name"] = row.auth_header_name or "Authorization"
-            except Exception as e:
-                logger.error(f"Failed to decrypt legacy token for agent {agent_id}: {e}")
-
-        return credentials
-
 
 # ---------------------------------------------------------------------------
 # Module-level singleton
 # ---------------------------------------------------------------------------
 credential_manager = CredentialManager()
-
-
-# ---------------------------------------------------------------------------
-# Backward-compat standalone functions (thin proxies to the singleton)
-# ---------------------------------------------------------------------------
-
-def get_agent_credentials(db: Session, agent_id: str, user_id: str) -> Dict[str, str]:
-    return credential_manager.get_agent_credentials(db, agent_id, user_id)
-
-def save_agent_credentials(db: Session, agent_id: str, user_id: str, credentials: Dict[str, str]) -> bool:
-    return credential_manager.save_agent_credentials(db, agent_id, user_id, credentials)
-
-def delete_agent_credentials(db: Session, agent_id: str, user_id: str) -> bool:
-    return credential_manager.delete_agent_credentials(db, agent_id, user_id)
-
-def has_valid_credentials(db: Session, agent_id: str, user_id: str) -> bool:
-    return credential_manager.has_valid_credentials(db, agent_id, user_id)
-
-def get_credentials_for_headers(db: Session, agent_id: str, user_id: str, agent_type: str = "http_rest") -> Dict[str, str]:
-    return credential_manager.get_credentials_for_headers(db, agent_id, user_id, agent_type)
 

@@ -340,7 +340,6 @@ class Brain:
                 f"~{len(prompt) // 4} tokens)"
             )
             return await self._call_llm_and_parse(prompt, state, config)
-        active_agents = agent_registry.list_active_agents()
 
         # Build standardized agent list using centralized registry
         agent_list = "\n".join(
@@ -582,9 +581,9 @@ Available tools:
 ❌ Creating Word/PDF documents → Document Agent
 ❌ Analyzing user-uploaded spreadsheets → Spreadsheet Agent
 ❌ Writing/editing actual project code → Coding Agent
-❌ Sending/reading emails → Gmail Agent
+❌ Sending/reading emails → Mail Agent
 
-⚠️ CONNECTION VERIFICATION RULE: If an agent action already SUCCEEDED in the current session, the OAuth connection is PROVEN WORKING. Do NOT call integrations_agent afterwards to "check if [app] is connected" -- that call is redundant and wastes iterations. Rule: if gmail_agent returned emails or confirmed sending → Gmail IS connected → proceed directly to finish. This rule applies to every agent: a successful response = connection confirmed.
+⚠️ CONNECTION VERIFICATION RULE: If an agent action already SUCCEEDED in the current session, the OAuth connection is PROVEN WORKING. Do NOT call integrations_agent afterwards to "check if [app] is connected" -- that call is redundant and wastes iterations. Rule: if mail_agent returned emails or confirmed sending → Gmail IS connected → proceed directly to finish. This rule applies to every agent: a successful response = connection confirmed.
 
 **Sandbox details:**
 - Modules: pandas, numpy, json, datetime, re, math, statistics, csv, os, requests
@@ -669,7 +668,7 @@ When `requires_approval=True`:
 ```json
 {{
   "action_type": "agent",
-  "resource_id": "Gmail Agent",
+  "resource_id": "mail_agent",
   "payload": {{"instruction": "Send Q4 report to finance@company.com"}},
   "requires_approval": true,
   "approval_reason": "Will send Q4 sales report email to finance@company.com with 3 attachments (report.pdf, data.xlsx, summary.docx)"
@@ -1477,8 +1476,6 @@ Example for "summarise a PDF and email it":
 
     # Maps agent resource_id patterns → (app_slug, display_name)
     _AGENT_APP_MAP: Dict[str, tuple] = {
-        "gmail": ("gmail", "Gmail"),
-        "gmail_agent": ("gmail", "Gmail"),
         "mail": ("gmail", "Gmail"),
         "mail_agent": ("gmail", "Gmail"),
         "zoho": ("zohobooks", "Zoho Books"),

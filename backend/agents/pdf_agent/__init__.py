@@ -24,7 +24,7 @@ for path in [str(PROJECT_ROOT), str(BACKEND_DIR)]:
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from backend.agents.base.server import create_agent_server
+from backend.base_agent.server import create_agent_server
 from .base_agent_impl import PDFAgent
 
 from backend.utils.mega_logger import setup_mega_logger

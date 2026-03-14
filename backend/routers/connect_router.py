@@ -1,20 +1,19 @@
 # backend/routers/connect_router.py
 """
-Router for MCP connection management.
-Handles probing, ingestion, and management of MCP server connections.
+Router for MCP connection management - DEPRECATED
+
+MCP functionality was removed when the AgentEndpoint, EndpointParameter,
+and AgentCredential tables were dropped from the schema.
+
+These endpoints return 501 Not Implemented to inform clients that
+MCP integration is no longer available.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Depends
 from pydantic import BaseModel, Field
+from typing import Dict, Optional
 from sqlalchemy.orm import Session
-from typing import Dict, List, Optional
 from database import get_db
-from backend.services.mcp_service import (
-    probe_mcp_url,
-    ingest_mcp_agent,
-    list_user_connections,
-    delete_user_connection
-)
 import json
 import os
 import logging
@@ -24,20 +23,11 @@ logger = logging.getLogger("uvicorn.error")
 router = APIRouter(prefix="/api/connect", tags=["connections"])
 
 
-# --- Request/Response Models ---
+# --- Request Models (kept for API documentation) ---
 
 class ProbeRequest(BaseModel):
     """Request to probe an MCP server URL"""
     url: str = Field(..., description="MCP server URL to probe")
-
-
-class ProbeResponse(BaseModel):
-    """Response from probing an MCP server"""
-    status: str
-    message: Optional[str] = None
-    type: Optional[str] = None
-    header: Optional[str] = None
-    details: Optional[str] = None
 
 
 class ConnectRequest(BaseModel):
@@ -49,139 +39,60 @@ class ConnectRequest(BaseModel):
     agent_description: Optional[str] = Field(None, description="Custom description")
 
 
-class ConnectResponse(BaseModel):
-    """Response from connecting to an MCP server"""
-    status: str
-    message: Optional[str] = None
-    agent_id: Optional[str] = None
-    agent_name: Optional[str] = None
-    tool_count: Optional[int] = None
-    tools: Optional[List[str]] = None
-
-
-class ConnectionInfo(BaseModel):
-    """Information about a user's MCP connection"""
-    agent_id: str
-    name: str
-    description: Optional[str]
-    url: Optional[str]
-    tool_count: int
-    tools: List[str]
-    created_at: Optional[str]
-
-
-class DeleteResponse(BaseModel):
-    """Response from deleting a connection"""
-    status: str
-    message: str
-
-
 # --- Endpoints ---
 
-@router.post("/probe", response_model=ProbeResponse)
+@router.post("/probe", status_code=status.HTTP_501_NOT_IMPLEMENTED)
 async def probe_connection(req: ProbeRequest):
     """
-    Probe an MCP server URL to detect authentication requirements.
+    DEPRECATED: MCP server probing is no longer supported.
     
-    This endpoint checks if the server is accessible and what type of
-    authentication it requires (if any).
+    MCP agent ingestion was removed when the AgentEndpoint, EndpointParameter,
+    and AgentCredential tables were dropped from the schema.
     """
-    try:
-        result = await probe_mcp_url(req.url)
-        return ProbeResponse(**result)
-    except Exception as e:
-        logger.error(f"Error probing URL: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
-        )
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="MCP server integration is deprecated and no longer supported."
+    )
 
 
-@router.post("/ingest", response_model=ConnectResponse)
+@router.post("/ingest", status_code=status.HTTP_501_NOT_IMPLEMENTED)
 async def ingest_connection(req: ConnectRequest, db: Session = Depends(get_db)):
     """
-    Connect to an MCP server, discover its tools, and save the connection.
+    DEPRECATED: MCP agent ingestion is no longer supported.
     
-    This endpoint:
-    1. Connects to the MCP server using provided credentials
-    2. Discovers available tools via MCP protocol
-    3. Saves the agent definition to the database
-    4. Stores encrypted user credentials
+    The AgentEndpoint, EndpointParameter, and AgentCredential tables
+    have been dropped from the schema.
     """
-    try:
-        result = await ingest_mcp_agent(
-            db=db,
-            url=req.url,
-            user_id=req.user_id,
-            credentials=req.credentials,
-            agent_name=req.agent_name,
-            agent_description=req.agent_description
-        )
-        
-        if result["status"] == "error":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=result.get("message", "Failed to ingest MCP agent")
-            )
-        
-        return ConnectResponse(**result)
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error ingesting connection: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
-        )
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="MCP agent ingestion is deprecated. The required database tables have been removed."
+    )
 
 
-@router.get("/list", response_model=List[ConnectionInfo])
+@router.get("/list", status_code=status.HTTP_501_NOT_IMPLEMENTED)
 async def list_connections(user_id: str, db: Session = Depends(get_db)):
     """
-    List all MCP connections for a user.
+    DEPRECATED: MCP connection listing is no longer supported.
     
-    Returns a list of all MCP agents that the user has connected to,
-    including their tools and connection details.
+    The AgentCredential table has been dropped.
     """
-    try:
-        connections = await list_user_connections(db, user_id)
-        return [ConnectionInfo(**conn) for conn in connections]
-    except Exception as e:
-        logger.error(f"Error listing connections: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
-        )
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="MCP connection management is deprecated."
+    )
 
 
-@router.delete("/{agent_id}", response_model=DeleteResponse)
+@router.delete("/{agent_id}", status_code=status.HTTP_501_NOT_IMPLEMENTED)
 async def delete_connection(agent_id: str, user_id: str, db: Session = Depends(get_db)):
     """
-    Delete a user's connection to an MCP agent.
+    DEPRECATED: MCP connection deletion is no longer supported.
     
-    This removes the user's stored credentials for the agent but does not
-    delete the agent definition itself (other users may still use it).
+    The AgentCredential table has been dropped.
     """
-    try:
-        result = await delete_user_connection(db, user_id, agent_id)
-        
-        if result["status"] == "error":
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=result.get("message", "Connection not found")
-            )
-        
-        return DeleteResponse(**result)
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error deleting connection: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
-        )
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="MCP connection management is deprecated."
+    )
 
 
 @router.get("/integrations")

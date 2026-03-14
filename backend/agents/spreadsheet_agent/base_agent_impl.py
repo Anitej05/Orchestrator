@@ -19,9 +19,9 @@ from dataclasses import dataclass
 import pandas as pd
 import numpy as np
 
-from backend.agents.base import BaseAgent, AgentServices, AgentConfig
-from backend.agents.base.types import AgentRequest, AgentResponse, ExecutionContext
-from backend.agents.base.capability import capability, ParameterSchema
+from backend.base_agent import BaseAgent, AgentServices, AgentConfig
+from backend.base_agent.types import AgentRequest, AgentResponse, ExecutionContext
+from backend.base_agent.capability import capability, ParameterSchema
 
 from .config import logger, STORAGE_DIR
 from .client import DataFrameClient, SmartDataResolver

@@ -26,7 +26,7 @@ from .vision import VisionClient
 from .config import CONFIG
 
 try:
-    from backend.agents.utils.agent_file_manager import AgentFileManager, FileType, FileStatus
+    from backend.utils.agent_file_manager import AgentFileManager, FileType, FileStatus
 except ImportError:
     class FileType:
         DOWNLOAD = "download"

@@ -1,24 +1,24 @@
 # agents/mail_agent/llm.py
 """
-Mail Agent LLM - Deprecated
+Gmail Agent LLM - Deprecated
 
 This file is kept for backward compatibility.
 New code should use:
-- MailLLMHelpers mixin (this agent inherits from it)
-- BaseAgent.llm_* methods for generic operations
+- BaseAgent.llm_* methods (inherited from AgentLLMHelpers)
+- GmailLLMHelpers mixin for Gmail-specific methods
 
-See llm_helpers.py for the implementation.
+See llm_helpers.py for the new implementation.
 """
 import warnings
-from .llm_helpers import MailLLMHelpers
+from .llm_helpers import GmailLLMHelpers, strip_think_tags
 
-# Deprecated - use MailLLMHelpers mixin instead
-class LLMClient(MailLLMHelpers):
-    """Deprecated: Use MailLLMHelpers mixin with BaseAgent."""
+# Deprecated - use GmailLLMHelpers mixin instead
+class LLMClient(GmailLLMHelpers):
+    """Deprecated: Use GmailLLMHelpers mixin with BaseAgent instead."""
     
     def __init__(self):
         warnings.warn(
-            "LLMClient is deprecated. Use MailLLMHelpers mixin.",
+            "LLMClient is deprecated. Use GmailLLMHelpers mixin with BaseAgent.",
             DeprecationWarning,
             stacklevel=2
         )

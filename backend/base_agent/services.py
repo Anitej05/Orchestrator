@@ -76,7 +76,7 @@ class AgentServices:
     def file_manager(self):
         """File manager for local file operations."""
         if self._file_manager is None:
-            from backend.agents.utils.agent_file_manager import AgentFileManager
+            from backend.utils.agent_file_manager import AgentFileManager
 
             self._file_manager = AgentFileManager(
                 agent_id="default_agent",

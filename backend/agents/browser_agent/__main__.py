@@ -3,7 +3,7 @@ Browser Agent Entry Point
 Run with: python -m backend.agents.browser_agent
 """
 
-from backend.agents.base.server import create_agent_server
+from backend.base_agent.server import create_agent_server
 from .base_agent_impl import BrowserAgent
 
 if __name__ == "__main__":

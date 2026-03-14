@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
-from backend.agents.base import (
+from backend.base_agent import (
     BaseAgent,
     AgentConfig,
     AgentServices,
@@ -135,7 +135,7 @@ class PPTAgent(BaseAgent, PPTLLMHelpers):
         """Synthesize final response with CanvasService-powered display."""
         successful = [r for r in results if getattr(r, "success", False)]
 
-        from backend.agents.base import AgentResponse
+        from backend.base_agent import AgentResponse
 
         if not successful:
             return AgentResponse.error(

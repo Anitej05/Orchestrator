@@ -608,13 +608,21 @@ export function useWebSocketManager({
           }
           else if (eventData.node === 'action_approval_required') {
             const currentState = useConversationStore.getState();
-            const question = eventData.data?.question_for_user || 'Action approval required.';
+            // approval_reason is nested inside pending_decision from the backend
+            const pendingDecision = eventData.data?.pending_decision;
+            const question = pendingDecision?.approval_reason || eventData.data?.approval_reason || eventData.data?.question_for_user || 'Action approval required.';
+
+            console.log('🔔 ACTION APPROVAL REQUIRED:', {
+              question,
+              pendingDecision,
+              approval_reason: pendingDecision?.approval_reason
+            });
 
             _setConversationState({
               isWaitingForUser: true,
               currentQuestion: question,
               pending_action_approval: true,
-              pending_action: eventData.data?.pending_decision,
+              pending_action: pendingDecision,
               isLoading: false,
               metadata: {
                 ...currentState.metadata,

@@ -1,5 +1,5 @@
 """
-Gmail Agent Integration Test Fixtures
+Mail Agent Integration Test Fixtures
 """
 import pytest
 import os
@@ -10,8 +10,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../.
 
 @pytest.fixture(scope="session")
 def test_user_id() -> str:
-    """Test user ID for Gmail agent tests"""
-    return os.getenv("TEST_USER_ID", "test_user_gmail_ci")
+    """Test user ID for Mail agent tests"""
+    return os.getenv("TEST_USER_ID", "test_user_mail_ci")
 
 @pytest.fixture(scope="session")
 def composio_api_key() -> str:
@@ -27,10 +27,10 @@ def test_email_address() -> str:
     return os.getenv("TEST_EMAIL_ADDRESS", "test@example.com")
 
 @pytest.fixture
-def gmail_service(test_user_id: str):
-    """Create Gmail service instance for testing"""
-    from agents.gmail_agent.service import GmailService
-    
+def mail_service(test_user_id: str):
+    """Create Mail service instance for testing"""
+    from agents.mail_agent.service import GmailService
+
     try:
         service = GmailService(test_user_id)
         return service

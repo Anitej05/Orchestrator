@@ -1097,12 +1097,12 @@ os.chdir(r'{workspace_path}')
                     "agent": resource_id or action_type,
                     "success": True,
                     # Cap at 3000 chars: this string is injected verbatim into the Brain's
-                # next LLM prompt under "LATEST AGENT RESULT". Without a cap, a large
-                # agent response (e.g. a full spreadsheet analysis) would balloon the
-                # prompt token count and risk hitting context limits or inflating costs.
-                # 3000 chars ≈ ~750 tokens — enough for the Brain to read the key result
-                # and decide to finish, but small enough to be safe for all model tiers.
-                "result": last_result_str[:3000],
+                    # next LLM prompt under "LATEST AGENT RESULT". Without a cap, a large
+                    # agent response (e.g. a full spreadsheet analysis) would balloon the
+                    # prompt token count and risk hitting context limits or inflating costs.
+                    # 3000 chars ≈ ~750 tokens — enough for the Brain to read the key result
+                    # and decide to finish, but small enough to be safe for all model tiers.
+                    "result": last_result_str[:3000],
                     "iteration": iteration,
                 }
             except Exception:

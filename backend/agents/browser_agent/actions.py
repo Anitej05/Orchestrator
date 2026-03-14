@@ -16,7 +16,7 @@ from .agent_schemas import ActionPlan, ActionResult, AtomicAction
 from .dom import DOMExtractor
 from .config import CONFIG
 from .persistent_memory import get_persistent_memory
-from backend.agents.utils.agent_file_manager import FileType
+from backend.utils.agent_file_manager import FileType
 
 from backend.services.inference_service import inference_service, InferencePriority, ProviderType
 from langchain_core.messages import HumanMessage, SystemMessage

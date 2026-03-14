@@ -11,9 +11,9 @@ import base64
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 
-from backend.agents.base import BaseAgent, AgentServices, AgentConfig
-from backend.agents.base.types import ExecutionContext, AgentRequest, CapabilityResult, ExecutionStep
-from backend.agents.base.capability import capability, ParameterSchema
+from backend.base_agent import BaseAgent, AgentServices, AgentConfig
+from backend.base_agent.types import ExecutionContext, AgentRequest, CapabilityResult, ExecutionStep
+from backend.base_agent.capability import capability, ParameterSchema
 
 from .browser import Browser
 from .dom import DOMExtractor

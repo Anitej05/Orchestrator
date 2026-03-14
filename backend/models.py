@@ -148,7 +148,7 @@ class Credential(Base):
     any scope: agents, tools, system-level keys, third-party integrations, etc.
 
     Scope examples:
-      scope="agent",  scope_id="gmail_agent"      → Gmail agent's Composio key
+      scope="agent",  scope_id="mail_agent"       → Mail agent's Composio key
       scope="tool",   scope_id="web_search"        → SerpAPI key for web search tool
       scope="system", scope_id="global"            → System-wide shared credentials
     """

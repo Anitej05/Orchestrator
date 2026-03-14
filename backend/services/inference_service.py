@@ -371,10 +371,11 @@ class InferenceService:
                     if not llm: 
                         break # Break inner loop if no client
                     
-                    # Skip with_structured_output for NVIDIA/minimax only — minimax's
-                    # structured output returns None but our JSON extraction handles it.
+                    # Skip with_structured_output for NVIDIA/minimax and OLLAMA/kimi-k2.5
+                    # - minimax's structured output returns None but our JSON extraction handles it
+                    # - OLLAMA kimi-k2.5:cloud returns markdown-wrapped JSON that breaks Pydantic
                     # Cerebras and GROQ support with_structured_output natively.
-                    use_json_fallback = current_provider == ProviderType.NVIDIA
+                    use_json_fallback = current_provider in (ProviderType.NVIDIA, ProviderType.OLLAMA)
                     
                     # Use standard LangChain structured output interface (skip for NVIDIA)
                     if not use_json_fallback and hasattr(llm, "with_structured_output"):
@@ -542,10 +543,13 @@ class InferenceService:
                 if not api_key:
                     logger.warning("Ollama API key not available")
                     return None
+                # Ollama Cloud base URL (OpenAI-compatible endpoint)
                 base_url = os.getenv("OLLAMA_BASE_URL", "https://ollama.com/v1")
                 model_to_use = model or "kimi-k2.5:cloud"
 
                 from langchain_openai import ChatOpenAI
+                # Note: kimi-k2.5:cloud sometimes returns markdown-wrapped JSON
+                # The generate_structured() method handles this via JSON fallback parsing
                 return ChatOpenAI(base_url=base_url, api_key=api_key, model=model_to_use, temperature=temp, max_tokens=max_tokens, max_retries=0)
 
             elif provider == ProviderType.CEREBRAS:

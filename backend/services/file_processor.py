@@ -200,12 +200,26 @@ class FileProcessor:
     async def _display_document(self, file_path: str, file_name: str) -> Optional[Dict]:
         """Call document agent to display in canvas"""
         try:
+            # Use agent_registry for dynamic URL lookup
+            from backend.services.agent_registry_service import agent_registry
+            agent = agent_registry.find_agent("Document Agent")
+            if not agent:
+                logger.warning(f"Document Agent not found for displaying {file_name}")
+                return None
+            
+            base_url = (agent.get('connection_config') or {}).get('base_url')
+            if not base_url:
+                logger.warning(f"Document Agent has no base_url configured")
+                return None
+            
+            display_url = f"{base_url.rstrip('/')}/display"
+            
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(
-                    "http://localhost:8070/display",
+                    display_url,
                     json={"file_path": file_path}
                 )
-                
+
                 if response.status_code == 200:
                     display_result = response.json()
                     canvas_display = display_result.get("canvas_display")
@@ -214,16 +228,16 @@ class FileProcessor:
                         return canvas_display
                 else:
                     logger.warning(f"Display failed: {response.status_code}")
-                    
+
         except Exception as e:
             logger.error(f"Display error for {file_name}: {e}")
-        
+
         return None
     
     async def process_spreadsheet(self, file_obj: FileObject) -> Dict:
-        """Process spreadsheet file (upload to v2 agent)"""
+        """Process spreadsheet file (upload to Spreadsheet Agent)"""
         start_time = datetime.now()
-        
+
         # Check if already has file_id (skip re-upload)
         existing_file_id = file_obj.file_id or file_obj.content_id
         if existing_file_id:
@@ -233,31 +247,42 @@ class FileProcessor:
                 'cached': True,
                 'processing_time': 0.0
             }
-        
+
         file_path = file_obj.file_path
         if not os.path.exists(file_path):
             return {'error': 'File not found'}
-        
+
         try:
             import mimetypes
             mime_type, _ = mimetypes.guess_type(file_obj.file_name)
             mime_type = mime_type or 'application/octet-stream'
-            
+
             file_content = await asyncio.to_thread(
                 lambda: open(file_path, 'rb').read()
             )
+
+            # Use agent_registry for dynamic URL lookup
+            from backend.services.agent_registry_service import agent_registry
+            agent = agent_registry.find_agent("Spreadsheet Agent")
+            if not agent:
+                return {'error': 'Spreadsheet Agent not found'}
             
-            # Use v2 agent /execute endpoint on port 9000
+            base_url = (agent.get('connection_config') or {}).get('base_url')
+            if not base_url:
+                return {'error': 'Spreadsheet Agent has no base_url configured'}
+            
+            upload_url = f"{base_url.rstrip('/')}/execute"
+
             async with httpx.AsyncClient(timeout=60.0) as client:
                 files = {"file": (file_obj.file_name, file_content, mime_type)}
                 response = await client.post(
-                    "http://localhost:9000/execute",
+                    upload_url,
                     files=files
                 )
-                
+
                 if response.status_code == 200:
                     execute_result = response.json()
-                    
+
                     # v2 returns result in top-level or in 'result' field
                     # Handle case where 'result' key exists but is None
                     nested_result = execute_result.get('result')
@@ -265,20 +290,20 @@ class FileProcessor:
                         nested_result = {}
                     file_id = execute_result.get('file_id') or nested_result.get('file_id')
                     canvas_display = execute_result.get('canvas_display')
-                    
+
                     result = {
                         'file_id': file_id,
                         'canvas_display': canvas_display,
                         'cached': False,
                         'processing_time': (datetime.now() - start_time).total_seconds()
                     }
-                    
+
                     logger.info(f"✅ Spreadsheet uploaded: {file_obj.file_name}")
                     return result
                 else:
                     logger.error(f"Upload failed: {response.status_code}")
                     return {'error': f'Upload failed: {response.status_code}'}
-                    
+
         except Exception as e:
             logger.error(f"Spreadsheet processing error: {e}")
             return {'error': str(e)}

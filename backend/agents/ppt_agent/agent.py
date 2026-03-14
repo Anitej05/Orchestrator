@@ -11,8 +11,8 @@ import time
 from typing import Dict, Any, Optional, List
 from pathlib import Path
 
-from backend.agents.base import BaseAgent, AgentRequest, capability, ExecutionContext, CapabilityResult
-from backend.agents.base.types import AgentResponse as BaseAgentResponse
+from backend.base_agent import BaseAgent, AgentRequest, capability, ExecutionContext, CapabilityResult
+from backend.base_agent.types import AgentResponse as BaseAgentResponse
 from .llm_helpers import PPTLLMHelpers
 from . import utils
 

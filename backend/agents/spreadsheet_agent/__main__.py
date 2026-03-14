@@ -9,7 +9,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent.parent / ".env")
 
-from backend.agents.base.server import create_agent_server
+from backend.base_agent.server import create_agent_server
 from .base_agent_impl import SpreadsheetAgent
 
 if __name__ == "__main__":

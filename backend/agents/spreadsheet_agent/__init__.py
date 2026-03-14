@@ -35,7 +35,7 @@ from .config import AGENT_PORT, AGENT_VERSION
 
 try:
     from .base_agent_impl import SpreadsheetAgent as BaseSpreadsheetAgent
-    from backend.agents.base.server import create_agent_server
+    from backend.base_agent.server import create_agent_server
 
     _server = create_agent_server(
         agent_class=BaseSpreadsheetAgent,

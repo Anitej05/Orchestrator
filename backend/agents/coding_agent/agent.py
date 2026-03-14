@@ -9,16 +9,16 @@ import os
 import time
 from typing import Dict, Any, Optional
 
-from backend.agents.base.agent import BaseAgent, AgentConfig
-from backend.agents.base.types import (
+from backend.base_agent.agent import BaseAgent, AgentConfig
+from backend.base_agent.types import (
     AgentRequest,
     AgentResponse,
     ExecutionContext,
     CapabilityResult,
     ParameterSchema,
 )
-from backend.agents.base.services import AgentServices
-from backend.agents.base.capability import capability
+from backend.base_agent.services import AgentServices
+from backend.base_agent.capability import capability
 
 from .opencode_client import OpenCodeClient, CodeTaskResult
 from .config import (

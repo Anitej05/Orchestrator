@@ -15,7 +15,7 @@ import os
 import re
 from typing import Dict, Any, Optional, List
 
-from backend.agents.base.types import ExecutionContext
+from backend.base_agent.types import ExecutionContext
 
 logger = logging.getLogger("integrations_agent")
 

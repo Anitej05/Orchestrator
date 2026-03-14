@@ -19,7 +19,7 @@ except ImportError:
 # New BaseAgent implementation
 try:
     from .base_agent_impl import ZohoBooksAgent
-    from backend.agents.base.server import create_agent_server
+    from backend.base_agent.server import create_agent_server
     
     # Create server instance
     _server = create_agent_server(

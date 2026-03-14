@@ -1,6 +1,6 @@
 """
 Document Agent Entry Point
-Run with: python -m backend.agents.document_agent_lib
+Run with: python -m backend.agents.document_agent
 """
 
 from .__init__ import app

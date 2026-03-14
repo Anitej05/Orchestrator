@@ -96,7 +96,7 @@ TIER1_AGENTS = [
     {
         "name": "Document Agent",
         "agent_id": "document",
-        "module": "agents.document_agent_lib",
+        "module": "agents.document_agent",
         "port": 8050,
         "test_script": "test_document_agent_standalone.py",
         # --skip-chat: no main backend needed
@@ -119,6 +119,14 @@ TIER1_AGENTS = [
         "test_script": "test_coding_agent_standalone.py",
         # Longer delay: OpenCode tasks take more time
         "test_args": ["--delay", "12"],
+    },
+    {
+        "name": "Mail Agent",
+        "agent_id": "mail",
+        "module": "agents.mail_agent",
+        "port": 8060,
+        "test_script": "test_mail_agent_standalone.py",
+        "test_args": ["--delay", "5"],
     },
 ]
 

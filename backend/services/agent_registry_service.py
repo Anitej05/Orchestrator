@@ -19,15 +19,12 @@ from pathlib import Path
 logger = logging.getLogger("AgentRegistryService")
 
 # Agent directories to scan for SKILL.md files.
-# mail_agent is DEPRECATED – excluded from scan so the orchestrator LLM never routes to it.
-# All email routing goes through gmail_agent.
 AGENT_DIRS = [
     "spreadsheet_agent",
-    # "mail_agent",  # DEPRECATED – use gmail_agent
-    "gmail_agent",
+    "mail_agent",
     "integrations_agent",
     "browser_agent",
-    "document_agent_lib",
+    "document_agent",
     "pdf_agent",
     "ppt_agent",
     "zoho_books",
@@ -50,13 +47,10 @@ AGENT_ALIASES = {
     "csv": "Spreadsheet Agent",
     "data_agent": "Spreadsheet Agent",
     # Mail agent aliases
-    "mail": "Gmail Agent",
-    # Mail agent aliases — all redirect to Gmail Agent (mail_agent is DEPRECATED)
-    "mail": "Gmail Agent",
-    "mail_agent": "Gmail Agent",  # DEPRECATED: mail_agent → gmail_agent
-    "email": "Gmail Agent",
-    "gmail": "Gmail Agent",
-    "gmail_agent": "Gmail Agent",
+    "mail": "Mail Agent",
+    "mail_agent": "Mail Agent",
+    "email": "Mail Agent",
+    "gmail": "Mail Agent",
     # Document agent aliases
     "document": "Document Agent",
     "document_agent": "Document Agent",
@@ -275,23 +269,6 @@ class AgentRegistryService:
         """
         agent = self.find_agent(name_or_id)
         return agent["name"] if agent else None
-
-    def get_all_skills_context(self) -> str:
-        """
-        Get a formatted string of all agent skills for LLM context.
-        Used by the Brain to understand available agents.
-        """
-        skills = self._load_skill_configs()
-
-        context_parts = []
-        for agent_id, config in skills.items():
-            context_parts.append(f"## {config['name']} (id: {agent_id})")
-            context_parts.append(
-                config.get("skill_text", config.get("description", ""))
-            )
-            context_parts.append("")  # Empty line between agents
-
-        return "\n".join(context_parts)
 
     def list_active_agents(self, db: Session = None) -> List[Dict[str, Any]]:
         """

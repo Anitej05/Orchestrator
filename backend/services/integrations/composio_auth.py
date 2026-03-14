@@ -653,7 +653,10 @@ class ComposioAuthManager:
     def disconnect_app(self, user_id: str, app_slug: str) -> Dict[str, Any]:
         """Disconnect a user from a specific app and remove from database."""
         try:
-            # Get user's connections using v0.10.x SDK
+            deleted_from_composio = False
+            deleted_from_db = 0
+
+            # Step 1: Delete from Composio (all connections for this user+app)
             connections = []
             seen_connection_ids = set()
             for entity_id in self._get_candidate_entity_ids(user_id, app_slug):
@@ -666,7 +669,7 @@ class ComposioAuthManager:
                             connections.append(c)
                 except Exception as e:
                     logger.debug(f"Could not fetch connections for entity {entity_id}: {e}")
-            
+
             for conn in connections:
                 conn_dict = conn.model_dump() if hasattr(conn, "model_dump") else getattr(conn, "__dict__", {})
                 slug = (
@@ -679,33 +682,64 @@ class ComposioAuthManager:
                     # v0.10.6 SDK moved slug to nested toolkit.slug
                     toolkit_info = getattr(conn, "toolkit", None) or conn_dict.get("toolkit", {})
                     slug = getattr(toolkit_info, "slug", None) or (toolkit_info.get("slug") if isinstance(toolkit_info, dict) else None)
-                
+
                 slug = (slug or "").lower()
                 if slug == app_slug.lower():
                     # Use official SDK delete method
                     self._composio.connected_accounts.delete(conn.id)
-                    logger.info(f"Disconnected {app_slug} for user {user_id}")
-                    
-                    # Remove from database
-                    db = SessionLocal()
-                    try:
-                        connection = db.query(UserConnection).filter(
-                            UserConnection.user_id == user_id,
-                            UserConnection.app_slug == app_slug
-                        ).first()
-                        if connection:
-                            db.delete(connection)
-                            db.commit()
-                            logger.info(f"✓ Removed connection from DB: {app_slug}")
-                    finally:
-                        db.close()
-                    
-                    # Log to database
-                    self._log_connection_event(user_id, app_slug, "disconnected", "success")
-                    return {"success": True, "message": f"Disconnected from {app_slug}"}
-            
-            return {"success": False, "error": f"No active connection for {app_slug}"}
-        
+                    deleted_from_composio = True
+                    logger.info(f"Deleted from Composio: {conn.id}")
+
+            # Step 2: Remove ALL matching entries from database
+            db = SessionLocal()
+            try:
+                # Delete ALL connections for this user+app (not just the first one)
+                connections_to_delete = db.query(UserConnection).filter(
+                    UserConnection.user_id == user_id,
+                    UserConnection.app_slug == app_slug
+                ).all()
+
+                for connection in connections_to_delete:
+                    db.delete(connection)
+                    deleted_from_db += 1
+                    logger.info(f"✓ Removed from DB: {connection.user_id} - {app_slug}")
+
+                if deleted_from_db > 0:
+                    db.commit()
+                    logger.info(f"✓ Deleted {deleted_from_db} database connection(s) for {app_slug}")
+                else:
+                    logger.warning(f"No database connections found for {app_slug}")
+
+                # Also check for system/initiated entries that might be orphaned
+                if user_id != "system":
+                    orphaned = db.query(UserConnection).filter(
+                        UserConnection.internal_user_id == user_id,
+                        UserConnection.app_slug == app_slug
+                    ).all()
+
+                    for conn in orphaned:
+                        db.delete(conn)
+                        deleted_from_db += 1
+                        logger.info(f"✓ Removed orphaned entry: {conn.id}")
+
+                    if orphaned:
+                        db.commit()
+
+            finally:
+                db.close()
+
+            if deleted_from_composio or deleted_from_db > 0:
+                # Log to database
+                self._log_connection_event(user_id, app_slug, "disconnected", "success")
+                return {
+                    "success": True,
+                    "message": f"Disconnected from {app_slug}",
+                    "deleted_from_composio": deleted_from_composio,
+                    "deleted_from_db": deleted_from_db
+                }
+            else:
+                return {"success": False, "error": f"No active connection for {app_slug}"}
+
         except Exception as e:
             logger.error(f"Disconnect failed: {e}", exc_info=True)
             self._log_connection_event(user_id, app_slug, "disconnected", "failed", str(e))

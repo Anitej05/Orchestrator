@@ -1,6 +1,6 @@
-# agents/gmail_agent/tools.py
+# agents/mail_agent/tools.py
 """
-Gmail Agent — Composio Tool Manager (v3 SDK)
+Mail Agent — Composio Tool Manager (v3 SDK)
 
 Handles all 60 Gmail tools with per-user authentication.
 Uses composio v0.10.x (v3 API):
@@ -19,7 +19,7 @@ from typing import Dict, Any, Optional, List
 
 from .config import COMPOSIO_API_KEY
 
-logger = logging.getLogger("gmail_agent")
+logger = logging.getLogger("mail_agent")
 _VERSION_FALLBACK_WARNED: set[str] = set()
 
 
@@ -118,7 +118,8 @@ class ComposioToolManager:
                 {
                     "slug": tool_slug,
                     "arguments": parameters or {},
-                    "connected_account_id": self.connection_id,
+                    # Don't pass connected_account_id - let Composio auto-resolve from user_id
+                    # This fixes the "Connected account user ID does not match" error
                     "user_id": self.user_id,
                 },
             )

@@ -1,4 +1,4 @@
-# agents/document_agent_lib/llm_helpers.py
+# agents/document_agent/llm_helpers.py
 """
 Document Agent - LLM Helper Functions
 

@@ -1,4 +1,4 @@
-# Dockerfile for Gmail Agent
+# Dockerfile for Mail Agent
 # Build context: backend/
 FROM python:3.11-slim
 
@@ -21,15 +21,15 @@ COPY . .
 RUN mkdir -p logs
 
 # Expose port
-EXPOSE 8000
+EXPOSE 8040
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:8000/health || exit 1
+  CMD curl -f http://localhost:8040/health || exit 1
 
 # Set Python path
 ENV PYTHONPATH=/app
 
-# Run Gmail agent
-WORKDIR /app/agents/gmail_agent
-CMD ["uvicorn", "agent:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run Mail agent
+WORKDIR /app/agents/mail_agent
+CMD ["uvicorn", "__init__:app", "--host", "0.0.0.0", "--port", "8040"]

@@ -14,7 +14,7 @@ Returns:
     "app_name":  "Gmail",               # Human-readable name
     "confidence": 0.95,                 # 0.0 – 1.0
     "method":    "DEDICATED_AGENT",     # or "INTEGRATIONS_AGENT"
-    "agent_id":  "gmail_agent",         # set when method == DEDICATED_AGENT
+    "agent_id":  "mail_agent",          # set when method == DEDICATED_AGENT
   }
 
 Dedicated-agent apps bypass the Integrations Agent and are routed directly by
@@ -32,7 +32,7 @@ logger = logging.getLogger("integrations_agent.app_detector")
 # Key = Composio app slug; Value = canonical agent route key (used by Brain).
 # ---------------------------------------------------------------------------
 DEDICATED_AGENT_APPS: Dict[str, str] = {
-    "gmail": "gmail_agent",
+    "gmail": "mail_agent",
     "zohobooks": "zoho_books",
     "zoho_books": "zoho_books",
     "googlesheets": "spreadsheet_agent",

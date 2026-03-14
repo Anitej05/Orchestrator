@@ -15,9 +15,9 @@ from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 from pathlib import Path
 
-from backend.agents.base import BaseAgent, AgentServices, AgentConfig
-from backend.agents.base.types import AgentRequest, AgentResponse, ExecutionContext
-from backend.agents.base.capability import capability, ParameterSchema
+from backend.base_agent import BaseAgent, AgentServices, AgentConfig
+from backend.base_agent.types import AgentRequest, AgentResponse, ExecutionContext
+from backend.base_agent.capability import capability, ParameterSchema
 
 from .editors import DocumentEditor
 from .state import DocumentSessionManager, DocumentVersionManager

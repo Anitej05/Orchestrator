@@ -242,7 +242,7 @@ export function OrchestrationFlow() {
             : undefined
           return (
             <BrainRow
-              key={event.id}
+              key={`${event.id}-${idx}`}
               event={event}
               isLast={isLast && !isProcessing}
               nextAgentName={nextAgent}
@@ -252,7 +252,7 @@ export function OrchestrationFlow() {
 
         return (
           <AgentRow
-            key={event.id}
+            key={`${event.id}-${idx}`}
             event={event}
             isLast={isLast && !isProcessing}
           />

@@ -39,7 +39,7 @@ from .base_agent_impl import IntegrationsAgent, IntegrationsAgentConfig, get_age
 # ============================================================================
 
 try:
-    from backend.agents.base.server import create_agent_server
+    from backend.base_agent.server import create_agent_server
 
     _server = create_agent_server(
         agent_class=IntegrationsAgent,

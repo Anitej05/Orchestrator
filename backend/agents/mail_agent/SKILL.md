@@ -1,49 +1,86 @@
 ---
 id: mail_agent
 name: Mail Agent
-port: 8040
-version: 1.0.0
+port: 8003
+version: 2.0.0
 description: >
-  Deprecated mail agent retained for compatibility with legacy Gmail-style workflows.
-  Prefer gmail_agent for new email tasks.
+  Advanced Gmail automation with full Composio SDK (v3) integration.
+  Covers all 60 Gmail tools: search, send, reply, forward, drafts, labels,
+  filters, batch operations, settings, contacts, and universal tool execution.
 model: ollama/minimax-m2.5:cloud
 context_strategy: minimal
 requires_auth: true
 composio_app_slug: gmail
-deprecated: true
-prefer: gmail_agent
-triggers: []
+triggers:
+  - email
+  - gmail
+  - inbox
+  - send mail
+  - draft
+  - attachments
+  - label
+  - thread
+  - compose
+  - reply
+  - forward
+  - filter
+  - batch
+  - archive
+  - vacation reply
 capabilities:
   - search_emails
-  - summarize_threads
-  - draft_reply
   - send_email
-  - manage_emails
+  - reply_email
+  - forward_email
+  - get_email
+  - summarize_emails
+  - draft_smart_reply
   - extract_action_items
+  - manage_drafts
+  - manage_labels
+  - batch_operations
+  - manage_filters
+  - get_settings
+  - execute_gmail_tool
 not_for:
-  - spreadsheets
-  - PDF documents
-  - web browsing
   - calendar events
+  - spreadsheets
+  - document processing
+  - web browsing
+  - accounting
+  - non-Gmail integrations (use integrations_agent)
 ---
 
-# Mail Agent (Legacy)
+# Mail Agent
 
-Smart, stateful Gmail assistant with LLM-powered email understanding.
-**Note:** Prefer `gmail_agent` for new tasks — this agent is retained for backward compatibility.
+Advanced Gmail automation agent with full Composio SDK v3 integration and per-user authentication.
 
-## Capabilities
+## Capabilities (14 total)
 
-- Search emails using natural language queries
-- Summarize email threads and batches
-- Draft context-aware replies based on thread history
-- Send new emails with HTML support
-- Manage emails: archive, delete, star, label
-- Extract action items, tasks, and deadlines from emails
-- Download and analyze email attachments
+- **Email Search** — NL queries with LLM optimization
+- **Send & Reply** — HTML, CC/BCC, attachments
+- **Forward** — Forward emails with optional message
+- **Draft Management** — Create, get, update, send, delete drafts
+- **Label Operations** — Create, delete, rename, list labels
+- **Batch Operations** — Archive, delete, star, mark read/unread in bulk
+- **Filter Management** — Create, list, delete Gmail filter rules
+- **Settings** — Vacation auto-reply, forwarding, language, aliases
+- **Universal Tool** — `execute_gmail_tool` for any of 60 Composio tools
+- **AI Features** — Summarize emails, smart reply drafts, extract action items
 
-## Notes
+## Composio Tools (60 total)
 
-- Requires Composio API key for Gmail integration
-- Supports multi-turn dialogues for clarification
-- Maintains session state for follow-up queries
+All 60 Composio Gmail tools are accessible:
+- 35 have explicit wrappers in `tools.py`
+- Remaining 25 are accessible via `execute_any_tool(slug, params)`
+
+## Triggers (2)
+
+- `GMAIL_NEW_GMAIL_MESSAGE` — New incoming email
+- `GMAIL_EMAIL_SENT_TRIGGER` — Email sent
+
+## Authentication
+
+- **Requires**: Active Gmail connection via Composio OAuth
+- **Multi-user**: Each user authenticates their own Gmail account
+- **SDK**: Composio v3 (`composio.tools.execute()`)

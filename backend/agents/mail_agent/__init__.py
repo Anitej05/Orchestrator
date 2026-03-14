@@ -1,18 +1,13 @@
+# agents/mail_agent/__init__.py
 """
-Mail Agent - AgentServer Entry Point
+Mail Agent - BaseAgent implementation for Gmail operations
 
-Legacy Gmail assistant with LLM-powered email understanding.
-Uses BaseAgent architecture via AgentServer.
-Note: Prefer gmail_agent for new tasks — this agent is retained for backward compatibility.
+Uses Composio Gmail tools and BaseAgent framework for clean architecture.
 """
-
-# CRITICAL: Load .env BEFORE any imports that trigger InferenceService/KeyManager singletons.
-from pathlib import Path as _Path
-from dotenv import load_dotenv as _load_dotenv
-_load_dotenv(_Path(__file__).parent.parent.parent / ".env")
 
 import os
 import sys
+import logging
 from pathlib import Path
 
 # ==================== ROBUST PATH HANDLING ====================
@@ -21,21 +16,26 @@ AGENTS_DIR = PACKAGE_DIR.parent
 BACKEND_DIR = AGENTS_DIR.parent
 PROJECT_ROOT = BACKEND_DIR.parent
 
+# Ensure correct paths in sys.path
 for path in [str(PROJECT_ROOT), str(BACKEND_DIR)]:
     if path not in sys.path:
         sys.path.insert(0, path)
 
+__version__ = "1.0.0"
+
+# Configure logging via centralized Mega Logger
 from backend.utils.mega_logger import setup_mega_logger
 logger = setup_mega_logger("MailAgent")
 
 # ============================================================================
-# BASEAGENT SERVER (primary)
+# BASEAGENT IMPLEMENTATION
 # ============================================================================
 
 try:
     from .base_agent_impl import MailAgent as BaseMailAgent
-    from backend.agents.base.server import create_agent_server
+    from backend.base_agent.server import create_agent_server
 
+    logger.info("Initializing BaseAgent Mail implementation...")
     _server = create_agent_server(
         agent_class=BaseMailAgent,
         agent_id="mail_agent",
@@ -49,20 +49,16 @@ except Exception as e:
     import traceback
     traceback.print_exc()
 
+    # Capture error before `e` goes out of scope (Python 3 clears it after except block)
     _init_error = str(e)
 
-    # Fallback: try legacy app
-    try:
-        from .agent import app as legacy_app
-        app = legacy_app
-        logger.info("Fell back to legacy Mail Agent app")
-    except Exception:
-        from fastapi import FastAPI
-        app = FastAPI(title="Mail Agent (error)")
+    # Create minimal health-check app as fallback
+    from fastapi import FastAPI
+    app = FastAPI(title="Mail Agent (error)")
 
-        @app.get("/health")
-        async def health():
-            return {"status": "unhealthy", "error": "Failed to load Mail Agent", "details": _init_error}
+    @app.get("/health")
+    async def health():
+        return {"status": "unhealthy", "error": "Failed to load Mail Agent", "details": _init_error}
 
 
 # ============================================================================

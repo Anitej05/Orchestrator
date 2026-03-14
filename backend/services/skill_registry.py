@@ -387,31 +387,6 @@ class SkillRegistry:
         self.initialize()
         return dict(self._skills)
 
-    # ──────────────────────────────────────────────────────────────────────
-    # BACKWARD COMPATIBILITY — For agent_registry_service
-    # ──────────────────────────────────────────────────────────────────────
-
-    def get_all_skills_context(self) -> str:
-        """
-        Backward-compatible method for agent_registry_service.
-        Returns full skill text for all agents (legacy behavior).
-        
-        NOTE: Brain should use get_skill_summary() instead for efficiency.
-        This exists only for backward compatibility during migration.
-        """
-        self.initialize()
-
-        parts = []
-        for skill_id, config in self._skills.items():
-            if config.deprecated:
-                continue
-            body = self.get_skill_context(skill_id)
-            parts.append(f"## {config.name} (id: {skill_id})")
-            parts.append(body)
-            parts.append("")
-
-        return "\n".join(parts)
-
     def reload(self) -> None:
         """Force reload all skills and re-compute embeddings."""
         self._skills.clear()

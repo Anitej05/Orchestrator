@@ -1,4 +1,4 @@
-# agents/gmail_agent/service.py
+# agents/mail_agent/service.py
 import asyncio
 import base64
 import logging
@@ -9,7 +9,7 @@ from .tools import ComposioToolManager
 from .llm import llm_client
 from .memory import agent_memory
 
-logger = logging.getLogger("gmail_agent")
+logger = logging.getLogger("mail_agent")
 
 class GmailService:
     """

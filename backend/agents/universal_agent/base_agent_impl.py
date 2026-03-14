@@ -13,8 +13,8 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 
-from backend.agents.base import BaseAgent, AgentRequest, capability
-from backend.agents.utils.agent_file_manager import AgentFileManager
+from backend.base_agent import BaseAgent, AgentRequest, capability
+from backend.utils.agent_file_manager import AgentFileManager
 from services.canvas_service import CanvasService
 
 logger = logging.getLogger(__name__)

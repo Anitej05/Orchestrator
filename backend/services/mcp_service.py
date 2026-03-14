@@ -1,93 +1,31 @@
 # backend/services/mcp_service.py
 """
-MCP Service: Handles discovery, ingestion, and management of MCP servers.
+MCP Service - DEPRECATED
+
+MCP agent ingestion was removed when the AgentEndpoint, EndpointParameter,
+and AgentCredential tables were dropped from the schema.
+
+These stub functions remain for backward compatibility with the /api/connect/*
+endpoints, which now return 501 Not Implemented responses.
 """
 
-import httpx
 import logging
 from typing import Dict, Any, Optional
 from sqlalchemy.orm import Session
-from models import Agent, AgentType
-import uuid
 
 logger = logging.getLogger("uvicorn.error")
 
 
 async def probe_mcp_url(url: str) -> Dict[str, Any]:
     """
-    Probe an MCP URL to determine authentication requirements.
+    STUB: MCP functionality deprecated.
     
-    Args:
-        url: The MCP server URL to probe
-        
-    Returns:
-        Dictionary with status and auth requirements
+    Probing MCP URLs is no longer supported.
     """
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            # Try SSE endpoint first (standard MCP entry point)
-            sse_url = f"{url}/sse" if not url.endswith("/sse") else url
-            
-            try:
-                response = await client.get(sse_url)
-                
-                if response.status_code == 200:
-                    return {
-                        "status": "open",
-                        "message": "No authentication required",
-                        "url": url
-                    }
-                
-                if response.status_code == 401:
-                    auth_header = response.headers.get("WWW-Authenticate", "")
-                    
-                    if "OAuth" in auth_header or "oauth" in auth_header.lower():
-                        # Parse OAuth details from header
-                        return {
-                            "status": "auth_required",
-                            "type": "oauth2",
-                            "details": auth_header,
-                            "message": "OAuth2 authentication required"
-                        }
-                    elif "Bearer" in auth_header or "bearer" in auth_header.lower():
-                        return {
-                            "status": "auth_required",
-                            "type": "api_key",
-                            "header": "Authorization",
-                            "message": "API key authentication required (Bearer token)"
-                        }
-                    else:
-                        # Generic auth required
-                        return {
-                            "status": "auth_required",
-                            "type": "api_key",
-                            "header": "Authorization",
-                            "message": "Authentication required"
-                        }
-                
-                return {
-                    "status": "unknown",
-                    "code": response.status_code,
-                    "message": f"Unexpected status code: {response.status_code}"
-                }
-                
-            except httpx.HTTPStatusError as e:
-                return {
-                    "status": "error",
-                    "message": f"HTTP error: {str(e)}"
-                }
-                
-    except httpx.TimeoutException:
-        return {
-            "status": "error",
-            "message": "Connection timeout - server did not respond"
-        }
-    except Exception as e:
-        logger.error(f"Error probing MCP URL {url}: {e}")
-        return {
-            "status": "error",
-            "message": str(e)
-        }
+    return {
+        "status": "error",
+        "message": "MCP server integration is deprecated and no longer supported."
+    }
 
 
 async def ingest_mcp_agent(
@@ -99,19 +37,33 @@ async def ingest_mcp_agent(
     agent_description: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    STUB: MCP agent ingestion removed (AgentEndpoint/EndpointParameter/AgentCredential tables dropped).
+    STUB: MCP agent ingestion removed.
+    
+    The AgentEndpoint, EndpointParameter, and AgentCredential tables
+    have been dropped from the schema.
     """
     return {
         "status": "error",
-        "message": "MCP agent ingestion is not supported in this version."
+        "message": "MCP agent ingestion is deprecated. The required database tables (AgentEndpoint, EndpointParameter, AgentCredential) have been removed."
     }
 
 
 async def list_user_connections(db: Session, user_id: str) -> list[Dict[str, Any]]:
-    """STUB: AgentCredential table dropped."""
+    """
+    STUB: Connection listing removed.
+    
+    The AgentCredential table has been dropped.
+    """
     return []
 
 
 async def delete_user_connection(db: Session, user_id: str, agent_id: str) -> Dict[str, Any]:
-    """STUB: AgentCredential table dropped."""
-    return {"status": "error", "message": "Connection management not supported in this version."}
+    """
+    STUB: Connection deletion removed.
+    
+    The AgentCredential table has been dropped.
+    """
+    return {
+        "status": "error",
+        "message": "MCP connection management is deprecated."
+    }

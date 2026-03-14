@@ -9,7 +9,7 @@ Follows the BaseAgent pattern for consistency with other agents.
 from pathlib import Path as _Path
 from dotenv import load_dotenv as _load_dotenv
 _load_dotenv(_Path(__file__).parent.parent.parent / ".env")
-from backend.agents.base.server import create_agent_server
+from backend.base_agent.server import create_agent_server
 from .base_agent_impl import UniversalAgent
 
 # Create agent server using the factory function

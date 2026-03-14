@@ -10,9 +10,9 @@ import logging
 from typing import Dict, Any, Optional
 from dataclasses import dataclass
 
-from backend.agents.base import BaseAgent, AgentServices, AgentConfig
-from backend.agents.base.types import ExecutionContext
-from backend.agents.base.capability import capability, ParameterSchema
+from backend.base_agent import BaseAgent, AgentServices, AgentConfig
+from backend.base_agent.types import ExecutionContext
+from backend.base_agent.capability import capability, ParameterSchema
 
 logger = logging.getLogger("agents.zoho_books")
 
