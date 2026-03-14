@@ -41,7 +41,7 @@ from .agent_schemas import (
 from .agent_schemas import AgentResponseStatus as LocalAgentResponseStatus
 from .editors import DocumentEditor
 from .state import DocumentSessionManager, DocumentVersionManager, EditAction as StateEditAction
-from .llm import DocumentLLMClient
+from .llm_helpers import DocumentLLMHelpers
 from .utils import (
     extract_document_content, create_docx, create_pdf, analyze_document_structure,
     convert_docx_to_pdf, create_pdf_canvas_display, ensure_directory
@@ -89,17 +89,22 @@ WORKSPACE_ROOT = Path(__file__).parent.parent.parent.parent.resolve()  # Correct
 DEFAULT_STORAGE_DIR = WORKSPACE_ROOT / "storage" / "document_agent"
 
 
-class DocumentAgent:
+class DocumentAgent(DocumentLLMHelpers):
     """
     Main orchestrator for document operations.
     Coordinates editors, LLM, sessions, and versioning.
+    
+    Inherits from DocumentLLMHelpers for all LLM methods:
+    - interpret_edit_instruction()
+    - analyze_document_with_query()
+    - extract_structured_data()
     """
 
     def __init__(self):
         """Initialize agent with all components."""
         self.session_manager = DocumentSessionManager()
         self.version_manager = DocumentVersionManager()
-        self.llm_client = DocumentLLMClient()
+        # No need for self.llm_client - LLM methods are inherited from DocumentLLMHelpers
         self.service = ContentManagementService() # Inject Service
         ensure_directory(str(DEFAULT_STORAGE_DIR))
         self._analysis_cache = {}  # Simple in-memory cache
@@ -803,7 +808,7 @@ class DocumentAgent:
             self.metrics["llm_calls"]["total"] += 1
             
             # Now awaited
-            plan = await self.llm_client.interpret_edit_instruction(
+            plan = await self.interpret_edit_instruction(
                 request.instruction,
                 content,
                 structure

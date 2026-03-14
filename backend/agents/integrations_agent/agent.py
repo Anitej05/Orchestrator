@@ -25,7 +25,8 @@ import os
 # Add parent directory to path for shared imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-from orchestrator.uap_schemas import UAPExecuteRequest, UAPResponse
+from backend.schemas import AgentResponse, StandardAgentResponse, AgentResponseStatus
+from orchestrator.uap_schemas import UAPExecuteRequest
 from .service import IntegrationsAgentService
 from .tool_cache import ToolCache
 
@@ -89,64 +90,39 @@ async def health():
 
 # === UAP Execute Endpoint ===
 
-@app.post("/execute", response_model=UAPResponse)
-async def execute(request: UAPExecuteRequest) -> UAPResponse:
+@app.post("/execute", response_model=AgentResponse)
+async def execute(request: UAPExecuteRequest) -> AgentResponse:
     """
     UAP Execute endpoint - main entry point for all tasks.
     
+    Returns StandardAgentResponse format for consistency with all other agents.
+
     Workflow:
     1. Extract user_id from payload
     2. Check if user has required app connection
     3. If not connected, return needs_input with connect URL
     4. If connected, discover and execute tools
-    5. Return result in UAP format
-    
-    Example Request:
-    ```json
-    {
-        "prompt": "Send a Slack message to #general saying 'Hello!'",
-        "payload": {
-            "user_id": "user_123"
-        }
-    }
-    ```
-    
-    Example Response (Connected):
-    ```json
-    {
-        "success": true,
-        "result": {"message": "sent", "channel": "#general"},
-        "status": "completed",
-        "execution_time_ms": 1234
-    }
-    ```
-    
-    Example Response (Not Connected):
-    ```json
-    {
-        "success": false,
-        "result": null,
-        "status": "needs_input",
-        "question": "Please connect your Slack account to continue.",
-        "error": "No Slack connection found. Connect at: https://app.orbimesh.com/connections/slack"
-    }
-    ```
+    5. Return result in StandardAgentResponse format
     """
     start_time = time.time()
-    
+
     try:
         # Extract user_id from payload
         if not request.payload or "user_id" not in request.payload:
-            return UAPResponse(
+            return AgentResponse(
+                status=AgentResponseStatus.ERROR,
                 success=False,
-                result=None,
-                status="error",
-                error="Missing 'user_id' in payload. Cannot execute without user context."
+                error_message="Missing 'user_id' in payload",
+                standard_response=StandardAgentResponse(
+                    status=AgentResponseStatus.ERROR,
+                    success=False,
+                    summary="Missing user_id in payload",
+                )
             )
-        
+
         user_id = request.payload["user_id"]
         service = get_service(user_id)
-        
+
         # Execute the prompt using the service
         result = await service.execute(
             prompt=request.prompt,
@@ -154,31 +130,60 @@ async def execute(request: UAPExecuteRequest) -> UAPResponse:
             task_id=request.task_id,
             thread_id=request.thread_id
         )
-        
+
         # Calculate execution time
         execution_time_ms = (time.time() - start_time) * 1000
-        result["execution_time_ms"] = execution_time_ms
         
-        return UAPResponse(**result)
+        # Determine status
+        is_success = result.get('success', False)
+        status = AgentResponseStatus.COMPLETE if is_success else AgentResponseStatus.ERROR
         
+        # Check if needs_input (for OAuth)
+        if 'needs_input' in result or result.get('status') == 'needs_input':
+            status = AgentResponseStatus.NEEDS_INPUT
+        
+        return AgentResponse(
+            status=status,
+            success=is_success,
+            summary=result.get('message', 'Integration operation completed'),
+            standard_response=StandardAgentResponse(
+                status=status,
+                success=is_success,
+                summary=result.get('message', 'Integration operation completed'),
+                data=result.get('data', result),
+                canvas_display=result.get('canvas_display'),
+                question=result.get('question'),
+                question_type=result.get('question_type'),
+                execution_time_ms=execution_time_ms,
+            )
+        )
+
     except ValueError as e:
         # User-friendly errors (connection issues, invalid input)
-        return UAPResponse(
+        return AgentResponse(
+            status=AgentResponseStatus.ERROR,
             success=False,
-            result=None,
-            status="error",
-            error=str(e),
-            execution_time_ms=(time.time() - start_time) * 1000
+            error_message=str(e),
+            standard_response=StandardAgentResponse(
+                status=AgentResponseStatus.ERROR,
+                success=False,
+                summary=f"Error: {str(e)}",
+                execution_time_ms=(time.time() - start_time) * 1000,
+            )
         )
     except Exception as e:
         # Unexpected errors
         logger.error(f"[Execute] Unexpected error: {e}", exc_info=True)
-        return UAPResponse(
+        return AgentResponse(
+            status=AgentResponseStatus.ERROR,
             success=False,
-            result=None,
-            status="error",
-            error=f"Internal error: {str(e)}",
-            execution_time_ms=(time.time() - start_time) * 1000
+            error_message=f"Internal error: {str(e)}",
+            standard_response=StandardAgentResponse(
+                status=AgentResponseStatus.ERROR,
+                success=False,
+                summary=f"Internal error: {str(e)}",
+                execution_time_ms=(time.time() - start_time) * 1000,
+            )
         )
 
 # === Cache Management Endpoints ===

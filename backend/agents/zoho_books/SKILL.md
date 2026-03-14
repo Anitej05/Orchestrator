@@ -6,7 +6,7 @@ version: 1.0.0
 description: >
   Zoho Books accounting integration for invoices, contacts, 
   expenses, payments, and financial reports.
-model: cerebras/llama-3.3-70b
+model: ollama/minimax-m2.5:cloud
 context_strategy: minimal
 requires_auth: true
 composio_app_slug: zohobooks

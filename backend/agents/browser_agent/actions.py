@@ -1925,12 +1925,12 @@ class ActionExecutor:
             ]
             
             logger.info(f"🧠 Sending {len(screenshots_b64)} images to Vision LLM for analysis...")
-            
+
             # Call inference service directly (bypassing conversational memory)
             response = await inference_service.generate(
                 messages=messages,
-                provider=ProviderType.OPENAI,
-                model_name="kimi-k2.5:cloud", # Assuming the multimodal model from llm.py
+                provider=ProviderType.OLLAMA,
+                model_name="kimi-k2.5:cloud", # Ollama Cloud multimodal model
                 priority=InferencePriority.QUALITY,
                 temperature=0.1,
                 json_mode=True,

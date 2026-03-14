@@ -233,17 +233,17 @@ class LLMClient:
             # Build image list
             images = [screenshot_b64] if screenshot_b64 else None
             
-            # Use qwen3.5 via Ollama (ProviderType.OPENAI maps to Ollama)
+            # Use kimi-k2.5:cloud via Ollama (ProviderType.OLLAMA)
             return await inference_service.generate(
                 messages=messages,
-                provider=ProviderType.OPENAI,
+                provider=ProviderType.OLLAMA,
                 model_name=self.MODEL_NAME,
                 priority=InferencePriority.QUALITY,
                 temperature=0.1,
                 max_tokens=8000,  # Planning responses need space for reasoning + JSON
                 json_mode=True,
                 images=images,
-                fallback_enabled=False,  # qwen3.5 is the primary model
+                fallback_enabled=False,  # kimi-k2.5:cloud is the primary model
                 use_cache=not bool(images)  # Don't cache multimodal calls (screenshots change)
             )
         except Exception as e:
@@ -266,10 +266,10 @@ class LLMClient:
         """
         try:
             images = [screenshot_b64] if screenshot_b64 else None
-            
+
             return await inference_service.generate(
                 messages=messages,
-                provider=ProviderType.OPENAI,
+                provider=ProviderType.OLLAMA,
                 model_name=self.MODEL_NAME,
                 priority=InferencePriority.QUALITY,
                 temperature=0.1,
@@ -288,7 +288,7 @@ class LLMClient:
                 try:
                     return await inference_service.generate(
                         messages=fallback_msgs,
-                        provider=ProviderType.OPENAI,
+                        provider=ProviderType.OLLAMA,
                         model_name=self.MODEL_NAME,
                         priority=InferencePriority.QUALITY,
                         temperature=0.1,

@@ -43,32 +43,32 @@ LARGE_FILE_THRESHOLD_MB = 50  # Files larger than this use chunked processing
 # LLM CONFIGURATION
 # ============================================================================
 
-# API Keys
+# API Keys - loaded from .env
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY")
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
+OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "ollama")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
-# Provider configurations (same order as mail agent: Cerebras → NVIDIA → Groq)
-# API keys are loaded from .env — NEVER hardcode keys in source code.
-CEREBRAS_KEYS = [k.strip() for k in (os.getenv("CEREBRAS_API_KEYS", "") or "").split(",") if k.strip()]
-if not CEREBRAS_KEYS and CEREBRAS_API_KEY:
-    CEREBRAS_KEYS = [CEREBRAS_API_KEY]
-
-LLM_PROVIDERS = []
-# Add one provider entry per Cerebras key for round-robin
-for _key in CEREBRAS_KEYS:
-    LLM_PROVIDERS.append({
+# Provider configurations - Ollama primary with fallbacks
+LLM_PROVIDERS = [
+    {
+        "name": "ollama",
+        "api_key": OLLAMA_API_KEY,
+        "model": "minimax-m2.5:cloud",
+        "summary_model": "minimax-m2.5:cloud",
+        "base_url": "https://ollama.com/v1"
+    },
+    # Fallback providers
+    {
         "name": "cerebras",
-        "api_key": _key,
+        "api_key": CEREBRAS_API_KEY,
         "model": "gpt-oss-120b",
         "summary_model": "llama-3.3-70b",
         "base_url": "https://api.cerebras.ai/v1"
-    })
-# Fallback providers
-LLM_PROVIDERS.extend([
+    },
     {
         "name": "nvidia",
         "api_key": NVIDIA_API_KEY,
@@ -79,11 +79,11 @@ LLM_PROVIDERS.extend([
     {
         "name": "groq",
         "api_key": GROQ_API_KEY,
-        "model": "openai/gpt-oss-120b",
+        "model": "llama-3.3-70b-versatile",
         "summary_model": "llama-3.3-70b-versatile",
         "base_url": "https://api.groq.com/openai/v1"
     }
-])
+]
 
 
 LLM_TEMPERATURE = 0.1

@@ -7,7 +7,7 @@ description: >
   LLM-powered document processing for Word (.docx) and text files.
   Supports reading, creating, editing (including XML-level manipulation),
   summarizing, tracked changes, and comments for DOCX and TXT.
-model: cerebras/llama-3.3-70b
+model: ollama/minimax-m2.5:cloud
 context_strategy: standard
 requires_auth: false
 triggers:

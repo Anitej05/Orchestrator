@@ -26,7 +26,7 @@ class DocumentPlanner:
     
     def __init__(self):
         self.inference = inference_service
-        self.model_id = "gpt-oss-120b" # Compatible with Cerebras
+        self.model_id = "minimax-m2.5:cloud" # Ollama Cloud for document agent
 
     async def plan(self, prompt: str, context: Optional[Dict[str, Any]] = None) -> DocumentPlan:
         """

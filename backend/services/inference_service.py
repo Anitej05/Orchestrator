@@ -12,20 +12,21 @@ from langchain_cerebras import ChatCerebras
 from langchain_groq import ChatGroq
 from dataclasses import dataclass, asdict
 
-from backend.utils.key_manager import key_manager, get_cerebras_key, report_rate_limit, ollama_key_manager, get_ollama_key, report_ollama_rate_limit
+from backend.utils.key_manager import key_manager, get_cerebras_key, report_rate_limit, ollama_key_manager, get_ollama_key, report_ollama_rate_limit, get_simple_api_key
 from backend.services.telemetry_service import telemetry_service
 from utils.mega_logger import setup_mega_logger
 
 logger = setup_mega_logger("InferenceService")
 
 class ProviderType(str, Enum):
+    OLLAMA = "ollama"     # Primary provider for Orchestrator
     CEREBRAS = "cerebras"
     GROQ = "groq"
     NVIDIA = "nvidia"
     OPENAI = "openai" # Conceptual, if added later
 
 class InferencePriority(str, Enum):
-    SPEED = "speed"       # Prefer fast providers (Cerebras, Groq)
+    SPEED = "speed"       # Prefer fast providers (Ollama, Cerebras, Groq)
     QUALITY = "quality"   # Prefer massive models (NVIDIA Llama 405b)
     COST = "cost"         # Prefer free/cheap tiers
 
@@ -52,8 +53,9 @@ class InferenceService:
     
     def __init__(self):
         self._initialized = True
-        # Provider order explicitly as: cerebras -> groq -> nvidia
+        # Provider order: Ollama first for orchestrator (kimi-k2.5:cloud), then fallbacks
         self._default_providers = [
+            ProviderType.OLLAMA,
             ProviderType.CEREBRAS,
             ProviderType.GROQ,
             ProviderType.NVIDIA,
@@ -81,12 +83,14 @@ class InferenceService:
             "llama-3.3-70b": (0.0, 0.0),      # Groq free tier
             "gpt-oss": (0.0, 0.0),            # Cerebras
             "minimax": (0.0, 0.0),            # NVIDIA NIM free tier
+            "kimi-k2": (0.0, 0.0),            # Ollama Cloud free tier
             "gpt-4o-mini": (0.150, 0.600),    # OpenAI
             "gpt-4o": (2.50, 10.00),          # OpenAI
             "claude-3-5-sonnet": (3.00, 15.00),# Anthropic
             "claude-3-5-haiku": (0.25, 1.25), # Anthropic
             # Fallbacks by provider if model doesn't match
-            ProviderType.OPENAI: (2.50, 10.00), 
+            ProviderType.OLLAMA: (0.0, 0.0),
+            ProviderType.OPENAI: (2.50, 10.00),
             ProviderType.CEREBRAS: (0.0, 0.0),
             ProviderType.GROQ: (0.0, 0.0),
             ProviderType.NVIDIA: (0.0, 0.0),
@@ -526,57 +530,68 @@ class InferenceService:
         """Determine the sequence of providers to try."""
         if requested_provider:
             return [requested_provider] + [p for p in self._default_providers if p != requested_provider]
-            
-        # Always prefer NVIDIA with minimax-m2.1 for better structured output
+
+        # Prefer Ollama with kimi-k2.5:cloud for orchestrator (best for structured output)
         return self._default_providers
 
     def _get_llm_client(self, provider: ProviderType, model: Optional[str], temp: float, max_tokens: int, json_mode: bool):
         """Instantiate the LangChain client for the provider."""
         try:
-            if provider == ProviderType.CEREBRAS:
+            if provider == ProviderType.OLLAMA:
+                api_key = get_ollama_key()
+                if not api_key:
+                    logger.warning("Ollama API key not available")
+                    return None
+                base_url = os.getenv("OLLAMA_BASE_URL", "https://ollama.com/v1")
+                model_to_use = model or "kimi-k2.5:cloud"
+
+                from langchain_openai import ChatOpenAI
+                return ChatOpenAI(base_url=base_url, api_key=api_key, model=model_to_use, temperature=temp, max_tokens=max_tokens, max_retries=0)
+
+            elif provider == ProviderType.CEREBRAS:
                 api_key = get_cerebras_key()
-                if not api_key: return None
-                
+                if not api_key:
+                    return None
+
                 # Model validation: Cerebras only supports their specific models
-                model_to_use = model if model and ("gpt-oss" in model or "llama" in model.lower()) else "gpt-oss-120b" 
-                # Add max_retries=0 to force fast failure so our key rotation loop can handle 429s instantly
+                model_to_use = model if model and ("gpt-oss" in model or "llama" in model.lower()) else "gpt-oss-120b"
                 return ChatCerebras(model=model_to_use, api_key=api_key, temperature=temp, max_tokens=max_tokens, max_retries=0)
                 
             elif provider == ProviderType.GROQ:
-                api_key = os.getenv("GROQ_API_KEY")
-                if not api_key: return None
-                
+                api_key = get_simple_api_key("GROQ_API_KEY")
+                if not api_key:
+                    return None
+
                 # Model validation: Groq models typically start with llama, mixtral, or gemma
-                # Use llama-3.3-70b-versatile as default (fast and capable)
-                # Exclude Cerebras-only models (gpt-oss-*) that don't exist on Groq
                 model_to_use = model if model and not model.startswith("gpt-oss") and any(x in model.lower() for x in ["llama", "mixtral", "gemma", "gpt", "qwen", "deepseek"]) else "llama-3.3-70b-versatile"
                 return ChatGroq(model=model_to_use, api_key=api_key, temperature=temp, max_tokens=max_tokens, max_retries=0)
-                
+
             elif provider == ProviderType.NVIDIA:
-                api_key = os.getenv("NVIDIA_API_KEY")
-                if not api_key: return None
-                
+                api_key = get_simple_api_key("NVIDIA_API_KEY")
+                if not api_key:
+                    return None
+
                 # Model validation: NVIDIA models usually have a prefix or are llama
                 model_to_use = model if model and ("meta/" in model or "nvidia/" in model or "llama" in model.lower() or "minimax" in model.lower()) else "minimaxai/minimax-m2.1"
-                
-                # Handling for JSON mode if supported or using model_kwargs
+
                 from langchain_nvidia_ai_endpoints import ChatNVIDIA
                 return ChatNVIDIA(
-                    model=model_to_use, 
-                    api_key=api_key, 
-                    temperature=temp, 
+                    model=model_to_use,
+                    api_key=api_key,
+                    temperature=temp,
                     max_tokens=max_tokens,
                     max_retries=0
                 )
             
-            elif provider == ProviderType.OPENAI: # Also handles OLLAMA (local or cloud) via OpenAI compatibility
-                 # Ollama Cloud: set OLLAMA_BASE_URL=https://ollama.com/v1 and OLLAMA_API_KEY
-                 base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-                 api_key = get_ollama_key() or os.getenv("OLLAMA_API_KEY", "ollama")
-                 model_to_use = model or "llama3.2-vision"
-                 
+            elif provider == ProviderType.OPENAI:
+                 # Standard OpenAI API
+                 api_key = get_simple_api_key("OPENAI_API_KEY")
+                 if not api_key:
+                     return None
+                 model_to_use = model or "gpt-4o-mini"
+
                  from langchain_openai import ChatOpenAI
-                 return ChatOpenAI(base_url=base_url, api_key=api_key, model=model_to_use, temperature=temp, max_tokens=max_tokens, max_retries=0)
+                 return ChatOpenAI(api_key=api_key, model=model_to_use, temperature=temp, max_tokens=max_tokens, max_retries=0)
 
         except Exception as e:
             logger.error(f"Failed to initialize {provider} client: {e}")

@@ -7,7 +7,7 @@ description: >
   Advanced Gmail automation with full Composio SDK (v3) integration.
   Covers all 60 Gmail tools: search, send, reply, forward, drafts, labels,
   filters, batch operations, settings, contacts, and universal tool execution.
-model: cerebras/llama-3.3-70b
+model: ollama/minimax-m2.5:cloud
 context_strategy: minimal
 requires_auth: true
 composio_app_slug: gmail

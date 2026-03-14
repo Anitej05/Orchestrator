@@ -6,7 +6,7 @@ version: 1.0.0
 description: >
   Deprecated mail agent retained for compatibility with legacy Gmail-style workflows.
   Prefer gmail_agent for new email tasks.
-model: cerebras/llama-3.3-70b
+model: ollama/minimax-m2.5:cloud
 context_strategy: minimal
 requires_auth: true
 composio_app_slug: gmail

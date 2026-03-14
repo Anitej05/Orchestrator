@@ -7,7 +7,7 @@ description: >
   Priority agent for CSV and Excel analysis, transformations,
   and natural-language data operations with LLM-powered task decomposition.
   Includes formula verification and professional output standards.
-model: cerebras/llama-3.3-70b
+model: ollama/minimax-m2.5:cloud
 context_strategy: standard
 requires_auth: false
 triggers:

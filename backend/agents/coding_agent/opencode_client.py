@@ -89,7 +89,7 @@ class OpenCodeClient:
         password: str = OPENCODE_SERVER_PASSWORD,
         username: str = OPENCODE_SERVER_USERNAME,
         project_dir: Optional[str] = None,
-        default_model: str = "cerebras/gpt-oss-120b",
+        default_model: str = "ollama/minimax-m2.5:cloud",
     ):
         self.host = host
         self.port = port

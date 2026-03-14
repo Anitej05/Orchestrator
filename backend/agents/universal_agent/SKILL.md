@@ -6,7 +6,7 @@ version: 1.0.0
 description: >
   General-purpose agent for arbitrary tasks using LLM reasoning,
   code execution, and tool use. Fallback when no specialized agent matches.
-model: cerebras/llama-3.3-70b
+model: ollama/minimax-m2.5:cloud
 context_strategy: standard
 requires_auth: false
 triggers:

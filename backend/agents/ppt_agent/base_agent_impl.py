@@ -24,7 +24,7 @@ from backend.agents.base import (
     AgentRequest,
     CapabilityResult,
 )
-
+from .llm_helpers import PPTLLMHelpers
 from . import utils
 
 logger = logging.getLogger("agents.ppt_agent")
@@ -41,7 +41,7 @@ class PPTAgentConfig:
     default_font_index: int = 0
 
 
-class PPTAgent(BaseAgent):
+class PPTAgent(BaseAgent, PPTLLMHelpers):
     """
     Presentation processing agent.
 
@@ -51,6 +51,16 @@ class PPTAgent(BaseAgent):
     - Edit existing presentations (add/remove/reorder slides, change content)
     - Extract text from all slides
     - Convert slides to images for preview/inspection
+    
+    Inherits from PPTLLMHelpers for LLM-powered features:
+    - plan_presentation_structure()
+    - suggest_slide_layout()
+    - generate_slide_content()
+    - enhance_text_for_presentation()
+    - suggest_color_palette()
+    - suggest_visual_elements()
+    - check_presentation_consistency()
+    - generate_speaker_notes()
     """
 
     def __init__(

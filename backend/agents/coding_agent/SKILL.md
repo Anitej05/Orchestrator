@@ -6,7 +6,7 @@ version: 1.0.0
 description: >
   Priority agent for coding, software engineering, multi-file editing,
   test execution, and code review. Powered by OpenCode headless server.
-model: cerebras/llama-3.3-70b
+model: ollama/minimax-m2.5:cloud
 context_strategy: standard
 requires_auth: false
 triggers:

@@ -6,7 +6,7 @@ version: 1.0.0
 description: >
   LLM-driven web browser automation for navigation, interaction, 
   data extraction, and screenshots using Playwright.
-model: cerebras/llama-3.3-70b
+model: ollama/kimi-k2.5:cloud
 context_strategy: minimal
 requires_auth: false
 triggers:

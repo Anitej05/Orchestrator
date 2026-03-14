@@ -19,8 +19,8 @@ from backend.agents.base.types import ExecutionContext
 
 logger = logging.getLogger("integrations_agent")
 
-# LLM model to use for tool selection / parameter extraction
-_TOOL_SELECTION_MODEL = os.getenv("INTEGRATIONS_TOOL_LLM", "llama-3.3-70b-versatile")
+# LLM model selection - uses inference_service now
+# No hardcoded model - let inference_service handle provider selection
 
 
 class IntegrationsAgentService:
@@ -530,9 +530,8 @@ class IntegrationsAgentService:
             Dict with "tool_name" and "parameters", or None on failure
         """
         try:
-            from groq import Groq
-
-            client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+            from backend.services.inference_service import inference_service, InferencePriority
+            from langchain_core.messages import HumanMessage, SystemMessage
 
             # Build a concise tool list for the LLM
             tool_list_str = "\n".join(
@@ -566,24 +565,21 @@ class IntegrationsAgentService:
             if provided_params:
                 user_message += f"\n\nAlready provided parameters: {json.dumps(provided_params)}"
 
-            response = client.chat.completions.create(
-                model=_TOOL_SELECTION_MODEL,
+            # Use inference_service instead of direct Groq client
+            response = await inference_service.generate(
                 messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message},
+                    SystemMessage(content=system_prompt),
+                    HumanMessage(content=user_message)
                 ],
+                priority=InferencePriority.SPEED,
                 temperature=0.0,
                 max_tokens=500,
+                json_mode=True,
+                strip_markdown=True,
             )
 
-            raw = response.choices[0].message.content.strip()
-
-            # Parse JSON from response (handle markdown code fences)
-            if raw.startswith("```"):
-                raw = re.sub(r"^```(?:json)?\s*", "", raw)
-                raw = re.sub(r"\s*```$", "", raw)
-
-            result = json.loads(raw)
+            # Parse JSON from response
+            result = json.loads(response)
 
             # Validate tool_name exists
             valid_names = {t["name"] for t in tool_catalog}

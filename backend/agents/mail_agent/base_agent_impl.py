@@ -14,7 +14,7 @@ from backend.agents.base.capability import capability, ParameterSchema
 
 from .config import COMPOSIO_API_KEY, MCP_URL, logger
 from .client import GmailClient
-from .llm import llm_client
+from .llm_helpers import MailLLMHelpers
 from .memory import AgentMemory
 
 logger = logging.getLogger("agents.mail_agent")
@@ -80,9 +80,11 @@ class SmartResolver:
         return None
 
 
-class MailAgent(BaseAgent):
+class MailAgent(BaseAgent, MailLLMHelpers):
     """
     Complete Gmail integration agent with corrected method mappings.
+    
+    Inherits from MailLLMHelpers for all LLM methods.
     """
 
     def __init__(
@@ -100,7 +102,7 @@ class MailAgent(BaseAgent):
         )
 
         self.gmail_client: Optional[GmailClient] = None
-        self.llm_client = llm_client  # Use the singleton from llm.py
+        # No need for self.llm_client - LLM methods are inherited from MailLLMHelpers
         self.memory: Optional[AgentMemory] = None
         self.resolver: Optional[SmartResolver] = None
 
@@ -185,7 +187,7 @@ class MailAgent(BaseAgent):
             if not any(
                 op in query for op in ["from:", "to:", "subject:", "label:", "is:"]
             ):
-                optimized_query = await self.llm_client.generate_optimized_query(query)
+                optimized_query = await self.generate_optimized_query(query)
                 query = optimized_query
 
             result = await self.gmail_client.semantic_search(
@@ -459,7 +461,7 @@ class MailAgent(BaseAgent):
 
             # Generate reply using draft_email_reply (correct method name)
             sender_name = original.get("from", "").split("<")[0].strip()
-            draft_result = await self.llm_client.draft_email_reply(
+            draft_result = await self.draft_email_reply(
                 thread_content, intent, sender_name
             )
 
@@ -545,7 +547,7 @@ class MailAgent(BaseAgent):
                 email_texts.append(content)
 
             # Generate summary using summarize_text_batch (correct method name)
-            summary = await self.llm_client.summarize_text_batch(email_texts)
+            summary = await self.summarize_text_batch(email_texts)
 
             return {
                 "success": True,
@@ -619,7 +621,7 @@ class MailAgent(BaseAgent):
                 email_texts.append(content)
 
             # Extract action items using extract_actions (correct method name)
-            actions = await self.llm_client.extract_actions(email_texts)
+            actions = await self.extract_actions(email_texts)
 
             return {
                 "success": True,

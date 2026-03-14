@@ -26,7 +26,7 @@ from backend.agents.base import (
     AgentRequest,
     CapabilityResult,
 )
-
+from .llm_helpers import PDFLLMHelpers
 from . import utils
 
 logger = logging.getLogger("agents.pdf_agent")
@@ -43,7 +43,7 @@ class PDFAgentConfig:
     enable_vision_fallback: bool = True
 
 
-class PDFAgent(BaseAgent):
+class PDFAgent(BaseAgent, PDFLLMHelpers):
     """
     Comprehensive PDF processing agent.
 
@@ -56,6 +56,14 @@ class PDFAgent(BaseAgent):
     - Watermark, password protection
     - Image extraction
     - Metadata extraction
+    
+    Inherits from PDFLLMHelpers for LLM-powered features:
+    - analyze_pdf_structure()
+    - summarize_pdf()
+    - extract_key_information()
+    - answer_questions_about_pdf()
+    - suggest_pdf_improvements()
+    - generate_pdf_metadata()
     """
 
     def __init__(

@@ -26,6 +26,7 @@ from .types import (
 )
 from .services import AgentServices
 from .capability import CapabilityRegistry
+from .llm_helpers import AgentLLMHelpers, strip_think_tags
 
 logger = logging.getLogger(__name__)
 
@@ -72,16 +73,25 @@ class AgentConfig:
     max_llm_dict_items: int = 12
 
 
-class BaseAgent(ABC):
+class BaseAgent(ABC, AgentLLMHelpers):
     """
     Abstract base class for all intelligent agents.
 
     Provides:
     - Service injection
     - Capability management
-    - LLM-driven planning
+    - LLM-driven planning (via AgentLLMHelpers mixin)
     - Error recovery
     - Lifecycle management
+    
+    LLM Methods (inherited from AgentLLMHelpers):
+    - self.llm_generate(prompt) - Generate text
+    - self.llm_generate_json(prompt) - Generate structured JSON
+    - self.llm_generate_structured(prompt, schema) - Generate Pydantic model
+    - self.llm_summarize(text) - Summarize content
+    - self.llm_extract(text, fields) - Extract fields
+    - self.llm_classify(text, categories) - Classify text
+    - self.llm_generate_code(instruction) - Generate code
     """
 
     def __init__(
